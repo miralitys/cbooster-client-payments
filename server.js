@@ -29,7 +29,7 @@ const QUICKBOOKS_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens
 const QUICKBOOKS_API_BASE_URL = ((process.env.QUICKBOOKS_API_BASE_URL || "https://quickbooks.api.intuit.com").toString().trim() || "https://quickbooks.api.intuit.com").replace(/\/+$/, "");
 const QUICKBOOKS_QUERY_PAGE_SIZE = 200;
 const QUICKBOOKS_MAX_QUERY_ROWS = 5000;
-const QUICKBOOKS_DEFAULT_RECENT_DAYS = 3;
+const QUICKBOOKS_DEFAULT_FROM_DATE = "2026-01-01";
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
@@ -964,15 +964,42 @@ function formatQuickBooksDateUtc(value) {
   return `${year}-${month}-${day}`;
 }
 
-function getQuickBooksRecentDateRange(days = QUICKBOOKS_DEFAULT_RECENT_DAYS) {
-  const normalizedDays = Math.min(Math.max(parsePositiveInteger(days, QUICKBOOKS_DEFAULT_RECENT_DAYS), 1), 31);
-  const toDate = new Date();
-  const fromDate = new Date(toDate);
-  fromDate.setUTCDate(fromDate.getUTCDate() - (normalizedDays - 1));
+function normalizeQuickBooksDateInput(rawValue) {
+  return sanitizeTextValue(rawValue, 20);
+}
+
+function isValidIsoDateString(value) {
+  const match = (value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return false;
+  }
+
+  const year = Number.parseInt(match[1], 10);
+  const month = Number.parseInt(match[2], 10);
+  const day = Number.parseInt(match[3], 10);
+  return isValidDateParts(year, month, day);
+}
+
+function getQuickBooksDateRange(rawFromDate, rawToDate) {
+  const todayIso = formatQuickBooksDateUtc(new Date());
+  const from = normalizeQuickBooksDateInput(rawFromDate) || QUICKBOOKS_DEFAULT_FROM_DATE;
+  const to = normalizeQuickBooksDateInput(rawToDate) || todayIso;
+
+  if (!isValidIsoDateString(from)) {
+    throw createHttpError("Invalid `from` date. Use YYYY-MM-DD format.", 400);
+  }
+
+  if (!isValidIsoDateString(to)) {
+    throw createHttpError("Invalid `to` date. Use YYYY-MM-DD format.", 400);
+  }
+
+  if (from > to) {
+    throw createHttpError("Invalid date range. `from` must be less than or equal to `to`.", 400);
+  }
+
   return {
-    days: normalizedDays,
-    from: formatQuickBooksDateUtc(fromDate),
-    to: formatQuickBooksDateUtc(toDate),
+    from,
+    to,
   };
 }
 
@@ -2423,7 +2450,15 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
     return;
   }
 
-  const range = getQuickBooksRecentDateRange(req.query.days);
+  let range;
+  try {
+    range = getQuickBooksDateRange(req.query.from, req.query.to);
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 300) || "Invalid date range.",
+    });
+    return;
+  }
 
   try {
     const accessToken = await fetchQuickBooksAccessToken();
@@ -2432,7 +2467,6 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
 
     res.json({
       ok: true,
-      days: range.days,
       range: {
         from: range.from,
         to: range.to,
