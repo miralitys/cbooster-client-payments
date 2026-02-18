@@ -11,6 +11,7 @@ const accountMenuPanel = document.querySelector("#account-menu-panel");
 const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
 const refreshButton = document.querySelector("#refresh-button");
+const clientSearchInput = document.querySelector("#client-search");
 const statusElement = document.querySelector("#status");
 const rangeElement = document.querySelector("#range");
 const tableBody = document.querySelector("#payments-body");
@@ -23,12 +24,17 @@ const usdFormatter = new Intl.NumberFormat("en-US", {
 });
 
 let currentAuthUser = "";
+let allTransactions = [];
 
 initializeAccountMenu();
 initializeAuthSession();
 
 refreshButton?.addEventListener("click", () => {
   void loadRecentQuickBooksPayments();
+});
+
+clientSearchInput?.addEventListener("input", () => {
+  applyTransactionsFilter();
 });
 
 void loadRecentQuickBooksPayments();
@@ -56,10 +62,11 @@ async function loadRecentQuickBooksPayments() {
     }
 
     const items = Array.isArray(payload.items) ? payload.items : [];
-    renderPayments(items);
+    allTransactions = items;
+    applyTransactionsFilter();
     renderRange(payload.range);
-    setStatus(`Loaded ${items.length} transaction${items.length === 1 ? "" : "s"}.`, false);
   } catch (error) {
+    allTransactions = [];
     renderPayments([]);
     renderRange(null);
     setStatus(error.message || "Failed to load transactions.", true);
@@ -77,7 +84,39 @@ function buildQuickBooksPaymentsEndpoint() {
   return `/api/quickbooks/payments/recent?${query.toString()}`;
 }
 
-function renderPayments(items) {
+function applyTransactionsFilter() {
+  const query = (clientSearchInput?.value || "").toString().trim();
+  const filteredItems = filterTransactionsByClientName(allTransactions, query);
+  renderPayments(filteredItems, query);
+  setStatus(buildFilterStatusMessage(allTransactions.length, filteredItems.length, query), false);
+}
+
+function filterTransactionsByClientName(items, query) {
+  const normalizedQuery = query.toLowerCase();
+  if (!normalizedQuery) {
+    return [...items];
+  }
+
+  return items.filter((item) => {
+    const clientName = (item?.clientName || "").toString().toLowerCase();
+    return clientName.includes(normalizedQuery);
+  });
+}
+
+function buildFilterStatusMessage(totalCount, visibleCount, query) {
+  const normalizedQuery = query.toString().trim();
+  if (!normalizedQuery) {
+    return `Loaded ${totalCount} transaction${totalCount === 1 ? "" : "s"}.`;
+  }
+
+  if (visibleCount === 0) {
+    return `No transactions found for "${normalizedQuery}".`;
+  }
+
+  return `Showing ${visibleCount} of ${totalCount} transactions for "${normalizedQuery}".`;
+}
+
+function renderPayments(items, query = "") {
   if (!tableBody) {
     return;
   }
@@ -87,7 +126,10 @@ function renderPayments(items) {
     row.className = "quickbooks-table__empty-row";
     const cell = document.createElement("td");
     cell.colSpan = 3;
-    cell.textContent = "No transactions found for the selected period.";
+    const normalizedQuery = query.toString().trim();
+    cell.textContent = normalizedQuery
+      ? `No transactions found for "${normalizedQuery}".`
+      : "No transactions found for the selected period.";
     row.append(cell);
     tableBody.replaceChildren(row);
     return;
@@ -140,11 +182,13 @@ function setStatus(message, isError) {
 }
 
 function setLoadingState(isLoading) {
-  if (!refreshButton) {
-    return;
+  if (refreshButton) {
+    refreshButton.disabled = isLoading;
   }
 
-  refreshButton.disabled = isLoading;
+  if (clientSearchInput) {
+    clientSearchInput.disabled = isLoading;
+  }
 }
 
 function formatUsd(value) {

@@ -1672,6 +1672,17 @@ tbody tr.row-tone-active:hover td {
   color: var(--color-text-muted);
 }
 
+.quickbooks-search-field {
+  display: grid;
+  gap: 6px;
+  width: min(320px, 100%);
+  min-width: min(320px, 100%);
+}
+
+.quickbooks-search-field__label {
+  margin: 0;
+}
+
 .quickbooks-status {
   margin: 0;
 }
@@ -2067,6 +2078,11 @@ body.modal-open {
 
   .table-panel__actions {
     justify-content: stretch;
+  }
+
+  .quickbooks-search-field {
+    width: 100%;
+    min-width: 0;
   }
 
   .table-wrap {
