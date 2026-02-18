@@ -2370,6 +2370,17 @@ app.get("/api/auth/session", (req, res) => {
   });
 });
 
+app.all("/api/quickbooks/*", (req, res, next) => {
+  if (req.method === "GET") {
+    next();
+    return;
+  }
+
+  res.status(405).json({
+    error: "QuickBooks integration is read-only. Write operations are disabled.",
+  });
+});
+
 app.get("/api/quickbooks/payments/recent", async (req, res) => {
   if (!isQuickBooksConfigured()) {
     res.status(503).json({

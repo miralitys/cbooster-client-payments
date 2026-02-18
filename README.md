@@ -88,6 +88,7 @@ npm start
 - Страница показывает только платежи из QuickBooks за последние 3 дня.
 - Колонки: `Client Name`, `Payment Amount`, `Payment Date`.
 - Для ручного обновления нажмите `Refresh`.
+- Интеграция строго read-only: мы только читаем данные из QuickBooks и не отправляем туда изменения.
 
 ## Telegram Mini App
 
