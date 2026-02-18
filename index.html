@@ -1,18 +1,18 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Credit Booster Dashboard</title>
-    <link rel="stylesheet" href="/styles.css?v=20260218-moderation-buttons" />
-    <script src="/dashboard.js?v=20260218-moderation-buttons" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260218-moderation-files" />
+    <script src="/dashboard.js?v=20260218-moderation-files" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
       <div class="container dashboard-home">
         <header class="section page-header dashboard-page-header">
           <div class="page-header__title">
-            <h1>Дашборд</h1>
+            <h1>Dashboard</h1>
           </div>
 
           <div class="page-header__right">
@@ -26,7 +26,7 @@
                 aria-haspopup="menu"
                 aria-expanded="false"
                 aria-controls="topbar-menu"
-                aria-label="Открыть меню"
+                aria-label="Open menu"
               >
                 ⋯
               </button>
@@ -130,11 +130,11 @@
             </div>
           </section>
 
-          <section class="section table-panel moderation-table-panel" aria-label="Новые клиенты на модерации">
+          <section class="section table-panel moderation-table-panel" aria-label="New clients pending moderation">
             <header class="table-panel__header">
-              <h2 class="section-heading">Новые клиенты из Mini App</h2>
+              <h2 class="section-heading">New Clients from Mini App</h2>
               <div class="table-panel__actions">
-                <button id="refresh-submissions-button" type="button" class="btn btn-secondary">Обновить</button>
+                <button id="refresh-submissions-button" type="button" class="btn btn-secondary">Refresh</button>
               </div>
             </header>
 
@@ -163,21 +163,25 @@
       <button type="button" class="modal-backdrop" data-close-modal aria-label="Close dialog"></button>
       <div class="modal-dialog moderation-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="submission-modal-title">
         <header class="modal-header">
-          <h3 id="submission-modal-title">Проверка клиента</h3>
-          <button type="button" class="modal-close" data-close-modal aria-label="Закрыть">×</button>
+          <h3 id="submission-modal-title">Client Review</h3>
+          <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
         </header>
 
         <div id="submission-modal-details" class="submission-modal__details"></div>
+        <section id="submission-modal-files" class="submission-files" hidden>
+          <h4 class="submission-files__title">Attachments</h4>
+          <div id="submission-modal-files-list" class="submission-files__list"></div>
+        </section>
 
         <div class="modal-footer moderation-modal-footer">
           <label class="checkbox-label moderation-approval-label">
             <input id="approval-checkbox" type="checkbox" />
-            <span>Добавить в общую базу данных</span>
+            <span>Add to main database</span>
           </label>
           <div class="moderation-modal-actions">
-            <button id="apply-moderation-button" type="button" class="btn btn-primary">Применить</button>
-            <button id="delete-moderation-button" type="button" class="btn btn-danger">Удалить</button>
-            <button type="button" class="btn btn-secondary" data-close-modal>Закрыть</button>
+            <button id="apply-moderation-button" type="button" class="btn btn-primary">Apply</button>
+            <button id="delete-moderation-button" type="button" class="btn btn-danger">Delete</button>
+            <button type="button" class="btn btn-secondary" data-close-modal>Close</button>
           </div>
         </div>
       </div>

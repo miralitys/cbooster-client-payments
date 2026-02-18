@@ -1513,6 +1513,76 @@ tbody tr.row-tone-active:hover td {
   gap: var(--space-2);
 }
 
+.submission-files {
+  padding: 0 var(--space-4) var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.submission-files[hidden] {
+  display: none !important;
+}
+
+.submission-files__title {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text);
+}
+
+.submission-files__list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.submission-file-row {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.submission-file-info {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.submission-file-name {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text);
+  word-break: break-word;
+}
+
+.submission-file-meta {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.submission-file-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.submission-file-actions .btn {
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+.submission-file-empty {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  padding: var(--space-2) 0;
+}
+
 .detail-row {
   display: grid;
   grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
@@ -1991,6 +2061,17 @@ body.modal-open {
 
   .detail-label {
     white-space: normal;
+  }
+
+  .submission-file-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .submission-file-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .moderation-modal-footer {
