@@ -11,16 +11,7 @@ const attachmentsInput = document.querySelector("#attachments");
 const attachmentsPreview = document.querySelector("#attachments-preview");
 const telegramApp = window.Telegram?.WebApp || null;
 const MAX_ATTACHMENTS_COUNT = 10;
-const REQUIRED_MINI_FIELDS = [
-  { id: "clientName", label: "Client Name" },
-  { id: "closedBy", label: "Closed By" },
-  { id: "leadSource", label: "Lead Source" },
-  { id: "clientPhoneNumber", label: "Client Phone Number" },
-  { id: "serviceType", label: "Service Type" },
-  { id: "contractTotals", label: "Contract Totals" },
-  { id: "payment1", label: "Payment 1" },
-  { id: "payment1Date", label: "Payment 1 Date" },
-];
+const REQUIRED_MINI_FIELDS = [{ id: "clientName", label: "Client Name" }];
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
   ".html",
   ".htm",
@@ -326,10 +317,6 @@ function initializeRequiredFieldValidation() {
 
     input.addEventListener("input", () => {
       if (normalizeValue(input.value)) {
-        if (field.id === "clientPhoneNumber") {
-          // Phone input keeps its own strict mask validation.
-          return;
-        }
         setInputInvalidState(input, false);
       }
     });
@@ -373,9 +360,9 @@ function validatePayment1DateField() {
 
   const value = normalizeValue(payment1DateInput.value);
   if (!value) {
-    setInputInvalidState(payment1DateInput, true);
+    setInputInvalidState(payment1DateInput, false);
     return {
-      ok: false,
+      ok: true,
     };
   }
 
@@ -456,6 +443,7 @@ function initializePhoneField(input) {
   input.addEventListener("input", () => {
     const formatted = formatUsPhoneInputValue(input.value);
     input.value = formatted;
+    moveCaretToEnd(input);
     const hasValue = Boolean(formatted.trim());
     setInputInvalidState(input, hasValue && !isValidUsPhoneFormat(formatted));
   });
@@ -466,10 +454,20 @@ function initializePhoneField(input) {
 }
 
 function formatUsPhoneInputValue(rawValue) {
-  let digits = (rawValue || "").replace(/\D/g, "");
-  if (digits.startsWith("1") && digits.length > 10) {
+  const rawText = (rawValue || "").toString().trim();
+  let digits = rawText.replace(/\D/g, "");
+
+  // Keep +1 as a fixed country prefix and strip it from editable local digits.
+  const hasMaskedCountryPrefix = rawText.includes("+1(") || rawText.startsWith("+1");
+  if (hasMaskedCountryPrefix && digits.startsWith("1")) {
     digits = digits.slice(1);
   }
+
+  // Support pasted NANP numbers like 1XXXXXXXXXX.
+  if (digits.length > 10 && digits.startsWith("1")) {
+    digits = digits.slice(1);
+  }
+
   digits = digits.slice(0, 10);
 
   if (!digits.length) {
@@ -492,6 +490,20 @@ function formatUsPhoneInputValue(rawValue) {
   }
 
   return result;
+}
+
+function moveCaretToEnd(input) {
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+
+  const position = input.value.length;
+  requestAnimationFrame(() => {
+    if (document.activeElement !== input) {
+      return;
+    }
+    input.setSelectionRange(position, position);
+  });
 }
 
 function isValidUsPhoneFormat(rawValue) {
