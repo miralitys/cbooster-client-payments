@@ -1,15 +1,45 @@
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const { Pool } = require("pg");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
+const BASIC_AUTH_USER = (process.env.BASIC_AUTH_USER || "").trim();
+const BASIC_AUTH_PASSWORD = (process.env.BASIC_AUTH_PASSWORD || "").trim();
+const BASIC_AUTH_REALM = "CB Payment";
+const IS_BASIC_AUTH_ENABLED = Boolean(BASIC_AUTH_USER && BASIC_AUTH_PASSWORD);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
 const TABLE_NAME = resolveTableName(process.env.DB_TABLE_NAME, DEFAULT_TABLE_NAME);
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
+
+app.use((req, res, next) => {
+  if (!IS_BASIC_AUTH_ENABLED) {
+    next();
+    return;
+  }
+
+  if (req.path === "/api/health") {
+    next();
+    return;
+  }
+
+  const credentials = extractBasicAuthCredentials(req.headers.authorization);
+  const isAuthorized =
+    credentials !== null &&
+    safeEqual(credentials.user, BASIC_AUTH_USER) &&
+    safeEqual(credentials.password, BASIC_AUTH_PASSWORD);
+
+  if (isAuthorized) {
+    next();
+    return;
+  }
+
+  requestAuth(res);
+});
 
 const staticRoot = __dirname;
 app.use(express.static(staticRoot));
@@ -39,6 +69,48 @@ function resolveTableName(rawTableName, fallbackTableName) {
 function shouldUseSsl() {
   const mode = (process.env.PGSSLMODE || "").toLowerCase();
   return mode !== "disable";
+}
+
+function requestAuth(res) {
+  res.set("WWW-Authenticate", `Basic realm="${BASIC_AUTH_REALM}", charset="UTF-8"`);
+  res.status(401).send("Authentication required");
+}
+
+function extractBasicAuthCredentials(rawAuthorization) {
+  if (typeof rawAuthorization !== "string") {
+    return null;
+  }
+
+  const [scheme, token] = rawAuthorization.split(" ");
+  if (scheme !== "Basic" || !token) {
+    return null;
+  }
+
+  try {
+    const decoded = Buffer.from(token, "base64").toString("utf8");
+    const separatorIndex = decoded.indexOf(":");
+    if (separatorIndex < 0) {
+      return null;
+    }
+
+    return {
+      user: decoded.slice(0, separatorIndex),
+      password: decoded.slice(separatorIndex + 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function safeEqual(leftValue, rightValue) {
+  const left = Buffer.from(leftValue, "utf8");
+  const right = Buffer.from(rightValue, "utf8");
+
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(left, right);
 }
 
 async function ensureDatabaseReady() {
@@ -188,5 +260,8 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   if (!pool) {
     console.warn("DATABASE_URL is missing. API routes will return 503 until configured.");
+  }
+  if (!IS_BASIC_AUTH_ENABLED) {
+    console.warn("Basic auth is disabled. Set BASIC_AUTH_USER and BASIC_AUTH_PASSWORD to enable it.");
   }
 });
