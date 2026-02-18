@@ -25,12 +25,13 @@ const usdFormatter = new Intl.NumberFormat("en-US", {
 
 let currentAuthUser = "";
 let allTransactions = [];
+let lastLoadPrefix = "";
 
 initializeAccountMenu();
 initializeAuthSession();
 
 refreshButton?.addEventListener("click", () => {
-  void loadRecentQuickBooksPayments();
+  void loadRecentQuickBooksPayments({ sync: true });
 });
 
 clientSearchInput?.addEventListener("input", () => {
@@ -39,12 +40,14 @@ clientSearchInput?.addEventListener("input", () => {
 
 void loadRecentQuickBooksPayments();
 
-async function loadRecentQuickBooksPayments() {
+async function loadRecentQuickBooksPayments(options = {}) {
+  const shouldSync = Boolean(options?.sync);
+  const previousItems = [...allTransactions];
   setLoadingState(true);
-  setStatus("Loading transactions...", false);
+  setStatus(shouldSync ? "Refreshing from QuickBooks..." : "Loading saved transactions...", false);
 
   try {
-    const response = await fetch(buildQuickBooksPaymentsEndpoint(), {
+    const response = await fetch(buildQuickBooksPaymentsEndpoint(shouldSync), {
       headers: {
         Accept: "application/json",
       },
@@ -63,24 +66,33 @@ async function loadRecentQuickBooksPayments() {
 
     const items = Array.isArray(payload.items) ? payload.items : [];
     allTransactions = items;
+    lastLoadPrefix = buildLoadPrefixFromPayload(payload, shouldSync);
     applyTransactionsFilter();
     renderRange(payload.range);
   } catch (error) {
-    allTransactions = [];
-    renderPayments([]);
-    renderRange(null);
+    if (!previousItems.length) {
+      allTransactions = [];
+      renderPayments([]);
+      renderRange(null);
+    } else {
+      allTransactions = previousItems;
+      applyTransactionsFilter();
+    }
     setStatus(error.message || "Failed to load transactions.", true);
   } finally {
     setLoadingState(false);
   }
 }
 
-function buildQuickBooksPaymentsEndpoint() {
+function buildQuickBooksPaymentsEndpoint(sync) {
   const todayIso = formatDateForApi(new Date());
   const query = new URLSearchParams({
     from: QUICKBOOKS_FROM_DATE,
     to: todayIso,
   });
+  if (sync) {
+    query.set("sync", "1");
+  }
   return `/api/quickbooks/payments/recent?${query.toString()}`;
 }
 
@@ -88,7 +100,7 @@ function applyTransactionsFilter() {
   const query = (clientSearchInput?.value || "").toString().trim();
   const filteredItems = filterTransactionsByClientName(allTransactions, query);
   renderPayments(filteredItems, query);
-  setStatus(buildFilterStatusMessage(allTransactions.length, filteredItems.length, query), false);
+  setStatus(buildFilterStatusMessage(allTransactions.length, filteredItems.length, query, lastLoadPrefix), false);
 }
 
 function filterTransactionsByClientName(items, query) {
@@ -103,17 +115,42 @@ function filterTransactionsByClientName(items, query) {
   });
 }
 
-function buildFilterStatusMessage(totalCount, visibleCount, query) {
+function buildFilterStatusMessage(totalCount, visibleCount, query, prefix = "") {
   const normalizedQuery = query.toString().trim();
+  const normalizedPrefix = prefix.toString().trim();
+
+  let mainMessage = "";
   if (!normalizedQuery) {
-    return `Loaded ${totalCount} transaction${totalCount === 1 ? "" : "s"}.`;
+    mainMessage = `Loaded ${totalCount} transaction${totalCount === 1 ? "" : "s"}.`;
+  } else if (visibleCount === 0) {
+    mainMessage = `No transactions found for "${normalizedQuery}".`;
+  } else {
+    mainMessage = `Showing ${visibleCount} of ${totalCount} transactions for "${normalizedQuery}".`;
   }
 
-  if (visibleCount === 0) {
-    return `No transactions found for "${normalizedQuery}".`;
+  if (!normalizedPrefix) {
+    return mainMessage;
   }
 
-  return `Showing ${visibleCount} of ${totalCount} transactions for "${normalizedQuery}".`;
+  return `${normalizedPrefix} ${mainMessage}`;
+}
+
+function buildLoadPrefixFromPayload(payload, syncRequested) {
+  if (!syncRequested) {
+    return "Saved data:";
+  }
+
+  const syncMeta = payload?.sync && typeof payload.sync === "object" ? payload.sync : null;
+  if (!syncMeta?.requested) {
+    return "Saved data:";
+  }
+
+  const insertedCount = Number.parseInt(syncMeta.insertedCount, 10);
+  if (Number.isFinite(insertedCount) && insertedCount > 0) {
+    return `Refresh: +${insertedCount} new.`;
+  }
+
+  return "Refresh: no new.";
 }
 
 function renderPayments(items, query = "") {

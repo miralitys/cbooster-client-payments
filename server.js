@@ -32,6 +32,7 @@ const QUICKBOOKS_MAX_QUERY_ROWS = 5000;
 const QUICKBOOKS_PAYMENT_DETAILS_CONCURRENCY = 2;
 const QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES = 5;
 const QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS = 250;
+const QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE = 250;
 const QUICKBOOKS_DEFAULT_FROM_DATE = "2026-01-01";
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
@@ -44,10 +45,16 @@ const MODERATION_FILES_TABLE_NAME = resolveTableName(
   process.env.DB_MODERATION_FILES_TABLE_NAME,
   DEFAULT_MODERATION_FILES_TABLE_NAME,
 );
+const DEFAULT_QUICKBOOKS_TRANSACTIONS_TABLE_NAME = "quickbooks_transactions";
+const QUICKBOOKS_TRANSACTIONS_TABLE_NAME = resolveTableName(
+  process.env.DB_QUICKBOOKS_TRANSACTIONS_TABLE_NAME,
+  DEFAULT_QUICKBOOKS_TRANSACTIONS_TABLE_NAME,
+);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
 const MODERATION_FILES_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_FILES_TABLE_NAME);
+const QUICKBOOKS_TRANSACTIONS_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_TRANSACTIONS_TABLE_NAME);
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
@@ -1006,6 +1013,60 @@ function getQuickBooksDateRange(rawFromDate, rawToDate) {
   };
 }
 
+function parseQuickBooksSyncFlag(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 20).toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function normalizeQuickBooksTransaction(item) {
+  const transactionType = sanitizeTextValue(item?.transactionType, 40).toLowerCase();
+  if (transactionType !== "payment" && transactionType !== "refund") {
+    return null;
+  }
+
+  const transactionId = sanitizeTextValue(item?.transactionId, 160);
+  if (!transactionId) {
+    return null;
+  }
+
+  const clientName = sanitizeTextValue(item?.clientName, 300) || "Unknown client";
+  const parsedAmount = Number.parseFloat(item?.paymentAmount);
+  const paymentAmount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
+  const paymentDate = sanitizeTextValue(item?.paymentDate, 20);
+  if (!isValidIsoDateString(paymentDate)) {
+    return null;
+  }
+
+  return {
+    transactionType,
+    transactionId,
+    clientName,
+    paymentAmount,
+    paymentDate,
+  };
+}
+
+function mapQuickBooksTransactionRow(row) {
+  const normalized = normalizeQuickBooksTransaction({
+    transactionType: row?.transaction_type,
+    transactionId: row?.transaction_id,
+    clientName: row?.client_name,
+    paymentAmount: row?.payment_amount,
+    paymentDate: row?.payment_date,
+  });
+
+  if (!normalized) {
+    return null;
+  }
+
+  return {
+    clientName: normalized.clientName,
+    paymentAmount: normalized.paymentAmount,
+    paymentDate: normalized.paymentDate,
+    transactionType: normalized.transactionType,
+  };
+}
+
 function sleepMilliseconds(milliseconds) {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
@@ -1287,11 +1348,13 @@ async function enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentR
 function mapQuickBooksPayment(record) {
   const customerName = sanitizeTextValue(record?.CustomerRef?.name, 300);
   const customerId = sanitizeTextValue(record?.CustomerRef?.value, 100);
+  const transactionId = sanitizeTextValue(record?.Id, 160);
   const parsedAmount = Number.parseFloat(record?._effectiveAmount ?? record?.TotalAmt);
   const paymentAmount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
   const paymentDate = sanitizeTextValue(record?.TxnDate, 20);
 
   return {
+    transactionId,
     clientName: customerName || (customerId ? `Customer ${customerId}` : "Unknown client"),
     paymentAmount,
     paymentDate: paymentDate || "",
@@ -1302,11 +1365,13 @@ function mapQuickBooksPayment(record) {
 function mapQuickBooksRefund(record) {
   const customerName = sanitizeTextValue(record?.CustomerRef?.name, 300);
   const customerId = sanitizeTextValue(record?.CustomerRef?.value, 100);
+  const transactionId = sanitizeTextValue(record?.Id, 160);
   const parsedAmount = Number.parseFloat(record?.TotalAmt);
   const refundAmount = Number.isFinite(parsedAmount) ? -Math.abs(parsedAmount) : 0;
   const paymentDate = sanitizeTextValue(record?.TxnDate, 20);
 
   return {
+    transactionId,
     clientName: customerName || (customerId ? `Customer ${customerId}` : "Unknown client"),
     paymentAmount: refundAmount,
     paymentDate: paymentDate || "",
@@ -1586,6 +1651,24 @@ async function ensureDatabaseReady() {
         CREATE INDEX IF NOT EXISTS ${MODERATION_FILES_TABLE_NAME}_submission_idx
         ON ${MODERATION_FILES_TABLE} (submission_id)
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE} (
+          transaction_type TEXT NOT NULL,
+          transaction_id TEXT NOT NULL,
+          client_name TEXT NOT NULL,
+          payment_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
+          payment_date DATE NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (transaction_type, transaction_id)
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE_NAME}_payment_date_idx
+        ON ${QUICKBOOKS_TRANSACTIONS_TABLE} (payment_date DESC)
+      `);
     })().catch((error) => {
       dbReadyPromise = null;
       throw error;
@@ -1624,6 +1707,141 @@ async function saveStoredRecords(records) {
   );
 
   return result.rows[0]?.updated_at || null;
+}
+
+async function listCachedQuickBooksTransactionsInRange(fromDate, toDate) {
+  await ensureDatabaseReady();
+
+  const result = await pool.query(
+    `
+      SELECT transaction_type, transaction_id, client_name, payment_amount, payment_date::text AS payment_date
+      FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      WHERE payment_date >= $1::date
+        AND payment_date <= $2::date
+      ORDER BY payment_date DESC, updated_at DESC, transaction_type ASC, transaction_id ASC
+    `,
+    [fromDate, toDate],
+  );
+
+  const items = [];
+  for (const row of result.rows) {
+    const mapped = mapQuickBooksTransactionRow(row);
+    if (!mapped) {
+      continue;
+    }
+    items.push(mapped);
+  }
+
+  return items;
+}
+
+async function getLatestCachedQuickBooksPaymentDate(fromDate, toDate) {
+  await ensureDatabaseReady();
+
+  const result = await pool.query(
+    `
+      SELECT MAX(payment_date)::text AS max_date
+      FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      WHERE payment_date >= $1::date
+        AND payment_date <= $2::date
+    `,
+    [fromDate, toDate],
+  );
+
+  const maxDate = sanitizeTextValue(result.rows[0]?.max_date, 20);
+  return isValidIsoDateString(maxDate) ? maxDate : "";
+}
+
+function buildQuickBooksIncrementalSyncFromDate(rangeFromDate, rangeToDate, latestCachedDate) {
+  if (!isValidIsoDateString(rangeFromDate) || !isValidIsoDateString(rangeToDate)) {
+    return "";
+  }
+
+  let syncFromDate = rangeFromDate;
+  if (isValidIsoDateString(latestCachedDate) && latestCachedDate > syncFromDate) {
+    syncFromDate = latestCachedDate;
+  }
+
+  if (syncFromDate > rangeToDate) {
+    return "";
+  }
+
+  return syncFromDate;
+}
+
+async function upsertQuickBooksTransactions(items) {
+  await ensureDatabaseReady();
+
+  const normalizedItems = (Array.isArray(items) ? items : [])
+    .map(normalizeQuickBooksTransaction)
+    .filter((item) => item !== null);
+  if (!normalizedItems.length) {
+    return {
+      insertedCount: 0,
+      writtenCount: 0,
+    };
+  }
+
+  const client = await pool.connect();
+  let insertedCount = 0;
+  let writtenCount = 0;
+
+  try {
+    await client.query("BEGIN");
+
+    for (let offset = 0; offset < normalizedItems.length; offset += QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE) {
+      const batch = normalizedItems.slice(offset, offset + QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE);
+      const placeholders = [];
+      const values = [];
+
+      for (let index = 0; index < batch.length; index += 1) {
+        const item = batch[index];
+        const base = index * 5;
+        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}::date)`);
+        values.push(item.transactionType, item.transactionId, item.clientName, item.paymentAmount, item.paymentDate);
+      }
+
+      const result = await client.query(
+        `
+          INSERT INTO ${QUICKBOOKS_TRANSACTIONS_TABLE}
+            (transaction_type, transaction_id, client_name, payment_amount, payment_date)
+          VALUES ${placeholders.join(", ")}
+          ON CONFLICT (transaction_type, transaction_id)
+          DO UPDATE
+          SET
+            client_name = EXCLUDED.client_name,
+            payment_amount = EXCLUDED.payment_amount,
+            payment_date = EXCLUDED.payment_date,
+            updated_at = NOW()
+          RETURNING (xmax = 0) AS inserted
+        `,
+        values,
+      );
+
+      writtenCount += result.rowCount || 0;
+      for (const row of result.rows) {
+        if (row?.inserted) {
+          insertedCount += 1;
+        }
+      }
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      insertedCount,
+      writtenCount,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function isValidRecordsPayload(value) {
@@ -2637,10 +2855,9 @@ app.all("/api/quickbooks/*", (req, res, next) => {
 });
 
 app.get("/api/quickbooks/payments/recent", async (req, res) => {
-  if (!isQuickBooksConfigured()) {
+  if (!pool) {
     res.status(503).json({
-      error:
-        "QuickBooks is not configured. Set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN, and QUICKBOOKS_REALM_ID.",
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
     });
     return;
   }
@@ -2655,16 +2872,53 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
     return;
   }
 
+  const shouldSync = parseQuickBooksSyncFlag(req.query.sync);
+  if (shouldSync && !isQuickBooksConfigured()) {
+    res.status(503).json({
+      error:
+        "QuickBooks is not configured. Set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN, and QUICKBOOKS_REALM_ID.",
+    });
+    return;
+  }
+
   try {
-    const accessToken = await fetchQuickBooksAccessToken();
-    const [paymentRecords, refundRecords] = await Promise.all([
-      fetchQuickBooksPaymentsInRange(accessToken, range.from, range.to),
-      fetchQuickBooksRefundsInRange(accessToken, range.from, range.to),
-    ]);
-    const normalizedPaymentRecords = await enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentRecords);
-    const paymentItems = normalizedPaymentRecords.map(mapQuickBooksPayment);
-    const refundItems = refundRecords.map(mapQuickBooksRefund);
-    const items = sortQuickBooksTransactionsByDateDesc([...paymentItems, ...refundItems]);
+    let syncMeta = {
+      requested: shouldSync,
+      performed: false,
+      syncFrom: "",
+      fetchedCount: 0,
+      insertedCount: 0,
+      writtenCount: 0,
+    };
+
+    if (shouldSync) {
+      const latestCachedDate = await getLatestCachedQuickBooksPaymentDate(range.from, range.to);
+      const syncFromDate = buildQuickBooksIncrementalSyncFromDate(range.from, range.to, latestCachedDate);
+
+      syncMeta.syncFrom = syncFromDate;
+      if (syncFromDate) {
+        const accessToken = await fetchQuickBooksAccessToken();
+        const [paymentRecords, refundRecords] = await Promise.all([
+          fetchQuickBooksPaymentsInRange(accessToken, syncFromDate, range.to),
+          fetchQuickBooksRefundsInRange(accessToken, syncFromDate, range.to),
+        ]);
+        const normalizedPaymentRecords = await enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentRecords);
+        const paymentItems = normalizedPaymentRecords.map(mapQuickBooksPayment);
+        const refundItems = refundRecords.map(mapQuickBooksRefund);
+        const fetchedItems = sortQuickBooksTransactionsByDateDesc([...paymentItems, ...refundItems]);
+        const upsertResult = await upsertQuickBooksTransactions(fetchedItems);
+
+        syncMeta = {
+          ...syncMeta,
+          performed: true,
+          fetchedCount: fetchedItems.length,
+          insertedCount: upsertResult.insertedCount,
+          writtenCount: upsertResult.writtenCount,
+        };
+      }
+    }
+
+    const items = await listCachedQuickBooksTransactionsInRange(range.from, range.to);
 
     res.json({
       ok: true,
@@ -2674,6 +2928,8 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
       },
       count: items.length,
       items,
+      source: shouldSync ? "cache+sync" : "cache",
+      sync: syncMeta,
     });
   } catch (error) {
     console.error("GET /api/quickbooks/payments/recent failed:", error);
