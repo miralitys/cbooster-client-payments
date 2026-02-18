@@ -55,7 +55,7 @@ npm start
 
 Сервис поднимает API:
 - `GET /api/auth/session`
-- `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD`
+- `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD[&sync=1]`
 - `GET /api/health`
 - `GET /api/records`
 - `PUT /api/records`
@@ -87,7 +87,8 @@ npm start
 - Откройте `/quickbooks-payments`.
 - Страница показывает транзакции из QuickBooks за период `2026-01-01` -> текущая дата.
 - Колонки: `Client Name`, `Payment Amount`, `Payment Date`.
-- Для ручного обновления нажмите `Refresh`.
+- При открытии страницы читаются только сохраненные данные из базы (без запроса в QuickBooks).
+- Для ручного обновления нажмите `Refresh`: выполняется sync с QuickBooks только от последней сохраненной даты и добавляются новые транзакции.
 - Для поиска введите имя клиента в поле `Search by client` (поиск выполняется по подстроке).
 - Интеграция строго read-only: мы только читаем данные из QuickBooks и не отправляем туда изменения.
 - Если `Payment.TotalAmt = 0`, но у записи есть linked `Deposit`, система интерпретирует сумму депозита как полученные деньги (берется модуль суммы linked deposit line).
