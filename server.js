@@ -29,6 +29,9 @@ const QUICKBOOKS_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens
 const QUICKBOOKS_API_BASE_URL = ((process.env.QUICKBOOKS_API_BASE_URL || "https://quickbooks.api.intuit.com").toString().trim() || "https://quickbooks.api.intuit.com").replace(/\/+$/, "");
 const QUICKBOOKS_QUERY_PAGE_SIZE = 200;
 const QUICKBOOKS_MAX_QUERY_ROWS = 5000;
+const QUICKBOOKS_PAYMENT_DETAILS_CONCURRENCY = 2;
+const QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES = 5;
+const QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS = 250;
 const QUICKBOOKS_DEFAULT_FROM_DATE = "2026-01-01";
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
@@ -1003,6 +1006,12 @@ function getQuickBooksDateRange(rawFromDate, rawToDate) {
   };
 }
 
+function sleepMilliseconds(milliseconds) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
 async function fetchQuickBooksAccessToken() {
   const basicCredentials = Buffer.from(`${QUICKBOOKS_CLIENT_ID}:${QUICKBOOKS_CLIENT_SECRET}`, "utf8").toString(
     "base64",
@@ -1052,14 +1061,19 @@ async function fetchQuickBooksAccessToken() {
   return accessToken;
 }
 
-async function fetchQuickBooksPaymentsInRange(accessToken, fromDate, toDate) {
+async function fetchQuickBooksEntityInRange(accessToken, entityName, fromDate, toDate, requestLabel) {
+  const normalizedEntityName = sanitizeTextValue(entityName, 80);
+  if (!normalizedEntityName) {
+    throw createHttpError("QuickBooks query entity is missing.", 500);
+  }
+
   const items = [];
   let startPosition = 1;
 
   while (items.length < QUICKBOOKS_MAX_QUERY_ROWS) {
     const query = [
       "SELECT Id, TotalAmt, TxnDate, CustomerRef",
-      "FROM Payment",
+      `FROM ${normalizedEntityName}`,
       `WHERE TxnDate >= '${fromDate}' AND TxnDate <= '${toDate}'`,
       "ORDER BY TxnDate DESC",
       `STARTPOSITION ${startPosition}`,
@@ -1081,7 +1095,10 @@ async function fetchQuickBooksPaymentsInRange(accessToken, fromDate, toDate) {
         },
       });
     } catch (error) {
-      throw createHttpError(`QuickBooks payments request failed: ${sanitizeTextValue(error?.message, 300)}`, 503);
+      throw createHttpError(
+        `QuickBooks ${requestLabel} request failed: ${sanitizeTextValue(error?.message, 300)}`,
+        503,
+      );
     }
 
     const responseText = await response.text();
@@ -1098,13 +1115,14 @@ async function fetchQuickBooksPaymentsInRange(accessToken, fromDate, toDate) {
         faultError?.Detail || faultError?.Message || responseText || "Unknown QuickBooks API error.",
         500,
       );
-      throw createHttpError(`QuickBooks payments query failed. ${message}`, 502);
+      throw createHttpError(`QuickBooks ${requestLabel} query failed. ${message}`, 502);
     }
 
-    const pageItems = Array.isArray(body?.QueryResponse?.Payment)
-      ? body.QueryResponse.Payment
-      : body?.QueryResponse?.Payment
-        ? [body.QueryResponse.Payment]
+    const responseItems = body?.QueryResponse?.[normalizedEntityName];
+    const pageItems = Array.isArray(responseItems)
+      ? responseItems
+      : responseItems
+        ? [responseItems]
         : [];
     if (!pageItems.length) {
       break;
@@ -1122,6 +1140,14 @@ async function fetchQuickBooksPaymentsInRange(accessToken, fromDate, toDate) {
   return items.slice(0, QUICKBOOKS_MAX_QUERY_ROWS);
 }
 
+async function fetchQuickBooksPaymentsInRange(accessToken, fromDate, toDate) {
+  return fetchQuickBooksEntityInRange(accessToken, "Payment", fromDate, toDate, "payments");
+}
+
+async function fetchQuickBooksRefundsInRange(accessToken, fromDate, toDate) {
+  return fetchQuickBooksEntityInRange(accessToken, "RefundReceipt", fromDate, toDate, "refunds");
+}
+
 async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
   const normalizedPaymentId = sanitizeTextValue(paymentId, 120);
   if (!normalizedPaymentId) {
@@ -1133,33 +1159,48 @@ async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
     minorversion: "75",
   });
 
-  let response;
-  try {
-    response = await fetch(`${endpoint}?${queryParams.toString()}`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-      },
-    });
-  } catch (error) {
-    console.warn(
-      "QuickBooks payment detail request failed:",
-      normalizedPaymentId,
-      sanitizeTextValue(error?.message, 300),
-    );
-    return null;
-  }
+  for (let attempt = 1; attempt <= QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`${endpoint}?${queryParams.toString()}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+    } catch (error) {
+      console.warn(
+        "QuickBooks payment detail request failed:",
+        normalizedPaymentId,
+        sanitizeTextValue(error?.message, 300),
+      );
+      return null;
+    }
 
-  const responseText = await response.text();
-  let body = null;
-  try {
-    body = responseText ? JSON.parse(responseText) : null;
-  } catch {
-    body = null;
-  }
+    const responseText = await response.text();
+    let body = null;
+    try {
+      body = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      body = null;
+    }
 
-  if (!response.ok) {
+    if (response.ok) {
+      const payment = body?.Payment;
+      if (!payment || typeof payment !== "object") {
+        return null;
+      }
+      return payment;
+    }
+
+    const shouldRetry = response.status === 429 && attempt < QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES;
+    if (shouldRetry) {
+      const retryDelay = QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS * attempt;
+      await sleepMilliseconds(retryDelay);
+      continue;
+    }
+
     const faultError = body?.Fault?.Error?.[0];
     console.warn(
       "QuickBooks payment detail query failed:",
@@ -1169,12 +1210,7 @@ async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
     return null;
   }
 
-  const payment = body?.Payment;
-  if (!payment || typeof payment !== "object") {
-    return null;
-  }
-
-  return payment;
+  return null;
 }
 
 function deriveQuickBooksDepositLinkedAmount(payment) {
@@ -1228,7 +1264,7 @@ async function enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentR
     return enrichedRecords;
   }
 
-  const workerCount = Math.min(6, zeroAmountIndexes.length);
+  const workerCount = Math.min(QUICKBOOKS_PAYMENT_DETAILS_CONCURRENCY, zeroAmountIndexes.length);
   let cursor = 0;
 
   async function worker() {
@@ -1259,7 +1295,40 @@ function mapQuickBooksPayment(record) {
     clientName: customerName || (customerId ? `Customer ${customerId}` : "Unknown client"),
     paymentAmount,
     paymentDate: paymentDate || "",
+    transactionType: "payment",
   };
+}
+
+function mapQuickBooksRefund(record) {
+  const customerName = sanitizeTextValue(record?.CustomerRef?.name, 300);
+  const customerId = sanitizeTextValue(record?.CustomerRef?.value, 100);
+  const parsedAmount = Number.parseFloat(record?.TotalAmt);
+  const refundAmount = Number.isFinite(parsedAmount) ? -Math.abs(parsedAmount) : 0;
+  const paymentDate = sanitizeTextValue(record?.TxnDate, 20);
+
+  return {
+    clientName: customerName || (customerId ? `Customer ${customerId}` : "Unknown client"),
+    paymentAmount: refundAmount,
+    paymentDate: paymentDate || "",
+    transactionType: "refund",
+  };
+}
+
+function sortQuickBooksTransactionsByDateDesc(items) {
+  return [...items].sort((left, right) => {
+    const leftDate = sanitizeTextValue(left?.paymentDate, 20);
+    const rightDate = sanitizeTextValue(right?.paymentDate, 20);
+    if (leftDate === rightDate) {
+      return 0;
+    }
+    if (!leftDate) {
+      return 1;
+    }
+    if (!rightDate) {
+      return -1;
+    }
+    return leftDate < rightDate ? 1 : -1;
+  });
 }
 
 async function verifyTelegramInitData(rawInitData) {
@@ -2588,9 +2657,14 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
 
   try {
     const accessToken = await fetchQuickBooksAccessToken();
-    const paymentRecords = await fetchQuickBooksPaymentsInRange(accessToken, range.from, range.to);
+    const [paymentRecords, refundRecords] = await Promise.all([
+      fetchQuickBooksPaymentsInRange(accessToken, range.from, range.to),
+      fetchQuickBooksRefundsInRange(accessToken, range.from, range.to),
+    ]);
     const normalizedPaymentRecords = await enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentRecords);
-    const items = normalizedPaymentRecords.map(mapQuickBooksPayment);
+    const paymentItems = normalizedPaymentRecords.map(mapQuickBooksPayment);
+    const refundItems = refundRecords.map(mapQuickBooksRefund);
+    const items = sortQuickBooksTransactionsByDateDesc([...paymentItems, ...refundItems]);
 
     res.json({
       ok: true,
