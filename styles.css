@@ -1042,6 +1042,18 @@ button:focus-visible {
   color: var(--color-text);
 }
 
+.btn-danger {
+  background: #d92d20;
+  border-color: #d92d20;
+  color: #ffffff;
+}
+
+.btn-danger:hover:not(:disabled),
+.btn-danger:active:not(:disabled) {
+  background: #b42318;
+  border-color: #b42318;
+}
+
 .btn-ghost {
   background: transparent;
   border-color: transparent;

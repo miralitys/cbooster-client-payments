@@ -15,13 +15,15 @@ services:
         value: client_records_state
       - key: DB_MODERATION_TABLE_NAME
         value: mini_client_submissions
-      - key: BASIC_AUTH_USER
-        sync: false
-      - key: BASIC_AUTH_PASSWORD
-        sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_ALLOWED_USER_IDS
         sync: false
+      - key: TELEGRAM_REQUIRED_CHAT_ID
+        sync: false
       - key: TELEGRAM_INIT_DATA_TTL_SEC
         value: "86400"
+      - key: TELEGRAM_NOTIFY_CHAT_ID
+        sync: false
+      - key: TELEGRAM_NOTIFY_THREAD_ID
+        sync: false

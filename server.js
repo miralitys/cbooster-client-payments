@@ -8,6 +8,10 @@ const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const TELEGRAM_ALLOWED_USER_IDS = parseTelegramAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS);
 const TELEGRAM_INIT_DATA_TTL_SEC = parsePositiveInteger(process.env.TELEGRAM_INIT_DATA_TTL_SEC, 86400);
+const TELEGRAM_REQUIRED_CHAT_ID = parseOptionalTelegramChatId(process.env.TELEGRAM_REQUIRED_CHAT_ID);
+const TELEGRAM_NOTIFY_CHAT_ID = (process.env.TELEGRAM_NOTIFY_CHAT_ID || "").toString().trim();
+const TELEGRAM_NOTIFY_THREAD_ID = parseOptionalPositiveInteger(process.env.TELEGRAM_NOTIFY_THREAD_ID);
+const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
 const TABLE_NAME = resolveTableName(process.env.DB_TABLE_NAME, DEFAULT_TABLE_NAME);
@@ -55,6 +59,41 @@ const MINI_ALLOWED_FIELDS = new Set([
   ...RECORD_DATE_FIELDS,
   ...RECORD_CHECKBOX_FIELDS,
 ]);
+const TELEGRAM_NOTIFICATION_FIELD_ORDER = [
+  ...RECORD_TEXT_FIELDS,
+  ...RECORD_DATE_FIELDS,
+  ...RECORD_CHECKBOX_FIELDS,
+];
+const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
+  clientName: "Client name",
+  closedBy: "Closed by",
+  companyName: "Company name",
+  serviceType: "Service type",
+  contractTotals: "Contract totals",
+  totalPayments: "Total payments",
+  payment1: "Payment 1",
+  payment2: "Payment 2",
+  payment3: "Payment 3",
+  payment4: "Payment 4",
+  payment5: "Payment 5",
+  payment6: "Payment 6",
+  payment7: "Payment 7",
+  futurePayments: "Future payments",
+  notes: "Notes",
+  collection: "Collection",
+  dateWhenFullyPaid: "Date when fully paid",
+  payment1Date: "Payment 1 date",
+  payment2Date: "Payment 2 date",
+  payment3Date: "Payment 3 date",
+  payment4Date: "Payment 4 date",
+  payment5Date: "Payment 5 date",
+  payment6Date: "Payment 6 date",
+  payment7Date: "Payment 7 date",
+  dateOfCollection: "Date of collection",
+  dateWhenWrittenOff: "Date when written off",
+  afterResult: "After result",
+  writtenOff: "Written off",
+};
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -127,6 +166,34 @@ function parsePositiveInteger(rawValue, fallbackValue) {
   return parsed;
 }
 
+function parseOptionalPositiveInteger(rawValue) {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function parseOptionalTelegramChatId(rawValue) {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return "";
+  }
+
+  // Telegram chat id may be negative for groups/supergroups.
+  if (!/^-?\d+$/.test(value)) {
+    return "";
+  }
+
+  return value;
+}
+
 function safeEqual(leftValue, rightValue) {
   const left = Buffer.from(leftValue, "utf8");
   const right = Buffer.from(rightValue, "utf8");
@@ -138,7 +205,7 @@ function safeEqual(leftValue, rightValue) {
   return crypto.timingSafeEqual(left, right);
 }
 
-function verifyTelegramInitData(rawInitData) {
+async function verifyTelegramInitData(rawInitData) {
   if (!TELEGRAM_BOT_TOKEN) {
     return {
       ok: false,
@@ -203,12 +270,9 @@ function verifyTelegramInitData(rawInitData) {
   }
 
   const user = parseTelegramUser(params.get("user"));
-  if (!isTelegramUserAllowed(user)) {
-    return {
-      ok: false,
-      status: 403,
-      error: "Telegram user is not allowed.",
-    };
+  const accessResult = await verifyTelegramUserAccess(user);
+  if (!accessResult.ok) {
+    return accessResult;
   }
 
   return {
@@ -243,6 +307,98 @@ function isTelegramUserAllowed(user) {
   }
 
   return TELEGRAM_ALLOWED_USER_IDS.has(String(userId));
+}
+
+async function verifyTelegramUserAccess(user) {
+  if (!isTelegramUserAllowed(user)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Telegram user is not allowed.",
+    };
+  }
+
+  if (!TELEGRAM_REQUIRED_CHAT_ID) {
+    return {
+      ok: true,
+    };
+  }
+
+  const membershipResult = await verifyTelegramGroupMembership(user);
+  if (!membershipResult.ok) {
+    return membershipResult;
+  }
+
+  return {
+    ok: true,
+  };
+}
+
+async function verifyTelegramGroupMembership(user) {
+  const userId = sanitizeTextValue(user?.id, 50);
+  if (!userId) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Only members of the allowed Telegram group can use Mini App.",
+    };
+  }
+
+  let response;
+  try {
+    const query = new URLSearchParams({
+      chat_id: TELEGRAM_REQUIRED_CHAT_ID,
+      user_id: userId,
+    });
+    response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChatMember?${query.toString()}`);
+  } catch (error) {
+    console.error("Telegram getChatMember network failed:", error);
+    return {
+      ok: false,
+      status: 503,
+      error: "Telegram membership check failed. Try again in a moment.",
+    };
+  }
+
+  const responseText = await response.text();
+  let body = null;
+  try {
+    body = responseText ? JSON.parse(responseText) : null;
+  } catch {
+    body = null;
+  }
+
+  if (!response.ok || !body?.ok) {
+    const description = sanitizeTextValue(body?.description || responseText, 400);
+    if (response.status === 400 || response.status === 403) {
+      console.warn("Telegram getChatMember denied:", description || response.statusText);
+      return {
+        ok: false,
+        status: 403,
+        error: "Only members of the allowed Telegram group can use Mini App.",
+      };
+    }
+
+    console.error("Telegram getChatMember failed:", response.status, description || response.statusText);
+    return {
+      ok: false,
+      status: 503,
+      error: "Telegram membership check failed. Try again in a moment.",
+    };
+  }
+
+  const memberStatus = sanitizeTextValue(body?.result?.status, 40).toLowerCase();
+  if (!TELEGRAM_MEMBER_ALLOWED_STATUSES.has(memberStatus)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Only members of the allowed Telegram group can use Mini App.",
+    };
+  }
+
+  return {
+    ok: true,
+  };
 }
 
 async function ensureDatabaseReady() {
@@ -394,6 +550,120 @@ async function queueClientSubmission(record, submittedBy) {
     status: result.rows[0]?.status || "pending",
     submittedAt: result.rows[0]?.submitted_at ? new Date(result.rows[0].submitted_at).toISOString() : null,
   };
+}
+
+function buildTelegramUserLabel(user) {
+  if (!user || typeof user !== "object") {
+    return "";
+  }
+
+  const userId = sanitizeTextValue(user.id, 80);
+  const username = sanitizeTextValue(user.username, 120);
+  if (username) {
+    return userId ? `@${username} (id: ${userId})` : `@${username}`;
+  }
+
+  const firstName = sanitizeTextValue(user.first_name, 120);
+  const lastName = sanitizeTextValue(user.last_name, 120);
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+  if (fullName) {
+    return userId ? `${fullName} (id: ${userId})` : fullName;
+  }
+
+  return userId ? `tg:${userId}` : "";
+}
+
+function normalizeTelegramMessageFieldValue(value, maxLength = 600) {
+  return sanitizeTextValue(value, maxLength).replace(/\s+/g, " ").trim();
+}
+
+function buildTelegramSubmissionMessage(record, submission, telegramUser) {
+  const lines = ["New client submission from Mini App"];
+
+  const submissionId = normalizeTelegramMessageFieldValue(submission?.id, 180);
+  if (submissionId) {
+    lines.push(`Submission ID: ${submissionId}`);
+  }
+
+  const submittedAt = normalizeTelegramMessageFieldValue(submission?.submittedAt, 120);
+  if (submittedAt) {
+    lines.push(`Submitted at: ${submittedAt}`);
+  }
+
+  const submittedBy = buildTelegramUserLabel(telegramUser);
+  if (submittedBy) {
+    lines.push(`Submitted by: ${submittedBy}`);
+  }
+
+  lines.push("");
+  lines.push("Client data:");
+
+  for (const field of TELEGRAM_NOTIFICATION_FIELD_ORDER) {
+    const label = TELEGRAM_NOTIFICATION_FIELD_LABELS[field] || field;
+    if (field === "afterResult" || field === "writtenOff") {
+      if (toCheckboxValue(record?.[field]) !== "Yes") {
+        continue;
+      }
+      lines.push(`- ${label}: Yes`);
+      continue;
+    }
+
+    const value = normalizeTelegramMessageFieldValue(record?.[field]);
+    if (!value) {
+      continue;
+    }
+
+    lines.push(`- ${label}: ${value}`);
+  }
+
+  const message = lines.join("\n").trim();
+  const TELEGRAM_MAX_MESSAGE_LENGTH = 3900;
+  if (message.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
+    return message;
+  }
+
+  return `${message.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH - 3)}...`;
+}
+
+async function sendMiniSubmissionTelegramNotification(record, submission, telegramUser) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_NOTIFY_CHAT_ID) {
+    return;
+  }
+
+  const payload = {
+    chat_id: TELEGRAM_NOTIFY_CHAT_ID,
+    text: buildTelegramSubmissionMessage(record, submission, telegramUser),
+    disable_web_page_preview: true,
+  };
+
+  if (TELEGRAM_NOTIFY_THREAD_ID) {
+    payload.message_thread_id = TELEGRAM_NOTIFY_THREAD_ID;
+  }
+
+  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`Telegram sendMessage HTTP ${response.status}: ${sanitizeTextValue(responseText, 700)}`);
+  }
+
+  let body;
+  try {
+    body = JSON.parse(responseText);
+  } catch {
+    body = null;
+  }
+
+  if (!body?.ok) {
+    const description = sanitizeTextValue(body?.description || responseText, 700) || "Unknown Telegram API error.";
+    throw new Error(`Telegram sendMessage failed: ${description}`);
+  }
 }
 
 async function listModerationSubmissions(options = {}) {
@@ -885,6 +1155,24 @@ app.put("/api/records", async (req, res) => {
   }
 });
 
+app.post("/api/mini/access", async (req, res) => {
+  const authResult = await verifyTelegramInitData(req.body?.initData);
+  if (!authResult.ok) {
+    res.status(authResult.status).json({
+      error: authResult.error,
+    });
+    return;
+  }
+
+  res.json({
+    ok: true,
+    user: {
+      id: sanitizeTextValue(authResult.user?.id, 50),
+      username: sanitizeTextValue(authResult.user?.username, 120),
+    },
+  });
+});
+
 app.post("/api/mini/clients", async (req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -893,7 +1181,7 @@ app.post("/api/mini/clients", async (req, res) => {
     return;
   }
 
-  const authResult = verifyTelegramInitData(req.body?.initData);
+  const authResult = await verifyTelegramInitData(req.body?.initData);
   if (!authResult.ok) {
     res.status(authResult.status).json({
       error: authResult.error,
@@ -911,6 +1199,12 @@ app.post("/api/mini/clients", async (req, res) => {
 
   try {
     const submission = await queueClientSubmission(creationResult.record, authResult.user);
+    try {
+      await sendMiniSubmissionTelegramNotification(creationResult.record, submission, authResult.user);
+    } catch (notificationError) {
+      console.error("Mini App Telegram notification failed:", notificationError);
+    }
+
     res.status(201).json({
       ok: true,
       status: submission.status,
@@ -1037,5 +1331,14 @@ app.listen(PORT, () => {
   }
   if (!TELEGRAM_BOT_TOKEN) {
     console.warn("Mini App write API is disabled. Set TELEGRAM_BOT_TOKEN to enable Telegram auth.");
+  }
+  if (TELEGRAM_REQUIRED_CHAT_ID && !TELEGRAM_BOT_TOKEN) {
+    console.warn("TELEGRAM_REQUIRED_CHAT_ID is ignored because TELEGRAM_BOT_TOKEN is missing.");
+  }
+  if (TELEGRAM_NOTIFY_CHAT_ID && !TELEGRAM_BOT_TOKEN) {
+    console.warn("Telegram submission notifications are disabled: TELEGRAM_BOT_TOKEN is missing.");
+  }
+  if (TELEGRAM_NOTIFY_THREAD_ID && !TELEGRAM_NOTIFY_CHAT_ID) {
+    console.warn("TELEGRAM_NOTIFY_THREAD_ID is ignored because TELEGRAM_NOTIFY_CHAT_ID is not set.");
   }
 });

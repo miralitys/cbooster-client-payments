@@ -43,6 +43,7 @@ const submissionModal = document.querySelector("#submission-modal");
 const submissionModalDetails = document.querySelector("#submission-modal-details");
 const approvalCheckbox = document.querySelector("#approval-checkbox");
 const applyModerationButton = document.querySelector("#apply-moderation-button");
+const deleteModerationButton = document.querySelector("#delete-moderation-button");
 const closeModalControls = [...document.querySelectorAll("[data-close-modal]")];
 
 const kpiMoneyFormatter = new Intl.NumberFormat("en-US", {
@@ -190,25 +191,34 @@ function initializeModal() {
       return;
     }
 
-    isModerationActionRunning = true;
-    applyModerationButton.disabled = true;
+    if (!approvalCheckbox?.checked) {
+      showMessage("Отметьте \"Добавить в общую базу данных\" или нажмите \"Удалить\".", "error");
+      return;
+    }
 
     try {
-      if (approvalCheckbox?.checked) {
-        await reviewSubmission(activeSubmission.id, "approve");
-        showMessage("Клиент добавлен в общую базу.", "success");
-      } else {
-        await reviewSubmission(activeSubmission.id, "reject");
-        showMessage("Клиент отклонен и не добавлен в базу.", "success");
-      }
-
-      setModalVisibility(false);
-      await reloadDashboard();
+      await runModerationAction("approve");
+      showMessage("Клиент добавлен в общую базу.", "success");
     } catch (error) {
       showMessage(error.message || "Не удалось применить решение модерации.", "error");
-    } finally {
-      isModerationActionRunning = false;
-      applyModerationButton.disabled = false;
+    }
+  });
+
+  deleteModerationButton?.addEventListener("click", async () => {
+    if (!activeSubmission || isModerationActionRunning) {
+      return;
+    }
+
+    const shouldDelete = window.confirm("Удалить эту заявку из очереди модерации?");
+    if (!shouldDelete) {
+      return;
+    }
+
+    try {
+      await runModerationAction("reject");
+      showMessage("Заявка удалена из очереди модерации.", "success");
+    } catch (error) {
+      showMessage(error.message || "Не удалось удалить заявку.", "error");
     }
   });
 
@@ -217,6 +227,34 @@ function initializeModal() {
       setModalVisibility(false);
     }
   });
+}
+
+async function runModerationAction(action) {
+  if (!activeSubmission || isModerationActionRunning) {
+    return;
+  }
+
+  isModerationActionRunning = true;
+  if (applyModerationButton) {
+    applyModerationButton.disabled = true;
+  }
+  if (deleteModerationButton) {
+    deleteModerationButton.disabled = true;
+  }
+
+  try {
+    await reviewSubmission(activeSubmission.id, action);
+    setModalVisibility(false);
+    await reloadDashboard();
+  } finally {
+    isModerationActionRunning = false;
+    if (applyModerationButton) {
+      applyModerationButton.disabled = false;
+    }
+    if (deleteModerationButton) {
+      deleteModerationButton.disabled = false;
+    }
+  }
 }
 
 async function loadOverviewData() {
