@@ -557,38 +557,27 @@ function buildTelegramUserLabel(user) {
     return "";
   }
 
-  const userId = sanitizeTextValue(user.id, 80);
   const username = sanitizeTextValue(user.username, 120);
   if (username) {
-    return userId ? `@${username} (id: ${userId})` : `@${username}`;
+    return `@${username}`;
   }
 
   const firstName = sanitizeTextValue(user.first_name, 120);
   const lastName = sanitizeTextValue(user.last_name, 120);
   const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
   if (fullName) {
-    return userId ? `${fullName} (id: ${userId})` : fullName;
+    return fullName;
   }
 
-  return userId ? `tg:${userId}` : "";
+  return "";
 }
 
 function normalizeTelegramMessageFieldValue(value, maxLength = 600) {
   return sanitizeTextValue(value, maxLength).replace(/\s+/g, " ").trim();
 }
 
-function buildTelegramSubmissionMessage(record, submission, telegramUser) {
+function buildTelegramSubmissionMessage(record, _submission, telegramUser) {
   const lines = ["New client submission from Mini App"];
-
-  const submissionId = normalizeTelegramMessageFieldValue(submission?.id, 180);
-  if (submissionId) {
-    lines.push(`Submission ID: ${submissionId}`);
-  }
-
-  const submittedAt = normalizeTelegramMessageFieldValue(submission?.submittedAt, 120);
-  if (submittedAt) {
-    lines.push(`Submitted at: ${submittedAt}`);
-  }
 
   const submittedBy = buildTelegramUserLabel(telegramUser);
   if (submittedBy) {
