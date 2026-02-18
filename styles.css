@@ -39,7 +39,7 @@ a {
   padding: var(--space-3) var(--space-4);
   position: sticky;
   top: var(--space-2);
-  z-index: var(--z-sticky);
+  z-index: calc(var(--z-modal-backdrop) - 10);
 }
 
 .page-header__title {
@@ -138,7 +138,7 @@ a {
   border-radius: var(--radius-md);
   background: var(--color-surface);
   box-shadow: var(--shadow-sm);
-  z-index: var(--z-dropdown);
+  z-index: calc(var(--z-modal-backdrop) - 1);
 }
 
 .account-menu__panel[hidden] {
