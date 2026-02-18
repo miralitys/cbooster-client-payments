@@ -211,7 +211,7 @@ function renderPayments(items, query = "", showOnlyRefunds = false) {
     const row = document.createElement("tr");
     row.className = "quickbooks-table__empty-row";
     const cell = document.createElement("td");
-    cell.colSpan = 3;
+    cell.colSpan = 5;
     const normalizedQuery = query.toString().trim();
     if (normalizedQuery) {
       cell.textContent = showOnlyRefunds
@@ -239,6 +239,12 @@ function renderPayments(items, query = "", showOnlyRefunds = false) {
       clientNameCell.textContent = clientName;
     }
 
+    const clientPhoneCell = document.createElement("td");
+    clientPhoneCell.textContent = formatContactCellValue(item?.clientPhone);
+
+    const clientEmailCell = document.createElement("td");
+    clientEmailCell.textContent = formatContactCellValue(item?.clientEmail);
+
     const paymentAmountCell = document.createElement("td");
     paymentAmountCell.className = "amount";
     paymentAmountCell.textContent = formatUsd(item?.paymentAmount);
@@ -246,7 +252,7 @@ function renderPayments(items, query = "", showOnlyRefunds = false) {
     const paymentDateCell = document.createElement("td");
     paymentDateCell.textContent = formatDate(item?.paymentDate);
 
-    row.append(clientNameCell, paymentAmountCell, paymentDateCell);
+    row.append(clientNameCell, clientPhoneCell, clientEmailCell, paymentAmountCell, paymentDateCell);
     fragment.append(row);
   }
 
@@ -304,6 +310,11 @@ function setLoadingState(isLoading) {
 function formatUsd(value) {
   const parsed = Number(value);
   return usdFormatter.format(Number.isFinite(parsed) ? parsed : 0);
+}
+
+function formatContactCellValue(value) {
+  const text = (value || "").toString().trim();
+  return text || "-";
 }
 
 function formatDate(rawValue) {
