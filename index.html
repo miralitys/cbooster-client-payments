@@ -3,87 +3,118 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dashboard</title>
-    <link rel="stylesheet" href="/dashboard.css?v=20260218-moderation-dashboard" />
-    <script src="/dashboard.js?v=20260218-moderation-dashboard" defer></script>
+    <title>Credit Booster Dashboard</title>
+    <link rel="stylesheet" href="/styles.css?v=20260218-dashboard-match-main" />
+    <script src="/dashboard.js?v=20260218-dashboard-match-main" defer></script>
   </head>
   <body>
-    <main class="dashboard-shell">
-      <header class="topbar">
-        <h1 class="topbar__title">Дашборд</h1>
-        <nav class="topbar__nav" aria-label="Переходы">
-          <a class="topbar__nav-link" href="/Client_Payments">Client Payment</a>
-        </nav>
-        <div class="topbar__menu-wrap">
-          <button id="topbar-menu-toggle" class="menu-toggle" type="button" aria-haspopup="menu" aria-expanded="false">
-            <span aria-hidden="true">⋯</span>
-            <span class="sr-only">Открыть меню</span>
-          </button>
-          <div id="topbar-menu" class="topbar-menu" role="menu" hidden>
-            <a class="topbar-menu__item" href="/Client_Payments" role="menuitem">Client Payments</a>
+    <main class="page-shell" aria-busy="false">
+      <div class="container dashboard-home">
+        <header class="section page-header dashboard-page-header">
+          <div class="page-header__title">
+            <h1>Дашборд</h1>
           </div>
-        </div>
-      </header>
 
-      <section class="overview-block" aria-label="Overview">
-        <div class="overview-block__head">
-          <h2>Overview</h2>
-        </div>
-        <div class="overview-cards">
-          <article class="overview-card">
-            <p class="overview-card__label">Total Received</p>
-            <p id="overview-received-value" class="overview-card__value">$0.00</p>
-          </article>
-          <article class="overview-card">
-            <p class="overview-card__label">Total Sales</p>
-            <p id="overview-sales-value" class="overview-card__value">$0.00</p>
-          </article>
-          <article class="overview-card">
-            <p class="overview-card__label">Total Debt</p>
-            <p id="overview-debt-value" class="overview-card__value">$0.00</p>
-          </article>
-        </div>
-      </section>
+          <div class="page-header__right">
+            <a class="btn btn-secondary dashboard-nav-link" href="/Client_Payments">Client Payment</a>
 
-      <section class="moderation-block" aria-label="Новые клиенты на модерации">
-        <div class="moderation-block__head">
-          <h2>Новые клиенты из Mini App</h2>
-          <div class="moderation-block__actions">
-            <button id="refresh-submissions-button" type="button">Обновить</button>
+            <div class="dashboard-menu">
+              <button
+                id="topbar-menu-toggle"
+                type="button"
+                class="btn btn-secondary dashboard-menu-toggle"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-controls="topbar-menu"
+                aria-label="Открыть меню"
+              >
+                ⋯
+              </button>
+
+              <div id="topbar-menu" class="dashboard-menu__panel" role="menu" hidden>
+                <a class="dashboard-menu__item" href="/Client_Payments" role="menuitem">Client Payment</a>
+              </div>
+            </div>
           </div>
+        </header>
+
+        <div class="dashboard-home-grid">
+          <section class="section period-dashboard-shell dashboard-overview-shell" aria-label="Overview section">
+            <header class="period-dashboard-shell__header dashboard-overview-shell__header">
+              <div class="period-dashboard-shell__header-main">
+                <h2 class="period-dashboard-shell__heading-text">Overview</h2>
+              </div>
+            </header>
+
+            <div id="overview-content" class="overview-cards" role="region" aria-label="Overview totals">
+              <article class="overview-card" aria-label="Total received">
+                <h3 class="overview-card__title">Total Received</h3>
+                <p class="overview-card__value" id="overview-received-value">$0.00</p>
+                <p class="overview-card__context">As of today</p>
+              </article>
+
+              <article class="overview-card" aria-label="Total sales">
+                <h3 class="overview-card__title">Total Sales</h3>
+                <p class="overview-card__value" id="overview-sales-value">$0.00</p>
+                <p class="overview-card__context">As of today</p>
+              </article>
+
+              <article class="overview-card" aria-label="Total debt">
+                <h3 class="overview-card__title">Total Debt</h3>
+                <p class="overview-card__value" id="overview-debt-value">$0.00</p>
+                <p class="overview-card__context">As of today</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="section table-panel moderation-table-panel" aria-label="Новые клиенты на модерации">
+            <header class="table-panel__header">
+              <h2 class="section-heading">Новые клиенты из Mini App</h2>
+              <div class="table-panel__actions">
+                <button id="refresh-submissions-button" type="button" class="btn btn-secondary">Обновить</button>
+              </div>
+            </header>
+
+            <p id="dashboard-message" class="dashboard-message" role="status" aria-live="polite"></p>
+
+            <div class="table-wrap moderation-table-wrap">
+              <table id="submissions-table" class="moderation-table">
+                <thead>
+                  <tr>
+                    <th>Client Name</th>
+                    <th>Company</th>
+                    <th>Closed By</th>
+                    <th>Submitted</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="submissions-table-body"></tbody>
+              </table>
+            </div>
+          </section>
         </div>
-        <p id="dashboard-message" class="dashboard-message" role="status" aria-live="polite"></p>
-        <div class="table-wrap">
-          <table id="submissions-table">
-            <thead>
-              <tr>
-                <th>Client Name</th>
-                <th>Company</th>
-                <th>Closed By</th>
-                <th>Submitted</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="submissions-table-body"></tbody>
-          </table>
-        </div>
-      </section>
+      </div>
     </main>
 
-    <section id="submission-modal" class="submission-modal" hidden>
-      <div class="submission-modal__backdrop" data-close-modal></div>
-      <div class="submission-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="submission-modal-title">
-        <header class="submission-modal__header">
+    <section id="submission-modal" class="modal" hidden>
+      <button type="button" class="modal-backdrop" data-close-modal aria-label="Close dialog"></button>
+      <div class="modal-dialog moderation-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="submission-modal-title">
+        <header class="modal-header">
           <h3 id="submission-modal-title">Проверка клиента</h3>
-          <button type="button" class="icon-button" data-close-modal aria-label="Закрыть">✕</button>
+          <button type="button" class="modal-close" data-close-modal aria-label="Закрыть">×</button>
         </header>
+
         <div id="submission-modal-details" class="submission-modal__details"></div>
-        <label class="approval-checkbox">
-          <input id="approval-checkbox" type="checkbox" />
-          <span>Добавить в общую базу данных</span>
-        </label>
-        <div class="submission-modal__footer">
-          <button id="apply-moderation-button" type="button">Применить</button>
+
+        <div class="modal-footer moderation-modal-footer">
+          <label class="checkbox-label moderation-approval-label">
+            <input id="approval-checkbox" type="checkbox" />
+            <span>Добавить в общую базу данных</span>
+          </label>
+          <div class="moderation-modal-actions">
+            <button id="apply-moderation-button" type="button" class="btn btn-primary">Применить</button>
+            <button type="button" class="btn btn-secondary" data-close-modal>Закрыть</button>
+          </div>
         </div>
       </div>
     </section>
