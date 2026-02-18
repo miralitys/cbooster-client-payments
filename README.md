@@ -30,6 +30,17 @@ npm start
 2. Возьмите строку подключения Postgres (`DATABASE_URL`) в `Supabase -> Project Settings -> Database`.
 3. В Render создайте `Web Service` из этого репозитория (можно по `render.yaml`).
 4. В переменных Render добавьте:
+   - `WEB_AUTH_USERNAME` = логин для входа на веб-сайт;
+   - `WEB_AUTH_PASSWORD` = пароль для входа на веб-сайт;
+   - `WEB_AUTH_SESSION_SECRET` = длинный случайный секрет для подписи cookie-сессии;
+   - `WEB_AUTH_SESSION_TTL_SEC` = TTL сессии в секундах (по умолчанию `43200` = 12 часов);
+   - `WEB_AUTH_COOKIE_SECURE` = `true`/`false` (опционально, принудительный secure-флаг cookie);
+   - `QUICKBOOKS_CLIENT_ID` = QuickBooks OAuth Client ID;
+   - `QUICKBOOKS_CLIENT_SECRET` = QuickBooks OAuth Client Secret;
+   - `QUICKBOOKS_REFRESH_TOKEN` = QuickBooks OAuth Refresh Token;
+   - `QUICKBOOKS_REALM_ID` = QuickBooks Company Realm ID;
+   - `QUICKBOOKS_REDIRECT_URI` = Redirect URI (опционально, но рекомендовано хранить рядом с OAuth-настройками);
+   - `QUICKBOOKS_API_BASE_URL` = API base URL (по умолчанию `https://quickbooks.api.intuit.com`);
    - `DATABASE_URL` = строка подключения Supabase;
    - `DB_TABLE_NAME` = `client_records_state`;
    - `DB_MODERATION_TABLE_NAME` = `mini_client_submissions`;
@@ -43,6 +54,8 @@ npm start
 5. Deploy.
 
 Сервис поднимает API:
+- `GET /api/auth/session`
+- `GET /api/quickbooks/payments/recent?days=3`
 - `GET /api/health`
 - `GET /api/records`
 - `PUT /api/records`
@@ -61,9 +74,20 @@ npm start
 
 ## Доступ к страницам
 
-- Главная страница `/` — это Dashboard (overview + таблица заявок на модерацию).
-- Страница полной таблицы клиентов находится по адресу `/Client_Payments`.
+- Весь веб-интерфейс защищен авторизацией через `/login`.
+- После входа доступны:
+  - главная страница `/` (Dashboard: overview + таблица заявок на модерацию);
+  - страница полной таблицы клиентов `/Client_Payments`;
+  - отдельная тестовая страница QuickBooks `/quickbooks-payments`.
+- Выход: `/logout`.
 - Mini App маршруты (`/mini`, `/api/mini/*`) защищаются подписью Telegram `initData`.
+
+## QuickBooks тест (отдельно)
+
+- Откройте `/quickbooks-payments`.
+- Страница показывает только платежи из QuickBooks за последние 3 дня.
+- Колонки: `Client Name`, `Payment Amount`, `Payment Date`.
+- Для ручного обновления нажмите `Refresh`.
 
 ## Telegram Mini App
 

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuickBooks Payments Test</title>
+    <script src="/quickbooks-payments.js?v=20260218-qb-payments" defer></script>
+    <style>
+      :root {
+        --bg: #f2f6fb;
+        --card: #ffffff;
+        --line: #d6e1ef;
+        --text: #0f172a;
+        --muted: #5b6b7f;
+        --accent: #0ea5e9;
+        --accent-strong: #0284c7;
+        --danger: #dc2626;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Avenir Next", "Segoe UI", Arial, sans-serif;
+        color: var(--text);
+        background: radial-gradient(circle at top, #dff4ff 0%, var(--bg) 45%, #e8edf4 100%);
+      }
+
+      .shell {
+        width: min(1080px, 100%);
+        margin: 0 auto;
+        padding: 28px 18px 36px;
+      }
+
+      .topbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 16px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(22px, 4vw, 34px);
+        line-height: 1.1;
+      }
+
+      .subtitle {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .actions {
+        display: inline-flex;
+        gap: 10px;
+      }
+
+      button,
+      .link {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 14px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button {
+        color: #fff;
+        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.7;
+      }
+
+      .link {
+        text-decoration: none;
+        color: #0f172a;
+        background: #e2e8f0;
+      }
+
+      .panel {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        overflow: hidden;
+        box-shadow: 0 24px 72px rgba(15, 23, 42, 0.1);
+      }
+
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 20px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .status {
+        margin: 0;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .status.error {
+        color: var(--danger);
+      }
+
+      .range {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .table-wrap {
+        overflow: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 620px;
+      }
+
+      th,
+      td {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        font-size: 14px;
+      }
+
+      th {
+        background: #f8fbff;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #334155;
+      }
+
+      td.amount {
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>QuickBooks Payments</h1>
+          <p class="subtitle">Last 3 days: client name, payment amount, payment date</p>
+        </div>
+        <div class="actions">
+          <button id="refresh-button" type="button">Refresh</button>
+          <a class="link" href="/">Back</a>
+        </div>
+      </header>
+
+      <section class="panel" aria-live="polite">
+        <div class="meta">
+          <p id="status" class="status">Loading payments...</p>
+          <p id="range" class="range"></p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Client Name</th>
+                <th>Payment Amount</th>
+                <th>Payment Date</th>
+              </tr>
+            </thead>
+            <tbody id="payments-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

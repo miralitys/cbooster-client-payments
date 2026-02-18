@@ -6,9 +6,9 @@ const REMOTE_SYNC_DEBOUNCE_MS = 900;
 const REMOTE_SYNC_RETRY_MS = 5000;
 const IS_HTTP_CONTEXT = window.location.protocol === "http:" || window.location.protocol === "https:";
 const FILTERS_PANEL_COLLAPSED_KEY = "cbooster_filters_panel_collapsed_v1";
-const AUTH_SESSION_STORAGE_KEY = "cbooster_auth_session_v1";
-const AUTH_ALLOWED_USERNAME = "ramisi@creditbooster.com";
-const AUTH_ALLOWED_PASSWORD = "Ringo@123Qwerty";
+const AUTH_SESSION_ENDPOINT = "/api/auth/session";
+const AUTH_LOGOUT_PATH = "/logout";
+const AUTH_LOGIN_PATH = "/login";
 const STATUS_FILTER_ALL = "all";
 const STATUS_FILTER_WRITTEN_OFF = "written-off";
 const STATUS_FILTER_FULLY_PAID = "fully-paid";
@@ -194,11 +194,6 @@ const accountMenuPanel = document.querySelector("#account-menu-panel");
 const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLoginActionButton = document.querySelector("#account-login-action");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
-const authGate = document.querySelector("#auth-gate");
-const authForm = document.querySelector("#auth-form");
-const authUsernameInput = document.querySelector("#auth-username");
-const authPasswordInput = document.querySelector("#auth-password");
-const authMessage = document.querySelector("#auth-message");
 const dashboardGrid = document.querySelector(".dashboard-grid");
 const filtersPanel = document.querySelector(".filters-panel");
 const searchInput = document.querySelector("#search-input");
@@ -2493,6 +2488,11 @@ async function syncRecordsToRemote(options = {}) {
       body: JSON.stringify({ records }),
     });
 
+    if (response.status === 401) {
+      redirectToLoginPage();
+      return false;
+    }
+
     if (response.status === 404) {
       isRemoteSyncEnabled = false;
       return false;
@@ -2531,6 +2531,11 @@ async function hydrateRecordsFromRemote() {
         Accept: "application/json",
       },
     });
+
+    if (response.status === 401) {
+      redirectToLoginPage();
+      return;
+    }
 
     if (response.status === 404) {
       isRemoteSyncEnabled = false;
@@ -3230,7 +3235,8 @@ function initializeAccountMenu() {
 
   accountLoginActionButton?.addEventListener("click", () => {
     setAccountMenuOpen(false);
-    openAuthGate();
+    const nextPath = `${window.location.pathname || "/"}${window.location.search || ""}`;
+    window.location.href = `${AUTH_LOGIN_PATH}?next=${encodeURIComponent(nextPath)}`;
   });
 
   accountLogoutActionButton?.addEventListener("click", () => {
@@ -3251,48 +3257,12 @@ function initializeAccountMenu() {
   });
 }
 
-function initializeAuthGate() {
-  if (!authForm || !authUsernameInput || !authPasswordInput) {
-    return;
-  }
-
-  authForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const username = authUsernameInput.value.trim();
-    const password = authPasswordInput.value.trim();
-
-    if (!username || !password) {
-      showAuthMessage("Enter username and password.", true);
-      if (!username) {
-        authUsernameInput.focus();
-      } else {
-        authPasswordInput.focus();
-      }
-      return;
-    }
-
-    if (!isValidAuthCredentials(username, password)) {
-      showAuthMessage("Invalid login or password.", true);
-      authPasswordInput.value = "";
-      authPasswordInput.focus();
-      return;
-    }
-
-    setAuthSession(AUTH_ALLOWED_USERNAME);
-    closeAuthGate();
-    showAuthMessage("");
-  });
-}
+function initializeAuthGate() {}
 
 function initializeAuthSession() {
-  currentAuthUser = loadAuthSession();
+  currentAuthUser = "Authorized user";
   syncAuthUi();
-
-  if (currentAuthUser) {
-    closeAuthGate();
-  } else {
-    openAuthGate();
-  }
+  void hydrateAuthSessionFromServer();
 }
 
 function setAccountMenuOpen(isOpen) {
@@ -3306,52 +3276,8 @@ function setAccountMenuOpen(isOpen) {
   accountMenuToggleButton.setAttribute("aria-label", isOpen ? "Close account menu" : "Open account menu");
 }
 
-function loadAuthSession() {
-  try {
-    const raw = localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
-    if (!raw) {
-      return "";
-    }
-
-    const parsed = JSON.parse(raw);
-    const username = (parsed?.username || "").toString().trim();
-    const isAuthenticated = Boolean(parsed?.authenticated);
-    if (isAuthenticated && username === AUTH_ALLOWED_USERNAME) {
-      return username;
-    }
-    return "";
-  } catch {
-    return "";
-  }
-}
-
-function setAuthSession(username) {
-  const nextUser = (username || "").toString().trim();
-  if (!nextUser) {
-    return;
-  }
-
-  currentAuthUser = nextUser;
-  localStorage.setItem(
-    AUTH_SESSION_STORAGE_KEY,
-    JSON.stringify({
-      username: nextUser,
-      authenticated: true,
-      signedInAt: new Date().toISOString(),
-    }),
-  );
-  syncAuthUi();
-}
-
-function clearAuthSession() {
-  currentAuthUser = "";
-  localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
-  syncAuthUi();
-}
-
 function signOutCurrentUser() {
-  clearAuthSession();
-  openAuthGate();
+  window.location.href = AUTH_LOGOUT_PATH;
 }
 
 function syncAuthUi() {
@@ -3370,51 +3296,35 @@ function syncAuthUi() {
   }
 }
 
-function openAuthGate() {
-  if (!authGate) {
-    return;
+async function hydrateAuthSessionFromServer() {
+  try {
+    const response = await fetch(AUTH_SESSION_ENDPOINT, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (response.status === 401) {
+      redirectToLoginPage();
+      return;
+    }
+
+    if (!response.ok) {
+      return;
+    }
+
+    const payload = await response.json().catch(() => null);
+    const username = (payload?.user?.username || "").toString().trim();
+    currentAuthUser = username || "Authorized user";
+    syncAuthUi();
+  } catch {
+    // Keep optimistic menu state.
   }
-
-  setAccountMenuOpen(false);
-  authGate.hidden = false;
-  document.body.classList.add("auth-locked");
-  showAuthMessage("");
-  requestAnimationFrame(() => {
-    authUsernameInput?.focus();
-  });
 }
 
-function closeAuthGate() {
-  if (!authGate) {
-    return;
-  }
-
-  authGate.hidden = true;
-  document.body.classList.remove("auth-locked");
-  authForm?.reset();
-  showAuthMessage("");
-}
-
-function showAuthMessage(message, isError = false) {
-  if (!authMessage) {
-    return;
-  }
-
-  authMessage.textContent = message || "";
-  authMessage.classList.toggle("error", Boolean(isError && message));
-}
-
-function normalizeAuthInput(value) {
-  return (value || "").toString().normalize("NFKC").trim();
-}
-
-function isValidAuthCredentials(username, password) {
-  const normalizedUsername = normalizeAuthInput(username).toLowerCase();
-  const normalizedPassword = normalizeAuthInput(password);
-  const allowedUsername = normalizeAuthInput(AUTH_ALLOWED_USERNAME).toLowerCase();
-  const allowedPassword = normalizeAuthInput(AUTH_ALLOWED_PASSWORD);
-
-  return normalizedUsername === allowedUsername && normalizedPassword === allowedPassword;
+function redirectToLoginPage() {
+  const nextPath = `${window.location.pathname || "/"}${window.location.search || ""}`;
+  window.location.href = `${AUTH_LOGIN_PATH}?next=${encodeURIComponent(nextPath)}`;
 }
 
 function syncFiltersStickyOffset() {
