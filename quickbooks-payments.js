@@ -172,6 +172,11 @@ function buildLoadPrefixFromPayload(payload, syncRequested) {
     return `Refresh: +${insertedCount} new.`;
   }
 
+  const reconciledCount = Number.parseInt(syncMeta.reconciledCount, 10);
+  if (Number.isFinite(reconciledCount) && reconciledCount > 0) {
+    return `Refresh: updated ${reconciledCount} zero rows.`;
+  }
+
   return "Refresh: no new.";
 }
 
@@ -202,9 +207,15 @@ function renderPayments(items, query = "", showOnlyRefunds = false) {
 
   for (const item of items) {
     const row = document.createElement("tr");
+    const isWriteOff = isWriteOffTransaction(item);
 
     const clientNameCell = document.createElement("td");
-    clientNameCell.textContent = (item?.clientName || "Unknown client").toString();
+    const clientName = (item?.clientName || "Unknown client").toString();
+    if (isWriteOff) {
+      clientNameCell.textContent = `${clientName} (Written off: ${formatUsd(Math.abs(Number(item?.paymentAmount) || 0))})`;
+    } else {
+      clientNameCell.textContent = clientName;
+    }
 
     const paymentAmountCell = document.createElement("td");
     paymentAmountCell.className = "amount";
@@ -218,6 +229,12 @@ function renderPayments(items, query = "", showOnlyRefunds = false) {
   }
 
   tableBody.replaceChildren(fragment);
+}
+
+function isWriteOffTransaction(item) {
+  const transactionType = (item?.transactionType || "").toString().toLowerCase();
+  const parsedAmount = Number(item?.paymentAmount);
+  return transactionType === "payment" && Number.isFinite(parsedAmount) && parsedAmount < 0;
 }
 
 function renderRange(range) {

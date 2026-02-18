@@ -34,6 +34,7 @@ const QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES = 5;
 const QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS = 250;
 const QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE = 250;
 const QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT = 0.000001;
+const QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS = 200;
 const QUICKBOOKS_DEFAULT_FROM_DATE = "2026-01-01";
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
@@ -1301,6 +1302,31 @@ function deriveQuickBooksDepositLinkedAmount(payment) {
   return total;
 }
 
+function deriveQuickBooksCreditMemoLinkedAmount(payment) {
+  const lines = Array.isArray(payment?.Line) ? payment.Line : [];
+  let total = 0;
+
+  for (const line of lines) {
+    const parsedAmount = Number.parseFloat(line?.Amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount === 0) {
+      continue;
+    }
+
+    const linkedTransactions = Array.isArray(line?.LinkedTxn) ? line.LinkedTxn : [];
+    const hasLinkedCreditMemo = linkedTransactions.some(
+      (transaction) => sanitizeTextValue(transaction?.TxnType, 40).toLowerCase() === "creditmemo",
+    );
+    if (!hasLinkedCreditMemo) {
+      continue;
+    }
+
+    // Credit memo linked payment lines indicate a receivable write-off/credit application.
+    total += Math.abs(parsedAmount);
+  }
+
+  return total;
+}
+
 async function enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentRecords) {
   const records = Array.isArray(paymentRecords) ? paymentRecords : [];
   if (!records.length) {
@@ -1335,9 +1361,15 @@ async function enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentR
       cursor += 1;
       const paymentRecord = enrichedRecords[currentIndex];
       const paymentDetails = await fetchQuickBooksPaymentDetails(accessToken, paymentRecord?.Id);
-      const derivedAmount = deriveQuickBooksDepositLinkedAmount(paymentDetails);
-      if (Number.isFinite(derivedAmount) && derivedAmount > 0) {
-        enrichedRecords[currentIndex]._effectiveAmount = derivedAmount;
+      const derivedDepositAmount = deriveQuickBooksDepositLinkedAmount(paymentDetails);
+      if (Number.isFinite(derivedDepositAmount) && derivedDepositAmount > 0) {
+        enrichedRecords[currentIndex]._effectiveAmount = derivedDepositAmount;
+        continue;
+      }
+
+      const derivedCreditMemoAmount = deriveQuickBooksCreditMemoLinkedAmount(paymentDetails);
+      if (Number.isFinite(derivedCreditMemoAmount) && derivedCreditMemoAmount > 0) {
+        enrichedRecords[currentIndex]._effectiveAmount = -Math.abs(derivedCreditMemoAmount);
       }
     }
   }
@@ -1756,6 +1788,32 @@ async function getLatestCachedQuickBooksPaymentDate(fromDate, toDate) {
   return isValidIsoDateString(maxDate) ? maxDate : "";
 }
 
+async function listCachedQuickBooksZeroPaymentsInRange(fromDate, toDate) {
+  await ensureDatabaseReady();
+
+  const result = await pool.query(
+    `
+      SELECT transaction_id, client_name, payment_date::text AS payment_date
+      FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      WHERE transaction_type = 'payment'
+        AND payment_date >= $1::date
+        AND payment_date <= $2::date
+        AND ABS(payment_amount) < $3
+      ORDER BY payment_date DESC, updated_at ASC, transaction_id ASC
+      LIMIT $4
+    `,
+    [fromDate, toDate, QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT, QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS],
+  );
+
+  return result.rows
+    .map((row) => ({
+      transactionId: sanitizeTextValue(row?.transaction_id, 160),
+      clientName: sanitizeTextValue(row?.client_name, 300) || "Unknown client",
+      paymentDate: sanitizeTextValue(row?.payment_date, 20),
+    }))
+    .filter((row) => row.transactionId && isValidIsoDateString(row.paymentDate));
+}
+
 function buildQuickBooksIncrementalSyncFromDate(rangeFromDate, rangeToDate, latestCachedDate) {
   if (!isValidIsoDateString(rangeFromDate) || !isValidIsoDateString(rangeToDate)) {
     return "";
@@ -1771,6 +1829,68 @@ function buildQuickBooksIncrementalSyncFromDate(rangeFromDate, rangeToDate, late
   }
 
   return syncFromDate;
+}
+
+async function reconcileCachedQuickBooksZeroPayments(accessToken, fromDate, toDate) {
+  const zeroRows = await listCachedQuickBooksZeroPaymentsInRange(fromDate, toDate);
+  if (!zeroRows.length) {
+    return {
+      scannedCount: 0,
+      reconciledCount: 0,
+      writtenCount: 0,
+    };
+  }
+
+  const updates = [];
+  const workerCount = Math.min(QUICKBOOKS_PAYMENT_DETAILS_CONCURRENCY, zeroRows.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < zeroRows.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+      const row = zeroRows[currentIndex];
+      const paymentDetails = await fetchQuickBooksPaymentDetails(accessToken, row.transactionId);
+      const derivedDepositAmount = deriveQuickBooksDepositLinkedAmount(paymentDetails);
+      if (Number.isFinite(derivedDepositAmount) && derivedDepositAmount > 0) {
+        updates.push({
+          transactionType: "payment",
+          transactionId: row.transactionId,
+          clientName: row.clientName,
+          paymentAmount: derivedDepositAmount,
+          paymentDate: row.paymentDate,
+        });
+        continue;
+      }
+
+      const derivedCreditMemoAmount = deriveQuickBooksCreditMemoLinkedAmount(paymentDetails);
+      if (Number.isFinite(derivedCreditMemoAmount) && derivedCreditMemoAmount > 0) {
+        updates.push({
+          transactionType: "payment",
+          transactionId: row.transactionId,
+          clientName: row.clientName,
+          paymentAmount: -Math.abs(derivedCreditMemoAmount),
+          paymentDate: row.paymentDate,
+        });
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  if (!updates.length) {
+    return {
+      scannedCount: zeroRows.length,
+      reconciledCount: 0,
+      writtenCount: 0,
+    };
+  }
+
+  const upsertResult = await upsertQuickBooksTransactions(updates);
+  return {
+    scannedCount: zeroRows.length,
+    reconciledCount: updates.length,
+    writtenCount: upsertResult.writtenCount,
+  };
 }
 
 async function upsertQuickBooksTransactions(items) {
@@ -2893,6 +3013,9 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
       fetchedCount: 0,
       insertedCount: 0,
       writtenCount: 0,
+      reconciledScannedCount: 0,
+      reconciledCount: 0,
+      reconciledWrittenCount: 0,
     };
 
     if (shouldSync) {
@@ -2900,8 +3023,9 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
       const syncFromDate = buildQuickBooksIncrementalSyncFromDate(range.from, range.to, latestCachedDate);
 
       syncMeta.syncFrom = syncFromDate;
+      const accessToken = await fetchQuickBooksAccessToken();
+
       if (syncFromDate) {
-        const accessToken = await fetchQuickBooksAccessToken();
         const [paymentRecords, refundRecords] = await Promise.all([
           fetchQuickBooksPaymentsInRange(accessToken, syncFromDate, range.to),
           fetchQuickBooksRefundsInRange(accessToken, syncFromDate, range.to),
@@ -2920,6 +3044,14 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
           writtenCount: upsertResult.writtenCount,
         };
       }
+
+      const reconcileResult = await reconcileCachedQuickBooksZeroPayments(accessToken, range.from, range.to);
+      syncMeta = {
+        ...syncMeta,
+        reconciledScannedCount: reconcileResult.scannedCount,
+        reconciledCount: reconcileResult.reconciledCount,
+        reconciledWrittenCount: reconcileResult.writtenCount,
+      };
     }
 
     const items = await listCachedQuickBooksTransactionsInRange(range.from, range.to);
