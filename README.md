@@ -31,7 +31,9 @@ npm start
 3. В Render создайте `Web Service` из этого репозитория (можно по `render.yaml`).
 4. В переменных Render добавьте:
    - `DATABASE_URL` = строка подключения Supabase;
-   - (опционально) `DB_TABLE_NAME` = `client_records_state`.
+   - `DB_TABLE_NAME` = `client_records_state`;
+   - `BASIC_AUTH_USER` = логин для входа;
+   - `BASIC_AUTH_PASSWORD` = пароль для входа.
 5. Deploy.
 
 Сервис поднимает API:
@@ -42,9 +44,13 @@ npm start
 Таблица в Supabase создается автоматически при первом обращении:
 - `client_records_state(id, records, updated_at)`.
 
+## Базовая авторизация (HTTP Basic)
+
+- Если заданы `BASIC_AUTH_USER` и `BASIC_AUTH_PASSWORD`, сайт и API требуют логин/пароль.
+- `GET /api/health` остается открытым для health check Render.
+
 ## Миграция текущих данных
 
 При первом старте с настроенной БД:
 - если в Supabase уже есть данные, они загрузятся в UI;
 - если БД пустая, локальные данные браузера будут отправлены в Supabase автоматически.
-# cbooster-client-payments

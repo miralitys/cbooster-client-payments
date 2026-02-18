@@ -6,6 +6,9 @@ const REMOTE_SYNC_DEBOUNCE_MS = 900;
 const REMOTE_SYNC_RETRY_MS = 5000;
 const IS_HTTP_CONTEXT = window.location.protocol === "http:" || window.location.protocol === "https:";
 const FILTERS_PANEL_COLLAPSED_KEY = "cbooster_filters_panel_collapsed_v1";
+const AUTH_SESSION_STORAGE_KEY = "cbooster_auth_session_v1";
+const AUTH_ALLOWED_USERNAME = "ramisi@creditbooster.com";
+const AUTH_ALLOWED_PASSWORD = "Ringo@123Qwerty";
 const STATUS_FILTER_ALL = "all";
 const STATUS_FILTER_WRITTEN_OFF = "written-off";
 const STATUS_FILTER_FULLY_PAID = "fully-paid";
@@ -51,6 +54,12 @@ const MONEY_FORMATTER = new Intl.NumberFormat("en-US", {
   currency: "USD",
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
+});
+const KPI_MONEY_FORMATTER = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
 });
 const AFTER_RESULT_CLIENT_NAMES = new Set(
   [
@@ -179,6 +188,17 @@ const formFields = document.querySelector("#form-fields");
 const formMessage = document.querySelector("#form-message");
 const pageShell = document.querySelector(".page-shell");
 const pageHeaderElement = document.querySelector(".page-header");
+const accountMenu = document.querySelector("#account-menu");
+const accountMenuToggleButton = document.querySelector("#account-menu-toggle");
+const accountMenuPanel = document.querySelector("#account-menu-panel");
+const accountMenuUser = document.querySelector("#account-menu-user");
+const accountLoginActionButton = document.querySelector("#account-login-action");
+const accountLogoutActionButton = document.querySelector("#account-logout-action");
+const authGate = document.querySelector("#auth-gate");
+const authForm = document.querySelector("#auth-form");
+const authUsernameInput = document.querySelector("#auth-username");
+const authPasswordInput = document.querySelector("#auth-password");
+const authMessage = document.querySelector("#auth-message");
 const dashboardGrid = document.querySelector(".dashboard-grid");
 const filtersPanel = document.querySelector(".filters-panel");
 const searchInput = document.querySelector("#search-input");
@@ -213,6 +233,7 @@ const overviewSummaryDebt = document.querySelector("#overview-summary-debt");
 const overviewSummarySales = document.querySelector("#overview-summary-sales");
 const overviewSummaryReceived = document.querySelector("#overview-summary-received");
 const tablePanel = document.querySelector(".table-panel");
+const tableWrap = document.querySelector(".table-wrap");
 const tableHead = document.querySelector("#table-head");
 const tableBody = document.querySelector("#table-body");
 const tableFoot = document.querySelector("#table-foot");
@@ -231,6 +252,8 @@ const OVERVIEW_PERIOD_KEYS = {
 const overviewSalesValue = document.querySelector("#overview-sales-value");
 const overviewDebtValue = document.querySelector("#overview-debt-value");
 const overviewReceivedValue = document.querySelector("#overview-received-value");
+const overviewSalesContext = document.querySelector("#overview-sales-context");
+const overviewReceivedContext = document.querySelector("#overview-received-context");
 const overviewPeriodButtons = [...document.querySelectorAll(".overview-period-toggle")];
 const statusFilterButtons = [...document.querySelectorAll(".status-filter-group .table-filter-btn")];
 const overdueRangeFilterButtons = [...document.querySelectorAll(".overdue-range-filter-btn")];
@@ -258,14 +281,14 @@ let records = loadRecords();
 removeDeprecatedFieldsFromRecords();
 let activeStatusFilter = STATUS_FILTER_ALL;
 let activeOverdueRangeFilter = OVERDUE_RANGE_FILTER_ALL;
-let activeOverviewSalesPeriod = OVERVIEW_PERIOD_DEFAULT;
-let activeOverviewReceivedPeriod = OVERVIEW_PERIOD_DEFAULT;
+let activeOverviewPeriod = OVERVIEW_PERIOD_DEFAULT;
 let activeSortKey = "";
 let activeSortDirection = SORT_DIRECTION_ASC;
 let currentPaymentsDateRange = { from: null, to: null };
 let editingRecordId = "";
 let isCardEditMode = false;
 let lastFocusedElementBeforeModal = null;
+let currentAuthUser = "";
 let isRemoteSyncEnabled = IS_HTTP_CONTEXT;
 let hasCompletedInitialRemoteSync = false;
 let remoteSyncTimeoutId = null;
@@ -288,6 +311,9 @@ initializeOverviewPeriodButtons();
 initializeOverviewPanelToggle();
 initializeExportDropdown();
 initializeEditModal();
+initializeAccountMenu();
+initializeAuthGate();
+initializeAuthSession();
 renderTableHead();
 renderTableLoadingState();
 requestAnimationFrame(() => {
@@ -901,20 +927,14 @@ function initializeOverviewPeriodButtons() {
   }
 
   for (const button of overviewPeriodButtons) {
-    button.addEventListener("click", () => {
-      const target = (button.dataset.overviewTarget || "").trim();
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
       const nextPeriod = (button.dataset.overviewPeriod || "").trim();
       if (!Object.prototype.hasOwnProperty.call(OVERVIEW_PERIOD_KEYS, nextPeriod)) {
         return;
       }
 
-      if (target === "sales") {
-        activeOverviewSalesPeriod = nextPeriod;
-      } else if (target === "received") {
-        activeOverviewReceivedPeriod = nextPeriod;
-      } else {
-        return;
-      }
+      activeOverviewPeriod = nextPeriod;
 
       syncOverviewPeriodButtons();
       updatePeriodDashboard(records);
@@ -926,15 +946,8 @@ function initializeOverviewPeriodButtons() {
 
 function syncOverviewPeriodButtons() {
   for (const button of overviewPeriodButtons) {
-    const target = (button.dataset.overviewTarget || "").trim();
     const periodKey = (button.dataset.overviewPeriod || "").trim();
-
-    let isActive = false;
-    if (target === "sales") {
-      isActive = periodKey === activeOverviewSalesPeriod;
-    } else if (target === "received") {
-      isActive = periodKey === activeOverviewReceivedPeriod;
-    }
+    const isActive = periodKey === activeOverviewPeriod;
 
     button.classList.toggle("is-active", isActive);
     button.setAttribute("aria-pressed", String(isActive));
@@ -1490,34 +1503,46 @@ function updatePeriodDashboard(recordsToMeasure = []) {
     last30Days: calculatePeriodMetrics(recordsToMeasure, ranges.last30Days),
   };
 
-  const salesMetrics = metricsByPeriod[activeOverviewSalesPeriod] || metricsByPeriod[OVERVIEW_PERIOD_DEFAULT];
-  const receivedMetrics =
-    metricsByPeriod[activeOverviewReceivedPeriod] || metricsByPeriod[OVERVIEW_PERIOD_DEFAULT];
+  const selectedMetrics = metricsByPeriod[activeOverviewPeriod] || metricsByPeriod[OVERVIEW_PERIOD_DEFAULT];
+  const selectedPeriodLabel = OVERVIEW_PERIOD_KEYS[activeOverviewPeriod] || OVERVIEW_PERIOD_KEYS[OVERVIEW_PERIOD_DEFAULT];
 
   if (overviewSalesValue) {
-    overviewSalesValue.textContent = MONEY_FORMATTER.format(salesMetrics?.sales ?? 0);
+    overviewSalesValue.textContent = formatKpiCurrency(selectedMetrics?.sales ?? 0);
+  }
+
+  if (overviewSalesContext) {
+    overviewSalesContext.textContent = selectedPeriodLabel;
   }
 
   if (overviewReceivedValue) {
-    overviewReceivedValue.textContent = MONEY_FORMATTER.format(receivedMetrics?.received ?? 0);
+    overviewReceivedValue.textContent = formatKpiCurrency(selectedMetrics?.received ?? 0);
+  }
+
+  if (overviewReceivedContext) {
+    overviewReceivedContext.textContent = selectedPeriodLabel;
   }
 
   const overallDebt = calculateOverallDebt(recordsToMeasure);
   if (overviewDebtValue) {
-    overviewDebtValue.textContent = MONEY_FORMATTER.format(overallDebt);
+    overviewDebtValue.textContent = formatKpiCurrency(overallDebt);
   }
 
   if (overviewSummaryDebt) {
-    overviewSummaryDebt.textContent = MONEY_FORMATTER.format(overallDebt);
+    overviewSummaryDebt.textContent = formatKpiCurrency(overallDebt);
   }
 
   if (overviewSummarySales) {
-    overviewSummarySales.textContent = MONEY_FORMATTER.format(metricsByPeriod.currentWeek?.sales ?? 0);
+    overviewSummarySales.textContent = formatKpiCurrency(metricsByPeriod.currentWeek?.sales ?? 0);
   }
 
   if (overviewSummaryReceived) {
-    overviewSummaryReceived.textContent = MONEY_FORMATTER.format(metricsByPeriod.currentWeek?.received ?? 0);
+    overviewSummaryReceived.textContent = formatKpiCurrency(metricsByPeriod.currentWeek?.received ?? 0);
   }
+}
+
+function formatKpiCurrency(value) {
+  const parsed = Number(value);
+  return KPI_MONEY_FORMATTER.format(Number.isFinite(parsed) ? parsed : 0);
 }
 
 function getPeriodDashboardRanges() {
@@ -2543,7 +2568,10 @@ async function hydrateRecordsFromRemote() {
 
 function applyCsvImportOnce() {
   const isAlreadyImported = localStorage.getItem(CSV_IMPORT_MARKER_KEY) === "done";
-  if (isAlreadyImported) {
+  const hasUsableStoredRecords = hasUsableStoredRecordsInLocalStorage();
+
+  // Recover gracefully if local storage was cleared/corrupted after initial import.
+  if (isAlreadyImported && hasUsableStoredRecords) {
     return;
   }
 
@@ -2571,6 +2599,21 @@ function applyCsvImportOnce() {
 
   localStorage.setItem(STORAGE_KEY, JSON.stringify(importedRecords));
   localStorage.setItem(CSV_IMPORT_MARKER_KEY, "done");
+}
+
+function hasUsableStoredRecordsInLocalStorage() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    const normalized = normalizeRecordsArray(parsed);
+    return normalized.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function applyAfterResultFlags() {
@@ -3143,6 +3186,7 @@ function setClientFormVisibility(isVisible) {
   toggleClientFormButton.setAttribute("aria-expanded", String(isVisible));
   toggleClientFormButton.textContent = isVisible ? "Hide Form" : "Add New Client";
   tablePanel?.classList.toggle("is-form-open", isVisible);
+  requestAnimationFrame(syncCollapsedOverviewTableWrapHeight);
 
   if (isVisible) {
     collapseCreatePaymentsSection();
@@ -3173,6 +3217,231 @@ function scrollPageToTop() {
   });
 }
 
+function initializeAccountMenu() {
+  if (!accountMenu || !accountMenuToggleButton || !accountMenuPanel) {
+    return;
+  }
+
+  accountMenuToggleButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const isOpen = accountMenu.classList.contains("is-open");
+    setAccountMenuOpen(!isOpen);
+  });
+
+  accountLoginActionButton?.addEventListener("click", () => {
+    setAccountMenuOpen(false);
+    openAuthGate();
+  });
+
+  accountLogoutActionButton?.addEventListener("click", () => {
+    setAccountMenuOpen(false);
+    signOutCurrentUser();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!accountMenu.contains(event.target)) {
+      setAccountMenuOpen(false);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      setAccountMenuOpen(false);
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    if (accountMenu.classList.contains("is-open")) {
+      syncAccountMenuOpenOffset();
+    }
+  });
+}
+
+function initializeAuthGate() {
+  if (!authForm || !authUsernameInput || !authPasswordInput) {
+    return;
+  }
+
+  authForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const username = authUsernameInput.value.trim();
+    const password = authPasswordInput.value.trim();
+
+    if (!username || !password) {
+      showAuthMessage("Enter username and password.", true);
+      if (!username) {
+        authUsernameInput.focus();
+      } else {
+        authPasswordInput.focus();
+      }
+      return;
+    }
+
+    if (!isValidAuthCredentials(username, password)) {
+      showAuthMessage("Invalid login or password.", true);
+      authPasswordInput.value = "";
+      authPasswordInput.focus();
+      return;
+    }
+
+    setAuthSession(AUTH_ALLOWED_USERNAME);
+    closeAuthGate();
+    showAuthMessage("");
+  });
+}
+
+function initializeAuthSession() {
+  currentAuthUser = loadAuthSession();
+  syncAuthUi();
+
+  if (currentAuthUser) {
+    closeAuthGate();
+  } else {
+    openAuthGate();
+  }
+}
+
+function setAccountMenuOpen(isOpen) {
+  if (!accountMenu || !accountMenuToggleButton || !accountMenuPanel) {
+    return;
+  }
+
+  accountMenu.classList.toggle("is-open", isOpen);
+  accountMenuPanel.hidden = !isOpen;
+  accountMenuToggleButton.setAttribute("aria-expanded", String(isOpen));
+  accountMenuToggleButton.setAttribute("aria-label", isOpen ? "Close account menu" : "Open account menu");
+
+  if (isOpen) {
+    syncAccountMenuOpenOffset();
+    return;
+  }
+
+  resetAccountMenuOpenOffset();
+}
+
+function syncAccountMenuOpenOffset() {
+  if (!pageHeaderElement || !accountMenuPanel) {
+    return;
+  }
+
+  const headerRect = pageHeaderElement.getBoundingClientRect();
+  const menuRect = accountMenuPanel.getBoundingClientRect();
+  const overlap = Math.max(0, menuRect.bottom - headerRect.bottom);
+  const offset = overlap > 0 ? Math.ceil(overlap + 8) : 0;
+
+  pageHeaderElement.style.setProperty("--account-menu-open-space", `${offset}px`);
+}
+
+function resetAccountMenuOpenOffset() {
+  if (!pageHeaderElement) {
+    return;
+  }
+
+  pageHeaderElement.style.setProperty("--account-menu-open-space", "0px");
+}
+
+function loadAuthSession() {
+  try {
+    const raw = localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
+    if (!raw) {
+      return "";
+    }
+
+    const parsed = JSON.parse(raw);
+    const username = (parsed?.username || "").toString().trim();
+    const isAuthenticated = Boolean(parsed?.authenticated);
+    if (isAuthenticated && username === AUTH_ALLOWED_USERNAME) {
+      return username;
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function setAuthSession(username) {
+  const nextUser = (username || "").toString().trim();
+  if (!nextUser) {
+    return;
+  }
+
+  currentAuthUser = nextUser;
+  localStorage.setItem(
+    AUTH_SESSION_STORAGE_KEY,
+    JSON.stringify({
+      username: nextUser,
+      authenticated: true,
+      signedInAt: new Date().toISOString(),
+    }),
+  );
+  syncAuthUi();
+}
+
+function clearAuthSession() {
+  currentAuthUser = "";
+  localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+  syncAuthUi();
+}
+
+function signOutCurrentUser() {
+  clearAuthSession();
+  openAuthGate();
+}
+
+function syncAuthUi() {
+  const isSignedIn = Boolean(currentAuthUser);
+
+  if (accountMenuUser) {
+    accountMenuUser.textContent = isSignedIn ? `Signed in as ${currentAuthUser}` : "Not signed in";
+  }
+
+  if (accountLoginActionButton) {
+    accountLoginActionButton.hidden = isSignedIn;
+  }
+
+  if (accountLogoutActionButton) {
+    accountLogoutActionButton.hidden = !isSignedIn;
+  }
+}
+
+function openAuthGate() {
+  if (!authGate) {
+    return;
+  }
+
+  setAccountMenuOpen(false);
+  authGate.hidden = false;
+  document.body.classList.add("auth-locked");
+  showAuthMessage("");
+  requestAnimationFrame(() => {
+    authUsernameInput?.focus();
+  });
+}
+
+function closeAuthGate() {
+  if (!authGate) {
+    return;
+  }
+
+  authGate.hidden = true;
+  document.body.classList.remove("auth-locked");
+  authForm?.reset();
+  showAuthMessage("");
+}
+
+function showAuthMessage(message, isError = false) {
+  if (!authMessage) {
+    return;
+  }
+
+  authMessage.textContent = message || "";
+  authMessage.classList.toggle("error", Boolean(isError && message));
+}
+
+function isValidAuthCredentials(username, password) {
+  return username === AUTH_ALLOWED_USERNAME && password === AUTH_ALLOWED_PASSWORD;
+}
+
 function syncFiltersStickyOffset() {
   if (!pageHeaderElement) {
     return;
@@ -3183,6 +3452,7 @@ function syncFiltersStickyOffset() {
   const headerHeight = Math.ceil(pageHeaderElement.getBoundingClientRect().height);
   const offset = space2 + headerHeight + space2;
   document.documentElement.style.setProperty("--filters-sticky-top", `${offset}px`);
+  requestAnimationFrame(syncCollapsedOverviewTableWrapHeight);
 }
 
 function initializeFiltersPanelToggle() {
@@ -3193,14 +3463,40 @@ function initializeFiltersPanelToggle() {
   const isCollapsed = localStorage.getItem(FILTERS_PANEL_COLLAPSED_KEY) === "1";
   setFiltersPanelCollapsed(isCollapsed, false);
 
-  toggleFiltersPanelButton.addEventListener("click", () => {
+  toggleFiltersPanelButton.addEventListener("click", (event) => {
+    event.stopPropagation();
     const nextCollapsedState = !dashboardGrid.classList.contains("is-filters-collapsed");
     setFiltersPanelCollapsed(nextCollapsedState, true);
+  });
+
+  filtersPanel.addEventListener("click", (event) => {
+    if (!dashboardGrid.classList.contains("is-filters-collapsed")) {
+      return;
+    }
+
+    if (event.target.closest("#toggle-filters-panel")) {
+      return;
+    }
+
+    setFiltersPanelCollapsed(false, true);
+  });
+
+  filtersPanel.addEventListener("keydown", (event) => {
+    if (!dashboardGrid.classList.contains("is-filters-collapsed")) {
+      return;
+    }
+
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    event.preventDefault();
+    setFiltersPanelCollapsed(false, true);
   });
 }
 
 function setFiltersPanelCollapsed(isCollapsed, persistState) {
-  if (!dashboardGrid || !toggleFiltersPanelButton) {
+  if (!dashboardGrid || !toggleFiltersPanelButton || !filtersPanel) {
     return;
   }
 
@@ -3216,11 +3512,24 @@ function setFiltersPanelCollapsed(isCollapsed, persistState) {
     icon.textContent = isCollapsed ? "›" : "‹";
   }
 
+  if (isCollapsed) {
+    filtersPanel.setAttribute("role", "button");
+    filtersPanel.setAttribute("tabindex", "0");
+    filtersPanel.setAttribute("aria-expanded", "false");
+    filtersPanel.setAttribute("aria-label", "Expand filters panel");
+  } else {
+    filtersPanel.removeAttribute("role");
+    filtersPanel.removeAttribute("tabindex");
+    filtersPanel.removeAttribute("aria-expanded");
+    filtersPanel.setAttribute("aria-label", "Filtering options");
+  }
+
   if (persistState) {
     localStorage.setItem(FILTERS_PANEL_COLLAPSED_KEY, isCollapsed ? "1" : "0");
   }
 
   syncFiltersStickyOffset();
+  requestAnimationFrame(syncCollapsedOverviewTableWrapHeight);
 }
 
 function initializeOverviewPanelToggle() {
@@ -3230,7 +3539,25 @@ function initializeOverviewPanelToggle() {
 
   setOverviewPanelCollapsed(false);
 
-  toggleOverviewPanelButton.addEventListener("click", () => {
+  toggleOverviewPanelButton.addEventListener("click", (event) => {
+    if (event.target.closest(".overview-segmented")) {
+      return;
+    }
+
+    const isCollapsed = overviewPanel.classList.contains("is-collapsed");
+    setOverviewPanelCollapsed(!isCollapsed);
+  });
+
+  toggleOverviewPanelButton.addEventListener("keydown", (event) => {
+    if (event.target.closest(".overview-segmented")) {
+      return;
+    }
+
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    event.preventDefault();
     const isCollapsed = overviewPanel.classList.contains("is-collapsed");
     setOverviewPanelCollapsed(!isCollapsed);
   });
@@ -3252,6 +3579,26 @@ function setOverviewPanelCollapsed(isCollapsed) {
     "aria-label",
     isCollapsed ? "Expand overview" : "Collapse overview",
   );
+  requestAnimationFrame(syncCollapsedOverviewTableWrapHeight);
+}
+
+function syncCollapsedOverviewTableWrapHeight() {
+  if (!tableWrap) {
+    return;
+  }
+
+  const isOverviewCollapsed = Boolean(overviewPanel?.classList.contains("is-collapsed"));
+  if (!isOverviewCollapsed) {
+    tableWrap.style.removeProperty("max-height");
+    return;
+  }
+
+  const rect = tableWrap.getBoundingClientRect();
+  const rootStyles = getComputedStyle(document.documentElement);
+  const bottomGap = Number.parseFloat(rootStyles.getPropertyValue("--space-3")) || 12;
+  const availableHeight = Math.floor(window.innerHeight - rect.top - bottomGap);
+  const minHeight = 280;
+  tableWrap.style.maxHeight = `${Math.max(minHeight, availableHeight)}px`;
 }
 
 function trapModalFocus(event) {
