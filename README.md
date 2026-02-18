@@ -55,7 +55,7 @@ npm start
 
 Сервис поднимает API:
 - `GET /api/auth/session`
-- `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD[&sync=1]`
+- `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD[&sync=1][&fullSync=1]`
 - `GET /api/health`
 - `GET /api/records`
 - `PUT /api/records`
@@ -89,6 +89,7 @@ npm start
 - Колонки: `Client Name`, `Payment Amount`, `Payment Date`.
 - При открытии страницы читаются только сохраненные данные из базы (без запроса в QuickBooks).
 - Для ручного обновления нажмите `Refresh`: выполняется sync с QuickBooks только от последней сохраненной даты и добавляются новые транзакции.
+- Кнопка `Total Refresh` выполняет полный sync за весь диапазон `2026-01-01` -> текущая дата и пересчитывает кеш целиком.
 - Для поиска введите имя клиента в поле `Search by client` (поиск выполняется по подстроке).
 - Чекбокс `Only refunds` показывает только транзакции с возвратами (`RefundReceipt`).
 - Интеграция строго read-only: мы только читаем данные из QuickBooks и не отправляем туда изменения.
