@@ -11,6 +11,7 @@ const accountMenuPanel = document.querySelector("#account-menu-panel");
 const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
 const refreshButton = document.querySelector("#refresh-button");
+const totalRefreshButton = document.querySelector("#total-refresh-button");
 const clientSearchInput = document.querySelector("#client-search");
 const refundOnlyCheckbox = document.querySelector("#refund-only");
 const statusElement = document.querySelector("#status");
@@ -35,6 +36,10 @@ refreshButton?.addEventListener("click", () => {
   void loadRecentQuickBooksPayments({ sync: true });
 });
 
+totalRefreshButton?.addEventListener("click", () => {
+  void loadRecentQuickBooksPayments({ sync: true, fullSync: true });
+});
+
 clientSearchInput?.addEventListener("input", () => {
   applyTransactionsFilter();
 });
@@ -47,12 +52,17 @@ void loadRecentQuickBooksPayments();
 
 async function loadRecentQuickBooksPayments(options = {}) {
   const shouldSync = Boolean(options?.sync);
+  const shouldTotalRefresh = Boolean(options?.fullSync);
   const previousItems = [...allTransactions];
   setLoadingState(true);
-  setStatus(shouldSync ? "Refreshing from QuickBooks..." : "Loading saved transactions...", false);
+  if (shouldTotalRefresh) {
+    setStatus("Running total refresh from QuickBooks...", false);
+  } else {
+    setStatus(shouldSync ? "Refreshing from QuickBooks..." : "Loading saved transactions...", false);
+  }
 
   try {
-    const response = await fetch(buildQuickBooksPaymentsEndpoint(shouldSync), {
+    const response = await fetch(buildQuickBooksPaymentsEndpoint(shouldSync, shouldTotalRefresh), {
       headers: {
         Accept: "application/json",
       },
@@ -71,7 +81,7 @@ async function loadRecentQuickBooksPayments(options = {}) {
 
     const items = Array.isArray(payload.items) ? payload.items : [];
     allTransactions = items;
-    lastLoadPrefix = buildLoadPrefixFromPayload(payload, shouldSync);
+    lastLoadPrefix = buildLoadPrefixFromPayload(payload, shouldSync, shouldTotalRefresh);
     applyTransactionsFilter();
     renderRange(payload.range);
   } catch (error) {
@@ -89,7 +99,7 @@ async function loadRecentQuickBooksPayments(options = {}) {
   }
 }
 
-function buildQuickBooksPaymentsEndpoint(sync) {
+function buildQuickBooksPaymentsEndpoint(sync, fullSync) {
   const todayIso = formatDateForApi(new Date());
   const query = new URLSearchParams({
     from: QUICKBOOKS_FROM_DATE,
@@ -97,6 +107,9 @@ function buildQuickBooksPaymentsEndpoint(sync) {
   });
   if (sync) {
     query.set("sync", "1");
+  }
+  if (fullSync) {
+    query.set("fullSync", "1");
   }
   return `/api/quickbooks/payments/recent?${query.toString()}`;
 }
@@ -157,7 +170,7 @@ function buildFilterStatusMessage(totalCount, visibleCount, query, showOnlyRefun
   return `${normalizedPrefix} ${mainMessage}`;
 }
 
-function buildLoadPrefixFromPayload(payload, syncRequested) {
+function buildLoadPrefixFromPayload(payload, syncRequested, totalRefreshRequested) {
   if (!syncRequested) {
     return "Saved data:";
   }
@@ -165,6 +178,15 @@ function buildLoadPrefixFromPayload(payload, syncRequested) {
   const syncMeta = payload?.sync && typeof payload.sync === "object" ? payload.sync : null;
   if (!syncMeta?.requested) {
     return "Saved data:";
+  }
+
+  const isFullSync = (syncMeta?.syncMode || "").toString().toLowerCase() === "full" || totalRefreshRequested;
+  if (isFullSync) {
+    const writtenCount = Number.parseInt(syncMeta.writtenCount, 10);
+    if (Number.isFinite(writtenCount) && writtenCount >= 0) {
+      return `Total refresh: ${writtenCount} synced.`;
+    }
+    return "Total refresh completed.";
   }
 
   const insertedCount = Number.parseInt(syncMeta.insertedCount, 10);
@@ -264,6 +286,10 @@ function setStatus(message, isError) {
 function setLoadingState(isLoading) {
   if (refreshButton) {
     refreshButton.disabled = isLoading;
+  }
+
+  if (totalRefreshButton) {
+    totalRefreshButton.disabled = isLoading;
   }
 
   if (clientSearchInput) {

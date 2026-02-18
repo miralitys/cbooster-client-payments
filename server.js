@@ -1587,6 +1587,16 @@ function parseQuickBooksSyncFlag(rawValue) {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
+function parseQuickBooksTotalRefreshFlag(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 40).toLowerCase();
+  return (
+    parseQuickBooksSyncFlag(rawValue) ||
+    normalized === "full" ||
+    normalized === "all" ||
+    normalized === "total"
+  );
+}
+
 function normalizeQuickBooksTransaction(item) {
   const transactionType = sanitizeTextValue(item?.transactionType, 40).toLowerCase();
   if (transactionType !== "payment" && transactionType !== "refund") {
@@ -3563,7 +3573,8 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
     return;
   }
 
-  const shouldSync = parseQuickBooksSyncFlag(req.query.sync);
+  const shouldTotalRefresh = parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
+  const shouldSync = parseQuickBooksSyncFlag(req.query.sync) || shouldTotalRefresh;
   if (shouldSync && !isQuickBooksConfigured()) {
     res.status(503).json({
       error:
@@ -3575,6 +3586,7 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
   try {
     let syncMeta = {
       requested: shouldSync,
+      syncMode: shouldTotalRefresh ? "full" : "incremental",
       performed: false,
       syncFrom: "",
       fetchedCount: 0,
@@ -3587,7 +3599,9 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
 
     if (shouldSync) {
       const latestCachedDate = await getLatestCachedQuickBooksPaymentDate(range.from, range.to);
-      const syncFromDate = buildQuickBooksIncrementalSyncFromDate(range.from, range.to, latestCachedDate);
+      const syncFromDate = shouldTotalRefresh
+        ? range.from
+        : buildQuickBooksIncrementalSyncFromDate(range.from, range.to, latestCachedDate);
 
       syncMeta.syncFrom = syncFromDate;
       const accessToken = await fetchQuickBooksAccessToken();
