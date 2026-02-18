@@ -64,6 +64,7 @@ function renderPayments(items) {
 
   if (!items.length) {
     const row = document.createElement("tr");
+    row.className = "quickbooks-table__empty-row";
     const cell = document.createElement("td");
     cell.colSpan = 3;
     cell.textContent = "No payments found for the selected period.";
