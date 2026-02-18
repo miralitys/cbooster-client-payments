@@ -130,7 +130,7 @@ a {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  min-width: 196px;
+  min-width: 236px;
   display: grid;
   gap: 4px;
   padding: 8px;
@@ -145,15 +145,22 @@ a {
   display: none !important;
 }
 
+.account-menu__divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: 2px 0;
+}
+
 .account-menu__user {
-  margin: 0 0 4px;
+  margin: 0;
   padding: 6px 8px;
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  border-bottom: 1px solid var(--color-border);
+  font-weight: var(--font-weight-medium);
 }
 
 .account-menu__item {
+  display: block;
   width: 100%;
   min-height: 34px;
   border: 1px solid transparent;
@@ -164,6 +171,8 @@ a {
   padding: 6px 10px;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-medium);
+  line-height: 1.35;
+  text-decoration: none;
   cursor: pointer;
 }
 

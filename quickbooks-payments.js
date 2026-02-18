@@ -2,7 +2,14 @@
 
 const QUICKBOOKS_FROM_DATE = "2026-01-01";
 const LOGIN_PATH = "/login";
+const AUTH_SESSION_ENDPOINT = "/api/auth/session";
+const AUTH_LOGOUT_PATH = "/logout";
 
+const accountMenu = document.querySelector("#account-menu");
+const accountMenuToggleButton = document.querySelector("#account-menu-toggle");
+const accountMenuPanel = document.querySelector("#account-menu-panel");
+const accountMenuUser = document.querySelector("#account-menu-user");
+const accountLogoutActionButton = document.querySelector("#account-logout-action");
 const refreshButton = document.querySelector("#refresh-button");
 const statusElement = document.querySelector("#status");
 const rangeElement = document.querySelector("#range");
@@ -14,6 +21,11 @@ const usdFormatter = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
+
+let currentAuthUser = "";
+
+initializeAccountMenu();
+initializeAuthSession();
 
 refreshButton?.addEventListener("click", () => {
   void loadRecentQuickBooksPayments();
@@ -173,4 +185,90 @@ function formatDateForApi(value) {
 function redirectToLogin() {
   const nextPath = `${window.location.pathname || "/"}${window.location.search || ""}`;
   window.location.href = `${LOGIN_PATH}?next=${encodeURIComponent(nextPath)}`;
+}
+
+function initializeAccountMenu() {
+  if (!accountMenu || !accountMenuToggleButton || !accountMenuPanel) {
+    return;
+  }
+
+  accountMenuToggleButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const isOpen = accountMenu.classList.contains("is-open");
+    setAccountMenuOpen(!isOpen);
+  });
+
+  accountLogoutActionButton?.addEventListener("click", () => {
+    setAccountMenuOpen(false);
+    signOutCurrentUser();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Node)) {
+      return;
+    }
+
+    if (!accountMenu.contains(event.target)) {
+      setAccountMenuOpen(false);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      setAccountMenuOpen(false);
+    }
+  });
+}
+
+function initializeAuthSession() {
+  currentAuthUser = "";
+  syncAuthUi();
+  void hydrateAuthSessionFromServer();
+}
+
+function setAccountMenuOpen(isOpen) {
+  if (!accountMenu || !accountMenuToggleButton || !accountMenuPanel) {
+    return;
+  }
+
+  accountMenu.classList.toggle("is-open", isOpen);
+  accountMenuPanel.hidden = !isOpen;
+  accountMenuToggleButton.setAttribute("aria-expanded", String(isOpen));
+  accountMenuToggleButton.setAttribute("aria-label", isOpen ? "Close account menu" : "Open account menu");
+}
+
+function syncAuthUi() {
+  if (accountMenuUser) {
+    accountMenuUser.textContent = currentAuthUser ? `User: ${currentAuthUser}` : "User: -";
+  }
+}
+
+function signOutCurrentUser() {
+  window.location.href = AUTH_LOGOUT_PATH;
+}
+
+async function hydrateAuthSessionFromServer() {
+  try {
+    const response = await fetch(AUTH_SESSION_ENDPOINT, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
+    if (!response.ok) {
+      return;
+    }
+
+    const payload = await response.json().catch(() => null);
+    const username = (payload?.user?.username || "").toString().trim();
+    currentAuthUser = username || "";
+    syncAuthUi();
+  } catch {
+    // Keep default placeholder.
+  }
 }
