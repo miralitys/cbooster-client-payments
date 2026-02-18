@@ -35,7 +35,7 @@ void loadRecentQuickBooksPayments();
 
 async function loadRecentQuickBooksPayments() {
   setLoadingState(true);
-  setStatus("Loading payments...", false);
+  setStatus("Loading transactions...", false);
 
   try {
     const response = await fetch(buildQuickBooksPaymentsEndpoint(), {
@@ -52,17 +52,17 @@ async function loadRecentQuickBooksPayments() {
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(payload.error || `Failed to load payments (${response.status})`);
+      throw new Error(payload.error || `Failed to load transactions (${response.status})`);
     }
 
     const items = Array.isArray(payload.items) ? payload.items : [];
     renderPayments(items);
     renderRange(payload.range);
-    setStatus(`Loaded ${items.length} payment${items.length === 1 ? "" : "s"}.`, false);
+    setStatus(`Loaded ${items.length} transaction${items.length === 1 ? "" : "s"}.`, false);
   } catch (error) {
     renderPayments([]);
     renderRange(null);
-    setStatus(error.message || "Failed to load payments.", true);
+    setStatus(error.message || "Failed to load transactions.", true);
   } finally {
     setLoadingState(false);
   }
@@ -87,7 +87,7 @@ function renderPayments(items) {
     row.className = "quickbooks-table__empty-row";
     const cell = document.createElement("td");
     cell.colSpan = 3;
-    cell.textContent = "No payments found for the selected period.";
+    cell.textContent = "No transactions found for the selected period.";
     row.append(cell);
     tableBody.replaceChildren(row);
     return;
