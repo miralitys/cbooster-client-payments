@@ -1082,35 +1082,32 @@ function buildTelegramSubmissionMessage(record, miniData, _submission, telegramU
 }
 
 async function sendMiniSubmissionTelegramAttachments(submission, attachments = []) {
-  const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
+  const normalizedAttachments = Array.isArray(attachments)
+    ? attachments
+        .map((attachment) => ({
+          fileName: sanitizeAttachmentFileName(attachment?.fileName),
+          mimeType: normalizeAttachmentMimeType(attachment?.mimeType),
+          content: Buffer.isBuffer(attachment?.content) ? attachment.content : null,
+        }))
+        .filter((attachment) => attachment.content && attachment.content.length)
+    : [];
   if (!normalizedAttachments.length) {
     return;
   }
 
   const submissionId = sanitizeTextValue(submission?.id, 140);
-
-  for (let index = 0; index < normalizedAttachments.length; index += 1) {
-    const attachment = normalizedAttachments[index];
-    const fileName = sanitizeAttachmentFileName(attachment?.fileName);
-    const mimeType = normalizeAttachmentMimeType(attachment?.mimeType);
-    const content = Buffer.isBuffer(attachment?.content) ? attachment.content : null;
-
-    if (!content || !content.length) {
-      continue;
-    }
-
+  if (normalizedAttachments.length === 1) {
+    const attachment = normalizedAttachments[0];
     const payload = new FormData();
     payload.append("chat_id", TELEGRAM_NOTIFY_CHAT_ID);
     if (TELEGRAM_NOTIFY_THREAD_ID) {
       payload.append("message_thread_id", String(TELEGRAM_NOTIFY_THREAD_ID));
     }
-
     if (submissionId) {
-      const caption = `Submission ${submissionId} · file ${index + 1}/${normalizedAttachments.length}`;
+      const caption = `Submission ${submissionId} · file 1/1`;
       payload.append("caption", sanitizeTextValue(caption, 900));
     }
-
-    payload.append("document", new Blob([content], { type: mimeType }), fileName);
+    payload.append("document", new Blob([attachment.content], { type: attachment.mimeType }), attachment.fileName);
 
     const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, {
       method: "POST",
@@ -1133,6 +1130,61 @@ async function sendMiniSubmissionTelegramAttachments(submission, attachments = [
       const description = sanitizeTextValue(body?.description || responseText, 700) || "Unknown Telegram API error.";
       throw new Error(`Telegram sendDocument failed: ${description}`);
     }
+    return;
+  }
+
+  const mediaPayload = new FormData();
+  mediaPayload.append("chat_id", TELEGRAM_NOTIFY_CHAT_ID);
+  if (TELEGRAM_NOTIFY_THREAD_ID) {
+    mediaPayload.append("message_thread_id", String(TELEGRAM_NOTIFY_THREAD_ID));
+  }
+
+  const media = normalizedAttachments.map((attachment, index) => {
+    const item = {
+      type: "document",
+      media: `attach://file_${index}`,
+    };
+
+    if (submissionId && index === 0) {
+      item.caption = sanitizeTextValue(
+        `Submission ${submissionId} · ${normalizedAttachments.length} files`,
+        900,
+      );
+    }
+
+    return item;
+  });
+
+  mediaPayload.append("media", JSON.stringify(media));
+  for (let index = 0; index < normalizedAttachments.length; index += 1) {
+    const attachment = normalizedAttachments[index];
+    mediaPayload.append(
+      `file_${index}`,
+      new Blob([attachment.content], { type: attachment.mimeType }),
+      attachment.fileName,
+    );
+  }
+
+  const mediaResponse = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMediaGroup`, {
+    method: "POST",
+    body: mediaPayload,
+  });
+
+  const mediaResponseText = await mediaResponse.text();
+  if (!mediaResponse.ok) {
+    throw new Error(`Telegram sendMediaGroup HTTP ${mediaResponse.status}: ${sanitizeTextValue(mediaResponseText, 700)}`);
+  }
+
+  let mediaBody;
+  try {
+    mediaBody = JSON.parse(mediaResponseText);
+  } catch {
+    mediaBody = null;
+  }
+
+  if (!mediaBody?.ok) {
+    const description = sanitizeTextValue(mediaBody?.description || mediaResponseText, 700) || "Unknown Telegram API error.";
+    throw new Error(`Telegram sendMediaGroup failed: ${description}`);
   }
 }
 
