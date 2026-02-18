@@ -1,7 +1,6 @@
 "use strict";
 
-const QUICKBOOKS_RECENT_DAYS = 3;
-const QUICKBOOKS_PAYMENTS_ENDPOINT = `/api/quickbooks/payments/recent?days=${QUICKBOOKS_RECENT_DAYS}`;
+const QUICKBOOKS_FROM_DATE = "2026-01-01";
 const LOGIN_PATH = "/login";
 
 const refreshButton = document.querySelector("#refresh-button");
@@ -27,7 +26,7 @@ async function loadRecentQuickBooksPayments() {
   setStatus("Loading payments...", false);
 
   try {
-    const response = await fetch(QUICKBOOKS_PAYMENTS_ENDPOINT, {
+    const response = await fetch(buildQuickBooksPaymentsEndpoint(), {
       headers: {
         Accept: "application/json",
       },
@@ -55,6 +54,15 @@ async function loadRecentQuickBooksPayments() {
   } finally {
     setLoadingState(false);
   }
+}
+
+function buildQuickBooksPaymentsEndpoint() {
+  const todayIso = formatDateForApi(new Date());
+  const query = new URLSearchParams({
+    from: QUICKBOOKS_FROM_DATE,
+    to: todayIso,
+  });
+  return `/api/quickbooks/payments/recent?${query.toString()}`;
 }
 
 function renderPayments(items) {
@@ -152,6 +160,14 @@ function formatDate(rawValue) {
   }
 
   return new Date(timestamp).toLocaleDateString("en-US");
+}
+
+function formatDateForApi(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  const year = String(date.getUTCFullYear());
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function redirectToLogin() {

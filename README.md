@@ -55,7 +55,7 @@ npm start
 
 Сервис поднимает API:
 - `GET /api/auth/session`
-- `GET /api/quickbooks/payments/recent?days=3`
+- `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD`
 - `GET /api/health`
 - `GET /api/records`
 - `PUT /api/records`
@@ -85,7 +85,7 @@ npm start
 ## QuickBooks тест (отдельно)
 
 - Откройте `/quickbooks-payments`.
-- Страница показывает только платежи из QuickBooks за последние 3 дня.
+- Страница показывает платежи из QuickBooks за период `2026-01-01` -> текущая дата.
 - Колонки: `Client Name`, `Payment Amount`, `Payment Date`.
 - Для ручного обновления нажмите `Refresh`.
 - Интеграция строго read-only: мы только читаем данные из QuickBooks и не отправляем туда изменения.
