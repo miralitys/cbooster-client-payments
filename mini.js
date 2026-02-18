@@ -3,15 +3,18 @@
 const form = document.querySelector("#mini-client-form");
 const message = document.querySelector("#mini-message");
 const submitButton = document.querySelector("#mini-submit-button");
+const submitButtonLabel = submitButton?.querySelector(".button-label") || null;
 const payment1DateInput = document.querySelector("#payment1Date");
 const ssnInput = document.querySelector("#ssn");
 const clientPhoneInput = document.querySelector("#clientPhoneNumber");
 const clientEmailInput = document.querySelector("#clientEmailAddress");
 const attachmentsInput = document.querySelector("#attachments");
+const attachmentsUploadButton = document.querySelector("#attachments-upload-button");
 const attachmentsPreview = document.querySelector("#attachments-preview");
 const telegramApp = window.Telegram?.WebApp || null;
 const MAX_ATTACHMENTS_COUNT = 10;
 const REQUIRED_MINI_FIELDS = [{ id: "clientName", label: "Client Name" }];
+const DEFAULT_SUBMIT_BUTTON_LABEL = "Add Client";
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
   ".html",
   ".htm",
@@ -38,6 +41,8 @@ const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
 
 let initData = "";
 let isMiniAccessAllowed = false;
+let isSubmitting = false;
+let isAccessCheckInProgress = true;
 
 initializeDateField(payment1DateInput);
 initializeSsnField(ssnInput);
@@ -45,9 +50,9 @@ initializePhoneField(clientPhoneInput);
 initializeEmailField(clientEmailInput);
 initializeRequiredFieldValidation();
 setDefaultDateIfEmpty(payment1DateInput);
-setSubmittingState(true);
-void initializeTelegramContext();
 initializeAttachmentsInput();
+updateFormInteractivity();
+void initializeTelegramContext();
 
 if (form) {
   form.addEventListener("submit", async (event) => {
@@ -135,6 +140,8 @@ if (form) {
 
 async function initializeTelegramContext() {
   if (!telegramApp) {
+    isAccessCheckInProgress = false;
+    updateFormInteractivity();
     setMessage("Telegram WebApp SDK is not available. Open this page in Telegram.", "error");
     return;
   }
@@ -144,6 +151,8 @@ async function initializeTelegramContext() {
   initData = (telegramApp.initData || "").toString().trim();
 
   if (!initData) {
+    isAccessCheckInProgress = false;
+    updateFormInteractivity();
     setMessage("Telegram auth data is missing. Reopen Mini App from bot menu.", "error");
     return;
   }
@@ -153,8 +162,13 @@ async function initializeTelegramContext() {
 
 async function verifyMiniAccess() {
   if (!initData) {
+    isAccessCheckInProgress = false;
+    updateFormInteractivity();
     return;
   }
+
+  isAccessCheckInProgress = true;
+  updateFormInteractivity();
 
   try {
     const response = await fetch("/api/mini/access", {
@@ -172,10 +186,12 @@ async function verifyMiniAccess() {
     }
 
     isMiniAccessAllowed = true;
-    setSubmittingState(false);
+    isAccessCheckInProgress = false;
+    updateFormInteractivity();
   } catch (error) {
     isMiniAccessAllowed = false;
-    setSubmittingState(true);
+    isAccessCheckInProgress = false;
+    updateFormInteractivity();
     setMessage(error.message || "Access denied for Mini App.", "error");
   }
 }
@@ -319,8 +335,20 @@ function initializeRequiredFieldValidation() {
       if (normalizeValue(input.value)) {
         setInputInvalidState(input, false);
       }
+      updateFormInteractivity();
     });
   }
+}
+
+function hasAllRequiredMiniFields() {
+  for (const field of REQUIRED_MINI_FIELDS) {
+    const input = getRequiredMiniInput(field.id);
+    if (!normalizeValue(input?.value)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function validateRequiredMiniFields() {
@@ -653,6 +681,15 @@ function initializeAttachmentsInput() {
     return;
   }
 
+  if (attachmentsUploadButton instanceof HTMLButtonElement) {
+    attachmentsUploadButton.addEventListener("click", () => {
+      if (attachmentsInput.disabled) {
+        return;
+      }
+      attachmentsInput.click();
+    });
+  }
+
   attachmentsInput.addEventListener("change", () => {
     const validation = validateSelectedAttachments();
     renderAttachmentsPreview(validation.files);
@@ -781,13 +818,31 @@ function formatBytes(value) {
   return `${bytes} B`;
 }
 
-function setSubmittingState(isSubmitting) {
+function setSubmittingState(nextSubmittingState) {
+  isSubmitting = Boolean(nextSubmittingState);
+  updateFormInteractivity();
+}
+
+function updateFormInteractivity() {
+  const canSubmit =
+    !isSubmitting && !isAccessCheckInProgress && isMiniAccessAllowed && hasAllRequiredMiniFields();
+
   if (submitButton) {
-    submitButton.disabled = Boolean(isSubmitting);
+    submitButton.disabled = !canSubmit;
+    submitButton.classList.toggle("is-loading", isSubmitting);
+    submitButton.setAttribute("aria-busy", isSubmitting ? "true" : "false");
+  }
+
+  if (submitButtonLabel) {
+    submitButtonLabel.textContent = isSubmitting ? "Submitting..." : DEFAULT_SUBMIT_BUTTON_LABEL;
   }
 
   if (attachmentsInput) {
-    attachmentsInput.disabled = Boolean(isSubmitting);
+    attachmentsInput.disabled = isSubmitting;
+  }
+
+  if (attachmentsUploadButton instanceof HTMLButtonElement) {
+    attachmentsUploadButton.disabled = isSubmitting;
   }
 }
 
