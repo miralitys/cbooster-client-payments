@@ -89,6 +89,7 @@ npm start
 - Колонки: `Client Name`, `Payment Amount`, `Payment Date`.
 - Для ручного обновления нажмите `Refresh`.
 - Интеграция строго read-only: мы только читаем данные из QuickBooks и не отправляем туда изменения.
+- Если `Payment.TotalAmt = 0`, но у записи есть linked `Deposit`, система интерпретирует сумму депозита как полученные деньги (берется модуль суммы linked deposit line).
 
 ## Telegram Mini App
 
