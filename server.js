@@ -1,6 +1,7 @@
 const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
+const multer = require("multer");
 const { Pool } = require("pg");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
@@ -17,11 +18,55 @@ const DEFAULT_TABLE_NAME = "client_records_state";
 const TABLE_NAME = resolveTableName(process.env.DB_TABLE_NAME, DEFAULT_TABLE_NAME);
 const DEFAULT_MODERATION_TABLE_NAME = "mini_client_submissions";
 const MODERATION_TABLE_NAME = resolveTableName(process.env.DB_MODERATION_TABLE_NAME, DEFAULT_MODERATION_TABLE_NAME);
+const DEFAULT_MODERATION_FILES_TABLE_NAME = "mini_submission_files";
+const MODERATION_FILES_TABLE_NAME = resolveTableName(
+  process.env.DB_MODERATION_FILES_TABLE_NAME,
+  DEFAULT_MODERATION_FILES_TABLE_NAME,
+);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
+const MODERATION_FILES_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_FILES_TABLE_NAME);
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
+const MINI_MAX_ATTACHMENTS_COUNT = 10;
+const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+const MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES = 40 * 1024 * 1024;
+const MINI_BLOCKED_FILE_EXTENSIONS = new Set([
+  ".html",
+  ".htm",
+  ".xhtml",
+  ".shtml",
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".bat",
+  ".cmd",
+  ".ps1",
+  ".psm1",
+  ".py",
+  ".rb",
+  ".php",
+  ".pl",
+  ".cgi",
+]);
+const MINI_BLOCKED_MIME_TYPES = new Set([
+  "text/html",
+  "application/xhtml+xml",
+  "application/javascript",
+  "text/javascript",
+  "application/ecmascript",
+  "text/ecmascript",
+  "application/x-javascript",
+  "application/x-httpd-php",
+]);
+const MINI_BLOCKED_MIME_PATTERNS = [/javascript/i, /ecmascript/i, /x-sh/i, /shellscript/i, /python/i, /xhtml/i];
 
 const RECORD_TEXT_FIELDS = [
   "clientName",
@@ -54,15 +99,27 @@ const RECORD_DATE_FIELDS = [
   "dateWhenWrittenOff",
 ];
 const RECORD_CHECKBOX_FIELDS = ["afterResult", "writtenOff"];
+const MINI_EXTRA_TEXT_FIELDS = ["leadSource", "ssn", "clientPhoneNumber", "futurePayment", "identityIq", "clientEmailAddress"];
+const MINI_EXTRA_FIELD_SET = new Set(MINI_EXTRA_TEXT_FIELDS);
+const MINI_EXTRA_MAX_LENGTH = {
+  leadSource: 200,
+  ssn: 64,
+  clientPhoneNumber: 64,
+  futurePayment: 120,
+  identityIq: 2000,
+  clientEmailAddress: 320,
+};
 const MINI_ALLOWED_FIELDS = new Set([
   ...RECORD_TEXT_FIELDS,
   ...RECORD_DATE_FIELDS,
   ...RECORD_CHECKBOX_FIELDS,
+  ...MINI_EXTRA_TEXT_FIELDS,
 ]);
 const TELEGRAM_NOTIFICATION_FIELD_ORDER = [
   ...RECORD_TEXT_FIELDS,
   ...RECORD_DATE_FIELDS,
   ...RECORD_CHECKBOX_FIELDS,
+  ...MINI_EXTRA_TEXT_FIELDS,
 ];
 const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
   clientName: "Client name",
@@ -93,6 +150,12 @@ const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
   dateWhenWrittenOff: "Date when written off",
   afterResult: "After result",
   writtenOff: "Written off",
+  leadSource: "Lead source",
+  ssn: "SSN",
+  clientPhoneNumber: "Client phone number",
+  futurePayment: "Future payment",
+  identityIq: "IdentityIQ",
+  clientEmailAddress: "Client email address",
 };
 
 const app = express();
@@ -107,6 +170,13 @@ const pool = DATABASE_URL
       ssl: shouldUseSsl() ? { rejectUnauthorized: false } : false,
     })
   : null;
+const miniAttachmentsUploadMiddleware = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: MINI_MAX_ATTACHMENTS_COUNT,
+    fileSize: MINI_MAX_ATTACHMENT_SIZE_BYTES,
+  },
+}).array("attachments", MINI_MAX_ATTACHMENTS_COUNT);
 
 let dbReadyPromise = null;
 
@@ -192,6 +262,223 @@ function parseOptionalTelegramChatId(rawValue) {
   }
 
   return value;
+}
+
+function createHttpError(message, status = 400) {
+  const error = new Error(message);
+  error.httpStatus = status;
+  return error;
+}
+
+function isMultipartRequest(req) {
+  const contentType = (req.headers["content-type"] || "").toString().toLowerCase();
+  return contentType.includes("multipart/form-data");
+}
+
+function parseMiniMultipartRequest(req, res) {
+  return new Promise((resolve, reject) => {
+    miniAttachmentsUploadMiddleware(req, res, (error) => {
+      if (!error) {
+        resolve();
+        return;
+      }
+
+      if (error instanceof multer.MulterError) {
+        if (error.code === "LIMIT_FILE_COUNT" || error.code === "LIMIT_UNEXPECTED_FILE") {
+          reject(createHttpError(`You can upload up to ${MINI_MAX_ATTACHMENTS_COUNT} files.`, 400));
+          return;
+        }
+
+        if (error.code === "LIMIT_FILE_SIZE") {
+          reject(
+            createHttpError(
+              `Each file must be up to ${Math.floor(MINI_MAX_ATTACHMENT_SIZE_BYTES / (1024 * 1024))} MB.`,
+              400,
+            ),
+          );
+          return;
+        }
+      }
+
+      reject(error);
+    });
+  });
+}
+
+function parseMiniClientPayload(req) {
+  const initData = sanitizeTextValue(req.body?.initData, 12000);
+  const client = parseMiniClientObject(req.body?.client);
+
+  if (!initData) {
+    return {
+      error: "Missing Telegram initData.",
+      status: 400,
+    };
+  }
+
+  if (!client) {
+    return {
+      error: "Payload must include `client` object.",
+      status: 400,
+    };
+  }
+
+  return {
+    initData,
+    client,
+  };
+}
+
+function parseMiniClientObject(rawClient) {
+  if (rawClient && typeof rawClient === "object" && !Array.isArray(rawClient)) {
+    return rawClient;
+  }
+
+  const json = (rawClient || "").toString().trim();
+  if (!json) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(json);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function sanitizeAttachmentFileName(rawFileName) {
+  const baseName = path.basename((rawFileName || "").toString());
+  const normalized = baseName.replace(/[^\w.\- ()[\]]+/g, "_").replace(/\s+/g, " ").trim();
+  const safeName = normalized || "attachment";
+  return safeName.slice(0, 180);
+}
+
+function normalizeAttachmentMimeType(rawMimeType) {
+  const normalized = sanitizeTextValue(rawMimeType, 120).toLowerCase();
+  return normalized || "application/octet-stream";
+}
+
+function getMiniAttachmentBlockReason(fileName, mimeType) {
+  const extension = path.extname(fileName).toLowerCase();
+  if (MINI_BLOCKED_FILE_EXTENSIONS.has(extension)) {
+    return `File "${fileName}" is not allowed. Script and HTML files are blocked.`;
+  }
+
+  if (MINI_BLOCKED_MIME_TYPES.has(mimeType)) {
+    return `File "${fileName}" is not allowed. Script and HTML files are blocked.`;
+  }
+
+  for (const pattern of MINI_BLOCKED_MIME_PATTERNS) {
+    if (pattern.test(mimeType)) {
+      return `File "${fileName}" is not allowed. Script and HTML files are blocked.`;
+    }
+  }
+
+  return "";
+}
+
+function buildMiniSubmissionAttachments(rawFiles) {
+  const files = Array.isArray(rawFiles) ? rawFiles : [];
+  if (!files.length) {
+    return {
+      attachments: [],
+    };
+  }
+
+  if (files.length > MINI_MAX_ATTACHMENTS_COUNT) {
+    return {
+      error: `You can upload up to ${MINI_MAX_ATTACHMENTS_COUNT} files.`,
+      status: 400,
+    };
+  }
+
+  let totalSizeBytes = 0;
+  const attachments = [];
+
+  for (const file of files) {
+    const fileName = sanitizeAttachmentFileName(file?.originalname);
+    const mimeType = normalizeAttachmentMimeType(file?.mimetype);
+    const buffer = Buffer.isBuffer(file?.buffer) ? file.buffer : null;
+
+    if (!buffer || !buffer.length) {
+      return {
+        error: `Failed to read "${fileName}". Please try uploading the file again.`,
+        status: 400,
+      };
+    }
+
+    const sizeBytes = Number.parseInt(file?.size, 10);
+    const normalizedSize = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : buffer.length;
+    if (normalizedSize > MINI_MAX_ATTACHMENT_SIZE_BYTES) {
+      return {
+        error: `File "${fileName}" exceeds ${Math.floor(MINI_MAX_ATTACHMENT_SIZE_BYTES / (1024 * 1024))} MB limit.`,
+        status: 400,
+      };
+    }
+
+    totalSizeBytes += normalizedSize;
+    if (totalSizeBytes > MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES) {
+      return {
+        error: `Total attachment size must not exceed ${Math.floor(MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES / (1024 * 1024))} MB.`,
+        status: 400,
+      };
+    }
+
+    const blockedReason = getMiniAttachmentBlockReason(fileName, mimeType);
+    if (blockedReason) {
+      return {
+        error: blockedReason,
+        status: 400,
+      };
+    }
+
+    attachments.push({
+      id: `file-${generateId()}`,
+      fileName,
+      mimeType,
+      sizeBytes: normalizedSize,
+      content: buffer,
+    });
+  }
+
+  return {
+    attachments,
+  };
+}
+
+function isPreviewableAttachmentMimeType(mimeType) {
+  const normalized = normalizeAttachmentMimeType(mimeType);
+  if (normalized === "image/svg+xml") {
+    return false;
+  }
+
+  return normalized.startsWith("image/") || normalized === "application/pdf";
+}
+
+function buildContentDisposition(dispositionType, fileName) {
+  const safeName = sanitizeAttachmentFileName(fileName);
+  const asciiFallback = safeName.replace(/[^\x20-\x7E]/g, "_").replace(/[\\"]/g, "_");
+  const encodedName = encodeURIComponent(safeName).replace(/['()*]/g, (char) =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `${dispositionType}; filename="${asciiFallback}"; filename*=UTF-8''${encodedName}`;
+}
+
+function byteaToBuffer(value) {
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.startsWith("\\x")) {
+    return Buffer.from(value.slice(2), "hex");
+  }
+
+  return Buffer.from([]);
 }
 
 function safeEqual(leftValue, rightValue) {
@@ -429,6 +716,7 @@ async function ensureDatabaseReady() {
         CREATE TABLE IF NOT EXISTS ${MODERATION_TABLE} (
           id TEXT PRIMARY KEY,
           record JSONB NOT NULL,
+          mini_data JSONB NOT NULL DEFAULT '{}'::jsonb,
           submitted_by JSONB,
           status TEXT NOT NULL DEFAULT 'pending',
           submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -436,6 +724,28 @@ async function ensureDatabaseReady() {
           reviewed_by TEXT,
           review_note TEXT
         )
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${MODERATION_TABLE}
+        ADD COLUMN IF NOT EXISTS mini_data JSONB NOT NULL DEFAULT '{}'::jsonb
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${MODERATION_FILES_TABLE} (
+          id TEXT PRIMARY KEY,
+          submission_id TEXT NOT NULL REFERENCES ${MODERATION_TABLE}(id) ON DELETE CASCADE,
+          file_name TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+          content BYTEA NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${MODERATION_FILES_TABLE_NAME}_submission_idx
+        ON ${MODERATION_FILES_TABLE} (submission_id)
       `);
     })().catch((error) => {
       dbReadyPromise = null;
@@ -486,6 +796,7 @@ function mapModerationRow(row) {
     id: (row.id || "").toString(),
     status: (row.status || "").toString(),
     client: row.record && typeof row.record === "object" ? row.record : null,
+    miniData: row.mini_data && typeof row.mini_data === "object" ? row.mini_data : {},
     submittedBy: row.submitted_by && typeof row.submitted_by === "object" ? row.submitted_by : null,
     submittedAt: row.submitted_at ? new Date(row.submitted_at).toISOString() : null,
     reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
@@ -531,24 +842,174 @@ function getReviewerIdentity(req) {
   return "moderator";
 }
 
-async function queueClientSubmission(record, submittedBy) {
+async function queueClientSubmission(record, submittedBy, miniData = {}, attachments = []) {
   await ensureDatabaseReady();
 
   const submissionId = `sub-${generateId()}`;
   const submittedByPayload = submittedBy && typeof submittedBy === "object" ? submittedBy : null;
-  const result = await pool.query(
+  const miniDataPayload = miniData && typeof miniData === "object" ? miniData : {};
+  const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const result = await client.query(
+      `
+        INSERT INTO ${MODERATION_TABLE} (id, record, mini_data, submitted_by, status)
+        VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, 'pending')
+        RETURNING id, status, submitted_at, mini_data
+      `,
+      [submissionId, JSON.stringify(record), JSON.stringify(miniDataPayload), JSON.stringify(submittedByPayload)],
+    );
+
+    for (const attachment of normalizedAttachments) {
+      await client.query(
+        `
+          INSERT INTO ${MODERATION_FILES_TABLE} (id, submission_id, file_name, mime_type, size_bytes, content)
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          sanitizeTextValue(attachment.id, 180),
+          submissionId,
+          sanitizeAttachmentFileName(attachment.fileName),
+          normalizeAttachmentMimeType(attachment.mimeType),
+          Number.parseInt(attachment.sizeBytes, 10) || 0,
+          attachment.content,
+        ],
+      );
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      id: result.rows[0]?.id || submissionId,
+      status: result.rows[0]?.status || "pending",
+      submittedAt: result.rows[0]?.submitted_at ? new Date(result.rows[0].submitted_at).toISOString() : null,
+      miniData: result.rows[0]?.mini_data && typeof result.rows[0].mini_data === "object" ? result.rows[0].mini_data : {},
+      attachmentsCount: normalizedAttachments.length,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function listPendingSubmissionFiles(submissionId) {
+  await ensureDatabaseReady();
+
+  const normalizedSubmissionId = sanitizeTextValue(submissionId, 180);
+  if (!normalizedSubmissionId) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Submission id is required.",
+    };
+  }
+
+  const submissionResult = await pool.query(
+    `SELECT id, status FROM ${MODERATION_TABLE} WHERE id = $1`,
+    [normalizedSubmissionId],
+  );
+  if (!submissionResult.rows.length) {
+    return {
+      ok: false,
+      status: 404,
+      error: "Submission not found.",
+    };
+  }
+
+  const status = sanitizeTextValue(submissionResult.rows[0]?.status, 40).toLowerCase();
+  if (status !== "pending") {
+    return {
+      ok: false,
+      status: 409,
+      error: "Files are available only while submission is pending moderation.",
+    };
+  }
+
+  const filesResult = await pool.query(
     `
-      INSERT INTO ${MODERATION_TABLE} (id, record, submitted_by, status)
-      VALUES ($1, $2::jsonb, $3::jsonb, 'pending')
-      RETURNING id, status, submitted_at
+      SELECT id, file_name, mime_type, size_bytes, created_at
+      FROM ${MODERATION_FILES_TABLE}
+      WHERE submission_id = $1
+      ORDER BY created_at ASC, id ASC
     `,
-    [submissionId, JSON.stringify(record), JSON.stringify(submittedByPayload)],
+    [normalizedSubmissionId],
   );
 
+  const items = filesResult.rows.map((row) => ({
+    id: sanitizeTextValue(row.id, 180),
+    fileName: sanitizeAttachmentFileName(row.file_name),
+    mimeType: normalizeAttachmentMimeType(row.mime_type),
+    sizeBytes: Number.parseInt(row.size_bytes, 10) || 0,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+  }));
+
   return {
-    id: result.rows[0]?.id || submissionId,
-    status: result.rows[0]?.status || "pending",
-    submittedAt: result.rows[0]?.submitted_at ? new Date(result.rows[0].submitted_at).toISOString() : null,
+    ok: true,
+    submissionId: normalizedSubmissionId,
+    items,
+  };
+}
+
+async function getPendingSubmissionFile(submissionId, fileId) {
+  await ensureDatabaseReady();
+
+  const normalizedSubmissionId = sanitizeTextValue(submissionId, 180);
+  const normalizedFileId = sanitizeTextValue(fileId, 180);
+  if (!normalizedSubmissionId || !normalizedFileId) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Submission id and file id are required.",
+    };
+  }
+
+  const filesResult = await pool.query(
+    `
+      SELECT f.id, f.file_name, f.mime_type, f.size_bytes, f.content, s.status AS submission_status
+      FROM ${MODERATION_FILES_TABLE} f
+      JOIN ${MODERATION_TABLE} s ON s.id = f.submission_id
+      WHERE f.submission_id = $1 AND f.id = $2
+      LIMIT 1
+    `,
+    [normalizedSubmissionId, normalizedFileId],
+  );
+
+  if (!filesResult.rows.length) {
+    return {
+      ok: false,
+      status: 404,
+      error: "File not found.",
+    };
+  }
+
+  const row = filesResult.rows[0];
+  const status = sanitizeTextValue(row.submission_status, 40).toLowerCase();
+  if (status !== "pending") {
+    return {
+      ok: false,
+      status: 409,
+      error: "Files are available only while submission is pending moderation.",
+    };
+  }
+
+  return {
+    ok: true,
+    file: {
+      id: sanitizeTextValue(row.id, 180),
+      fileName: sanitizeAttachmentFileName(row.file_name),
+      mimeType: normalizeAttachmentMimeType(row.mime_type),
+      sizeBytes: Number.parseInt(row.size_bytes, 10) || 0,
+      content: byteaToBuffer(row.content),
+    },
   };
 }
 
@@ -576,7 +1037,7 @@ function normalizeTelegramMessageFieldValue(value, maxLength = 600) {
   return sanitizeTextValue(value, maxLength).replace(/\s+/g, " ").trim();
 }
 
-function buildTelegramSubmissionMessage(record, _submission, telegramUser) {
+function buildTelegramSubmissionMessage(record, miniData, _submission, telegramUser) {
   const lines = ["New client submission from Mini App"];
 
   const submittedBy = buildTelegramUserLabel(telegramUser);
@@ -597,7 +1058,8 @@ function buildTelegramSubmissionMessage(record, _submission, telegramUser) {
       continue;
     }
 
-    const value = normalizeTelegramMessageFieldValue(record?.[field]);
+    const source = MINI_EXTRA_FIELD_SET.has(field) ? miniData : record;
+    const value = normalizeTelegramMessageFieldValue(source?.[field]);
     if (!value) {
       continue;
     }
@@ -614,14 +1076,14 @@ function buildTelegramSubmissionMessage(record, _submission, telegramUser) {
   return `${message.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH - 3)}...`;
 }
 
-async function sendMiniSubmissionTelegramNotification(record, submission, telegramUser) {
+async function sendMiniSubmissionTelegramNotification(record, miniData, submission, telegramUser) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_NOTIFY_CHAT_ID) {
     return;
   }
 
   const payload = {
     chat_id: TELEGRAM_NOTIFY_CHAT_ID,
-    text: buildTelegramSubmissionMessage(record, submission, telegramUser),
+    text: buildTelegramSubmissionMessage(record, miniData, submission, telegramUser),
     disable_web_page_preview: true,
   };
 
@@ -679,7 +1141,7 @@ async function listModerationSubmissions(options = {}) {
   if (status === "all") {
     result = await pool.query(
       `
-        SELECT id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+        SELECT id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
         FROM ${MODERATION_TABLE}
         ORDER BY submitted_at DESC
         LIMIT $1
@@ -689,7 +1151,7 @@ async function listModerationSubmissions(options = {}) {
   } else {
     result = await pool.query(
       `
-        SELECT id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+        SELECT id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
         FROM ${MODERATION_TABLE}
         WHERE status = $1
         ORDER BY submitted_at DESC
@@ -738,7 +1200,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
 
     const submissionResult = await client.query(
       `
-        SELECT id, record, submitted_by, status, submitted_at
+        SELECT id, record, mini_data, submitted_by, status, submitted_at
         FROM ${MODERATION_TABLE}
         WHERE id = $1
         FOR UPDATE
@@ -790,7 +1252,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
         UPDATE ${MODERATION_TABLE}
         SET status = $2, reviewed_at = NOW(), reviewed_by = $3, review_note = $4
         WHERE id = $1
-        RETURNING id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+        RETURNING id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
       `,
       [normalizedSubmissionId, normalizedDecision, normalizedReviewer, normalizedReviewNote],
     );
@@ -845,7 +1307,17 @@ function createEmptyRecord() {
   return record;
 }
 
-function createRecordFromMiniPayload(rawClient, telegramUser) {
+function createEmptyMiniData() {
+  const miniData = {};
+
+  for (const field of MINI_EXTRA_TEXT_FIELDS) {
+    miniData[field] = "";
+  }
+
+  return miniData;
+}
+
+function createRecordFromMiniPayload(rawClient) {
   if (!rawClient || typeof rawClient !== "object") {
     return {
       error: "Payload must include `client` object.",
@@ -867,6 +1339,7 @@ function createRecordFromMiniPayload(rawClient, telegramUser) {
   }
 
   const record = createEmptyRecord();
+  const miniData = createEmptyMiniData();
   record.clientName = clientName;
 
   for (const field of RECORD_TEXT_FIELDS) {
@@ -893,8 +1366,8 @@ function createRecordFromMiniPayload(rawClient, telegramUser) {
     record[field] = toCheckboxValue(client[field]);
   }
 
-  if (!record.closedBy && telegramUser) {
-    record.closedBy = buildDefaultClosedBy(telegramUser);
+  for (const field of MINI_EXTRA_TEXT_FIELDS) {
+    miniData[field] = sanitizeTextValue(client[field], MINI_EXTRA_MAX_LENGTH[field] || 4000);
   }
 
   if (record.writtenOff === "Yes" && !record.dateWhenWrittenOff) {
@@ -907,24 +1380,8 @@ function createRecordFromMiniPayload(rawClient, telegramUser) {
       createdAt: new Date().toISOString(),
       ...record,
     },
+    miniData,
   };
-}
-
-function buildDefaultClosedBy(telegramUser) {
-  const username = sanitizeTextValue(telegramUser?.username, 120);
-  if (username) {
-    return `@${username}`;
-  }
-
-  const firstName = sanitizeTextValue(telegramUser?.first_name, 120);
-  const lastName = sanitizeTextValue(telegramUser?.last_name, 120);
-  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
-  if (fullName) {
-    return fullName;
-  }
-
-  const userId = sanitizeTextValue(telegramUser?.id, 50);
-  return userId ? `tg:${userId}` : "";
 }
 
 function generateId() {
@@ -1170,7 +1627,26 @@ app.post("/api/mini/clients", async (req, res) => {
     return;
   }
 
-  const authResult = await verifyTelegramInitData(req.body?.initData);
+  try {
+    if (isMultipartRequest(req)) {
+      await parseMiniMultipartRequest(req, res);
+    }
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 500) || "Failed to process file uploads.",
+    });
+    return;
+  }
+
+  const parsedPayload = parseMiniClientPayload(req);
+  if (parsedPayload.error) {
+    res.status(parsedPayload.status || 400).json({
+      error: parsedPayload.error,
+    });
+    return;
+  }
+
+  const authResult = await verifyTelegramInitData(parsedPayload.initData);
   if (!authResult.ok) {
     res.status(authResult.status).json({
       error: authResult.error,
@@ -1178,7 +1654,7 @@ app.post("/api/mini/clients", async (req, res) => {
     return;
   }
 
-  const creationResult = createRecordFromMiniPayload(req.body?.client, authResult.user);
+  const creationResult = createRecordFromMiniPayload(parsedPayload.client);
   if (!creationResult.record) {
     res.status(400).json({
       error: creationResult.error || "Invalid client payload.",
@@ -1186,10 +1662,28 @@ app.post("/api/mini/clients", async (req, res) => {
     return;
   }
 
+  const attachmentsResult = buildMiniSubmissionAttachments(req.files);
+  if (attachmentsResult.error) {
+    res.status(attachmentsResult.status || 400).json({
+      error: attachmentsResult.error,
+    });
+    return;
+  }
+
   try {
-    const submission = await queueClientSubmission(creationResult.record, authResult.user);
+    const submission = await queueClientSubmission(
+      creationResult.record,
+      authResult.user,
+      creationResult.miniData,
+      attachmentsResult.attachments,
+    );
     try {
-      await sendMiniSubmissionTelegramNotification(creationResult.record, submission, authResult.user);
+      await sendMiniSubmissionTelegramNotification(
+        creationResult.record,
+        creationResult.miniData,
+        submission,
+        authResult.user,
+      );
     } catch (notificationError) {
       console.error("Mini App Telegram notification failed:", notificationError);
     }
@@ -1199,6 +1693,7 @@ app.post("/api/mini/clients", async (req, res) => {
       status: submission.status,
       submissionId: submission.id,
       submittedAt: submission.submittedAt,
+      attachmentsCount: submission.attachmentsCount || 0,
     });
   } catch (error) {
     console.error("POST /api/mini/clients failed:", error);
@@ -1236,6 +1731,79 @@ app.get("/api/moderation/submissions", async (req, res) => {
     res
       .status(resolveDbHttpStatus(error))
       .json(buildPublicErrorPayload(error, "Failed to load moderation submissions"));
+  }
+});
+
+app.get("/api/moderation/submissions/:id/files", async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  try {
+    const filesResult = await listPendingSubmissionFiles(req.params.id);
+    if (!filesResult.ok) {
+      res.status(filesResult.status).json({
+        error: filesResult.error,
+      });
+      return;
+    }
+
+    const basePath = `/api/moderation/submissions/${encodeURIComponent(filesResult.submissionId)}/files`;
+    const items = filesResult.items.map((file) => {
+      const canPreview = isPreviewableAttachmentMimeType(file.mimeType);
+      return {
+        ...file,
+        canPreview,
+        previewUrl: canPreview ? `${basePath}/${encodeURIComponent(file.id)}?inline=1` : "",
+        downloadUrl: `${basePath}/${encodeURIComponent(file.id)}`,
+      };
+    });
+
+    res.json({
+      ok: true,
+      items,
+    });
+  } catch (error) {
+    console.error("GET /api/moderation/submissions/:id/files failed:", error);
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load submission files"));
+  }
+});
+
+app.get("/api/moderation/submissions/:id/files/:fileId", async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  try {
+    const fileResult = await getPendingSubmissionFile(req.params.id, req.params.fileId);
+    if (!fileResult.ok) {
+      res.status(fileResult.status).json({
+        error: fileResult.error,
+      });
+      return;
+    }
+
+    const file = fileResult.file;
+    const mimeType = normalizeAttachmentMimeType(file.mimeType);
+    const inlineRequested = sanitizeTextValue(req.query.inline, 10) === "1";
+    const isInline = inlineRequested && isPreviewableAttachmentMimeType(mimeType);
+    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Length", String(file.content.length));
+    res.setHeader(
+      "Content-Disposition",
+      buildContentDisposition(isInline ? "inline" : "attachment", file.fileName),
+    );
+    res.setHeader("Cache-Control", "private, max-age=0, no-cache");
+    res.send(file.content);
+  } catch (error) {
+    console.error("GET /api/moderation/submissions/:id/files/:fileId failed:", error);
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load file"));
   }
 });
 
