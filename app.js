@@ -3249,12 +3249,6 @@ function initializeAccountMenu() {
       setAccountMenuOpen(false);
     }
   });
-
-  window.addEventListener("resize", () => {
-    if (accountMenu.classList.contains("is-open")) {
-      syncAccountMenuOpenOffset();
-    }
-  });
 }
 
 function initializeAuthGate() {
@@ -3310,34 +3304,6 @@ function setAccountMenuOpen(isOpen) {
   accountMenuPanel.hidden = !isOpen;
   accountMenuToggleButton.setAttribute("aria-expanded", String(isOpen));
   accountMenuToggleButton.setAttribute("aria-label", isOpen ? "Close account menu" : "Open account menu");
-
-  if (isOpen) {
-    syncAccountMenuOpenOffset();
-    return;
-  }
-
-  resetAccountMenuOpenOffset();
-}
-
-function syncAccountMenuOpenOffset() {
-  if (!pageHeaderElement || !accountMenuPanel) {
-    return;
-  }
-
-  const headerRect = pageHeaderElement.getBoundingClientRect();
-  const menuRect = accountMenuPanel.getBoundingClientRect();
-  const overlap = Math.max(0, menuRect.bottom - headerRect.bottom);
-  const offset = overlap > 0 ? Math.ceil(overlap + 8) : 0;
-
-  pageHeaderElement.style.setProperty("--account-menu-open-space", `${offset}px`);
-}
-
-function resetAccountMenuOpenOffset() {
-  if (!pageHeaderElement) {
-    return;
-  }
-
-  pageHeaderElement.style.setProperty("--account-menu-open-space", "0px");
 }
 
 function loadAuthSession() {
@@ -3438,8 +3404,17 @@ function showAuthMessage(message, isError = false) {
   authMessage.classList.toggle("error", Boolean(isError && message));
 }
 
+function normalizeAuthInput(value) {
+  return (value || "").toString().normalize("NFKC").trim();
+}
+
 function isValidAuthCredentials(username, password) {
-  return username === AUTH_ALLOWED_USERNAME && password === AUTH_ALLOWED_PASSWORD;
+  const normalizedUsername = normalizeAuthInput(username).toLowerCase();
+  const normalizedPassword = normalizeAuthInput(password);
+  const allowedUsername = normalizeAuthInput(AUTH_ALLOWED_USERNAME).toLowerCase();
+  const allowedPassword = normalizeAuthInput(AUTH_ALLOWED_PASSWORD);
+
+  return normalizedUsername === allowedUsername && normalizedPassword === allowedPassword;
 }
 
 function syncFiltersStickyOffset() {
