@@ -33,6 +33,7 @@ const QUICKBOOKS_PAYMENT_DETAILS_CONCURRENCY = 2;
 const QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES = 5;
 const QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS = 250;
 const QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE = 250;
+const QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT = 0.000001;
 const QUICKBOOKS_DEFAULT_FROM_DATE = "2026-01-01";
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
@@ -1727,6 +1728,9 @@ async function listCachedQuickBooksTransactionsInRange(fromDate, toDate) {
   for (const row of result.rows) {
     const mapped = mapQuickBooksTransactionRow(row);
     if (!mapped) {
+      continue;
+    }
+    if (Math.abs(mapped.paymentAmount) < QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT) {
       continue;
     }
     items.push(mapped);
