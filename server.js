@@ -15,6 +15,10 @@ const IS_BASIC_AUTH_ENABLED = Boolean(BASIC_AUTH_USER && BASIC_AUTH_PASSWORD);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
 const TABLE_NAME = resolveTableName(process.env.DB_TABLE_NAME, DEFAULT_TABLE_NAME);
+const DEFAULT_MODERATION_TABLE_NAME = "mini_client_submissions";
+const MODERATION_TABLE_NAME = resolveTableName(process.env.DB_MODERATION_TABLE_NAME, DEFAULT_MODERATION_TABLE_NAME);
+const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
+const DEFAULT_MODERATION_LIST_LIMIT = 200;
 
 const RECORD_TEXT_FIELDS = [
   "clientName",
@@ -311,6 +315,19 @@ async function ensureDatabaseReady() {
         `,
         [STATE_ROW_ID],
       );
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${MODERATION_TABLE_NAME} (
+          id TEXT PRIMARY KEY,
+          record JSONB NOT NULL,
+          submitted_by JSONB,
+          status TEXT NOT NULL DEFAULT 'pending',
+          submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          reviewed_at TIMESTAMPTZ,
+          reviewed_by TEXT,
+          review_note TEXT
+        )
+      `);
     })().catch((error) => {
       dbReadyPromise = null;
       throw error;
@@ -353,6 +370,228 @@ async function saveStoredRecords(records) {
 
 function isValidRecordsPayload(value) {
   return Array.isArray(value);
+}
+
+function mapModerationRow(row) {
+  return {
+    id: (row.id || "").toString(),
+    status: (row.status || "").toString(),
+    client: row.record && typeof row.record === "object" ? row.record : null,
+    submittedBy: row.submitted_by && typeof row.submitted_by === "object" ? row.submitted_by : null,
+    submittedAt: row.submitted_at ? new Date(row.submitted_at).toISOString() : null,
+    reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+    reviewedBy: (row.reviewed_by || "").toString(),
+    reviewNote: (row.review_note || "").toString(),
+  };
+}
+
+function normalizeModerationStatus(rawStatus, options = {}) {
+  const { allowAll = false, fallback = "pending" } = options;
+  const normalized = (rawStatus || "").toString().trim().toLowerCase();
+
+  if (!normalized) {
+    return fallback;
+  }
+
+  if (allowAll && normalized === "all") {
+    return "all";
+  }
+
+  if (MODERATION_STATUSES.has(normalized)) {
+    return normalized;
+  }
+
+  return null;
+}
+
+function getReviewerIdentity(req) {
+  const credentials = extractBasicAuthCredentials(req.headers.authorization);
+  const reviewer = sanitizeTextValue(credentials?.user, 200);
+  if (reviewer) {
+    return reviewer;
+  }
+
+  return "moderator";
+}
+
+async function queueClientSubmission(record, submittedBy) {
+  await ensureDatabaseReady();
+
+  const submissionId = `sub-${generateId()}`;
+  const submittedByPayload = submittedBy && typeof submittedBy === "object" ? submittedBy : null;
+  const result = await pool.query(
+    `
+      INSERT INTO ${MODERATION_TABLE_NAME} (id, record, submitted_by, status)
+      VALUES ($1, $2::jsonb, $3::jsonb, 'pending')
+      RETURNING id, status, submitted_at
+    `,
+    [submissionId, JSON.stringify(record), JSON.stringify(submittedByPayload)],
+  );
+
+  return {
+    id: result.rows[0]?.id || submissionId,
+    status: result.rows[0]?.status || "pending",
+    submittedAt: result.rows[0]?.submitted_at ? new Date(result.rows[0].submitted_at).toISOString() : null,
+  };
+}
+
+async function listModerationSubmissions(options = {}) {
+  await ensureDatabaseReady();
+
+  const status = normalizeModerationStatus(options.status, {
+    allowAll: true,
+    fallback: "pending",
+  });
+  if (!status) {
+    return {
+      error: "Invalid moderation status filter.",
+      items: [],
+      status: null,
+    };
+  }
+
+  const limit = Math.min(
+    Math.max(parsePositiveInteger(options.limit, DEFAULT_MODERATION_LIST_LIMIT), 1),
+    500,
+  );
+
+  let result;
+  if (status === "all") {
+    result = await pool.query(
+      `
+        SELECT id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+        FROM ${MODERATION_TABLE_NAME}
+        ORDER BY submitted_at DESC
+        LIMIT $1
+      `,
+      [limit],
+    );
+  } else {
+    result = await pool.query(
+      `
+        SELECT id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+        FROM ${MODERATION_TABLE_NAME}
+        WHERE status = $1
+        ORDER BY submitted_at DESC
+        LIMIT $2
+      `,
+      [status, limit],
+    );
+  }
+
+  return {
+    status,
+    items: result.rows.map(mapModerationRow),
+  };
+}
+
+async function reviewClientSubmission(submissionId, decision, reviewedBy, reviewNote) {
+  await ensureDatabaseReady();
+
+  const normalizedDecision = normalizeModerationStatus(decision, {
+    allowAll: false,
+    fallback: null,
+  });
+  if (!normalizedDecision || normalizedDecision === "pending") {
+    return {
+      ok: false,
+      status: 400,
+      error: "Invalid moderation action.",
+    };
+  }
+
+  const normalizedSubmissionId = sanitizeTextValue(submissionId, 160);
+  if (!normalizedSubmissionId) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Submission id is required.",
+    };
+  }
+
+  const normalizedReviewer = sanitizeTextValue(reviewedBy, 200) || "moderator";
+  const normalizedReviewNote = sanitizeTextValue(reviewNote, 2000) || null;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const submissionResult = await client.query(
+      `
+        SELECT id, record, submitted_by, status, submitted_at
+        FROM ${MODERATION_TABLE_NAME}
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [normalizedSubmissionId],
+    );
+
+    if (!submissionResult.rows.length) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 404,
+        error: "Submission not found.",
+      };
+    }
+
+    const submission = submissionResult.rows[0];
+    if (submission.status !== "pending") {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        error: `Submission already reviewed (${submission.status}).`,
+      };
+    }
+
+    if (normalizedDecision === "approved") {
+      const stateResult = await client.query(
+        `SELECT records FROM ${TABLE_NAME} WHERE id = $1 FOR UPDATE`,
+        [STATE_ROW_ID],
+      );
+
+      const currentRecords = Array.isArray(stateResult.rows[0]?.records) ? stateResult.rows[0].records : [];
+      currentRecords.unshift(submission.record);
+
+      await client.query(
+        `
+          INSERT INTO ${TABLE_NAME} (id, records, updated_at)
+          VALUES ($1, $2::jsonb, NOW())
+          ON CONFLICT (id)
+          DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
+        `,
+        [STATE_ROW_ID, JSON.stringify(currentRecords)],
+      );
+    }
+
+    const updateResult = await client.query(
+      `
+        UPDATE ${MODERATION_TABLE_NAME}
+        SET status = $2, reviewed_at = NOW(), reviewed_by = $3, review_note = $4
+        WHERE id = $1
+        RETURNING id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+      `,
+      [normalizedSubmissionId, normalizedDecision, normalizedReviewer, normalizedReviewNote],
+    );
+
+    await client.query("COMMIT");
+
+    return {
+      ok: true,
+      status: 200,
+      item: mapModerationRow(updateResult.rows[0]),
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function normalizeStoredRecords(rawRecords) {
@@ -657,26 +896,116 @@ app.post("/api/mini/clients", async (req, res) => {
   }
 
   try {
-    const state = await getStoredRecords();
-    const records = normalizeStoredRecords(state.records);
-    records.unshift(creationResult.record);
-    const updatedAt = await saveStoredRecords(records);
-
+    const submission = await queueClientSubmission(creationResult.record, authResult.user);
     res.status(201).json({
       ok: true,
-      id: creationResult.record.id,
-      updatedAt,
+      status: submission.status,
+      submissionId: submission.id,
+      submittedAt: submission.submittedAt,
     });
   } catch (error) {
     console.error("POST /api/mini/clients failed:", error);
     res.status(500).json({
-      error: "Failed to create client",
+      error: "Failed to submit client",
+    });
+  }
+});
+
+app.get("/api/moderation/submissions", async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  try {
+    const result = await listModerationSubmissions({
+      status: req.query.status,
+      limit: req.query.limit,
+    });
+
+    if (result.error) {
+      res.status(400).json({
+        error: result.error,
+      });
+      return;
+    }
+
+    res.json({
+      status: result.status,
+      items: result.items,
+    });
+  } catch (error) {
+    console.error("GET /api/moderation/submissions failed:", error);
+    res.status(500).json({
+      error: "Failed to load moderation submissions",
+    });
+  }
+});
+
+app.post("/api/moderation/submissions/:id/approve", async (req, res) => {
+  try {
+    const result = await reviewClientSubmission(
+      req.params.id,
+      "approved",
+      getReviewerIdentity(req),
+      req.body?.reviewNote,
+    );
+
+    if (!result.ok) {
+      res.status(result.status).json({
+        error: result.error,
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      item: result.item,
+    });
+  } catch (error) {
+    console.error("POST /api/moderation/submissions/:id/approve failed:", error);
+    res.status(500).json({
+      error: "Failed to approve submission",
+    });
+  }
+});
+
+app.post("/api/moderation/submissions/:id/reject", async (req, res) => {
+  try {
+    const result = await reviewClientSubmission(
+      req.params.id,
+      "rejected",
+      getReviewerIdentity(req),
+      req.body?.reviewNote,
+    );
+
+    if (!result.ok) {
+      res.status(result.status).json({
+        error: result.error,
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      item: result.item,
+    });
+  } catch (error) {
+    console.error("POST /api/moderation/submissions/:id/reject failed:", error);
+    res.status(500).json({
+      error: "Failed to reject submission",
     });
   }
 });
 
 app.get("/mini", (_req, res) => {
   res.sendFile(path.join(staticRoot, "mini.html"));
+});
+
+app.get("/moderation", (_req, res) => {
+  res.sendFile(path.join(staticRoot, "moderation.html"));
 });
 
 app.use("/api", (_req, res) => {
