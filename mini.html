@@ -11,12 +11,12 @@
         --card-bg: #111827;
         --field-bg: #0b1220;
         --line: #334155;
-        --line-soft: #1f2937;
+        --line-soft: #243244;
         --text: #e2e8f0;
         --muted: #94a3b8;
         --brand: #3b82f6;
         --brand-strong: #2563eb;
-        --brand-glow: rgba(59, 130, 246, 0.28);
+        --brand-glow: rgba(59, 130, 246, 0.34);
         --danger: #f87171;
         --ok: #22c55e;
       }
@@ -46,22 +46,25 @@
 
       .title {
         margin: 0;
-        font-size: 23px;
+        font-size: 19px;
         font-weight: 700;
         letter-spacing: 0.01em;
       }
 
       .subtitle {
-        margin: 6px 0 14px;
+        margin: 4px 0 12px;
         color: var(--muted);
-        font-size: 13px;
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       form {
         background: var(--card-bg);
         border: 1px solid var(--line);
         border-radius: 16px;
-        padding: 14px;
+        padding: 14px 14px calc(18px + env(safe-area-inset-bottom));
       }
 
       .form-section {
@@ -70,9 +73,19 @@
       }
 
       .form-section + .form-section {
-        margin-top: 18px;
-        padding-top: 18px;
-        border-top: 1px solid var(--line-soft);
+        position: relative;
+        margin-top: 24px;
+        padding-top: 24px;
+      }
+
+      .form-section + .form-section::before {
+        content: "";
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        top: 0;
+        height: 1px;
+        background: var(--line-soft);
       }
 
       .section-title {
@@ -80,7 +93,7 @@
         color: var(--muted);
         font-size: 12px;
         font-weight: 700;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.5px;
         text-transform: uppercase;
       }
 
@@ -94,7 +107,7 @@
         color: var(--muted);
         font-size: 12px;
         font-weight: 600;
-        letter-spacing: 0.03em;
+        letter-spacing: 0.5px;
         text-transform: uppercase;
       }
 
@@ -105,7 +118,8 @@
         border-radius: 12px;
         background: var(--field-bg);
         color: var(--text);
-        padding: 11px 12px;
+        min-height: 46px;
+        padding: 10px 12px;
         font-size: 15px;
         outline: none;
         transition: border-color 0.16s ease, box-shadow 0.16s ease;
@@ -113,7 +127,7 @@
 
       input:not([type="checkbox"])::placeholder,
       textarea::placeholder {
-        color: #64748b;
+        color: #4f6178;
       }
 
       input:not([type="checkbox"]):focus,
@@ -186,10 +200,10 @@
       .payment-group {
         border: 1px solid var(--line-soft);
         border-radius: 14px;
-        background: #0d1628;
+        background: #0b1527;
         padding: 10px;
         display: grid;
-        gap: 10px;
+        gap: 8px;
       }
 
       .payment-group__title {
@@ -286,12 +300,13 @@
       }
 
       .attachments-card {
+        position: relative;
         border: 1px solid var(--line-soft);
         border-radius: 14px;
-        background: #0d1628;
+        background: #0b1527;
         padding: 10px;
         display: grid;
-        gap: 8px;
+        gap: 10px;
       }
 
       .attachments-card__title {
@@ -301,25 +316,35 @@
         font-weight: 600;
       }
 
-      input[type="file"] {
-        width: 100%;
-        border: 1px dashed var(--line);
-        border-radius: 12px;
-        background: var(--field-bg);
-        color: var(--muted);
-        padding: 10px;
-        line-height: 1.2;
+      .attachments-input-native {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
       }
 
-      input[type="file"]::file-selector-button {
-        border: 0;
-        border-radius: 8px;
-        background: var(--brand-strong);
-        color: #ffffff;
-        font-weight: 600;
-        padding: 7px 10px;
-        margin-right: 10px;
+      .attachments-upload-button {
+        width: fit-content;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #12203a;
+        color: #bfdbfe;
+        font-weight: 700;
+        font-size: 13px;
+        padding: 9px 12px;
         cursor: pointer;
+        transition: background-color 0.16s ease, border-color 0.16s ease;
+      }
+
+      .attachments-upload-button:hover {
+        border-color: var(--brand);
+        background: #16294a;
+      }
+
+      .attachments-upload-button:disabled {
+        opacity: 0.58;
+        cursor: not-allowed;
       }
 
       .attachments-preview {
@@ -334,6 +359,9 @@
       }
 
       .attachments-preview__item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
         border: 1px solid var(--line);
         border-radius: 999px;
         background: var(--field-bg);
@@ -346,20 +374,30 @@
         white-space: nowrap;
       }
 
+      .attachments-preview__item::before {
+        content: "📄";
+        font-size: 12px;
+        line-height: 1;
+      }
+
       .attachments-preview__meta {
         color: var(--muted);
-        margin-left: 6px;
       }
 
       .submit-bar {
         position: sticky;
-        bottom: max(8px, env(safe-area-inset-bottom));
-        margin-top: 18px;
+        z-index: 2;
+        bottom: max(6px, env(safe-area-inset-bottom));
+        margin-top: 22px;
         padding-top: 12px;
-        background: linear-gradient(to bottom, rgba(17, 24, 39, 0), rgba(17, 24, 39, 0.94) 34%);
+        background: linear-gradient(to bottom, rgba(17, 24, 39, 0), rgba(17, 24, 39, 0.96) 34%);
       }
 
       #mini-submit-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
         width: 100%;
         border: 0;
         border-radius: 12px;
@@ -367,15 +405,89 @@
         color: #ffffff;
         font-size: 15px;
         font-weight: 700;
-        min-height: 44px;
+        min-height: 46px;
         cursor: pointer;
         box-shadow: 0 10px 22px -14px rgba(37, 99, 235, 0.85);
+        transition: opacity 0.16s ease;
       }
 
       #mini-submit-button:disabled {
-        opacity: 0.6;
+        opacity: 0.5;
         cursor: not-allowed;
         box-shadow: none;
+      }
+
+      .button-spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(255, 255, 255, 0.45);
+        border-top-color: #ffffff;
+        border-radius: 50%;
+        display: none;
+        animation: mini-submit-spin 0.8s linear infinite;
+      }
+
+      #mini-submit-button.is-loading .button-spinner {
+        display: inline-block;
+      }
+
+      #mini-submit-button.is-loading .button-label {
+        opacity: 0.92;
+      }
+
+      @keyframes mini-submit-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .advanced-panel {
+        margin-top: 24px;
+        border: 1px solid var(--line-soft);
+        border-radius: 14px;
+        background: #0d1628;
+      }
+
+      .advanced-panel > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .advanced-panel > summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .advanced-panel > summary::after {
+        content: "▾";
+        color: var(--muted);
+        font-size: 13px;
+        transform: rotate(0deg);
+        transition: transform 0.16s ease;
+      }
+
+      .advanced-panel[open] > summary::after {
+        transform: rotate(180deg);
+      }
+
+      .advanced-panel__title {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+      }
+
+      .advanced-panel__hint {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .advanced-panel__content {
+        padding: 2px 12px 12px;
       }
 
       .message {
@@ -399,12 +511,12 @@
       }
     </style>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/mini.js?v=20260218-phone-mask-fix" defer></script>
+    <script src="/mini.js?v=20260218-form-polish-v2" defer></script>
   </head>
   <body>
     <main class="shell">
-      <h1 class="title">Add Client</h1>
-      <p class="subtitle">Credit Booster Mini App (submissions require moderation)</p>
+      <h1 class="title">New Client</h1>
+      <p class="subtitle">Submissions go to moderation queue.</p>
 
       <form id="mini-client-form" novalidate>
         <section class="form-section" aria-labelledby="mini-section-basic">
@@ -506,7 +618,7 @@
           <label class="toggle-card" for="afterResult">
             <div class="toggle-copy">
               <span class="toggle-title">After Result</span>
-              <span class="toggle-hint">Mark when this client should be tracked as after result.</span>
+              <span class="toggle-hint">Track this client as "After Result".</span>
             </div>
             <span class="toggle-switch">
               <input id="afterResult" type="checkbox" name="afterResult" />
@@ -515,43 +627,55 @@
           </label>
         </section>
 
-        <section class="form-section" aria-labelledby="mini-section-extra">
-          <h2 id="mini-section-extra" class="section-title">Extra</h2>
+        <details class="advanced-panel">
+          <summary>
+            <span class="advanced-panel__title">Advanced</span>
+            <span class="advanced-panel__hint">Optional fields</span>
+          </summary>
+          <div class="advanced-panel__content">
+            <section class="form-section" aria-labelledby="mini-section-extra">
+              <h2 id="mini-section-extra" class="section-title">Extra</h2>
 
-          <div class="field">
-            <label for="ssn">SSN</label>
-            <input
-              id="ssn"
-              name="ssn"
-              type="password"
-              autocomplete="off"
-              inputmode="numeric"
-              maxlength="11"
-              placeholder="•••-••-••••"
-            />
-          </div>
+              <div class="field">
+                <label for="ssn">SSN</label>
+                <input
+                  id="ssn"
+                  name="ssn"
+                  type="password"
+                  autocomplete="off"
+                  inputmode="numeric"
+                  maxlength="11"
+                  placeholder="•••-••-••••"
+                />
+              </div>
 
-          <div class="field">
-            <label for="identityIq">IdentityIQ</label>
-            <input id="identityIq" name="identityIq" autocomplete="off" />
-            <p class="field-help">IdentityIQ reference or status note (if applicable).</p>
-          </div>
+              <div class="field">
+                <label for="identityIq">IdentityIQ</label>
+                <input id="identityIq" name="identityIq" autocomplete="off" />
+                <p class="field-help">IdentityIQ reference or status note (if applicable).</p>
+              </div>
 
-          <div class="field">
-            <label for="notes">Notes</label>
-            <textarea id="notes" name="notes" placeholder="Add extra context for moderation"></textarea>
-          </div>
+              <div class="field">
+                <label for="notes">Notes</label>
+                <textarea id="notes" name="notes" placeholder="Add extra context for moderation"></textarea>
+              </div>
 
-          <div class="attachments-card">
-            <h3 class="attachments-card__title">Attachments</h3>
-            <p class="field-help">Upload up to 10 files. Script and HTML files are blocked.</p>
-            <input id="attachments" name="attachments" type="file" multiple />
-            <div id="attachments-preview" class="attachments-preview" hidden></div>
+              <div class="attachments-card">
+                <h3 class="attachments-card__title">📎 Attachments</h3>
+                <p class="field-help">Upload up to 10 files</p>
+                <input id="attachments" class="attachments-input-native" name="attachments" type="file" multiple />
+                <button id="attachments-upload-button" class="attachments-upload-button" type="button">Upload files</button>
+                <div id="attachments-preview" class="attachments-preview" hidden></div>
+              </div>
+            </section>
           </div>
-        </section>
+        </details>
 
         <div class="submit-bar">
-          <button type="submit" id="mini-submit-button">Add Client</button>
+          <button type="submit" id="mini-submit-button">
+            <span class="button-label">Add Client</span>
+            <span class="button-spinner" aria-hidden="true"></span>
+          </button>
         </div>
       </form>
 
