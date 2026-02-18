@@ -32,6 +32,7 @@ npm start
 4. В переменных Render добавьте:
    - `DATABASE_URL` = строка подключения Supabase;
    - `DB_TABLE_NAME` = `client_records_state`;
+   - `DB_MODERATION_TABLE_NAME` = `mini_client_submissions`;
    - `BASIC_AUTH_USER` = логин для входа;
    - `BASIC_AUTH_PASSWORD` = пароль для входа;
    - `TELEGRAM_BOT_TOKEN` = токен бота (для Mini App);
@@ -44,15 +45,20 @@ npm start
 - `GET /api/records`
 - `PUT /api/records`
 - `POST /api/mini/clients`
+- `GET /api/moderation/submissions`
+- `POST /api/moderation/submissions/:id/approve`
+- `POST /api/moderation/submissions/:id/reject`
 
 Таблица в Supabase создается автоматически при первом обращении:
 - `client_records_state(id, records, updated_at)`.
+- `mini_client_submissions(id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note)`.
 
 ## Базовая авторизация (HTTP Basic)
 
 - Если заданы `BASIC_AUTH_USER` и `BASIC_AUTH_PASSWORD`, сайт и API требуют логин/пароль.
 - `GET /api/health` остается открытым для health check Render.
 - Mini App маршруты (`/mini`, `/api/mini/*`) не используют Basic Auth и защищаются подписью Telegram `initData`.
+- Страница модерации находится по адресу `/moderation` и защищена Basic Auth.
 
 ## Telegram Mini App
 
@@ -61,7 +67,9 @@ npm start
 3. В BotFather настройте кнопку/меню Web App на URL:
    - `https://<ваш-домен>.onrender.com/mini`
 4. (Опционально) ограничьте доступ к Mini App, задав `TELEGRAM_ALLOWED_USER_IDS`.
-5. Откройте Mini App из Telegram и добавьте клиента.
+5. Откройте Mini App из Telegram и добавьте клиента (заявка попадет в очередь модерации).
+6. Откройте `https://<ваш-домен>.onrender.com/moderation`, одобрите или отклоните заявку.
+7. После `Approve` клиент попадет в основной дашборд.
 
 ## Миграция текущих данных
 

@@ -13,6 +13,8 @@ services:
         sync: false
       - key: DB_TABLE_NAME
         value: client_records_state
+      - key: DB_MODERATION_TABLE_NAME
+        value: mini_client_submissions
       - key: BASIC_AUTH_USER
         sync: false
       - key: BASIC_AUTH_PASSWORD

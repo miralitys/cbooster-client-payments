@@ -46,7 +46,7 @@ if (form) {
 
       form.reset();
       prefillClosedBy();
-      setMessage("Client added successfully.", "success");
+      setMessage("Submitted for moderation. Client will appear after approval.", "success");
       telegramApp?.HapticFeedback?.notificationOccurred?.("success");
     } catch (error) {
       setMessage(error.message || "Failed to add client.", "error");
