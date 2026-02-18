@@ -39,29 +39,92 @@
         </header>
 
         <div class="dashboard-home-grid">
-          <section class="section period-dashboard-shell dashboard-overview-shell" aria-label="Overview section">
-            <header class="period-dashboard-shell__header dashboard-overview-shell__header">
+          <section class="section period-dashboard-shell" aria-label="Period financial dashboard">
+            <div
+              id="toggle-overview-panel"
+              class="period-dashboard-shell__header"
+              role="button"
+              tabindex="0"
+              aria-label="Collapse overview"
+              aria-controls="overview-content"
+              aria-expanded="true"
+            >
               <div class="period-dashboard-shell__header-main">
                 <h2 class="period-dashboard-shell__heading-text">Overview</h2>
+                <span
+                  id="overview-collapsed-summary"
+                  class="overview-collapsed-summary"
+                  aria-hidden="true"
+                  hidden
+                >
+                  <span class="overview-collapsed-summary__item">
+                    Received:
+                    <strong id="overview-summary-received">$0</strong>
+                  </span>
+                  <span class="overview-collapsed-summary__item">
+                    Sales:
+                    <strong id="overview-summary-sales">$0</strong>
+                  </span>
+                  <span class="overview-collapsed-summary__item">
+                    Debt:
+                    <strong id="overview-summary-debt">$0</strong>
+                  </span>
+                </span>
               </div>
-            </header>
-
-            <div id="overview-content" class="overview-cards" role="region" aria-label="Overview totals">
-              <article class="overview-card" aria-label="Total received">
+              <div class="period-dashboard-shell__header-actions">
+                <div class="overview-segmented" role="group" aria-label="Select overview period">
+                  <button
+                    type="button"
+                    class="btn btn-secondary overview-period-toggle is-active"
+                    data-overview-period="currentWeek"
+                    aria-pressed="true"
+                  >
+                    Current Week
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-secondary overview-period-toggle"
+                    data-overview-period="previousWeek"
+                    aria-pressed="false"
+                  >
+                    Previous Week
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-secondary overview-period-toggle"
+                    data-overview-period="currentMonth"
+                    aria-pressed="false"
+                  >
+                    Current Month
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-secondary overview-period-toggle"
+                    data-overview-period="last30Days"
+                    aria-pressed="false"
+                  >
+                    Last 30 Days
+                  </button>
+                </div>
+                <span class="overview-toggle-icon" aria-hidden="true">▾</span>
+              </div>
+            </div>
+            <div id="overview-content" class="overview-cards" role="region" aria-label="Overview totals by period">
+              <article class="overview-card" aria-label="Total received by period">
                 <h3 class="overview-card__title">Total Received</h3>
-                <p class="overview-card__value" id="overview-received-value">$0.00</p>
-                <p class="overview-card__context">As of today</p>
+                <p class="overview-card__value" id="overview-received-value">$0</p>
+                <p class="overview-card__context" id="overview-received-context">Current Week</p>
               </article>
 
-              <article class="overview-card" aria-label="Total sales">
+              <article class="overview-card" aria-label="Total sales by period">
                 <h3 class="overview-card__title">Total Sales</h3>
-                <p class="overview-card__value" id="overview-sales-value">$0.00</p>
-                <p class="overview-card__context">As of today</p>
+                <p class="overview-card__value" id="overview-sales-value">$0</p>
+                <p class="overview-card__context" id="overview-sales-context">Current Week</p>
               </article>
 
               <article class="overview-card" aria-label="Total debt">
                 <h3 class="overview-card__title">Total Debt</h3>
-                <p class="overview-card__value" id="overview-debt-value">$0.00</p>
+                <p class="overview-card__value" id="overview-debt-value">$0</p>
                 <p class="overview-card__context">As of today</p>
               </article>
             </div>
