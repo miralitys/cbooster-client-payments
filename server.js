@@ -36,6 +36,20 @@ const QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE = 250;
 const QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT = 0.000001;
 const QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS = 200;
 const QUICKBOOKS_DEFAULT_FROM_DATE = "2026-01-01";
+const GHL_API_KEY = (process.env.GHL_API_KEY || process.env.GOHIGHLEVEL_API_KEY || "").toString().trim();
+const GHL_LOCATION_ID = (process.env.GHL_LOCATION_ID || "").toString().trim();
+const GHL_API_BASE_URL = (
+  (process.env.GHL_API_BASE_URL || process.env.GOHIGHLEVEL_API_BASE_URL || "https://services.leadconnectorhq.com")
+    .toString()
+    .trim() || "https://services.leadconnectorhq.com"
+).replace(/\/+$/, "");
+const GHL_API_VERSION = (process.env.GHL_API_VERSION || "2021-07-28").toString().trim() || "2021-07-28";
+const GHL_REQUEST_TIMEOUT_MS = Math.min(Math.max(parsePositiveInteger(process.env.GHL_REQUEST_TIMEOUT_MS, 15000), 2000), 60000);
+const GHL_CONTACT_SEARCH_LIMIT = Math.min(Math.max(parsePositiveInteger(process.env.GHL_CONTACT_SEARCH_LIMIT, 20), 1), 100);
+const GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY, 4), 1),
+  12,
+);
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
@@ -966,6 +980,559 @@ function isQuickBooksConfigured() {
       QUICKBOOKS_REFRESH_TOKEN &&
       QUICKBOOKS_REALM_ID,
   );
+}
+
+function isGhlConfigured() {
+  return Boolean(GHL_API_KEY && GHL_LOCATION_ID);
+}
+
+function buildGhlRequestHeaders(includeJsonBody = false) {
+  const headers = {
+    Authorization: `Bearer ${GHL_API_KEY}`,
+    Version: GHL_API_VERSION,
+    Accept: "application/json",
+  };
+
+  if (includeJsonBody) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  return headers;
+}
+
+function buildGhlUrl(pathname, query = {}) {
+  const normalizedPath = `/${(pathname || "").toString().replace(/^\/+/, "")}`;
+  const url = new URL(`${GHL_API_BASE_URL}${normalizedPath}`);
+
+  const entries = Object.entries(query || {});
+  for (const [key, rawValue] of entries) {
+    const value = sanitizeTextValue(rawValue, 1000);
+    if (!value) {
+      continue;
+    }
+    url.searchParams.set(key, value);
+  }
+
+  return url;
+}
+
+async function requestGhlApi(pathname, options = {}) {
+  const method = (options.method || "GET").toString().toUpperCase();
+  const includeJsonBody = method !== "GET" && method !== "HEAD";
+  const headers = buildGhlRequestHeaders(includeJsonBody);
+  const query = options.query && typeof options.query === "object" ? options.query : {};
+  const tolerateNotFound = Boolean(options.tolerateNotFound);
+  const url = buildGhlUrl(pathname, query);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, GHL_REQUEST_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers,
+      body: includeJsonBody && options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    const errorMessage = sanitizeTextValue(error?.message, 300) || "Unknown network error.";
+    if (error?.name === "AbortError") {
+      throw createHttpError(`GHL request timed out after ${GHL_REQUEST_TIMEOUT_MS}ms (${pathname}).`, 504);
+    }
+    throw createHttpError(`GHL request failed (${pathname}): ${errorMessage}`, 503);
+  }
+
+  clearTimeout(timeoutId);
+
+  const responseText = await response.text();
+  let body = null;
+  try {
+    body = responseText ? JSON.parse(responseText) : null;
+  } catch {
+    body = null;
+  }
+
+  if (!response.ok) {
+    if (tolerateNotFound && response.status === 404) {
+      return {
+        ok: false,
+        status: 404,
+        body: null,
+      };
+    }
+
+    const details = sanitizeTextValue(
+      body?.message ||
+        body?.error ||
+        body?.detail ||
+        body?.details ||
+        body?.meta?.message ||
+        responseText,
+      500,
+    );
+    throw createHttpError(
+      `GHL API request failed (${pathname}, HTTP ${response.status}). ${details || "No details provided."}`,
+      response.status >= 500 ? 502 : response.status,
+    );
+  }
+
+  return {
+    ok: true,
+    status: response.status,
+    body,
+  };
+}
+
+function extractGhlContactsFromPayload(payload) {
+  const candidates = [
+    payload?.contacts,
+    payload?.data?.contacts,
+    payload?.data?.items,
+    payload?.items,
+    payload?.data,
+    payload?.result?.contacts,
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+
+    return candidate.filter((item) => item && typeof item === "object");
+  }
+
+  if (payload?.contact && typeof payload.contact === "object") {
+    return [payload.contact];
+  }
+
+  return [];
+}
+
+function extractGhlUsersFromPayload(payload) {
+  const candidates = [
+    payload?.users,
+    payload?.data?.users,
+    payload?.data?.items,
+    payload?.items,
+    payload?.data,
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+
+    return candidate.filter((item) => item && typeof item === "object");
+  }
+
+  if (payload?.user && typeof payload.user === "object") {
+    return [payload.user];
+  }
+
+  return [];
+}
+
+function normalizeNameForLookup(rawValue) {
+  const value = sanitizeTextValue(rawValue, 300).toLowerCase();
+  if (!value) {
+    return "";
+  }
+
+  return value
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildContactCandidateName(contact) {
+  const variants = [
+    contact?.name,
+    [contact?.firstName, contact?.lastName].filter(Boolean).join(" "),
+    [contact?.first_name, contact?.last_name].filter(Boolean).join(" "),
+    [contact?.contactNameFirst, contact?.contactNameLast].filter(Boolean).join(" "),
+  ]
+    .map((value) => sanitizeTextValue(value, 300))
+    .filter(Boolean);
+
+  return variants[0] || "";
+}
+
+function areNamesEquivalent(expectedName, candidateName) {
+  const expected = normalizeNameForLookup(expectedName);
+  const candidate = normalizeNameForLookup(candidateName);
+  if (!expected || !candidate) {
+    return false;
+  }
+
+  if (expected === candidate) {
+    return true;
+  }
+
+  const expectedParts = expected.split(" ").filter(Boolean);
+  const candidateParts = candidate.split(" ").filter(Boolean);
+
+  if (expectedParts.length >= 2 && candidateParts.length >= 2) {
+    const expectedFirst = expectedParts[0];
+    const expectedLast = expectedParts[expectedParts.length - 1];
+    const candidateFirst = candidateParts[0];
+    const candidateLast = candidateParts[candidateParts.length - 1];
+    if (expectedFirst === candidateFirst && expectedLast === candidateLast) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function pushManagerIdToSet(rawValue, targetSet) {
+  if (!targetSet || !(targetSet instanceof Set) || rawValue === null || rawValue === undefined) {
+    return;
+  }
+
+  if (Array.isArray(rawValue)) {
+    for (const item of rawValue) {
+      pushManagerIdToSet(item, targetSet);
+    }
+    return;
+  }
+
+  if (typeof rawValue === "object") {
+    const nestedCandidates = [rawValue.id, rawValue.userId, rawValue.user_id, rawValue.value];
+    for (const candidate of nestedCandidates) {
+      pushManagerIdToSet(candidate, targetSet);
+    }
+    return;
+  }
+
+  const id = sanitizeTextValue(rawValue, 160);
+  if (!id) {
+    return;
+  }
+
+  targetSet.add(id);
+}
+
+function extractManagerIdsFromContact(contact) {
+  const managerIds = new Set();
+  const candidates = [
+    contact?.assignedTo,
+    contact?.assigned_to,
+    contact?.assignedUserId,
+    contact?.assigned_user_id,
+    contact?.ownerId,
+    contact?.owner_id,
+  ];
+
+  for (const candidate of candidates) {
+    pushManagerIdToSet(candidate, managerIds);
+  }
+
+  return [...managerIds];
+}
+
+function formatManagerNameFromUser(user, fallbackId = "") {
+  if (!user || typeof user !== "object") {
+    return sanitizeTextValue(fallbackId, 160);
+  }
+
+  const firstName = sanitizeTextValue(user.firstName || user.first_name, 120);
+  const lastName = sanitizeTextValue(user.lastName || user.last_name, 120);
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+  if (fullName) {
+    return fullName;
+  }
+
+  const directName = sanitizeTextValue(user.name || user.displayName, 240);
+  if (directName) {
+    return directName;
+  }
+
+  const email = sanitizeTextValue(user.email, 240);
+  if (email) {
+    return email;
+  }
+
+  return sanitizeTextValue(fallbackId, 160);
+}
+
+async function listGhlUsersIndex() {
+  const query = {
+    locationId: GHL_LOCATION_ID,
+    limit: 200,
+    page: 1,
+  };
+
+  const attempts = [
+    () => requestGhlApi("/users/", { method: "GET", query, tolerateNotFound: true }),
+    () => requestGhlApi("/users", { method: "GET", query, tolerateNotFound: true }),
+  ];
+
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt();
+    } catch {
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const users = extractGhlUsersFromPayload(response.body);
+    if (!users.length) {
+      continue;
+    }
+
+    const index = new Map();
+    for (const user of users) {
+      const userId = sanitizeTextValue(user?.id || user?._id || user?.userId || user?.user_id, 160);
+      if (!userId) {
+        continue;
+      }
+      const managerName = formatManagerNameFromUser(user, userId);
+      if (!managerName) {
+        continue;
+      }
+      index.set(userId, managerName);
+    }
+
+    if (index.size) {
+      return index;
+    }
+  }
+
+  return new Map();
+}
+
+async function resolveGhlManagerName(managerId, usersIndex, managerNameCache) {
+  const normalizedManagerId = sanitizeTextValue(managerId, 160);
+  if (!normalizedManagerId) {
+    return "";
+  }
+
+  if (managerNameCache.has(normalizedManagerId)) {
+    return managerNameCache.get(normalizedManagerId);
+  }
+
+  const indexedName = usersIndex.get(normalizedManagerId);
+  if (indexedName) {
+    managerNameCache.set(normalizedManagerId, indexedName);
+    return indexedName;
+  }
+
+  const response = await requestGhlApi(`/users/${encodeURIComponent(normalizedManagerId)}`, {
+    method: "GET",
+    query: {
+      locationId: GHL_LOCATION_ID,
+    },
+    tolerateNotFound: true,
+  });
+
+  if (!response.ok) {
+    managerNameCache.set(normalizedManagerId, normalizedManagerId);
+    return normalizedManagerId;
+  }
+
+  const user = response.body?.user && typeof response.body.user === "object"
+    ? response.body.user
+    : response.body?.data && typeof response.body.data === "object"
+      ? response.body.data
+      : response.body;
+  const managerName = formatManagerNameFromUser(user, normalizedManagerId) || normalizedManagerId;
+  managerNameCache.set(normalizedManagerId, managerName);
+  return managerName;
+}
+
+async function searchGhlContactsByClientName(clientName) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return [];
+  }
+
+  const attempts = [
+    () =>
+      requestGhlApi("/contacts/search", {
+        method: "POST",
+        body: {
+          locationId: GHL_LOCATION_ID,
+          page: 1,
+          pageLimit: GHL_CONTACT_SEARCH_LIMIT,
+          query: normalizedClientName,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/contacts/search", {
+        method: "POST",
+        body: {
+          locationId: GHL_LOCATION_ID,
+          page: 1,
+          limit: GHL_CONTACT_SEARCH_LIMIT,
+          query: normalizedClientName,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/contacts/", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+          query: normalizedClientName,
+          page: 1,
+          limit: GHL_CONTACT_SEARCH_LIMIT,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/contacts", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+          query: normalizedClientName,
+          page: 1,
+          limit: GHL_CONTACT_SEARCH_LIMIT,
+        },
+        tolerateNotFound: true,
+      }),
+  ];
+
+  const contactsById = new Map();
+  let successfulRequestCount = 0;
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt();
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    successfulRequestCount += 1;
+
+    const contacts = extractGhlContactsFromPayload(response.body);
+    for (const contact of contacts) {
+      const candidateName = buildContactCandidateName(contact);
+      if (!areNamesEquivalent(normalizedClientName, candidateName)) {
+        continue;
+      }
+
+      const contactId = sanitizeTextValue(contact?.id || contact?._id || contact?.contactId, 160);
+      if (contactId) {
+        contactsById.set(contactId, contact);
+        continue;
+      }
+
+      const fallbackKey = `${normalizeNameForLookup(candidateName)}::${contactsById.size}`;
+      contactsById.set(fallbackKey, contact);
+    }
+
+    if (contactsById.size) {
+      break;
+    }
+  }
+
+  if (!successfulRequestCount && lastError) {
+    throw lastError;
+  }
+
+  return [...contactsById.values()];
+}
+
+function getUniqueClientNamesFromRecords(records) {
+  const normalizedRecords = Array.isArray(records) ? records : [];
+  const names = new Set();
+
+  for (const record of normalizedRecords) {
+    const clientName = sanitizeTextValue(record?.clientName, 300);
+    if (!clientName) {
+      continue;
+    }
+    names.add(clientName);
+  }
+
+  return [...names].sort((left, right) => left.localeCompare(right, "en", { sensitivity: "base" }));
+}
+
+async function buildGhlClientManagerLookupRows(clientNames) {
+  const names = Array.isArray(clientNames) ? clientNames : [];
+  if (!names.length) {
+    return [];
+  }
+
+  const managerNameCache = new Map();
+  const usersIndex = await listGhlUsersIndex();
+  const rows = new Array(names.length);
+  let cursor = 0;
+  const workerCount = Math.min(GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY, names.length);
+
+  async function worker() {
+    while (cursor < names.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+      const clientName = sanitizeTextValue(names[currentIndex], 300);
+      if (!clientName) {
+        rows[currentIndex] = {
+          clientName: "",
+          managers: [],
+          managersLabel: "-",
+          matchedContacts: 0,
+          status: "unassigned",
+        };
+        continue;
+      }
+
+      try {
+        const contacts = await searchGhlContactsByClientName(clientName);
+        const managerIds = new Set();
+
+        for (const contact of contacts) {
+          for (const managerId of extractManagerIdsFromContact(contact)) {
+            managerIds.add(managerId);
+          }
+        }
+
+        const managerNames = [];
+        for (const managerId of managerIds) {
+          const managerName = await resolveGhlManagerName(managerId, usersIndex, managerNameCache);
+          if (!managerName) {
+            continue;
+          }
+          managerNames.push(managerName);
+        }
+
+        const uniqueManagerNames = [...new Set(managerNames)];
+        rows[currentIndex] = {
+          clientName,
+          managers: uniqueManagerNames,
+          managersLabel: uniqueManagerNames.join(", ") || "-",
+          matchedContacts: contacts.length,
+          status: uniqueManagerNames.length ? "assigned" : "unassigned",
+        };
+      } catch (error) {
+        rows[currentIndex] = {
+          clientName,
+          managers: [],
+          managersLabel: "-",
+          matchedContacts: 0,
+          status: "error",
+          error: sanitizeTextValue(error?.message, 300) || "GHL lookup failed.",
+        };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return rows.filter(Boolean);
 }
 
 function formatQuickBooksDateUtc(value) {
@@ -3119,6 +3686,41 @@ app.get("/api/records", async (_req, res) => {
   }
 });
 
+app.get("/api/ghl/client-managers", async (_req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  try {
+    const state = await getStoredRecords();
+    const clientNames = getUniqueClientNamesFromRecords(state.records);
+    const items = await buildGhlClientManagerLookupRows(clientNames);
+
+    res.json({
+      ok: true,
+      count: items.length,
+      items,
+      source: "gohighlevel",
+      updatedAt: state.updatedAt,
+    });
+  } catch (error) {
+    console.error("GET /api/ghl/client-managers failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 500) || "Failed to load client-manager data from GHL.",
+    });
+  }
+});
+
 app.put("/api/records", async (req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -3414,6 +4016,10 @@ app.get("/quickbooks-payments", (_req, res) => {
   res.sendFile(path.join(staticRoot, "quickbooks-payments.html"));
 });
 
+app.get("/client-managers", (_req, res) => {
+  res.sendFile(path.join(staticRoot, "client-managers.html"));
+});
+
 app.get("/Client_Payments", (_req, res) => {
   res.sendFile(path.join(staticRoot, "client-payments.html"));
 });
@@ -3455,5 +4061,8 @@ app.listen(PORT, () => {
   }
   if (!isQuickBooksConfigured()) {
     console.warn("QuickBooks test API is disabled. Set QUICKBOOKS_CLIENT_ID/SECRET/REFRESH_TOKEN/REALM_ID.");
+  }
+  if (!isGhlConfigured()) {
+    console.warn("GHL client-manager lookup is disabled. Set GHL_API_KEY and GHL_LOCATION_ID.");
   }
 });

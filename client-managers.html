@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Client Manager Lookup</title>
+    <link rel="stylesheet" href="/styles.css?v=20260218-client-manager-test" />
+    <script src="/client-managers.js?v=20260218-client-manager-test" defer></script>
+  </head>
+  <body>
+    <main class="page-shell" aria-busy="false">
+      <div class="container client-manager-page">
+        <header class="section page-header client-manager-page-header">
+          <div class="page-header__title">
+            <p class="eyebrow">Credit Booster</p>
+            <h1>Client - Manager Test</h1>
+            <p class="client-manager-subtitle">
+              Separate test page. Managers are not written to the main client database.
+            </p>
+          </div>
+          <div class="page-header__right">
+            <div id="account-menu" class="account-menu">
+              <button
+                id="account-menu-toggle"
+                type="button"
+                class="account-menu__toggle"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-controls="account-menu-panel"
+                aria-label="Open account menu"
+              >
+                <span class="account-menu__line" aria-hidden="true"></span>
+                <span class="account-menu__line" aria-hidden="true"></span>
+                <span class="account-menu__line" aria-hidden="true"></span>
+              </button>
+
+              <div id="account-menu-panel" class="account-menu__panel" role="menu" hidden>
+                <a href="/" class="account-menu__item" role="menuitem">Main</a>
+                <a href="/quickbooks-payments" class="account-menu__item" role="menuitem">Quick Book Payment</a>
+                <a href="/Client_Payments" class="account-menu__item" role="menuitem">Client Payment</a>
+                <div class="account-menu__divider" aria-hidden="true"></div>
+                <p id="account-menu-user" class="account-menu__user">User: -</p>
+                <button id="account-logout-action" type="button" class="account-menu__item" role="menuitem">
+                  Log Out
+                </button>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <section class="section table-panel client-manager-table-panel" aria-live="polite">
+          <header class="table-panel__header">
+            <h2 class="section-heading">Client - Manager Table</h2>
+            <div class="table-panel__actions">
+              <button id="refresh-client-managers" type="button" class="btn btn-primary">Refresh</button>
+            </div>
+          </header>
+
+          <p id="client-manager-status" class="dashboard-message client-manager-status">Loading...</p>
+
+          <div class="table-wrap client-manager-table-wrap">
+            <table class="client-manager-table">
+              <thead>
+                <tr>
+                  <th>Client Name</th>
+                  <th>Managers</th>
+                  <th>Matched Contacts</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="client-manager-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>
