@@ -41,6 +41,8 @@ const overviewPeriodButtons = [...document.querySelectorAll(".overview-period-to
 const submissionsTableBody = document.querySelector("#submissions-table-body");
 const submissionModal = document.querySelector("#submission-modal");
 const submissionModalDetails = document.querySelector("#submission-modal-details");
+const submissionModalFiles = document.querySelector("#submission-modal-files");
+const submissionModalFilesList = document.querySelector("#submission-modal-files-list");
 const approvalCheckbox = document.querySelector("#approval-checkbox");
 const applyModerationButton = document.querySelector("#apply-moderation-button");
 const deleteModerationButton = document.querySelector("#delete-moderation-button");
@@ -58,6 +60,7 @@ let activeSubmission = null;
 let isModerationActionRunning = false;
 let activeOverviewPeriod = OVERVIEW_PERIOD_DEFAULT;
 let cachedOverviewRecords = [];
+let activeSubmissionFilesRequestId = 0;
 
 initializeMenu();
 initializeOverviewPeriodButtons();
@@ -192,15 +195,15 @@ function initializeModal() {
     }
 
     if (!approvalCheckbox?.checked) {
-      showMessage("Отметьте \"Добавить в общую базу данных\" или нажмите \"Удалить\".", "error");
+      showMessage('Check "Add to main database" or click "Delete".', "error");
       return;
     }
 
     try {
       await runModerationAction("approve");
-      showMessage("Клиент добавлен в общую базу.", "success");
+      showMessage("Client added to the main database.", "success");
     } catch (error) {
-      showMessage(error.message || "Не удалось применить решение модерации.", "error");
+      showMessage(error.message || "Failed to apply moderation decision.", "error");
     }
   });
 
@@ -209,16 +212,16 @@ function initializeModal() {
       return;
     }
 
-    const shouldDelete = window.confirm("Удалить эту заявку из очереди модерации?");
+    const shouldDelete = window.confirm("Delete this submission from the moderation queue?");
     if (!shouldDelete) {
       return;
     }
 
     try {
       await runModerationAction("reject");
-      showMessage("Заявка удалена из очереди модерации.", "success");
+      showMessage("Submission removed from the moderation queue.", "success");
     } catch (error) {
-      showMessage(error.message || "Не удалось удалить заявку.", "error");
+      showMessage(error.message || "Failed to delete submission.", "error");
     }
   });
 
@@ -276,7 +279,7 @@ async function loadOverviewData() {
   } catch (error) {
     cachedOverviewRecords = [];
     updatePeriodDashboard([]);
-    showMessage(error.message || "Не удалось загрузить данные overview.", "error");
+    showMessage(error.message || "Failed to load overview data.", "error");
   }
 }
 
@@ -544,7 +547,7 @@ async function loadPendingSubmissions() {
     renderPendingSubmissions();
   } catch (error) {
     pendingSubmissions = [];
-    renderPendingSubmissions(error.message || "Не удалось загрузить заявки.");
+    renderPendingSubmissions(error.message || "Failed to load submissions.");
   }
 }
 
@@ -558,7 +561,7 @@ function renderPendingSubmissions(errorText = "") {
     const cell = document.createElement("td");
     cell.colSpan = 5;
     cell.className = "empty-state";
-    cell.textContent = errorText || "Новых клиентов на модерации нет.";
+    cell.textContent = errorText || "No new clients pending moderation.";
     row.append(cell);
     submissionsTableBody.replaceChildren(row);
     return;
@@ -577,9 +580,9 @@ function renderPendingSubmissions(errorText = "") {
     const openButton = document.createElement("button");
     openButton.type = "button";
     openButton.className = "open-submission-button";
-    openButton.textContent = "Открыть";
+    openButton.textContent = "Open";
     openButton.addEventListener("click", () => {
-      openSubmissionModal(submission.id);
+      void openSubmissionModal(submission.id);
     });
     actionCell.append(openButton);
     row.append(actionCell);
@@ -596,7 +599,7 @@ function appendCell(row, value) {
   row.append(cell);
 }
 
-function openSubmissionModal(submissionId) {
+async function openSubmissionModal(submissionId) {
   const submission = pendingSubmissions.find((item) => item.id === submissionId);
   if (!submission || !submissionModalDetails) {
     return;
@@ -645,7 +648,10 @@ function openSubmissionModal(submissionId) {
   }
 
   submissionModalDetails.replaceChildren(fragment);
+  const requestId = ++activeSubmissionFilesRequestId;
+  renderSubmissionFilesLoading();
   setModalVisibility(true);
+  await loadSubmissionFiles(submission.id, requestId);
 }
 
 function appendDetail(fragment, label, value) {
@@ -673,8 +679,141 @@ function setModalVisibility(isVisible) {
   document.body.classList.toggle("modal-open", isVisible);
   document.body.style.overflow = isVisible ? "hidden" : "";
   if (!isVisible) {
+    activeSubmissionFilesRequestId += 1;
     activeSubmission = null;
+    if (submissionModalFiles) {
+      submissionModalFiles.hidden = true;
+    }
+    if (submissionModalFilesList) {
+      submissionModalFilesList.replaceChildren();
+    }
   }
+}
+
+async function loadSubmissionFiles(submissionId, requestId) {
+  if (!submissionModalFilesList) {
+    return;
+  }
+
+  try {
+    const response = await fetch(`/api/moderation/submissions/${encodeURIComponent(submissionId)}/files`, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body.error || body.details || `Failed to load attachments (${response.status})`);
+    }
+
+    if (requestId !== activeSubmissionFilesRequestId) {
+      return;
+    }
+
+    const items = Array.isArray(body.items) ? body.items : [];
+    renderSubmissionFiles(items);
+  } catch (error) {
+    if (requestId !== activeSubmissionFilesRequestId) {
+      return;
+    }
+
+    renderSubmissionFiles([], error.message || "Failed to load attachments.");
+  }
+}
+
+function renderSubmissionFilesLoading() {
+  if (!submissionModalFiles || !submissionModalFilesList) {
+    return;
+  }
+
+  submissionModalFiles.hidden = false;
+  const line = document.createElement("p");
+  line.className = "submission-file-empty";
+  line.textContent = "Loading attachments...";
+  submissionModalFilesList.replaceChildren(line);
+}
+
+function renderSubmissionFiles(items, errorText = "") {
+  if (!submissionModalFiles || !submissionModalFilesList) {
+    return;
+  }
+
+  const normalizedItems = Array.isArray(items) ? items : [];
+  if (!normalizedItems.length) {
+    submissionModalFiles.hidden = false;
+    const line = document.createElement("p");
+    line.className = "submission-file-empty";
+    line.textContent = errorText || "No attachments.";
+    submissionModalFilesList.replaceChildren(line);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of normalizedItems) {
+    const row = document.createElement("div");
+    row.className = "submission-file-row";
+
+    const info = document.createElement("div");
+    info.className = "submission-file-info";
+
+    const name = document.createElement("div");
+    name.className = "submission-file-name";
+    name.textContent = (item?.fileName || "attachment").toString();
+
+    const meta = document.createElement("div");
+    meta.className = "submission-file-meta";
+    const fileType = (item?.mimeType || "application/octet-stream").toString();
+    meta.textContent = `${formatFileSize(item?.sizeBytes)} · ${fileType}`;
+    info.append(name, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "submission-file-actions";
+
+    if (item?.canPreview && item?.previewUrl) {
+      const previewLink = document.createElement("a");
+      previewLink.className = "btn btn-secondary";
+      previewLink.href = item.previewUrl;
+      previewLink.target = "_blank";
+      previewLink.rel = "noopener noreferrer";
+      previewLink.textContent = "Preview";
+      actions.append(previewLink);
+    }
+
+    if (item?.downloadUrl) {
+      const downloadLink = document.createElement("a");
+      downloadLink.className = "btn btn-secondary";
+      downloadLink.href = item.downloadUrl;
+      downloadLink.textContent = "Download";
+      downloadLink.setAttribute("download", (item?.fileName || "attachment").toString());
+      actions.append(downloadLink);
+    }
+
+    row.append(info, actions);
+    fragment.append(row);
+  }
+
+  submissionModalFiles.hidden = false;
+  submissionModalFilesList.replaceChildren(fragment);
+}
+
+function formatFileSize(value) {
+  const bytes = Number.parseInt(value, 10);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const KB = 1024;
+  const MB = 1024 * 1024;
+  if (bytes >= MB) {
+    return `${(bytes / MB).toFixed(bytes >= 10 * MB ? 0 : 1)} MB`;
+  }
+
+  if (bytes >= KB) {
+    return `${Math.round(bytes / KB)} KB`;
+  }
+
+  return `${bytes} B`;
 }
 
 async function reviewSubmission(submissionId, action) {
