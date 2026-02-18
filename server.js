@@ -1435,6 +1435,19 @@ function normalizeUsPhoneForStorage(rawValue) {
   return `+1(${digits.slice(0, 3)})${digits.slice(3, 6)}-${digits.slice(6)}`;
 }
 
+function normalizeEmailForStorage(rawValue) {
+  const value = sanitizeTextValue(rawValue, MINI_EXTRA_MAX_LENGTH.clientEmailAddress || 320).trim();
+  if (!value) {
+    return "";
+  }
+
+  if (!value.includes("@")) {
+    return null;
+  }
+
+  return value;
+}
+
 function createEmptyRecord() {
   const record = {};
 
@@ -1513,7 +1526,7 @@ function createRecordFromMiniPayload(rawClient) {
   }
 
   for (const field of MINI_EXTRA_TEXT_FIELDS) {
-    if (field === "ssn" || field === "clientPhoneNumber") {
+    if (field === "ssn" || field === "clientPhoneNumber" || field === "clientEmailAddress") {
       continue;
     }
 
@@ -1538,6 +1551,17 @@ function createRecordFromMiniPayload(rawClient) {
     };
   }
   miniData.clientPhoneNumber = normalizedPhone || "";
+
+  const normalizedEmail = normalizeEmailForStorage(client.clientEmailAddress);
+  if (
+    sanitizeTextValue(client.clientEmailAddress, MINI_EXTRA_MAX_LENGTH.clientEmailAddress || 320) &&
+    normalizedEmail === null
+  ) {
+    return {
+      error: "Invalid client email. Email must include @.",
+    };
+  }
+  miniData.clientEmailAddress = normalizedEmail || "";
 
   if (record.writtenOff === "Yes" && !record.dateWhenWrittenOff) {
     record.dateWhenWrittenOff = getTodayDateUs();
