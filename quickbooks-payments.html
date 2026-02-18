@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>QuickBooks Payments</title>
-    <link rel="stylesheet" href="/styles.css?v=20260218-global-menu" />
-    <script src="/quickbooks-payments.js?v=20260218-global-menu" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260218-client-search" />
+    <script src="/quickbooks-payments.js?v=20260218-client-search" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -52,6 +52,17 @@
           <header class="table-panel__header">
             <h2 class="section-heading">Transactions</h2>
             <div class="table-panel__actions">
+              <div class="quickbooks-search-field">
+                <label for="client-search" class="search-label quickbooks-search-field__label">Search by client</label>
+                <input
+                  id="client-search"
+                  type="search"
+                  name="client-search"
+                  placeholder="Type client name"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
               <button id="refresh-button" type="button" class="btn btn-primary">Refresh</button>
               <p id="range" class="quickbooks-range"></p>
             </div>
