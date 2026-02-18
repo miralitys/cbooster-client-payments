@@ -12,6 +12,7 @@ const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
 
 const refreshButton = document.querySelector("#refresh-client-managers");
+const totalRefreshButton = document.querySelector("#total-refresh-client-managers");
 const statusElement = document.querySelector("#client-manager-status");
 const tableBody = document.querySelector("#client-manager-table-body");
 
@@ -21,17 +22,25 @@ initializeAccountMenu();
 initializeAuthSession();
 
 refreshButton?.addEventListener("click", () => {
-  void loadClientManagers();
+  void loadClientManagers("incremental");
 });
 
-void loadClientManagers();
+totalRefreshButton?.addEventListener("click", () => {
+  void loadClientManagers("full");
+});
 
-async function loadClientManagers() {
+async function loadClientManagers(refreshMode = "none") {
   setLoadingState(true);
-  setStatus("Loading client-manager table...", false);
+  setStatus(
+    refreshMode === "full"
+      ? "Running total refresh for all clients..."
+      : "Refreshing only new clients...",
+    false,
+  );
 
   try {
-    const response = await fetch(CLIENT_MANAGER_ENDPOINT, {
+    const endpoint = buildClientManagerEndpoint(refreshMode);
+    const response = await fetch(endpoint, {
       headers: {
         Accept: "application/json",
       },
@@ -49,13 +58,25 @@ async function loadClientManagers() {
 
     const items = Array.isArray(payload.items) ? payload.items : [];
     renderRows(items);
-    setStatus(`Loaded ${items.length} client${items.length === 1 ? "" : "s"}.`, false);
+    const refreshedCount = Number.parseInt(payload?.refresh?.refreshedClientsCount, 10);
+    const refreshedLabel = Number.isFinite(refreshedCount) ? refreshedCount : 0;
+    setStatus(
+      `Loaded ${items.length} client${items.length === 1 ? "" : "s"}. Refreshed: ${refreshedLabel}.`,
+      false,
+    );
   } catch (error) {
-    renderRows([]);
     setStatus(error.message || "Failed to load client-manager table.", true);
   } finally {
     setLoadingState(false);
   }
+}
+
+function buildClientManagerEndpoint(refreshMode) {
+  const url = new URL(CLIENT_MANAGER_ENDPOINT, window.location.origin);
+  if (refreshMode === "incremental" || refreshMode === "full") {
+    url.searchParams.set("refresh", refreshMode);
+  }
+  return `${url.pathname}${url.search}`;
 }
 
 function renderRows(items) {
@@ -134,6 +155,10 @@ function setStatus(message, isError) {
 function setLoadingState(isLoading) {
   if (refreshButton) {
     refreshButton.disabled = isLoading;
+  }
+
+  if (totalRefreshButton) {
+    totalRefreshButton.disabled = isLoading;
   }
 }
 

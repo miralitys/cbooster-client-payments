@@ -66,12 +66,19 @@ const QUICKBOOKS_TRANSACTIONS_TABLE_NAME = resolveTableName(
   process.env.DB_QUICKBOOKS_TRANSACTIONS_TABLE_NAME,
   DEFAULT_QUICKBOOKS_TRANSACTIONS_TABLE_NAME,
 );
+const DEFAULT_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME = "ghl_client_manager_cache";
+const GHL_CLIENT_MANAGER_CACHE_TABLE_NAME = resolveTableName(
+  process.env.DB_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME,
+  DEFAULT_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME,
+);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
 const MODERATION_FILES_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_FILES_TABLE_NAME);
 const QUICKBOOKS_TRANSACTIONS_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_TRANSACTIONS_TABLE_NAME);
+const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
+const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
@@ -1535,6 +1542,212 @@ async function buildGhlClientManagerLookupRows(clientNames) {
   return rows.filter(Boolean);
 }
 
+function normalizeGhlClientManagerStatus(rawStatus, fallback = "unassigned") {
+  const normalized = sanitizeTextValue(rawStatus, 40).toLowerCase();
+  if (GHL_CLIENT_MANAGER_STATUSES.has(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function normalizeGhlRefreshMode(rawRefreshMode) {
+  const value = sanitizeTextValue(rawRefreshMode, 40).toLowerCase();
+  if (value === "full") {
+    return "full";
+  }
+  if (value === "incremental") {
+    return "incremental";
+  }
+  return "none";
+}
+
+function mapGhlClientManagerCacheRow(row) {
+  const managers = Array.isArray(row?.managers)
+    ? row.managers
+        .map((value) => sanitizeTextValue(value, 240))
+        .filter(Boolean)
+    : [];
+  const managersLabel = sanitizeTextValue(row?.managers_label, 2000) || managers.join(", ") || "-";
+  const matchedContacts = Number.parseInt(row?.matched_contacts, 10);
+  const status = normalizeGhlClientManagerStatus(row?.status);
+  const error = sanitizeTextValue(row?.error, 500);
+
+  return {
+    clientName: sanitizeTextValue(row?.client_name, 300),
+    managers,
+    managersLabel,
+    matchedContacts: Number.isFinite(matchedContacts) && matchedContacts >= 0 ? matchedContacts : 0,
+    status,
+    error,
+    updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
+  };
+}
+
+function normalizeGhlLookupRowForCache(row) {
+  const clientName = sanitizeTextValue(row?.clientName, 300);
+  if (!clientName) {
+    return null;
+  }
+
+  const managers = Array.isArray(row?.managers)
+    ? row.managers
+        .map((value) => sanitizeTextValue(value, 240))
+        .filter(Boolean)
+    : [];
+  const uniqueManagers = [...new Set(managers)];
+  const managersLabel = sanitizeTextValue(row?.managersLabel, 2000) || uniqueManagers.join(", ") || "-";
+  const matchedContacts = Number.parseInt(row?.matchedContacts, 10);
+  const status = normalizeGhlClientManagerStatus(
+    row?.status,
+    uniqueManagers.length ? "assigned" : "unassigned",
+  );
+  const error = sanitizeTextValue(row?.error, 500);
+
+  return {
+    clientName,
+    managers: uniqueManagers,
+    managersLabel,
+    matchedContacts: Number.isFinite(matchedContacts) && matchedContacts >= 0 ? matchedContacts : 0,
+    status,
+    error,
+  };
+}
+
+async function listCachedGhlClientManagerRowsByClientNames(clientNames) {
+  await ensureDatabaseReady();
+
+  const names = (Array.isArray(clientNames) ? clientNames : [])
+    .map((value) => sanitizeTextValue(value, 300))
+    .filter(Boolean);
+  if (!names.length) {
+    return [];
+  }
+
+  const result = await pool.query(
+    `
+      SELECT client_name, managers, managers_label, matched_contacts, status, error, updated_at
+      FROM ${GHL_CLIENT_MANAGER_CACHE_TABLE}
+      WHERE client_name = ANY($1::text[])
+      ORDER BY client_name ASC
+    `,
+    [names],
+  );
+
+  return result.rows.map(mapGhlClientManagerCacheRow).filter((row) => row.clientName);
+}
+
+async function upsertGhlClientManagerCacheRows(rows) {
+  await ensureDatabaseReady();
+
+  const normalizedRows = (Array.isArray(rows) ? rows : [])
+    .map(normalizeGhlLookupRowForCache)
+    .filter(Boolean);
+  if (!normalizedRows.length) {
+    return 0;
+  }
+
+  let writtenCount = 0;
+  for (let offset = 0; offset < normalizedRows.length; offset += 150) {
+    const batch = normalizedRows.slice(offset, offset + 150);
+    const placeholders = [];
+    const values = [];
+
+    for (let index = 0; index < batch.length; index += 1) {
+      const row = batch[index];
+      const base = index * 6;
+      placeholders.push(`($${base + 1}, $${base + 2}::jsonb, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`);
+      values.push(
+        row.clientName,
+        JSON.stringify(row.managers),
+        row.managersLabel,
+        row.matchedContacts,
+        row.status,
+        row.error,
+      );
+    }
+
+    const result = await pool.query(
+      `
+        INSERT INTO ${GHL_CLIENT_MANAGER_CACHE_TABLE}
+          (client_name, managers, managers_label, matched_contacts, status, error, updated_at)
+        VALUES ${placeholders.join(", ")}
+        ON CONFLICT (client_name)
+        DO UPDATE SET
+          managers = EXCLUDED.managers,
+          managers_label = EXCLUDED.managers_label,
+          matched_contacts = EXCLUDED.matched_contacts,
+          status = EXCLUDED.status,
+          error = EXCLUDED.error,
+          updated_at = NOW()
+      `,
+      values,
+    );
+
+    writtenCount += result.rowCount || 0;
+  }
+
+  return writtenCount;
+}
+
+async function deleteStaleGhlClientManagerCacheRows(clientNames) {
+  await ensureDatabaseReady();
+
+  const names = (Array.isArray(clientNames) ? clientNames : [])
+    .map((value) => sanitizeTextValue(value, 300))
+    .filter(Boolean);
+
+  if (!names.length) {
+    const result = await pool.query(`DELETE FROM ${GHL_CLIENT_MANAGER_CACHE_TABLE}`);
+    return result.rowCount || 0;
+  }
+
+  const result = await pool.query(
+    `
+      DELETE FROM ${GHL_CLIENT_MANAGER_CACHE_TABLE}
+      WHERE NOT (client_name = ANY($1::text[]))
+    `,
+    [names],
+  );
+
+  return result.rowCount || 0;
+}
+
+function buildClientManagerItemsFromCache(clientNames, cachedRows) {
+  const rowsByClientName = new Map();
+  for (const row of Array.isArray(cachedRows) ? cachedRows : []) {
+    if (!row?.clientName) {
+      continue;
+    }
+    rowsByClientName.set(row.clientName, row);
+  }
+
+  const items = [];
+  for (const clientName of Array.isArray(clientNames) ? clientNames : []) {
+    const normalizedClientName = sanitizeTextValue(clientName, 300);
+    if (!normalizedClientName) {
+      continue;
+    }
+
+    const cachedRow = rowsByClientName.get(normalizedClientName);
+    if (cachedRow) {
+      items.push(cachedRow);
+      continue;
+    }
+
+    items.push({
+      clientName: normalizedClientName,
+      managers: [],
+      managersLabel: "-",
+      matchedContacts: 0,
+      status: "unassigned",
+      error: "",
+      updatedAt: null,
+    });
+  }
+
+  return items;
+}
+
 function formatQuickBooksDateUtc(value) {
   const date = value instanceof Date ? value : new Date(value);
   const year = String(date.getUTCFullYear());
@@ -2278,6 +2491,23 @@ async function ensureDatabaseReady() {
       await pool.query(`
         CREATE INDEX IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE_NAME}_payment_date_idx
         ON ${QUICKBOOKS_TRANSACTIONS_TABLE} (payment_date DESC)
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${GHL_CLIENT_MANAGER_CACHE_TABLE} (
+          client_name TEXT PRIMARY KEY,
+          managers JSONB NOT NULL DEFAULT '[]'::jsonb,
+          managers_label TEXT NOT NULL DEFAULT '-',
+          matched_contacts INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'unassigned',
+          error TEXT NOT NULL DEFAULT '',
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CLIENT_MANAGER_CACHE_TABLE_NAME}_updated_at_idx
+        ON ${GHL_CLIENT_MANAGER_CACHE_TABLE} (updated_at DESC)
       `);
     })().catch((error) => {
       dbReadyPromise = null;
@@ -3708,17 +3938,46 @@ app.get("/api/ghl/client-managers", async (_req, res) => {
     return;
   }
 
-  if (!isGhlConfigured()) {
-    res.status(503).json({
-      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
-    });
-    return;
-  }
+  const refreshMode = normalizeGhlRefreshMode(_req.query.refresh);
 
   try {
     const state = await getStoredRecords();
     const clientNames = getUniqueClientNamesFromRecords(state.records);
-    const items = await buildGhlClientManagerLookupRows(clientNames);
+    let cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
+    let refreshedClientsCount = 0;
+    let refreshedRowsWritten = 0;
+    let deletedStaleRowsCount = 0;
+    let refreshed = false;
+
+    if (refreshMode !== "none") {
+      if (!isGhlConfigured()) {
+        res.status(503).json({
+          error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+        });
+        return;
+      }
+
+      const cachedClientNameSet = new Set(cachedRows.map((row) => row.clientName));
+      const namesToLookup =
+        refreshMode === "full"
+          ? clientNames
+          : clientNames.filter((clientName) => !cachedClientNameSet.has(clientName));
+
+      if (refreshMode === "full") {
+        deletedStaleRowsCount = await deleteStaleGhlClientManagerCacheRows(clientNames);
+      }
+
+      if (namesToLookup.length) {
+        const lookedUpRows = await buildGhlClientManagerLookupRows(namesToLookup);
+        refreshedRowsWritten = await upsertGhlClientManagerCacheRows(lookedUpRows);
+        refreshedClientsCount = lookedUpRows.length;
+      }
+
+      refreshed = true;
+      cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
+    }
+
+    const items = buildClientManagerItemsFromCache(clientNames, cachedRows);
 
     res.json({
       ok: true,
@@ -3726,6 +3985,13 @@ app.get("/api/ghl/client-managers", async (_req, res) => {
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt,
+      refresh: {
+        mode: refreshMode,
+        performed: refreshed,
+        refreshedClientsCount,
+        refreshedRowsWritten,
+        deletedStaleRowsCount,
+      },
     });
   } catch (error) {
     console.error("GET /api/ghl/client-managers failed:", error);
