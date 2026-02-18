@@ -316,6 +316,7 @@ function setModalVisibility(isVisible) {
   }
 
   submissionModal.hidden = !isVisible;
+  document.body.classList.toggle("modal-open", isVisible);
   document.body.style.overflow = isVisible ? "hidden" : "";
   if (!isVisible) {
     activeSubmission = null;
