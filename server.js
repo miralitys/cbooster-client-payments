@@ -167,16 +167,7 @@ const MINI_EXTRA_MAX_LENGTH = {
   identityIq: 2000,
   clientEmailAddress: 320,
 };
-const MINI_REQUIRED_FIELDS = [
-  "clientName",
-  "closedBy",
-  "leadSource",
-  "clientPhoneNumber",
-  "serviceType",
-  "contractTotals",
-  "payment1",
-  "payment1Date",
-];
+const MINI_REQUIRED_FIELDS = ["clientName"];
 const MINI_ALLOWED_FIELDS = new Set([
   ...RECORD_TEXT_FIELDS,
   ...RECORD_DATE_FIELDS,
@@ -790,6 +781,8 @@ function isPublicWebAuthPath(pathname) {
     pathname === "/mini" ||
     pathname === "/mini.html" ||
     pathname === "/mini.js" ||
+    pathname === "/api/auth/login" ||
+    pathname === "/api/auth/logout" ||
     pathname === "/api/mobile/auth/login" ||
     pathname === "/api/mobile/auth/logout" ||
     pathname === "/api/health"
@@ -1702,7 +1695,7 @@ async function upsertGhlClientManagerCacheRows(rows) {
     const result = await pool.query(
       `
         INSERT INTO ${GHL_CLIENT_MANAGER_CACHE_TABLE}
-          (client_name, managers, managers_label, matched_contacts, status, error, updated_at)
+          (client_name, managers, managers_label, matched_contacts, status, error)
         VALUES ${placeholders.join(", ")}
         ON CONFLICT (client_name)
         DO UPDATE SET
@@ -4171,7 +4164,7 @@ app.post("/login", (req, res) => {
   res.redirect(302, nextPath);
 });
 
-app.post("/api/mobile/auth/login", (req, res) => {
+function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
   const password = req.body?.password;
 
@@ -4194,15 +4187,20 @@ app.post("/api/mobile/auth/login", (req, res) => {
       username: authUsername,
     },
   });
-});
+}
 
-app.post("/api/mobile/auth/logout", (req, res) => {
+function handleApiAuthLogout(req, res) {
   clearWebAuthSessionCookie(req, res);
   res.setHeader("Cache-Control", "no-store, private");
   res.json({
     ok: true,
   });
-});
+}
+
+app.post("/api/auth/login", handleApiAuthLogin);
+app.post("/api/auth/logout", handleApiAuthLogout);
+app.post("/api/mobile/auth/login", handleApiAuthLogin);
+app.post("/api/mobile/auth/logout", handleApiAuthLogout);
 
 function handleWebLogout(req, res) {
   clearWebAuthSessionCookie(req, res);
