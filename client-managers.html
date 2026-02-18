@@ -54,10 +54,13 @@
             <h2 class="section-heading">Client - Manager Table</h2>
             <div class="table-panel__actions">
               <button id="refresh-client-managers" type="button" class="btn btn-primary">Refresh</button>
+              <button id="total-refresh-client-managers" type="button" class="btn btn-secondary">Total Refresh</button>
             </div>
           </header>
 
-          <p id="client-manager-status" class="dashboard-message client-manager-status">Loading...</p>
+          <p id="client-manager-status" class="dashboard-message client-manager-status">
+            Press Refresh to update only new clients. Use Total Refresh to recalculate all clients.
+          </p>
 
           <div class="table-wrap client-manager-table-wrap">
             <table class="client-manager-table">
