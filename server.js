@@ -594,14 +594,6 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
   }
 }
 
-function normalizeStoredRecords(rawRecords) {
-  if (!Array.isArray(rawRecords)) {
-    return [];
-  }
-
-  return rawRecords.filter((record) => record && typeof record === "object");
-}
-
 function sanitizeTextValue(value, maxLength = 4000) {
   return (value ?? "").toString().trim().slice(0, maxLength);
 }
@@ -1004,8 +996,12 @@ app.get("/mini", (_req, res) => {
   res.sendFile(path.join(staticRoot, "mini.html"));
 });
 
+app.get("/Client_Payments", (_req, res) => {
+  res.sendFile(path.join(staticRoot, "client-payments.html"));
+});
+
 app.get("/moderation", (_req, res) => {
-  res.sendFile(path.join(staticRoot, "moderation.html"));
+  res.redirect(302, "/");
 });
 
 app.use("/api", (_req, res) => {

@@ -1,413 +1,90 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Credit Booster Client Payments</title>
-    <link rel="stylesheet" href="styles.css?v=20260218-ui-overhaul64" />
-    <script src="seed-client-data.js?v=20260217-ar3" defer></script>
-    <script src="app.js?v=20260218-ui-overhaul50" defer></script>
+    <title>Dashboard</title>
+    <link rel="stylesheet" href="/dashboard.css?v=20260218-moderation-dashboard" />
+    <script src="/dashboard.js?v=20260218-moderation-dashboard" defer></script>
   </head>
   <body>
-    <main class="page-shell" aria-busy="false">
-      <div class="container">
-        <header class="section page-header">
-          <div class="page-header__title">
-            <p class="eyebrow">Credit Booster</p>
-            <h1>Client Payments Dashboard</h1>
+    <main class="dashboard-shell">
+      <header class="topbar">
+        <h1 class="topbar__title">Дашборд</h1>
+        <nav class="topbar__nav" aria-label="Переходы">
+          <a class="topbar__nav-link" href="/Client_Payments">Client Payment</a>
+        </nav>
+        <div class="topbar__menu-wrap">
+          <button id="topbar-menu-toggle" class="menu-toggle" type="button" aria-haspopup="menu" aria-expanded="false">
+            <span aria-hidden="true">⋯</span>
+            <span class="sr-only">Открыть меню</span>
+          </button>
+          <div id="topbar-menu" class="topbar-menu" role="menu" hidden>
+            <a class="topbar-menu__item" href="/Client_Payments" role="menuitem">Client Payments</a>
           </div>
-          <div class="page-header__right">
-            <div class="page-header__stats" aria-live="polite">
-              <span class="stat-chip">
-                <span class="stat-chip__label">Clients:</span>
-                <span class="stat-chip__value" id="record-count">0</span>
-              </span>
-              <span class="stat-chip">
-                <span class="stat-chip__label">Filtered:</span>
-                <span class="stat-chip__value" id="filtered-count">0</span>
-              </span>
-              <span class="stat-chip">
-                <span class="stat-chip__label">Written Off:</span>
-                <span class="stat-chip__value" id="written-off-count">0</span>
-              </span>
-              <span class="stat-chip">
-                <span class="stat-chip__label">Fully Paid:</span>
-                <span class="stat-chip__value" id="fully-paid-count">0</span>
-              </span>
-              <span class="stat-chip">
-                <span class="stat-chip__label">Overdue:</span>
-                <span class="stat-chip__value" id="overdue-count">0</span>
-              </span>
-            </div>
-            <div id="account-menu" class="account-menu">
-              <button
-                id="account-menu-toggle"
-                type="button"
-                class="account-menu__toggle"
-                aria-haspopup="menu"
-                aria-expanded="false"
-                aria-controls="account-menu-panel"
-                aria-label="Open account menu"
-              >
-                <span class="account-menu__line" aria-hidden="true"></span>
-                <span class="account-menu__line" aria-hidden="true"></span>
-                <span class="account-menu__line" aria-hidden="true"></span>
-              </button>
-              <div id="account-menu-panel" class="account-menu__panel" role="menu" hidden>
-                <p id="account-menu-user" class="account-menu__user">Not signed in</p>
-                <button id="account-login-action" type="button" class="account-menu__item" role="menuitem">
-                  Log In
-                </button>
-                <button id="account-logout-action" type="button" class="account-menu__item" role="menuitem">
-                  Log Out
-                </button>
-              </div>
-            </div>
-          </div>
-        </header>
-
-        <div class="grid dashboard-grid">
-          <section class="section filters-panel" aria-label="Filtering options">
-            <div class="filters-panel__header">
-              <h2 class="section-heading">Filters</h2>
-              <button
-                id="toggle-filters-panel"
-                type="button"
-                class="filters-toggle-btn"
-                aria-label="Collapse filters panel"
-                aria-controls="filters-panel-content"
-                aria-expanded="true"
-              >
-                <span class="filters-toggle-icon" aria-hidden="true">‹</span>
-              </button>
-            </div>
-
-            <div class="filters-panel__content" id="filters-panel-content">
-              <label class="search-label" for="search-input">Search by client or company</label>
-              <div class="search-row">
-                <input
-                  id="search-input"
-                  type="search"
-                  placeholder="For example: John Smith or ACME Logistics"
-                  autocomplete="off"
-                />
-                <button id="clear-search" type="button" class="btn btn-secondary">Reset</button>
-              </div>
-
-              <div class="filters-grid">
-                <div class="filter-field filter-field--date-from">
-                  <label for="payment-date-from">New Client From</label>
-                  <input id="payment-date-from" type="text" inputmode="numeric" placeholder="MM/DD/YYYY" />
-                </div>
-
-                <div class="filter-field filter-field--date-to">
-                  <label for="payment-date-to">To</label>
-                  <input id="payment-date-to" type="text" inputmode="numeric" placeholder="MM/DD/YYYY" />
-                </div>
-
-                <div class="filter-field filter-field--payments-date-from">
-                  <label for="payments-date-from">Payments From</label>
-                  <input id="payments-date-from" type="text" inputmode="numeric" placeholder="MM/DD/YYYY" />
-                </div>
-
-                <div class="filter-field filter-field--payments-date-to">
-                  <label for="payments-date-to">To</label>
-                  <input id="payments-date-to" type="text" inputmode="numeric" placeholder="MM/DD/YYYY" />
-                </div>
-
-                <div class="filter-field filter-field--closed-by">
-                  <label for="closed-by-filter">Closed By</label>
-                  <select id="closed-by-filter" aria-label="Filter by closed by name">
-                    <option value="">All</option>
-                  </select>
-                </div>
-
-                <button id="clear-date-filter" type="button" class="btn btn-secondary">Clear</button>
-              </div>
-
-              <div class="status-filter-group" role="group" aria-label="Filter clients by status">
-                <button type="button" class="btn btn-secondary table-filter-btn is-active" data-status-filter="all">All</button>
-                <button type="button" class="btn btn-secondary table-filter-btn" data-status-filter="written-off">
-                  Written Off
-                </button>
-                <button type="button" class="btn btn-secondary table-filter-btn" data-status-filter="fully-paid">
-                  Fully Paid
-                </button>
-                <button type="button" class="btn btn-secondary table-filter-btn" data-status-filter="after-result">
-                  After Result
-                </button>
-                <button type="button" class="btn btn-secondary table-filter-btn" data-status-filter="overdue">
-                  Overdue
-                </button>
-              </div>
-
-              <div
-                id="overdue-range-filter"
-                class="overdue-range-filter"
-                role="group"
-                aria-label="Filter overdue clients by days"
-                hidden
-              >
-                <button type="button" class="btn btn-secondary overdue-range-filter-btn" data-overdue-range="1-7">
-                  1-7
-                </button>
-                <button type="button" class="btn btn-secondary overdue-range-filter-btn" data-overdue-range="8-30">
-                  8-30
-                </button>
-                <button type="button" class="btn btn-secondary overdue-range-filter-btn" data-overdue-range="31-60">
-                  31-60
-                </button>
-                <button type="button" class="btn btn-secondary overdue-range-filter-btn" data-overdue-range="60+">
-                  60+
-                </button>
-              </div>
-
-              <div
-                id="written-off-date-filter"
-                class="written-off-date-filter"
-                aria-label="Filter written off clients by date range"
-                hidden
-              >
-                <div class="filter-field">
-                  <label for="written-off-date-from">Written Off Date From</label>
-                  <input id="written-off-date-from" type="text" inputmode="numeric" placeholder="MM/DD/YYYY" />
-                </div>
-                <div class="filter-field">
-                  <label for="written-off-date-to">To</label>
-                  <input id="written-off-date-to" type="text" inputmode="numeric" placeholder="MM/DD/YYYY" />
-                </div>
-              </div>
-
-              <div
-                id="fully-paid-date-filter"
-                class="written-off-date-filter"
-                aria-label="Filter fully paid clients by contract close date range"
-                hidden
-              >
-                <div class="filter-field">
-                  <label for="fully-paid-date-from">Fully Paid Date From</label>
-                  <input id="fully-paid-date-from" type="text" inputmode="numeric" placeholder="MM/DD/YYYY" />
-                </div>
-                <div class="filter-field">
-                  <label for="fully-paid-date-to">To</label>
-                  <input id="fully-paid-date-to" type="text" inputmode="numeric" placeholder="MM/DD/YYYY" />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="section period-dashboard-shell" aria-label="Period financial dashboard">
-            <div
-              id="toggle-overview-panel"
-              class="period-dashboard-shell__header"
-              role="button"
-              tabindex="0"
-              aria-label="Collapse overview"
-              aria-controls="overview-content"
-              aria-expanded="true"
-            >
-              <div class="period-dashboard-shell__header-main">
-                <h2 class="period-dashboard-shell__heading-text">Overview</h2>
-                <span
-                  id="overview-collapsed-summary"
-                  class="overview-collapsed-summary"
-                  aria-hidden="true"
-                  hidden
-                >
-                  <span class="overview-collapsed-summary__item">
-                    Received:
-                    <strong id="overview-summary-received">$0</strong>
-                  </span>
-                  <span class="overview-collapsed-summary__item">
-                    Sales:
-                    <strong id="overview-summary-sales">$0</strong>
-                  </span>
-                  <span class="overview-collapsed-summary__item">
-                    Debt:
-                    <strong id="overview-summary-debt">$0</strong>
-                  </span>
-                </span>
-              </div>
-              <div class="period-dashboard-shell__header-actions">
-                <div class="overview-segmented" role="group" aria-label="Select overview period">
-                  <button
-                    type="button"
-                    class="btn btn-secondary overview-period-toggle is-active"
-                    data-overview-period="currentWeek"
-                    aria-pressed="true"
-                  >
-                    Current Week
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-secondary overview-period-toggle"
-                    data-overview-period="previousWeek"
-                    aria-pressed="false"
-                  >
-                    Previous Week
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-secondary overview-period-toggle"
-                    data-overview-period="currentMonth"
-                    aria-pressed="false"
-                  >
-                    Current Month
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-secondary overview-period-toggle"
-                    data-overview-period="last30Days"
-                    aria-pressed="false"
-                  >
-                    Last 30 Days
-                  </button>
-                </div>
-                <span class="overview-toggle-icon" aria-hidden="true">▾</span>
-              </div>
-            </div>
-            <div id="overview-content" class="overview-cards" role="region" aria-label="Overview totals by period">
-              <article class="overview-card" aria-label="Total received by period">
-                <h3 class="overview-card__title">Total Received</h3>
-                <p class="overview-card__value" id="overview-received-value">$0</p>
-                <p class="overview-card__context" id="overview-received-context">Current Week</p>
-              </article>
-
-              <article class="overview-card" aria-label="Total sales by period">
-                <h3 class="overview-card__title">Total Sales</h3>
-                <p class="overview-card__value" id="overview-sales-value">$0</p>
-                <p class="overview-card__context" id="overview-sales-context">Current Week</p>
-              </article>
-
-              <article class="overview-card" aria-label="Total debt">
-                <h3 class="overview-card__title">Total Debt</h3>
-                <p class="overview-card__value" id="overview-debt-value">$0</p>
-                <p class="overview-card__context">As of today</p>
-              </article>
-            </div>
-          </section>
-
-          <section class="section table-panel" aria-label="Client payments table section">
-            <header class="table-panel__header">
-              <h2 class="section-heading">Client Payments</h2>
-              <div class="table-panel__actions">
-                <div id="export-dropdown" class="export-dropdown">
-                  <button
-                    id="export-menu-toggle"
-                    type="button"
-                    class="btn btn-secondary export-dropdown__toggle"
-                    aria-haspopup="menu"
-                    aria-expanded="false"
-                    aria-controls="export-menu"
-                  >
-                    Export
-                    <span class="export-dropdown__chevron" aria-hidden="true">▾</span>
-                  </button>
-                  <div id="export-menu" class="export-dropdown__menu" role="menu" hidden>
-                    <button
-                      id="export-xls"
-                      type="button"
-                      class="export-dropdown__item"
-                      role="menuitem"
-                      aria-label="Export currently visible table rows to XLS"
-                    >
-                      Export XLS
-                    </button>
-                    <button
-                      id="export-pdf"
-                      type="button"
-                      class="export-dropdown__item"
-                      role="menuitem"
-                      aria-label="Export currently visible table rows to PDF"
-                    >
-                      Export PDF
-                    </button>
-                  </div>
-                </div>
-                <button
-                  id="toggle-client-form"
-                  type="button"
-                  class="btn btn-primary"
-                  aria-expanded="false"
-                  aria-controls="client-form-section"
-                >
-                  Add New Client
-                </button>
-              </div>
-            </header>
-
-            <section class="client-form-shell" id="client-form-section" hidden>
-              <h3 class="subsection-heading">New Client</h3>
-              <form id="client-form" novalidate>
-                <div id="form-fields" class="form-sections"></div>
-                <div class="form-actions sticky-action-bar">
-                  <button type="submit" class="btn btn-primary">Add Client</button>
-                  <button type="reset" class="btn btn-secondary">Reset Form</button>
-                  <button type="button" id="close-client-form" class="btn btn-secondary">Close</button>
-                </div>
-                <p class="form-message" id="form-message" role="status" aria-live="polite"></p>
-              </form>
-            </section>
-
-            <div class="table-wrap" aria-live="polite">
-              <table id="payments-table">
-                <thead id="table-head"></thead>
-                <tbody id="table-body"></tbody>
-                <tfoot id="table-foot"></tfoot>
-              </table>
-            </div>
-          </section>
         </div>
-      </div>
+      </header>
+
+      <section class="overview-block" aria-label="Overview">
+        <div class="overview-block__head">
+          <h2>Overview</h2>
+        </div>
+        <div class="overview-cards">
+          <article class="overview-card">
+            <p class="overview-card__label">Total Received</p>
+            <p id="overview-received-value" class="overview-card__value">$0.00</p>
+          </article>
+          <article class="overview-card">
+            <p class="overview-card__label">Total Sales</p>
+            <p id="overview-sales-value" class="overview-card__value">$0.00</p>
+          </article>
+          <article class="overview-card">
+            <p class="overview-card__label">Total Debt</p>
+            <p id="overview-debt-value" class="overview-card__value">$0.00</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="moderation-block" aria-label="Новые клиенты на модерации">
+        <div class="moderation-block__head">
+          <h2>Новые клиенты из Mini App</h2>
+          <div class="moderation-block__actions">
+            <button id="refresh-submissions-button" type="button">Обновить</button>
+          </div>
+        </div>
+        <p id="dashboard-message" class="dashboard-message" role="status" aria-live="polite"></p>
+        <div class="table-wrap">
+          <table id="submissions-table">
+            <thead>
+              <tr>
+                <th>Client Name</th>
+                <th>Company</th>
+                <th>Closed By</th>
+                <th>Submitted</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="submissions-table-body"></tbody>
+          </table>
+        </div>
+      </section>
     </main>
 
-    <section id="auth-gate" class="auth-gate" hidden aria-live="polite">
-      <div class="auth-gate__backdrop"></div>
-      <div class="auth-gate__dialog" role="dialog" aria-modal="true" aria-labelledby="auth-gate-title">
-        <h2 id="auth-gate-title">Sign In</h2>
-        <p class="auth-gate__subtitle">Enter your account details to continue.</p>
-        <form id="auth-form" novalidate>
-          <label class="auth-gate__field">
-            Username
-            <input id="auth-username" name="username" type="text" autocomplete="username" required />
-          </label>
-          <label class="auth-gate__field">
-            Password
-            <input
-              id="auth-password"
-              name="password"
-              type="password"
-              autocomplete="current-password"
-              required
-            />
-          </label>
-          <button type="submit" class="btn btn-primary auth-gate__submit">Log In</button>
-          <p id="auth-message" class="auth-gate__message" role="status" aria-live="polite"></p>
-        </form>
-      </div>
-    </section>
-
-    <section class="modal" id="edit-modal" hidden>
-      <div class="modal-backdrop" data-close-edit-modal></div>
-      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title" tabindex="-1">
-        <header class="modal-header">
-          <div class="modal-title-wrap">
-            <h2 id="edit-modal-title">Client Card</h2>
-            <div id="edit-modal-status-chips" aria-live="polite" aria-label="Client status"></div>
-          </div>
-          <button type="button" class="modal-close" data-close-edit-modal aria-label="Close dialog">×</button>
+    <section id="submission-modal" class="submission-modal" hidden>
+      <div class="submission-modal__backdrop" data-close-modal></div>
+      <div class="submission-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="submission-modal-title">
+        <header class="submission-modal__header">
+          <h3 id="submission-modal-title">Проверка клиента</h3>
+          <button type="button" class="icon-button" data-close-modal aria-label="Закрыть">✕</button>
         </header>
-
-        <form id="edit-client-form" class="modal-form" novalidate>
-          <div id="edit-form-fields" class="form-sections"></div>
-          <div class="form-actions sticky-action-bar modal-footer">
-            <button type="button" id="enable-edit-mode" class="btn btn-primary">Edit</button>
-            <button type="submit" id="save-edit-changes" class="btn btn-primary" hidden>Save Changes</button>
-            <button type="button" id="cancel-edit-mode" class="btn btn-secondary" hidden>Cancel Editing</button>
-            <button type="button" class="btn btn-ghost" data-close-edit-modal>Close</button>
-          </div>
-          <p class="form-message" id="edit-form-message" role="status" aria-live="polite"></p>
-        </form>
+        <div id="submission-modal-details" class="submission-modal__details"></div>
+        <label class="approval-checkbox">
+          <input id="approval-checkbox" type="checkbox" />
+          <span>Добавить в общую базу данных</span>
+        </label>
+        <div class="submission-modal__footer">
+          <button id="apply-moderation-button" type="button">Применить</button>
+        </div>
       </div>
     </section>
   </body>
