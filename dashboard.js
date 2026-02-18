@@ -578,7 +578,6 @@ function openSubmissionModal(submissionId) {
   appendDetail(fragment, "Notes", getClientField(submission, "notes"));
   appendDetail(fragment, "After Result", getClientField(submission, "afterResult"));
   appendDetail(fragment, "Written Off", getClientField(submission, "writtenOff"));
-  appendDetail(fragment, "Submitted At", formatDateTime(submission.submittedAt));
   appendDetail(fragment, "Submitted By", formatSubmittedBy(submission.submittedBy));
 
   const allClientFields = submission.client && typeof submission.client === "object" ? submission.client : {};
@@ -593,6 +592,8 @@ function openSubmissionModal(submissionId) {
     "notes",
     "afterResult",
     "writtenOff",
+    "id",
+    "createdAt",
   ]);
   for (const [key, value] of Object.entries(allClientFields)) {
     if (alreadyShown.has(key)) {
