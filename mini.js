@@ -6,6 +6,7 @@ const submitButton = document.querySelector("#mini-submit-button");
 const payment1DateInput = document.querySelector("#payment1Date");
 const ssnInput = document.querySelector("#ssn");
 const clientPhoneInput = document.querySelector("#clientPhoneNumber");
+const clientEmailInput = document.querySelector("#clientEmailAddress");
 const attachmentsInput = document.querySelector("#attachments");
 const attachmentsPreview = document.querySelector("#attachments-preview");
 const telegramApp = window.Telegram?.WebApp || null;
@@ -40,6 +41,7 @@ let isMiniAccessAllowed = false;
 initializeDateField(payment1DateInput);
 initializeSsnField(ssnInput);
 initializePhoneField(clientPhoneInput);
+initializeEmailField(clientEmailInput);
 setDefaultDateIfEmpty(payment1DateInput);
 setSubmittingState(true);
 void initializeTelegramContext();
@@ -78,6 +80,12 @@ if (form) {
       return;
     }
 
+    const emailValidation = validateEmailField();
+    if (!emailValidation.ok) {
+      setMessage("Client Email Address must include @.", "error");
+      return;
+    }
+
     const payload = buildPayload();
     if (payload.attachmentsError) {
       setMessage(payload.attachmentsError, "error");
@@ -104,6 +112,7 @@ if (form) {
       form.reset();
       setInputInvalidState(ssnInput, false);
       setInputInvalidState(clientPhoneInput, false);
+      setInputInvalidState(clientEmailInput, false);
       setDefaultDateIfEmpty(payment1DateInput);
       renderAttachmentsPreview([]);
       setMessage("Submitted for moderation. Client will appear after approval.", "success");
@@ -425,6 +434,51 @@ function validatePhoneField() {
   return {
     ok: isValid,
     value: formatted,
+  };
+}
+
+function initializeEmailField(input) {
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+
+  input.addEventListener("input", () => {
+    const value = (input.value || "").trim();
+    setInputInvalidState(input, Boolean(value) && !isValidEmailWithAt(value));
+  });
+
+  input.addEventListener("blur", () => {
+    validateEmailField();
+  });
+}
+
+function isValidEmailWithAt(rawValue) {
+  return (rawValue || "").includes("@");
+}
+
+function validateEmailField() {
+  if (!(clientEmailInput instanceof HTMLInputElement)) {
+    return {
+      ok: true,
+      value: "",
+    };
+  }
+
+  const value = (clientEmailInput.value || "").trim();
+  clientEmailInput.value = value;
+  if (!value) {
+    setInputInvalidState(clientEmailInput, false);
+    return {
+      ok: true,
+      value: "",
+    };
+  }
+
+  const isValid = isValidEmailWithAt(value);
+  setInputInvalidState(clientEmailInput, !isValid);
+  return {
+    ok: isValid,
+    value,
   };
 }
 
