@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>QuickBooks Payments</title>
-    <link rel="stylesheet" href="/styles.css?v=20260218-unified-site" />
-    <script src="/quickbooks-payments.js?v=20260218-qb-payments" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260218-global-menu" />
+    <script src="/quickbooks-payments.js?v=20260218-global-menu" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -17,8 +17,32 @@
             <p class="quickbooks-subtitle">From 01/01/2026 to today: client name, payment amount, payment date</p>
           </div>
           <div class="page-header__right quickbooks-page-header__actions">
-            <button id="refresh-button" type="button" class="btn btn-primary">Refresh</button>
-            <a class="btn btn-secondary dashboard-nav-link" href="/">Back to Dashboard</a>
+            <div id="account-menu" class="account-menu">
+              <button
+                id="account-menu-toggle"
+                type="button"
+                class="account-menu__toggle"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-controls="account-menu-panel"
+                aria-label="Open account menu"
+              >
+                <span class="account-menu__line" aria-hidden="true"></span>
+                <span class="account-menu__line" aria-hidden="true"></span>
+                <span class="account-menu__line" aria-hidden="true"></span>
+              </button>
+
+              <div id="account-menu-panel" class="account-menu__panel" role="menu" hidden>
+                <a href="/" class="account-menu__item" role="menuitem">Main</a>
+                <a href="/quickbooks-payments" class="account-menu__item" role="menuitem">Quick Book Payment</a>
+                <a href="/Client_Payments" class="account-menu__item" role="menuitem">Client Payment</a>
+                <div class="account-menu__divider" aria-hidden="true"></div>
+                <p id="account-menu-user" class="account-menu__user">Signed in</p>
+                <button id="account-logout-action" type="button" class="account-menu__item" role="menuitem">
+                  Log Out
+                </button>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -26,6 +50,7 @@
           <header class="table-panel__header">
             <h2 class="section-heading">Payments</h2>
             <div class="table-panel__actions">
+              <button id="refresh-button" type="button" class="btn btn-primary">Refresh</button>
               <p id="range" class="quickbooks-range"></p>
             </div>
           </header>

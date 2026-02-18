@@ -3260,7 +3260,7 @@ function initializeAccountMenu() {
 function initializeAuthGate() {}
 
 function initializeAuthSession() {
-  currentAuthUser = "Authorized user";
+  currentAuthUser = "";
   syncAuthUi();
   void hydrateAuthSessionFromServer();
 }
@@ -3284,7 +3284,7 @@ function syncAuthUi() {
   const isSignedIn = Boolean(currentAuthUser);
 
   if (accountMenuUser) {
-    accountMenuUser.textContent = isSignedIn ? `Signed in as ${currentAuthUser}` : "Not signed in";
+    accountMenuUser.textContent = isSignedIn ? `User: ${currentAuthUser}` : "User: -";
   }
 
   if (accountLoginActionButton) {
@@ -3315,7 +3315,7 @@ async function hydrateAuthSessionFromServer() {
 
     const payload = await response.json().catch(() => null);
     const username = (payload?.user?.username || "").toString().trim();
-    currentAuthUser = username || "Authorized user";
+    currentAuthUser = username || "";
     syncAuthUi();
   } catch {
     // Keep optimistic menu state.
