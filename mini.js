@@ -51,6 +51,7 @@ if (form) {
       prefillClosedBy();
       setDefaultDateIfEmpty(payment1DateInput);
       setMessage("Submitted for moderation. Client will appear after approval.", "success");
+      showSubmissionPopup();
       telegramApp?.HapticFeedback?.notificationOccurred?.("success");
     } catch (error) {
       setMessage(error.message || "Failed to add client.", "error");
@@ -265,4 +266,34 @@ function setMessage(text, tone) {
 
   message.textContent = text;
   message.className = `message ${tone || ""}`.trim();
+}
+
+function showSubmissionPopup() {
+  const popupMessage = "Клиент отправлен на модерацию. Он появится после подтверждения.";
+
+  if (telegramApp && typeof telegramApp.showPopup === "function") {
+    try {
+      telegramApp.showPopup({
+        title: "Клиент отправлен",
+        message: popupMessage,
+        buttons: [{ type: "ok", text: "ОК" }],
+      });
+      return;
+    } catch {
+      // Continue to fallback.
+    }
+  }
+
+  if (telegramApp && typeof telegramApp.showAlert === "function") {
+    try {
+      telegramApp.showAlert(popupMessage);
+      return;
+    } catch {
+      // Continue to browser fallback.
+    }
+  }
+
+  if (typeof window !== "undefined" && typeof window.alert === "function") {
+    window.alert(popupMessage);
+  }
 }
