@@ -238,7 +238,7 @@
       }
     </style>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/mini.js?v=20260218-email-at-check" defer></script>
+    <script src="/mini.js?v=20260218-required-fields" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -252,13 +252,13 @@
         </div>
 
         <div class="field">
-          <label for="closedBy">Closed By</label>
-          <input id="closedBy" name="closedBy" autocomplete="off" />
+          <label for="closedBy">Closed By *</label>
+          <input id="closedBy" name="closedBy" autocomplete="off" required />
         </div>
 
         <div class="field">
-          <label for="leadSource">Lead Source</label>
-          <input id="leadSource" name="leadSource" autocomplete="off" />
+          <label for="leadSource">Lead Source *</label>
+          <input id="leadSource" name="leadSource" autocomplete="off" required />
         </div>
 
         <div class="field">
@@ -274,7 +274,7 @@
         </div>
 
         <div class="field">
-          <label for="clientPhoneNumber">Client Phone Number</label>
+          <label for="clientPhoneNumber">Client Phone Number *</label>
           <input
             id="clientPhoneNumber"
             name="clientPhoneNumber"
@@ -283,6 +283,7 @@
             inputmode="numeric"
             maxlength="15"
             placeholder="+1(555)123-4567"
+            required
           />
         </div>
 
@@ -307,24 +308,24 @@
         </div>
 
         <div class="field">
-          <label for="serviceType">Service Type</label>
-          <input id="serviceType" name="serviceType" autocomplete="off" />
+          <label for="serviceType">Service Type *</label>
+          <input id="serviceType" name="serviceType" autocomplete="off" required />
         </div>
 
         <div class="field">
-          <label for="contractTotals">Contract Totals</label>
-          <input id="contractTotals" name="contractTotals" autocomplete="off" />
+          <label for="contractTotals">Contract Totals *</label>
+          <input id="contractTotals" name="contractTotals" autocomplete="off" required />
         </div>
 
         <div class="field">
-          <label for="payment1">Payment 1</label>
-          <input id="payment1" name="payment1" autocomplete="off" />
+          <label for="payment1">Payment 1 *</label>
+          <input id="payment1" name="payment1" autocomplete="off" required />
         </div>
 
         <div class="field">
-          <label for="payment1Date">Payment 1 Date</label>
+          <label for="payment1Date">Payment 1 Date *</label>
           <div class="date-input-shell">
-            <input id="payment1Date" name="payment1Date" type="text" placeholder="MM/DD/YYYY" autocomplete="off" />
+            <input id="payment1Date" name="payment1Date" type="text" placeholder="MM/DD/YYYY" autocomplete="off" required />
             <button type="button" class="date-picker-trigger" data-date-target="payment1Date" aria-label="Pick date">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path
