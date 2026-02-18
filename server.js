@@ -5,18 +5,17 @@ const { Pool } = require("pg");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
-const BASIC_AUTH_USER = (process.env.BASIC_AUTH_USER || "").trim();
-const BASIC_AUTH_PASSWORD = (process.env.BASIC_AUTH_PASSWORD || "").trim();
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const TELEGRAM_ALLOWED_USER_IDS = parseTelegramAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS);
 const TELEGRAM_INIT_DATA_TTL_SEC = parsePositiveInteger(process.env.TELEGRAM_INIT_DATA_TTL_SEC, 86400);
-const BASIC_AUTH_REALM = "CB Payment";
-const IS_BASIC_AUTH_ENABLED = Boolean(BASIC_AUTH_USER && BASIC_AUTH_PASSWORD);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
 const TABLE_NAME = resolveTableName(process.env.DB_TABLE_NAME, DEFAULT_TABLE_NAME);
 const DEFAULT_MODERATION_TABLE_NAME = "mini_client_submissions";
 const MODERATION_TABLE_NAME = resolveTableName(process.env.DB_MODERATION_TABLE_NAME, DEFAULT_MODERATION_TABLE_NAME);
+const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
+const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
+const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 
@@ -60,26 +59,6 @@ const MINI_ALLOWED_FIELDS = new Set([
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-app.use((req, res, next) => {
-  if (!IS_BASIC_AUTH_ENABLED || isPublicPath(req.path)) {
-    next();
-    return;
-  }
-
-  const credentials = extractBasicAuthCredentials(req.headers.authorization);
-  const isAuthorized =
-    credentials !== null &&
-    safeEqual(credentials.user, BASIC_AUTH_USER) &&
-    safeEqual(credentials.password, BASIC_AUTH_PASSWORD);
-
-  if (isAuthorized) {
-    next();
-    return;
-  }
-
-  requestAuth(res);
-});
-
 const staticRoot = __dirname;
 app.use(express.static(staticRoot));
 
@@ -92,18 +71,6 @@ const pool = DATABASE_URL
 
 let dbReadyPromise = null;
 
-function isPublicPath(pathname) {
-  if (pathname === "/api/health") {
-    return true;
-  }
-
-  if (pathname === "/mini" || pathname === "/mini.html" || pathname === "/mini.js") {
-    return true;
-  }
-
-  return pathname.startsWith("/api/mini/");
-}
-
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
   if (!normalized) {
@@ -115,6 +82,23 @@ function resolveTableName(rawTableName, fallbackTableName) {
   }
 
   return normalized;
+}
+
+function resolveSchemaName(rawSchemaName, fallbackSchemaName) {
+  const normalized = (rawSchemaName || fallbackSchemaName || "").trim();
+  if (!normalized) {
+    throw new Error("DB schema name cannot be empty.");
+  }
+
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(normalized)) {
+    throw new Error(`Unsafe DB schema name: "${normalized}"`);
+  }
+
+  return normalized;
+}
+
+function qualifyTableName(schemaName, tableName) {
+  return `"${schemaName}"."${tableName}"`;
 }
 
 function shouldUseSsl() {
@@ -141,37 +125,6 @@ function parsePositiveInteger(rawValue, fallbackValue) {
     return fallbackValue;
   }
   return parsed;
-}
-
-function requestAuth(res) {
-  res.set("WWW-Authenticate", `Basic realm="${BASIC_AUTH_REALM}", charset="UTF-8"`);
-  res.status(401).send("Authentication required");
-}
-
-function extractBasicAuthCredentials(rawAuthorization) {
-  if (typeof rawAuthorization !== "string") {
-    return null;
-  }
-
-  const [scheme, token] = rawAuthorization.split(" ");
-  if (scheme !== "Basic" || !token) {
-    return null;
-  }
-
-  try {
-    const decoded = Buffer.from(token, "base64").toString("utf8");
-    const separatorIndex = decoded.indexOf(":");
-    if (separatorIndex < 0) {
-      return null;
-    }
-
-    return {
-      user: decoded.slice(0, separatorIndex),
-      password: decoded.slice(separatorIndex + 1),
-    };
-  } catch {
-    return null;
-  }
 }
 
 function safeEqual(leftValue, rightValue) {
@@ -300,7 +253,7 @@ async function ensureDatabaseReady() {
   if (!dbReadyPromise) {
     dbReadyPromise = (async () => {
       await pool.query(`
-        CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (
+        CREATE TABLE IF NOT EXISTS ${STATE_TABLE} (
           id BIGINT PRIMARY KEY,
           records JSONB NOT NULL DEFAULT '[]'::jsonb,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -309,7 +262,7 @@ async function ensureDatabaseReady() {
 
       await pool.query(
         `
-          INSERT INTO ${TABLE_NAME} (id, records)
+          INSERT INTO ${STATE_TABLE} (id, records)
           VALUES ($1, '[]'::jsonb)
           ON CONFLICT (id) DO NOTHING
         `,
@@ -317,7 +270,7 @@ async function ensureDatabaseReady() {
       );
 
       await pool.query(`
-        CREATE TABLE IF NOT EXISTS ${MODERATION_TABLE_NAME} (
+        CREATE TABLE IF NOT EXISTS ${MODERATION_TABLE} (
           id TEXT PRIMARY KEY,
           record JSONB NOT NULL,
           submitted_by JSONB,
@@ -339,7 +292,7 @@ async function ensureDatabaseReady() {
 
 async function getStoredRecords() {
   await ensureDatabaseReady();
-  const result = await pool.query(`SELECT records, updated_at FROM ${TABLE_NAME} WHERE id = $1`, [STATE_ROW_ID]);
+  const result = await pool.query(`SELECT records, updated_at FROM ${STATE_TABLE} WHERE id = $1`, [STATE_ROW_ID]);
 
   if (!result.rows.length) {
     return { records: [], updatedAt: null };
@@ -356,7 +309,7 @@ async function saveStoredRecords(records) {
   await ensureDatabaseReady();
   const result = await pool.query(
     `
-      INSERT INTO ${TABLE_NAME} (id, records, updated_at)
+      INSERT INTO ${STATE_TABLE} (id, records, updated_at)
       VALUES ($1, $2::jsonb, NOW())
       ON CONFLICT (id)
       DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
@@ -405,10 +358,18 @@ function normalizeModerationStatus(rawStatus, options = {}) {
 }
 
 function getReviewerIdentity(req) {
-  const credentials = extractBasicAuthCredentials(req.headers.authorization);
-  const reviewer = sanitizeTextValue(credentials?.user, 200);
-  if (reviewer) {
-    return reviewer;
+  const candidates = [
+    req.headers["x-user-email"],
+    req.headers["x-user"],
+    req.headers["x-auth-request-email"],
+    req.headers["x-auth-request-user"],
+  ];
+
+  for (const candidate of candidates) {
+    const reviewer = sanitizeTextValue(candidate, 200);
+    if (reviewer) {
+      return reviewer;
+    }
   }
 
   return "moderator";
@@ -421,7 +382,7 @@ async function queueClientSubmission(record, submittedBy) {
   const submittedByPayload = submittedBy && typeof submittedBy === "object" ? submittedBy : null;
   const result = await pool.query(
     `
-      INSERT INTO ${MODERATION_TABLE_NAME} (id, record, submitted_by, status)
+      INSERT INTO ${MODERATION_TABLE} (id, record, submitted_by, status)
       VALUES ($1, $2::jsonb, $3::jsonb, 'pending')
       RETURNING id, status, submitted_at
     `,
@@ -460,7 +421,7 @@ async function listModerationSubmissions(options = {}) {
     result = await pool.query(
       `
         SELECT id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
-        FROM ${MODERATION_TABLE_NAME}
+        FROM ${MODERATION_TABLE}
         ORDER BY submitted_at DESC
         LIMIT $1
       `,
@@ -470,7 +431,7 @@ async function listModerationSubmissions(options = {}) {
     result = await pool.query(
       `
         SELECT id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
-        FROM ${MODERATION_TABLE_NAME}
+        FROM ${MODERATION_TABLE}
         WHERE status = $1
         ORDER BY submitted_at DESC
         LIMIT $2
@@ -519,7 +480,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
     const submissionResult = await client.query(
       `
         SELECT id, record, submitted_by, status, submitted_at
-        FROM ${MODERATION_TABLE_NAME}
+        FROM ${MODERATION_TABLE}
         WHERE id = $1
         FOR UPDATE
       `,
@@ -547,7 +508,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
 
     if (normalizedDecision === "approved") {
       const stateResult = await client.query(
-        `SELECT records FROM ${TABLE_NAME} WHERE id = $1 FOR UPDATE`,
+        `SELECT records FROM ${STATE_TABLE} WHERE id = $1 FOR UPDATE`,
         [STATE_ROW_ID],
       );
 
@@ -556,7 +517,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
 
       await client.query(
         `
-          INSERT INTO ${TABLE_NAME} (id, records, updated_at)
+          INSERT INTO ${STATE_TABLE} (id, records, updated_at)
           VALUES ($1, $2::jsonb, NOW())
           ON CONFLICT (id)
           DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
@@ -567,7 +528,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
 
     const updateResult = await client.query(
       `
-        UPDATE ${MODERATION_TABLE_NAME}
+        UPDATE ${MODERATION_TABLE}
         SET status = $2, reviewed_at = NOW(), reviewed_by = $3, review_note = $4
         WHERE id = $1
         RETURNING id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
@@ -797,7 +758,62 @@ function normalizeDateForStorage(rawValue) {
   return formatDateTimestampUs(timestamp);
 }
 
-app.get("/api/health", (_req, res) => {
+function buildPublicErrorPayload(error, fallbackMessage) {
+  const payload = {
+    error: fallbackMessage,
+  };
+
+  const code = sanitizeTextValue(error?.code, 40);
+  const message = sanitizeTextValue(error?.message, 600);
+  const detail = sanitizeTextValue(error?.detail, 600);
+  const hint = sanitizeTextValue(error?.hint, 600);
+
+  if (code) {
+    payload.code = code;
+  }
+
+  if (message) {
+    payload.details = message;
+  }
+
+  if (detail) {
+    payload.dbDetail = detail;
+  }
+
+  if (hint) {
+    payload.dbHint = hint;
+  }
+
+  return payload;
+}
+
+function resolveDbHttpStatus(error, fallbackStatus = 500) {
+  const code = sanitizeTextValue(error?.code, 40).toUpperCase();
+  const unavailableCodes = new Set([
+    "28P01",
+    "3D000",
+    "08001",
+    "08003",
+    "08004",
+    "08006",
+    "57P01",
+    "57P02",
+    "57P03",
+    "ENOTFOUND",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "EHOSTUNREACH",
+  ]);
+
+  if (unavailableCodes.has(code)) {
+    return 503;
+  }
+
+  return fallbackStatus;
+}
+
+app.get("/api/health", async (_req, res) => {
   if (!pool) {
     res.status(503).json({
       ok: false,
@@ -806,9 +822,19 @@ app.get("/api/health", (_req, res) => {
     return;
   }
 
-  res.json({
-    ok: true,
-  });
+  try {
+    await ensureDatabaseReady();
+    await pool.query("SELECT 1");
+    res.json({
+      ok: true,
+    });
+  } catch (error) {
+    console.error("GET /api/health failed:", error);
+    res.status(resolveDbHttpStatus(error, 503)).json({
+      ok: false,
+      ...buildPublicErrorPayload(error, "Database connection failed"),
+    });
+  }
 });
 
 app.get("/api/records", async (_req, res) => {
@@ -827,9 +853,7 @@ app.get("/api/records", async (_req, res) => {
     });
   } catch (error) {
     console.error("GET /api/records failed:", error);
-    res.status(500).json({
-      error: "Failed to load records",
-    });
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load records"));
   }
 });
 
@@ -857,9 +881,7 @@ app.put("/api/records", async (req, res) => {
     });
   } catch (error) {
     console.error("PUT /api/records failed:", error);
-    res.status(500).json({
-      error: "Failed to save records",
-    });
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to save records"));
   }
 });
 
@@ -897,9 +919,7 @@ app.post("/api/mini/clients", async (req, res) => {
     });
   } catch (error) {
     console.error("POST /api/mini/clients failed:", error);
-    res.status(500).json({
-      error: "Failed to submit client",
-    });
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to submit client"));
   }
 });
 
@@ -930,9 +950,9 @@ app.get("/api/moderation/submissions", async (req, res) => {
     });
   } catch (error) {
     console.error("GET /api/moderation/submissions failed:", error);
-    res.status(500).json({
-      error: "Failed to load moderation submissions",
-    });
+    res
+      .status(resolveDbHttpStatus(error))
+      .json(buildPublicErrorPayload(error, "Failed to load moderation submissions"));
   }
 });
 
@@ -958,9 +978,7 @@ app.post("/api/moderation/submissions/:id/approve", async (req, res) => {
     });
   } catch (error) {
     console.error("POST /api/moderation/submissions/:id/approve failed:", error);
-    res.status(500).json({
-      error: "Failed to approve submission",
-    });
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to approve submission"));
   }
 });
 
@@ -986,9 +1004,7 @@ app.post("/api/moderation/submissions/:id/reject", async (req, res) => {
     });
   } catch (error) {
     console.error("POST /api/moderation/submissions/:id/reject failed:", error);
-    res.status(500).json({
-      error: "Failed to reject submission",
-    });
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to reject submission"));
   }
 });
 
@@ -1018,9 +1034,6 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   if (!pool) {
     console.warn("DATABASE_URL is missing. API routes will return 503 until configured.");
-  }
-  if (!IS_BASIC_AUTH_ENABLED) {
-    console.warn("Basic auth is disabled. Set BASIC_AUTH_USER and BASIC_AUTH_PASSWORD to enable it.");
   }
   if (!TELEGRAM_BOT_TOKEN) {
     console.warn("Mini App write API is disabled. Set TELEGRAM_BOT_TOKEN to enable Telegram auth.");
