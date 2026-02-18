@@ -4,6 +4,7 @@ const form = document.querySelector("#mini-client-form");
 const message = document.querySelector("#mini-message");
 const submitButton = document.querySelector("#mini-submit-button");
 const payment1DateInput = document.querySelector("#payment1Date");
+const ssnInput = document.querySelector("#ssn");
 const attachmentsInput = document.querySelector("#attachments");
 const attachmentsPreview = document.querySelector("#attachments-preview");
 const telegramApp = window.Telegram?.WebApp || null;
@@ -36,6 +37,7 @@ let initData = "";
 let isMiniAccessAllowed = false;
 
 initializeDateField(payment1DateInput);
+initializeSsnField(ssnInput);
 setDefaultDateIfEmpty(payment1DateInput);
 setSubmittingState(true);
 void initializeTelegramContext();
@@ -62,6 +64,12 @@ if (form) {
       return;
     }
 
+    const ssnValidation = validateSsnField();
+    if (!ssnValidation.ok) {
+      setMessage("SSN must match XXX-XX-XXXX.", "error");
+      return;
+    }
+
     if (payload.attachmentsError) {
       setMessage(payload.attachmentsError, "error");
       return;
@@ -85,6 +93,7 @@ if (form) {
       }
 
       form.reset();
+      setInputInvalidState(ssnInput, false);
       setDefaultDateIfEmpty(payment1DateInput);
       renderAttachmentsPreview([]);
       setMessage("Submitted for moderation. Client will appear after approval.", "success");
@@ -267,6 +276,77 @@ function isValidDateParts(year, month, day) {
 
   const date = new Date(year, month - 1, day);
   return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function initializeSsnField(input) {
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+
+  input.addEventListener("input", () => {
+    const formatted = formatSsnInputValue(input.value);
+    input.value = formatted;
+    const hasValue = Boolean(formatted.trim());
+    setInputInvalidState(input, hasValue && !isValidSsnFormat(formatted));
+  });
+
+  input.addEventListener("blur", () => {
+    validateSsnField();
+  });
+}
+
+function formatSsnInputValue(rawValue) {
+  const digits = (rawValue || "").replace(/\D/g, "").slice(0, 9);
+  if (digits.length <= 3) {
+    return digits;
+  }
+
+  if (digits.length <= 5) {
+    return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  }
+
+  return `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
+}
+
+function isValidSsnFormat(rawValue) {
+  return /^\d{3}-\d{2}-\d{4}$/.test((rawValue || "").trim());
+}
+
+function validateSsnField() {
+  if (!(ssnInput instanceof HTMLInputElement)) {
+    return {
+      ok: true,
+      value: "",
+    };
+  }
+
+  const rawValue = (ssnInput.value || "").trim();
+  if (!rawValue) {
+    setInputInvalidState(ssnInput, false);
+    return {
+      ok: true,
+      value: "",
+    };
+  }
+
+  const formatted = formatSsnInputValue(rawValue);
+  ssnInput.value = formatted;
+  const isValid = isValidSsnFormat(formatted);
+  setInputInvalidState(ssnInput, !isValid);
+
+  return {
+    ok: isValid,
+    value: formatted,
+  };
+}
+
+function setInputInvalidState(input, hasError) {
+  if (!(input instanceof HTMLElement)) {
+    return;
+  }
+
+  input.classList.toggle("input-invalid", Boolean(hasError));
+  input.setAttribute("aria-invalid", hasError ? "true" : "false");
 }
 
 function buildPayload() {

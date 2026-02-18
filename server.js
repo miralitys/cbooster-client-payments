@@ -1403,6 +1403,20 @@ function toCheckboxValue(value) {
   return value ? "Yes" : "";
 }
 
+function normalizeSsnForStorage(rawValue) {
+  const value = sanitizeTextValue(rawValue, MINI_EXTRA_MAX_LENGTH.ssn || 64);
+  if (!value) {
+    return "";
+  }
+
+  const digits = value.replace(/\D/g, "");
+  if (digits.length !== 9) {
+    return null;
+  }
+
+  return `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
+}
+
 function createEmptyRecord() {
   const record = {};
 
@@ -1481,8 +1495,20 @@ function createRecordFromMiniPayload(rawClient) {
   }
 
   for (const field of MINI_EXTRA_TEXT_FIELDS) {
+    if (field === "ssn") {
+      continue;
+    }
+
     miniData[field] = sanitizeTextValue(client[field], MINI_EXTRA_MAX_LENGTH[field] || 4000);
   }
+
+  const normalizedSsn = normalizeSsnForStorage(client.ssn);
+  if (sanitizeTextValue(client.ssn, MINI_EXTRA_MAX_LENGTH.ssn || 64) && normalizedSsn === null) {
+    return {
+      error: "Invalid SSN format. Use XXX-XX-XXXX.",
+    };
+  }
+  miniData.ssn = normalizedSsn || "";
 
   if (record.writtenOff === "Yes" && !record.dateWhenWrittenOff) {
     record.dateWhenWrittenOff = getTodayDateUs();
