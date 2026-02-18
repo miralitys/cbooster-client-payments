@@ -1358,6 +1358,16 @@ tbody tr.row-tone-active:hover td {
   gap: var(--space-3);
 }
 
+.dashboard-page-header .page-header__title h1 {
+  margin: 0;
+  font-family: var(--font-family-heading);
+  font-size: var(--font-size-xl);
+  line-height: var(--line-height-tight);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .dashboard-nav-link {
   text-decoration: none;
 }
