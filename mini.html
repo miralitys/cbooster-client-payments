@@ -441,55 +441,6 @@
         }
       }
 
-      .advanced-panel {
-        margin-top: 24px;
-        border: 1px solid var(--line-soft);
-        border-radius: 14px;
-        background: #0d1628;
-      }
-
-      .advanced-panel > summary {
-        list-style: none;
-        cursor: pointer;
-        padding: 12px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
-
-      .advanced-panel > summary::-webkit-details-marker {
-        display: none;
-      }
-
-      .advanced-panel > summary::after {
-        content: "▾";
-        color: var(--muted);
-        font-size: 13px;
-        transform: rotate(0deg);
-        transition: transform 0.16s ease;
-      }
-
-      .advanced-panel[open] > summary::after {
-        transform: rotate(180deg);
-      }
-
-      .advanced-panel__title {
-        font-size: 13px;
-        font-weight: 700;
-        letter-spacing: 0.4px;
-        text-transform: uppercase;
-      }
-
-      .advanced-panel__hint {
-        color: var(--muted);
-        font-size: 12px;
-      }
-
-      .advanced-panel__content {
-        padding: 2px 12px 12px;
-      }
-
       .message {
         min-height: 20px;
         margin: 10px 2px 0;
@@ -627,49 +578,41 @@
           </label>
         </section>
 
-        <details class="advanced-panel">
-          <summary>
-            <span class="advanced-panel__title">Advanced</span>
-            <span class="advanced-panel__hint">Optional fields</span>
-          </summary>
-          <div class="advanced-panel__content">
-            <section class="form-section" aria-labelledby="mini-section-extra">
-              <h2 id="mini-section-extra" class="section-title">Extra</h2>
+        <section class="form-section" aria-labelledby="mini-section-extra">
+          <h2 id="mini-section-extra" class="section-title">Extra</h2>
 
-              <div class="field">
-                <label for="ssn">SSN</label>
-                <input
-                  id="ssn"
-                  name="ssn"
-                  type="password"
-                  autocomplete="off"
-                  inputmode="numeric"
-                  maxlength="11"
-                  placeholder="•••-••-••••"
-                />
-              </div>
-
-              <div class="field">
-                <label for="identityIq">IdentityIQ</label>
-                <input id="identityIq" name="identityIq" autocomplete="off" />
-                <p class="field-help">IdentityIQ reference or status note (if applicable).</p>
-              </div>
-
-              <div class="field">
-                <label for="notes">Notes</label>
-                <textarea id="notes" name="notes" placeholder="Add extra context for moderation"></textarea>
-              </div>
-
-              <div class="attachments-card">
-                <h3 class="attachments-card__title">📎 Attachments</h3>
-                <p class="field-help">Upload up to 10 files</p>
-                <input id="attachments" class="attachments-input-native" name="attachments" type="file" multiple />
-                <button id="attachments-upload-button" class="attachments-upload-button" type="button">Upload files</button>
-                <div id="attachments-preview" class="attachments-preview" hidden></div>
-              </div>
-            </section>
+          <div class="field">
+            <label for="ssn">SSN</label>
+            <input
+              id="ssn"
+              name="ssn"
+              type="password"
+              autocomplete="off"
+              inputmode="numeric"
+              maxlength="11"
+              placeholder="•••-••-••••"
+            />
           </div>
-        </details>
+
+          <div class="field">
+            <label for="identityIq">IdentityIQ</label>
+            <input id="identityIq" name="identityIq" autocomplete="off" />
+            <p class="field-help">IdentityIQ reference or status note (if applicable).</p>
+          </div>
+
+          <div class="field">
+            <label for="notes">Notes</label>
+            <textarea id="notes" name="notes" placeholder="Add extra context for moderation"></textarea>
+          </div>
+
+          <div class="attachments-card">
+            <h3 class="attachments-card__title">📎 Attachments</h3>
+            <p class="field-help">Upload up to 10 files</p>
+            <input id="attachments" class="attachments-input-native" name="attachments" type="file" multiple />
+            <button id="attachments-upload-button" class="attachments-upload-button" type="button">Upload files</button>
+            <div id="attachments-preview" class="attachments-preview" hidden></div>
+          </div>
+        </section>
 
         <div class="submit-bar">
           <button type="submit" id="mini-submit-button">
