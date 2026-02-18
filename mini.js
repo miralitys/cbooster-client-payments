@@ -11,6 +11,16 @@ const attachmentsInput = document.querySelector("#attachments");
 const attachmentsPreview = document.querySelector("#attachments-preview");
 const telegramApp = window.Telegram?.WebApp || null;
 const MAX_ATTACHMENTS_COUNT = 10;
+const REQUIRED_MINI_FIELDS = [
+  { id: "clientName", label: "Client Name" },
+  { id: "closedBy", label: "Closed By" },
+  { id: "leadSource", label: "Lead Source" },
+  { id: "clientPhoneNumber", label: "Client Phone Number" },
+  { id: "serviceType", label: "Service Type" },
+  { id: "contractTotals", label: "Contract Totals" },
+  { id: "payment1", label: "Payment 1" },
+  { id: "payment1Date", label: "Payment 1 Date" },
+];
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
   ".html",
   ".htm",
@@ -42,6 +52,7 @@ initializeDateField(payment1DateInput);
 initializeSsnField(ssnInput);
 initializePhoneField(clientPhoneInput);
 initializeEmailField(clientEmailInput);
+initializeRequiredFieldValidation();
 setDefaultDateIfEmpty(payment1DateInput);
 setSubmittingState(true);
 void initializeTelegramContext();
@@ -62,9 +73,15 @@ if (form) {
       return;
     }
 
-    const formData = new FormData(form);
-    if (!normalizeValue(formData.get("clientName"))) {
-      setMessage("Client Name is required.", "error");
+    const requiredValidation = validateRequiredMiniFields();
+    if (!requiredValidation.ok) {
+      setMessage(requiredValidation.error, "error");
+      return;
+    }
+
+    const payment1DateValidation = validatePayment1DateField();
+    if (!payment1DateValidation.ok) {
+      setMessage("Payment 1 Date must be valid MM/DD/YYYY.", "error");
       return;
     }
 
@@ -110,9 +127,7 @@ if (form) {
       }
 
       form.reset();
-      setInputInvalidState(ssnInput, false);
-      setInputInvalidState(clientPhoneInput, false);
-      setInputInvalidState(clientEmailInput, false);
+      clearMiniValidationStates();
       setDefaultDateIfEmpty(payment1DateInput);
       renderAttachmentsPreview([]);
       setMessage("Submitted for moderation. Client will appear after approval.", "success");
@@ -295,6 +310,80 @@ function isValidDateParts(year, month, day) {
 
   const date = new Date(year, month - 1, day);
   return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function getRequiredMiniInput(fieldId) {
+  const input = document.querySelector(`#${fieldId}`);
+  return input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement ? input : null;
+}
+
+function initializeRequiredFieldValidation() {
+  for (const field of REQUIRED_MINI_FIELDS) {
+    const input = getRequiredMiniInput(field.id);
+    if (!input) {
+      continue;
+    }
+
+    input.addEventListener("input", () => {
+      if (normalizeValue(input.value)) {
+        if (field.id === "clientPhoneNumber") {
+          // Phone input keeps its own strict mask validation.
+          return;
+        }
+        setInputInvalidState(input, false);
+      }
+    });
+  }
+}
+
+function validateRequiredMiniFields() {
+  let firstMissingLabel = "";
+
+  for (const field of REQUIRED_MINI_FIELDS) {
+    const input = getRequiredMiniInput(field.id);
+    const value = normalizeValue(input?.value);
+    const isMissing = !value;
+    if (input) {
+      setInputInvalidState(input, isMissing);
+    }
+    if (!firstMissingLabel && isMissing) {
+      firstMissingLabel = field.label;
+    }
+  }
+
+  if (firstMissingLabel) {
+    return {
+      ok: false,
+      error: `${firstMissingLabel} is required.`,
+    };
+  }
+
+  return {
+    ok: true,
+    error: "",
+  };
+}
+
+function validatePayment1DateField() {
+  if (!(payment1DateInput instanceof HTMLInputElement)) {
+    return {
+      ok: true,
+    };
+  }
+
+  const value = normalizeValue(payment1DateInput.value);
+  if (!value) {
+    setInputInvalidState(payment1DateInput, true);
+    return {
+      ok: false,
+    };
+  }
+
+  const isValid = Boolean(parseUsDateToIso(value));
+  setInputInvalidState(payment1DateInput, !isValid);
+  return {
+    ok: isValid,
+  };
 }
 
 function initializeSsnField(input) {
@@ -489,6 +578,15 @@ function setInputInvalidState(input, hasError) {
 
   input.classList.toggle("input-invalid", Boolean(hasError));
   input.setAttribute("aria-invalid", hasError ? "true" : "false");
+}
+
+function clearMiniValidationStates() {
+  for (const field of REQUIRED_MINI_FIELDS) {
+    setInputInvalidState(getRequiredMiniInput(field.id), false);
+  }
+  setInputInvalidState(ssnInput, false);
+  setInputInvalidState(clientPhoneInput, false);
+  setInputInvalidState(clientEmailInput, false);
 }
 
 function buildPayload() {

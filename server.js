@@ -109,6 +109,16 @@ const MINI_EXTRA_MAX_LENGTH = {
   identityIq: 2000,
   clientEmailAddress: 320,
 };
+const MINI_REQUIRED_FIELDS = [
+  "clientName",
+  "closedBy",
+  "leadSource",
+  "clientPhoneNumber",
+  "serviceType",
+  "contractTotals",
+  "payment1",
+  "payment1Date",
+];
 const MINI_ALLOWED_FIELDS = new Set([
   ...RECORD_TEXT_FIELDS,
   ...RECORD_DATE_FIELDS,
@@ -1490,12 +1500,18 @@ function createRecordFromMiniPayload(rawClient) {
     }
   }
 
-  const clientName = sanitizeTextValue(client.clientName, 200);
-  if (!clientName) {
-    return {
-      error: "`clientName` is required.",
-    };
+  for (const field of MINI_REQUIRED_FIELDS) {
+    const maxLength =
+      Object.prototype.hasOwnProperty.call(MINI_EXTRA_MAX_LENGTH, field) ? MINI_EXTRA_MAX_LENGTH[field] : 4000;
+    const value = sanitizeTextValue(client[field], maxLength);
+    if (!value) {
+      return {
+        error: `\`${field}\` is required.`,
+      };
+    }
   }
+
+  const clientName = sanitizeTextValue(client.clientName, 200);
 
   const record = createEmptyRecord();
   const miniData = createEmptyMiniData();
