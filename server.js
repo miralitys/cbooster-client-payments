@@ -1122,10 +1122,136 @@ async function fetchQuickBooksPaymentsInRange(accessToken, fromDate, toDate) {
   return items.slice(0, QUICKBOOKS_MAX_QUERY_ROWS);
 }
 
+async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
+  const normalizedPaymentId = sanitizeTextValue(paymentId, 120);
+  if (!normalizedPaymentId) {
+    return null;
+  }
+
+  const endpoint = `${QUICKBOOKS_API_BASE_URL}/v3/company/${encodeURIComponent(QUICKBOOKS_REALM_ID)}/payment/${encodeURIComponent(normalizedPaymentId)}`;
+  const queryParams = new URLSearchParams({
+    minorversion: "75",
+  });
+
+  let response;
+  try {
+    response = await fetch(`${endpoint}?${queryParams.toString()}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
+  } catch (error) {
+    console.warn(
+      "QuickBooks payment detail request failed:",
+      normalizedPaymentId,
+      sanitizeTextValue(error?.message, 300),
+    );
+    return null;
+  }
+
+  const responseText = await response.text();
+  let body = null;
+  try {
+    body = responseText ? JSON.parse(responseText) : null;
+  } catch {
+    body = null;
+  }
+
+  if (!response.ok) {
+    const faultError = body?.Fault?.Error?.[0];
+    console.warn(
+      "QuickBooks payment detail query failed:",
+      normalizedPaymentId,
+      sanitizeTextValue(faultError?.Detail || faultError?.Message || responseText, 400),
+    );
+    return null;
+  }
+
+  const payment = body?.Payment;
+  if (!payment || typeof payment !== "object") {
+    return null;
+  }
+
+  return payment;
+}
+
+function deriveQuickBooksDepositLinkedAmount(payment) {
+  const lines = Array.isArray(payment?.Line) ? payment.Line : [];
+  let total = 0;
+
+  for (const line of lines) {
+    const parsedAmount = Number.parseFloat(line?.Amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount === 0) {
+      continue;
+    }
+
+    const linkedTransactions = Array.isArray(line?.LinkedTxn) ? line.LinkedTxn : [];
+    const hasLinkedDeposit = linkedTransactions.some(
+      (transaction) => sanitizeTextValue(transaction?.TxnType, 40).toLowerCase() === "deposit",
+    );
+    if (!hasLinkedDeposit) {
+      continue;
+    }
+
+    // In QuickBooks these linked deposit amounts may appear with opposite sign in bank/deposit views.
+    // For dashboard reporting we treat the linked deposit movement as received money.
+    total += Math.abs(parsedAmount);
+  }
+
+  return total;
+}
+
+async function enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentRecords) {
+  const records = Array.isArray(paymentRecords) ? paymentRecords : [];
+  if (!records.length) {
+    return [];
+  }
+
+  const enrichedRecords = records.map((record) => {
+    const parsedAmount = Number.parseFloat(record?.TotalAmt);
+    return {
+      ...record,
+      _effectiveAmount: Number.isFinite(parsedAmount) ? parsedAmount : 0,
+    };
+  });
+
+  const zeroAmountIndexes = [];
+  for (let index = 0; index < enrichedRecords.length; index += 1) {
+    if (Math.abs(enrichedRecords[index]._effectiveAmount) < 0.000001) {
+      zeroAmountIndexes.push(index);
+    }
+  }
+
+  if (!zeroAmountIndexes.length) {
+    return enrichedRecords;
+  }
+
+  const workerCount = Math.min(6, zeroAmountIndexes.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < zeroAmountIndexes.length) {
+      const currentIndex = zeroAmountIndexes[cursor];
+      cursor += 1;
+      const paymentRecord = enrichedRecords[currentIndex];
+      const paymentDetails = await fetchQuickBooksPaymentDetails(accessToken, paymentRecord?.Id);
+      const derivedAmount = deriveQuickBooksDepositLinkedAmount(paymentDetails);
+      if (Number.isFinite(derivedAmount) && derivedAmount > 0) {
+        enrichedRecords[currentIndex]._effectiveAmount = derivedAmount;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return enrichedRecords;
+}
+
 function mapQuickBooksPayment(record) {
   const customerName = sanitizeTextValue(record?.CustomerRef?.name, 300);
   const customerId = sanitizeTextValue(record?.CustomerRef?.value, 100);
-  const parsedAmount = Number.parseFloat(record?.TotalAmt);
+  const parsedAmount = Number.parseFloat(record?._effectiveAmount ?? record?.TotalAmt);
   const paymentAmount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
   const paymentDate = sanitizeTextValue(record?.TxnDate, 20);
 
@@ -2463,7 +2589,8 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
   try {
     const accessToken = await fetchQuickBooksAccessToken();
     const paymentRecords = await fetchQuickBooksPaymentsInRange(accessToken, range.from, range.to);
-    const items = paymentRecords.map(mapQuickBooksPayment);
+    const normalizedPaymentRecords = await enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentRecords);
+    const items = normalizedPaymentRecords.map(mapQuickBooksPayment);
 
     res.json({
       ok: true,
