@@ -58,7 +58,8 @@ npm start
 - Если заданы `BASIC_AUTH_USER` и `BASIC_AUTH_PASSWORD`, сайт и API требуют логин/пароль.
 - `GET /api/health` остается открытым для health check Render.
 - Mini App маршруты (`/mini`, `/api/mini/*`) не используют Basic Auth и защищаются подписью Telegram `initData`.
-- Страница модерации находится по адресу `/moderation` и защищена Basic Auth.
+- Главная страница `/` — это Dashboard (overview + таблица заявок на модерацию) и защищена Basic Auth.
+- Страница полной таблицы клиентов находится по адресу `/Client_Payments`.
 
 ## Telegram Mini App
 
@@ -68,8 +69,9 @@ npm start
    - `https://<ваш-домен>.onrender.com/mini`
 4. (Опционально) ограничьте доступ к Mini App, задав `TELEGRAM_ALLOWED_USER_IDS`.
 5. Откройте Mini App из Telegram и добавьте клиента (заявка попадет в очередь модерации).
-6. Откройте `https://<ваш-домен>.onrender.com/moderation`, одобрите или отклоните заявку.
-7. После `Approve` клиент попадет в основной дашборд.
+6. Откройте `https://<ваш-домен>.onrender.com/`, проверьте заявку в таблице модерации и откройте карточку клиента.
+7. Поставьте галочку "Добавить в общую базу данных" и нажмите "Применить" для одобрения.
+8. После approve клиент появится на странице `https://<ваш-домен>.onrender.com/Client_Payments`.
 
 ## Миграция текущих данных
 
