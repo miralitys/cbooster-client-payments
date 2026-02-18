@@ -33,13 +33,17 @@ npm start
    - `DATABASE_URL` = строка подключения Supabase;
    - `DB_TABLE_NAME` = `client_records_state`;
    - `BASIC_AUTH_USER` = логин для входа;
-   - `BASIC_AUTH_PASSWORD` = пароль для входа.
+   - `BASIC_AUTH_PASSWORD` = пароль для входа;
+   - `TELEGRAM_BOT_TOKEN` = токен бота (для Mini App);
+   - `TELEGRAM_ALLOWED_USER_IDS` = список Telegram user id через запятую (опционально);
+   - `TELEGRAM_INIT_DATA_TTL_SEC` = TTL сессии Mini App в секундах (по умолчанию `86400`).
 5. Deploy.
 
 Сервис поднимает API:
 - `GET /api/health`
 - `GET /api/records`
 - `PUT /api/records`
+- `POST /api/mini/clients`
 
 Таблица в Supabase создается автоматически при первом обращении:
 - `client_records_state(id, records, updated_at)`.
@@ -48,6 +52,16 @@ npm start
 
 - Если заданы `BASIC_AUTH_USER` и `BASIC_AUTH_PASSWORD`, сайт и API требуют логин/пароль.
 - `GET /api/health` остается открытым для health check Render.
+- Mini App маршруты (`/mini`, `/api/mini/*`) не используют Basic Auth и защищаются подписью Telegram `initData`.
+
+## Telegram Mini App
+
+1. В BotFather создайте/настройте бота и получите токен.
+2. Добавьте `TELEGRAM_BOT_TOKEN` в Render environment.
+3. В BotFather настройте кнопку/меню Web App на URL:
+   - `https://<ваш-домен>.onrender.com/mini`
+4. (Опционально) ограничьте доступ к Mini App, задав `TELEGRAM_ALLOWED_USER_IDS`.
+5. Откройте Mini App из Telegram и добавьте клиента.
 
 ## Миграция текущих данных
 

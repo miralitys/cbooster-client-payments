@@ -7,22 +7,57 @@ const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
 const BASIC_AUTH_USER = (process.env.BASIC_AUTH_USER || "").trim();
 const BASIC_AUTH_PASSWORD = (process.env.BASIC_AUTH_PASSWORD || "").trim();
+const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
+const TELEGRAM_ALLOWED_USER_IDS = parseTelegramAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS);
+const TELEGRAM_INIT_DATA_TTL_SEC = parsePositiveInteger(process.env.TELEGRAM_INIT_DATA_TTL_SEC, 86400);
 const BASIC_AUTH_REALM = "CB Payment";
 const IS_BASIC_AUTH_ENABLED = Boolean(BASIC_AUTH_USER && BASIC_AUTH_PASSWORD);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
 const TABLE_NAME = resolveTableName(process.env.DB_TABLE_NAME, DEFAULT_TABLE_NAME);
 
+const RECORD_TEXT_FIELDS = [
+  "clientName",
+  "closedBy",
+  "companyName",
+  "serviceType",
+  "contractTotals",
+  "totalPayments",
+  "payment1",
+  "payment2",
+  "payment3",
+  "payment4",
+  "payment5",
+  "payment6",
+  "payment7",
+  "futurePayments",
+  "notes",
+  "collection",
+  "dateWhenFullyPaid",
+];
+const RECORD_DATE_FIELDS = [
+  "payment1Date",
+  "payment2Date",
+  "payment3Date",
+  "payment4Date",
+  "payment5Date",
+  "payment6Date",
+  "payment7Date",
+  "dateOfCollection",
+  "dateWhenWrittenOff",
+];
+const RECORD_CHECKBOX_FIELDS = ["afterResult", "writtenOff"];
+const MINI_ALLOWED_FIELDS = new Set([
+  ...RECORD_TEXT_FIELDS,
+  ...RECORD_DATE_FIELDS,
+  ...RECORD_CHECKBOX_FIELDS,
+]);
+
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 app.use((req, res, next) => {
-  if (!IS_BASIC_AUTH_ENABLED) {
-    next();
-    return;
-  }
-
-  if (req.path === "/api/health") {
+  if (!IS_BASIC_AUTH_ENABLED || isPublicPath(req.path)) {
     next();
     return;
   }
@@ -53,6 +88,18 @@ const pool = DATABASE_URL
 
 let dbReadyPromise = null;
 
+function isPublicPath(pathname) {
+  if (pathname === "/api/health") {
+    return true;
+  }
+
+  if (pathname === "/mini" || pathname === "/mini.html" || pathname === "/mini.js") {
+    return true;
+  }
+
+  return pathname.startsWith("/api/mini/");
+}
+
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
   if (!normalized) {
@@ -69,6 +116,27 @@ function resolveTableName(rawTableName, fallbackTableName) {
 function shouldUseSsl() {
   const mode = (process.env.PGSSLMODE || "").toLowerCase();
   return mode !== "disable";
+}
+
+function parseTelegramAllowedUserIds(rawValue) {
+  if (!rawValue) {
+    return new Set();
+  }
+
+  return new Set(
+    rawValue
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+}
+
+function parsePositiveInteger(rawValue, fallbackValue) {
+  const parsed = Number.parseInt(rawValue || "", 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallbackValue;
+  }
+  return parsed;
 }
 
 function requestAuth(res) {
@@ -111,6 +179,113 @@ function safeEqual(leftValue, rightValue) {
   }
 
   return crypto.timingSafeEqual(left, right);
+}
+
+function verifyTelegramInitData(rawInitData) {
+  if (!TELEGRAM_BOT_TOKEN) {
+    return {
+      ok: false,
+      status: 503,
+      error: "Telegram auth is not configured on server.",
+    };
+  }
+
+  const initData = (rawInitData || "").toString().trim();
+  if (!initData) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Missing Telegram initData.",
+    };
+  }
+
+  const params = new URLSearchParams(initData);
+  const receivedHash = (params.get("hash") || "").trim().toLowerCase();
+  if (!receivedHash) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Invalid Telegram initData hash.",
+    };
+  }
+
+  const authDateRaw = (params.get("auth_date") || "").trim();
+  const authDate = Number.parseInt(authDateRaw, 10);
+  if (!Number.isFinite(authDate) || authDate <= 0) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Invalid Telegram auth_date.",
+    };
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSeconds - authDate) > TELEGRAM_INIT_DATA_TTL_SEC) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Telegram session expired. Reopen Mini App from Telegram chat.",
+    };
+  }
+
+  const dataCheckString = [...params.entries()]
+    .filter(([key]) => key !== "hash")
+    .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+
+  const secretKey = crypto.createHmac("sha256", "WebAppData").update(TELEGRAM_BOT_TOKEN).digest();
+  const expectedHash = crypto.createHmac("sha256", secretKey).update(dataCheckString).digest("hex").toLowerCase();
+
+  if (!safeEqual(receivedHash, expectedHash)) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Telegram signature check failed.",
+    };
+  }
+
+  const user = parseTelegramUser(params.get("user"));
+  if (!isTelegramUserAllowed(user)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Telegram user is not allowed.",
+    };
+  }
+
+  return {
+    ok: true,
+    user,
+    authDate,
+  };
+}
+
+function parseTelegramUser(rawUser) {
+  const userJson = (rawUser || "").toString().trim();
+  if (!userJson) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(userJson);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isTelegramUserAllowed(user) {
+  if (!TELEGRAM_ALLOWED_USER_IDS.size) {
+    return true;
+  }
+
+  const userId = user?.id;
+  if (userId === null || userId === undefined) {
+    return false;
+  }
+
+  return TELEGRAM_ALLOWED_USER_IDS.has(String(userId));
 }
 
 async function ensureDatabaseReady() {
@@ -180,6 +355,217 @@ function isValidRecordsPayload(value) {
   return Array.isArray(value);
 }
 
+function normalizeStoredRecords(rawRecords) {
+  if (!Array.isArray(rawRecords)) {
+    return [];
+  }
+
+  return rawRecords.filter((record) => record && typeof record === "object");
+}
+
+function sanitizeTextValue(value, maxLength = 4000) {
+  return (value ?? "").toString().trim().slice(0, maxLength);
+}
+
+function toCheckboxValue(value) {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "yes" || normalized === "true" || normalized === "1" ? "Yes" : "";
+  }
+
+  return value ? "Yes" : "";
+}
+
+function createEmptyRecord() {
+  const record = {};
+
+  for (const field of RECORD_TEXT_FIELDS) {
+    record[field] = "";
+  }
+
+  for (const field of RECORD_DATE_FIELDS) {
+    record[field] = "";
+  }
+
+  for (const field of RECORD_CHECKBOX_FIELDS) {
+    record[field] = "";
+  }
+
+  return record;
+}
+
+function createRecordFromMiniPayload(rawClient, telegramUser) {
+  if (!rawClient || typeof rawClient !== "object") {
+    return {
+      error: "Payload must include `client` object.",
+    };
+  }
+
+  const client = {};
+  for (const [key, value] of Object.entries(rawClient)) {
+    if (MINI_ALLOWED_FIELDS.has(key)) {
+      client[key] = value;
+    }
+  }
+
+  const clientName = sanitizeTextValue(client.clientName, 200);
+  if (!clientName) {
+    return {
+      error: "`clientName` is required.",
+    };
+  }
+
+  const record = createEmptyRecord();
+  record.clientName = clientName;
+
+  for (const field of RECORD_TEXT_FIELDS) {
+    if (field === "clientName") {
+      continue;
+    }
+
+    record[field] = sanitizeTextValue(client[field]);
+  }
+
+  for (const field of RECORD_DATE_FIELDS) {
+    const rawDate = client[field] ?? "";
+    const normalizedDate = normalizeDateForStorage(rawDate);
+    if (sanitizeTextValue(rawDate, 100) && normalizedDate === null) {
+      return {
+        error: `Invalid date in field "${field}". Use MM/DD/YYYY.`,
+      };
+    }
+
+    record[field] = normalizedDate || "";
+  }
+
+  for (const field of RECORD_CHECKBOX_FIELDS) {
+    record[field] = toCheckboxValue(client[field]);
+  }
+
+  if (!record.closedBy && telegramUser) {
+    record.closedBy = buildDefaultClosedBy(telegramUser);
+  }
+
+  if (record.writtenOff === "Yes" && !record.dateWhenWrittenOff) {
+    record.dateWhenWrittenOff = getTodayDateUs();
+  }
+
+  return {
+    record: {
+      id: generateId(),
+      createdAt: new Date().toISOString(),
+      ...record,
+    },
+  };
+}
+
+function buildDefaultClosedBy(telegramUser) {
+  const username = sanitizeTextValue(telegramUser?.username, 120);
+  if (username) {
+    return `@${username}`;
+  }
+
+  const firstName = sanitizeTextValue(telegramUser?.first_name, 120);
+  const lastName = sanitizeTextValue(telegramUser?.last_name, 120);
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+  if (fullName) {
+    return fullName;
+  }
+
+  const userId = sanitizeTextValue(telegramUser?.id, 50);
+  return userId ? `tg:${userId}` : "";
+}
+
+function generateId() {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function getTodayDateUs() {
+  const today = new Date();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const day = String(today.getDate()).padStart(2, "0");
+  const year = String(today.getFullYear());
+  return `${month}/${day}/${year}`;
+}
+
+function parseDateValue(rawValue) {
+  const value = sanitizeTextValue(rawValue, 100);
+  if (!value) {
+    return null;
+  }
+
+  const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    if (isValidDateParts(year, month, day)) {
+      return Date.UTC(year, month - 1, day);
+    }
+    return null;
+  }
+
+  const usMatch = value.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2}|\d{4})$/);
+  if (usMatch) {
+    const month = Number(usMatch[1]);
+    const day = Number(usMatch[2]);
+    let year = Number(usMatch[3]);
+    if (usMatch[3].length === 2) {
+      year += 2000;
+    }
+
+    if (isValidDateParts(year, month, day)) {
+      return Date.UTC(year, month - 1, day);
+    }
+    return null;
+  }
+
+  return null;
+}
+
+function isValidDateParts(year, month, day) {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return false;
+  }
+
+  if (year < 1900 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
+  }
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
+function formatDateTimestampUs(timestamp) {
+  const date = new Date(timestamp);
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const year = String(date.getUTCFullYear());
+  return `${month}/${day}/${year}`;
+}
+
+function normalizeDateForStorage(rawValue) {
+  const value = sanitizeTextValue(rawValue, 100);
+  if (!value) {
+    return "";
+  }
+
+  const timestamp = parseDateValue(value);
+  if (timestamp === null) {
+    return null;
+  }
+
+  return formatDateTimestampUs(timestamp);
+}
+
 app.get("/api/health", (_req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -246,6 +632,53 @@ app.put("/api/records", async (req, res) => {
   }
 });
 
+app.post("/api/mini/clients", async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  const authResult = verifyTelegramInitData(req.body?.initData);
+  if (!authResult.ok) {
+    res.status(authResult.status).json({
+      error: authResult.error,
+    });
+    return;
+  }
+
+  const creationResult = createRecordFromMiniPayload(req.body?.client, authResult.user);
+  if (!creationResult.record) {
+    res.status(400).json({
+      error: creationResult.error || "Invalid client payload.",
+    });
+    return;
+  }
+
+  try {
+    const state = await getStoredRecords();
+    const records = normalizeStoredRecords(state.records);
+    records.unshift(creationResult.record);
+    const updatedAt = await saveStoredRecords(records);
+
+    res.status(201).json({
+      ok: true,
+      id: creationResult.record.id,
+      updatedAt,
+    });
+  } catch (error) {
+    console.error("POST /api/mini/clients failed:", error);
+    res.status(500).json({
+      error: "Failed to create client",
+    });
+  }
+});
+
+app.get("/mini", (_req, res) => {
+  res.sendFile(path.join(staticRoot, "mini.html"));
+});
+
 app.use("/api", (_req, res) => {
   res.status(404).json({
     error: "API route not found",
@@ -263,5 +696,8 @@ app.listen(PORT, () => {
   }
   if (!IS_BASIC_AUTH_ENABLED) {
     console.warn("Basic auth is disabled. Set BASIC_AUTH_USER and BASIC_AUTH_PASSWORD to enable it.");
+  }
+  if (!TELEGRAM_BOT_TOKEN) {
+    console.warn("Mini App write API is disabled. Set TELEGRAM_BOT_TOKEN to enable Telegram auth.");
   }
 });

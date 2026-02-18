@@ -17,3 +17,9 @@ services:
         sync: false
       - key: BASIC_AUTH_PASSWORD
         sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALLOWED_USER_IDS
+        sync: false
+      - key: TELEGRAM_INIT_DATA_TTL_SEC
+        value: "86400"
