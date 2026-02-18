@@ -1417,6 +1417,24 @@ function normalizeSsnForStorage(rawValue) {
   return `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
 }
 
+function normalizeUsPhoneForStorage(rawValue) {
+  const value = sanitizeTextValue(rawValue, MINI_EXTRA_MAX_LENGTH.clientPhoneNumber || 64);
+  if (!value) {
+    return "";
+  }
+
+  let digits = value.replace(/\D/g, "");
+  if (digits.startsWith("1") && digits.length > 10) {
+    digits = digits.slice(1);
+  }
+
+  if (digits.length !== 10) {
+    return null;
+  }
+
+  return `+1(${digits.slice(0, 3)})${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
 function createEmptyRecord() {
   const record = {};
 
@@ -1495,7 +1513,7 @@ function createRecordFromMiniPayload(rawClient) {
   }
 
   for (const field of MINI_EXTRA_TEXT_FIELDS) {
-    if (field === "ssn") {
+    if (field === "ssn" || field === "clientPhoneNumber") {
       continue;
     }
 
@@ -1509,6 +1527,17 @@ function createRecordFromMiniPayload(rawClient) {
     };
   }
   miniData.ssn = normalizedSsn || "";
+
+  const normalizedPhone = normalizeUsPhoneForStorage(client.clientPhoneNumber);
+  if (
+    sanitizeTextValue(client.clientPhoneNumber, MINI_EXTRA_MAX_LENGTH.clientPhoneNumber || 64) &&
+    normalizedPhone === null
+  ) {
+    return {
+      error: "Invalid client phone format. Use +1(XXX)XXX-XXXX.",
+    };
+  }
+  miniData.clientPhoneNumber = normalizedPhone || "";
 
   if (record.writtenOff === "Yes" && !record.dateWhenWrittenOff) {
     record.dateWhenWrittenOff = getTodayDateUs();

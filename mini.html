@@ -238,7 +238,7 @@
       }
     </style>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/mini.js?v=20260218-ssn-format" defer></script>
+    <script src="/mini.js?v=20260218-phone-format" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -275,7 +275,15 @@
 
         <div class="field">
           <label for="clientPhoneNumber">Client Phone Number</label>
-          <input id="clientPhoneNumber" name="clientPhoneNumber" autocomplete="off" type="tel" />
+          <input
+            id="clientPhoneNumber"
+            name="clientPhoneNumber"
+            autocomplete="off"
+            type="tel"
+            inputmode="numeric"
+            maxlength="15"
+            placeholder="+1(555)123-4567"
+          />
         </div>
 
         <div class="field">
