@@ -212,7 +212,7 @@ function renderPayments(items, query = "", showOnlyRefunds = false) {
     const clientNameCell = document.createElement("td");
     const clientName = (item?.clientName || "Unknown client").toString();
     if (isWriteOff) {
-      clientNameCell.textContent = `${clientName} (Written off: ${formatUsd(Math.abs(Number(item?.paymentAmount) || 0))})`;
+      clientNameCell.textContent = `${clientName} (списан)`;
     } else {
       clientNameCell.textContent = clientName;
     }
