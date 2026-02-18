@@ -9,12 +9,36 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
+      - key: WEB_AUTH_USERNAME
+        sync: false
+      - key: WEB_AUTH_PASSWORD
+        sync: false
+      - key: WEB_AUTH_SESSION_SECRET
+        sync: false
+      - key: WEB_AUTH_SESSION_TTL_SEC
+        value: "43200"
+      - key: WEB_AUTH_COOKIE_SECURE
+        sync: false
+      - key: QUICKBOOKS_CLIENT_ID
+        sync: false
+      - key: QUICKBOOKS_CLIENT_SECRET
+        sync: false
+      - key: QUICKBOOKS_REFRESH_TOKEN
+        sync: false
+      - key: QUICKBOOKS_REALM_ID
+        sync: false
+      - key: QUICKBOOKS_REDIRECT_URI
+        sync: false
+      - key: QUICKBOOKS_API_BASE_URL
+        value: https://quickbooks.api.intuit.com
       - key: DATABASE_URL
         sync: false
       - key: DB_TABLE_NAME
         value: client_records_state
       - key: DB_MODERATION_TABLE_NAME
         value: mini_client_submissions
+      - key: DB_MODERATION_FILES_TABLE_NAME
+        value: mini_submission_files
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_ALLOWED_USER_IDS

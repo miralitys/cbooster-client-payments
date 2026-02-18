@@ -2,6 +2,7 @@
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const ZERO_TOLERANCE = 0.005;
+const AUTH_LOGIN_PATH = "/login";
 const PAYMENT_PAIRS = [
   ["payment1", "payment1Date"],
   ["payment2", "payment2Date"],
@@ -70,6 +71,11 @@ void reloadDashboard();
 
 async function reloadDashboard() {
   await Promise.all([loadOverviewData(), loadPendingSubmissions()]);
+}
+
+function redirectToLoginPage() {
+  const nextPath = `${window.location.pathname || "/"}${window.location.search || ""}`;
+  window.location.href = `${AUTH_LOGIN_PATH}?next=${encodeURIComponent(nextPath)}`;
 }
 
 function initializeMenu() {
@@ -267,6 +273,11 @@ async function loadOverviewData() {
         Accept: "application/json",
       },
     });
+
+    if (response.status === 401) {
+      redirectToLoginPage();
+      return;
+    }
 
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -538,6 +549,11 @@ async function loadPendingSubmissions() {
       },
     });
 
+    if (response.status === 401) {
+      redirectToLoginPage();
+      return;
+    }
+
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(body.error || body.details || `Failed to load submissions (${response.status})`);
@@ -702,6 +718,11 @@ async function loadSubmissionFiles(submissionId, requestId) {
       },
     });
 
+    if (response.status === 401) {
+      redirectToLoginPage();
+      return;
+    }
+
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(body.error || body.details || `Failed to load attachments (${response.status})`);
@@ -826,6 +847,11 @@ async function reviewSubmission(submissionId, action) {
     },
     body: JSON.stringify({}),
   });
+
+  if (response.status === 401) {
+    redirectToLoginPage();
+    throw new Error("Authentication required.");
+  }
 
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {

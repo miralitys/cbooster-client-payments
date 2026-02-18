@@ -6,7 +6,7 @@
     <title>Credit Booster Client Payments</title>
     <link rel="stylesheet" href="styles.css?v=20260218-ui-overhaul64" />
     <script src="seed-client-data.js?v=20260217-ar3" defer></script>
-    <script src="app.js?v=20260218-ui-overhaul50" defer></script>
+    <script src="app.js?v=20260218-web-auth" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -54,10 +54,7 @@
                 <span class="account-menu__line" aria-hidden="true"></span>
               </button>
               <div id="account-menu-panel" class="account-menu__panel" role="menu" hidden>
-                <p id="account-menu-user" class="account-menu__user">Not signed in</p>
-                <button id="account-login-action" type="button" class="account-menu__item" role="menuitem">
-                  Log In
-                </button>
+                <p id="account-menu-user" class="account-menu__user">Signed in</p>
                 <button id="account-logout-action" type="button" class="account-menu__item" role="menuitem">
                   Log Out
                 </button>
@@ -360,32 +357,6 @@
         </div>
       </div>
     </main>
-
-    <section id="auth-gate" class="auth-gate" hidden aria-live="polite">
-      <div class="auth-gate__backdrop"></div>
-      <div class="auth-gate__dialog" role="dialog" aria-modal="true" aria-labelledby="auth-gate-title">
-        <h2 id="auth-gate-title">Sign In</h2>
-        <p class="auth-gate__subtitle">Enter your account details to continue.</p>
-        <form id="auth-form" novalidate>
-          <label class="auth-gate__field">
-            Username
-            <input id="auth-username" name="username" type="text" autocomplete="username" required />
-          </label>
-          <label class="auth-gate__field">
-            Password
-            <input
-              id="auth-password"
-              name="password"
-              type="password"
-              autocomplete="current-password"
-              required
-            />
-          </label>
-          <button type="submit" class="btn btn-primary auth-gate__submit">Log In</button>
-          <p id="auth-message" class="auth-gate__message" role="status" aria-live="polite"></p>
-        </form>
-      </div>
-    </section>
 
     <section class="modal" id="edit-modal" hidden>
       <div class="modal-backdrop" data-close-edit-modal></div>

@@ -12,6 +12,24 @@ const TELEGRAM_INIT_DATA_TTL_SEC = parsePositiveInteger(process.env.TELEGRAM_INI
 const TELEGRAM_REQUIRED_CHAT_ID = parseOptionalTelegramChatId(process.env.TELEGRAM_REQUIRED_CHAT_ID);
 const TELEGRAM_NOTIFY_CHAT_ID = (process.env.TELEGRAM_NOTIFY_CHAT_ID || "").toString().trim();
 const TELEGRAM_NOTIFY_THREAD_ID = parseOptionalPositiveInteger(process.env.TELEGRAM_NOTIFY_THREAD_ID);
+const DEFAULT_WEB_AUTH_USERNAME = "ramisi@creditbooster.com";
+const DEFAULT_WEB_AUTH_PASSWORD = "Ringo@123Qwerty";
+const WEB_AUTH_USERNAME = normalizeWebAuthConfigValue(process.env.WEB_AUTH_USERNAME) || DEFAULT_WEB_AUTH_USERNAME;
+const WEB_AUTH_PASSWORD = normalizeWebAuthConfigValue(process.env.WEB_AUTH_PASSWORD) || DEFAULT_WEB_AUTH_PASSWORD;
+const WEB_AUTH_SESSION_COOKIE_NAME = "cbooster_auth_session";
+const WEB_AUTH_SESSION_TTL_SEC = parsePositiveInteger(process.env.WEB_AUTH_SESSION_TTL_SEC, 12 * 60 * 60);
+const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
+const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(process.env.WEB_AUTH_SESSION_SECRET);
+const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
+const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
+const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
+const QUICKBOOKS_REALM_ID = (process.env.QUICKBOOKS_REALM_ID || "").toString().trim();
+const QUICKBOOKS_REDIRECT_URI = (process.env.QUICKBOOKS_REDIRECT_URI || "").toString().trim();
+const QUICKBOOKS_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
+const QUICKBOOKS_API_BASE_URL = ((process.env.QUICKBOOKS_API_BASE_URL || "https://quickbooks.api.intuit.com").toString().trim() || "https://quickbooks.api.intuit.com").replace(/\/+$/, "");
+const QUICKBOOKS_QUERY_PAGE_SIZE = 200;
+const QUICKBOOKS_MAX_QUERY_ROWS = 5000;
+const QUICKBOOKS_DEFAULT_RECENT_DAYS = 3;
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
@@ -169,10 +187,11 @@ const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
 };
 
 const app = express();
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: false }));
 
 const staticRoot = __dirname;
-app.use(express.static(staticRoot));
 
 const pool = DATABASE_URL
   ? new Pool({
@@ -272,6 +291,39 @@ function parseOptionalTelegramChatId(rawValue) {
   }
 
   return value;
+}
+
+function normalizeWebAuthConfigValue(value) {
+  return (value || "").toString().normalize("NFKC").trim();
+}
+
+function resolveOptionalBoolean(rawValue) {
+  const normalized = (rawValue || "").toString().trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+
+  return null;
+}
+
+function resolveWebAuthSessionSecret(rawSecret) {
+  const explicit = normalizeWebAuthConfigValue(rawSecret);
+  if (explicit.length >= 16) {
+    return explicit;
+  }
+
+  return crypto
+    .createHash("sha256")
+    .update(`cbooster-web-auth:${WEB_AUTH_USERNAME}:${WEB_AUTH_PASSWORD}`)
+    .digest("hex");
 }
 
 function createHttpError(message, status = 400) {
@@ -500,6 +552,528 @@ function safeEqual(leftValue, rightValue) {
   }
 
   return crypto.timingSafeEqual(left, right);
+}
+
+function encodeBase64Url(rawValue) {
+  return Buffer.from(rawValue, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function decodeBase64Url(rawValue) {
+  if (!rawValue) {
+    return "";
+  }
+
+  const normalized = rawValue.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = normalized.length % 4 ? "=".repeat(4 - (normalized.length % 4)) : "";
+  return Buffer.from(normalized + padding, "base64").toString("utf8");
+}
+
+function signWebAuthPayload(payload) {
+  return crypto.createHmac("sha256", WEB_AUTH_SESSION_SECRET).update(payload).digest("hex");
+}
+
+function createWebAuthSessionToken(username) {
+  const expiresAt = Date.now() + WEB_AUTH_SESSION_TTL_SEC * 1000;
+  const payload = JSON.stringify({
+    u: sanitizeTextValue(username, 200),
+    e: expiresAt,
+  });
+  const encodedPayload = encodeBase64Url(payload);
+  const signature = signWebAuthPayload(encodedPayload);
+  return `${encodedPayload}.${signature}`;
+}
+
+function parseWebAuthSessionToken(rawToken) {
+  const token = sanitizeTextValue(rawToken, 1200);
+  if (!token) {
+    return "";
+  }
+
+  const separatorIndex = token.lastIndexOf(".");
+  if (separatorIndex <= 0) {
+    return "";
+  }
+
+  const encodedPayload = token.slice(0, separatorIndex);
+  const receivedSignature = token.slice(separatorIndex + 1);
+  const expectedSignature = signWebAuthPayload(encodedPayload);
+  if (!safeEqual(receivedSignature, expectedSignature)) {
+    return "";
+  }
+
+  let parsedPayload = null;
+  try {
+    parsedPayload = JSON.parse(decodeBase64Url(encodedPayload));
+  } catch {
+    return "";
+  }
+
+  const username = sanitizeTextValue(parsedPayload?.u, 200);
+  const expiresAt = Number.parseInt(parsedPayload?.e, 10);
+  if (!username || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return "";
+  }
+
+  return username;
+}
+
+function getRequestCookie(req, cookieName) {
+  const normalizedName = sanitizeTextValue(cookieName, 200);
+  if (!normalizedName) {
+    return "";
+  }
+
+  const rawCookieHeader = (req.headers.cookie || "").toString();
+  if (!rawCookieHeader) {
+    return "";
+  }
+
+  const chunks = rawCookieHeader.split(";");
+  for (const chunk of chunks) {
+    const [rawKey, ...rawValueParts] = chunk.split("=");
+    const key = (rawKey || "").trim();
+    if (!key || key !== normalizedName) {
+      continue;
+    }
+
+    const rawValue = rawValueParts.join("=").trim();
+    if (!rawValue) {
+      return "";
+    }
+
+    try {
+      return decodeURIComponent(rawValue);
+    } catch {
+      return rawValue;
+    }
+  }
+
+  return "";
+}
+
+function isSecureCookieRequired(req) {
+  if (WEB_AUTH_COOKIE_SECURE !== null) {
+    return WEB_AUTH_COOKIE_SECURE;
+  }
+
+  if (req?.secure) {
+    return true;
+  }
+
+  const forwardedProto = sanitizeTextValue(req?.headers?.["x-forwarded-proto"], 40).toLowerCase();
+  if (forwardedProto === "https") {
+    return true;
+  }
+
+  return false;
+}
+
+function setWebAuthSessionCookie(req, res, username) {
+  const token = createWebAuthSessionToken(username);
+  res.cookie(WEB_AUTH_SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isSecureCookieRequired(req),
+    maxAge: WEB_AUTH_SESSION_TTL_SEC * 1000,
+    path: "/",
+  });
+}
+
+function clearWebAuthSessionCookie(req, res) {
+  res.clearCookie(WEB_AUTH_SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isSecureCookieRequired(req),
+    path: "/",
+  });
+}
+
+function resolveSafeNextPath(rawValue) {
+  const candidate = sanitizeTextValue(rawValue, 2000);
+  if (!candidate || !candidate.startsWith("/") || candidate.startsWith("//")) {
+    return "/";
+  }
+
+  if (candidate.startsWith("/login") || candidate.startsWith("/logout")) {
+    return "/";
+  }
+
+  return candidate;
+}
+
+function isValidWebAuthCredentials(rawUsername, rawPassword) {
+  const username = normalizeWebAuthConfigValue(rawUsername).toLowerCase();
+  const password = normalizeWebAuthConfigValue(rawPassword);
+  const expectedUsername = normalizeWebAuthConfigValue(WEB_AUTH_USERNAME).toLowerCase();
+  const expectedPassword = normalizeWebAuthConfigValue(WEB_AUTH_PASSWORD);
+  return safeEqual(username, expectedUsername) && safeEqual(password, expectedPassword);
+}
+
+function isPublicWebAuthPath(pathname) {
+  if (!pathname) {
+    return false;
+  }
+
+  if (
+    pathname === "/login" ||
+    pathname === "/logout" ||
+    pathname === "/favicon.ico" ||
+    pathname === "/mini" ||
+    pathname === "/mini.html" ||
+    pathname === "/mini.js" ||
+    pathname === "/api/health"
+  ) {
+    return true;
+  }
+
+  if (pathname.startsWith("/api/mini/")) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
+  const safeNextPath = resolveSafeNextPath(nextPath);
+  const safeError = sanitizeTextValue(errorMessage, 200);
+  const errorBlock = safeError
+    ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
+    : `<p class="auth-help">Use your account credentials to access the dashboard.</p>`;
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign In | Credit Booster</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f7fb;
+        --panel-bg: #ffffff;
+        --panel-border: #dbe3ef;
+        --text: #0f172a;
+        --muted: #5b667a;
+        --accent: #0ea5e9;
+        --accent-strong: #0284c7;
+        --danger: #dc2626;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font-family: "Avenir Next", "Segoe UI", Arial, sans-serif;
+        color: var(--text);
+        background: radial-gradient(circle at top left, #dff3ff 0%, var(--bg) 52%, #eef2f7 100%);
+      }
+
+      .auth-shell {
+        width: min(420px, 100%);
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 18px;
+        box-shadow: 0 24px 80px rgba(15, 23, 42, 0.14);
+        padding: 28px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 28px;
+        line-height: 1.15;
+      }
+
+      .auth-subtitle {
+        margin: 8px 0 20px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      form {
+        display: grid;
+        gap: 14px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      input {
+        width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 15px;
+      }
+
+      input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.16);
+      }
+
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 15px;
+        font-weight: 700;
+        color: #fff;
+        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        cursor: pointer;
+      }
+
+      .auth-help,
+      .auth-error {
+        margin: 0 0 8px;
+        font-size: 13px;
+      }
+
+      .auth-help {
+        color: var(--muted);
+      }
+
+      .auth-error {
+        color: var(--danger);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="auth-shell">
+      <h1>Sign In</h1>
+      <p class="auth-subtitle">Credit Booster Client Payments</p>
+      ${errorBlock}
+      <form method="post" action="/login" novalidate>
+        <input type="hidden" name="next" value="${escapeHtml(safeNextPath)}" />
+        <label>
+          Username
+          <input type="text" name="username" autocomplete="username" required />
+        </label>
+        <label>
+          Password
+          <input type="password" name="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit">Log In</button>
+      </form>
+    </main>
+  </body>
+</html>`;
+}
+
+function escapeHtml(value) {
+  return (value || "")
+    .toString()
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function requireWebAuth(req, res, next) {
+  const pathname = req.path || "/";
+  if (isPublicWebAuthPath(pathname)) {
+    next();
+    return;
+  }
+
+  const sessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+  const username = parseWebAuthSessionToken(sessionToken);
+  if (username) {
+    req.webAuthUser = username;
+    next();
+    return;
+  }
+
+  clearWebAuthSessionCookie(req, res);
+
+  if (pathname.startsWith("/api/")) {
+    res.status(401).json({
+      error: "Authentication required.",
+    });
+    return;
+  }
+
+  const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
+  res.redirect(302, `/login?next=${encodeURIComponent(nextPath)}`);
+}
+
+function isQuickBooksConfigured() {
+  return Boolean(
+    QUICKBOOKS_CLIENT_ID &&
+      QUICKBOOKS_CLIENT_SECRET &&
+      QUICKBOOKS_REFRESH_TOKEN &&
+      QUICKBOOKS_REALM_ID,
+  );
+}
+
+function formatQuickBooksDateUtc(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  const year = String(date.getUTCFullYear());
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getQuickBooksRecentDateRange(days = QUICKBOOKS_DEFAULT_RECENT_DAYS) {
+  const normalizedDays = Math.min(Math.max(parsePositiveInteger(days, QUICKBOOKS_DEFAULT_RECENT_DAYS), 1), 31);
+  const toDate = new Date();
+  const fromDate = new Date(toDate);
+  fromDate.setUTCDate(fromDate.getUTCDate() - (normalizedDays - 1));
+  return {
+    days: normalizedDays,
+    from: formatQuickBooksDateUtc(fromDate),
+    to: formatQuickBooksDateUtc(toDate),
+  };
+}
+
+async function fetchQuickBooksAccessToken() {
+  const basicCredentials = Buffer.from(`${QUICKBOOKS_CLIENT_ID}:${QUICKBOOKS_CLIENT_SECRET}`, "utf8").toString(
+    "base64",
+  );
+  const payload = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: QUICKBOOKS_REFRESH_TOKEN,
+  });
+
+  if (QUICKBOOKS_REDIRECT_URI) {
+    payload.set("redirect_uri", QUICKBOOKS_REDIRECT_URI);
+  }
+
+  let response;
+  try {
+    response = await fetch(QUICKBOOKS_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basicCredentials}`,
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: payload.toString(),
+    });
+  } catch (error) {
+    throw createHttpError(`QuickBooks token request failed: ${sanitizeTextValue(error?.message, 300)}`, 503);
+  }
+
+  const responseText = await response.text();
+  let body = null;
+  try {
+    body = responseText ? JSON.parse(responseText) : null;
+  } catch {
+    body = null;
+  }
+
+  if (!response.ok) {
+    const details = sanitizeTextValue(body?.error_description || body?.error || responseText, 400);
+    throw createHttpError(`QuickBooks auth failed. ${details || "Unable to refresh access token."}`, 502);
+  }
+
+  const accessToken = sanitizeTextValue(body?.access_token, 5000);
+  if (!accessToken) {
+    throw createHttpError("QuickBooks auth failed. Empty access token.", 502);
+  }
+
+  return accessToken;
+}
+
+async function fetchQuickBooksPaymentsInRange(accessToken, fromDate, toDate) {
+  const items = [];
+  let startPosition = 1;
+
+  while (items.length < QUICKBOOKS_MAX_QUERY_ROWS) {
+    const query = [
+      "SELECT Id, TotalAmt, TxnDate, CustomerRef",
+      "FROM Payment",
+      `WHERE TxnDate >= '${fromDate}' AND TxnDate <= '${toDate}'`,
+      "ORDER BY TxnDate DESC",
+      `STARTPOSITION ${startPosition}`,
+      `MAXRESULTS ${QUICKBOOKS_QUERY_PAGE_SIZE}`,
+    ].join(" ");
+    const endpoint = `${QUICKBOOKS_API_BASE_URL}/v3/company/${encodeURIComponent(QUICKBOOKS_REALM_ID)}/query`;
+    const queryParams = new URLSearchParams({
+      query,
+      minorversion: "75",
+    });
+
+    let response;
+    try {
+      response = await fetch(`${endpoint}?${queryParams.toString()}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+    } catch (error) {
+      throw createHttpError(`QuickBooks payments request failed: ${sanitizeTextValue(error?.message, 300)}`, 503);
+    }
+
+    const responseText = await response.text();
+    let body = null;
+    try {
+      body = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      const faultError = body?.Fault?.Error?.[0];
+      const message = sanitizeTextValue(
+        faultError?.Detail || faultError?.Message || responseText || "Unknown QuickBooks API error.",
+        500,
+      );
+      throw createHttpError(`QuickBooks payments query failed. ${message}`, 502);
+    }
+
+    const pageItems = Array.isArray(body?.QueryResponse?.Payment)
+      ? body.QueryResponse.Payment
+      : body?.QueryResponse?.Payment
+        ? [body.QueryResponse.Payment]
+        : [];
+    if (!pageItems.length) {
+      break;
+    }
+
+    items.push(...pageItems);
+
+    if (pageItems.length < QUICKBOOKS_QUERY_PAGE_SIZE) {
+      break;
+    }
+
+    startPosition += QUICKBOOKS_QUERY_PAGE_SIZE;
+  }
+
+  return items.slice(0, QUICKBOOKS_MAX_QUERY_ROWS);
+}
+
+function mapQuickBooksPayment(record) {
+  const customerName = sanitizeTextValue(record?.CustomerRef?.name, 300);
+  const customerId = sanitizeTextValue(record?.CustomerRef?.value, 100);
+  const parsedAmount = Number.parseFloat(record?.TotalAmt);
+  const paymentAmount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
+  const paymentDate = sanitizeTextValue(record?.TxnDate, 20);
+
+  return {
+    clientName: customerName || (customerId ? `Customer ${customerId}` : "Unknown client"),
+    paymentAmount,
+    paymentDate: paymentDate || "",
+  };
 }
 
 async function verifyTelegramInitData(rawInitData) {
@@ -836,6 +1410,7 @@ function normalizeModerationStatus(rawStatus, options = {}) {
 
 function getReviewerIdentity(req) {
   const candidates = [
+    req.webAuthUser,
     req.headers["x-user-email"],
     req.headers["x-user"],
     req.headers["x-auth-request-email"],
@@ -1738,6 +2313,97 @@ function resolveDbHttpStatus(error, fallbackStatus = 500) {
   return fallbackStatus;
 }
 
+app.get("/login", (req, res) => {
+  const nextPath = resolveSafeNextPath(req.query.next);
+  const currentSessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+  const currentUser = parseWebAuthSessionToken(currentSessionToken);
+  if (currentUser) {
+    res.redirect(302, nextPath);
+    return;
+  }
+
+  const hasError = Boolean(sanitizeTextValue(req.query.error, 20));
+  res.setHeader("Cache-Control", "no-store, private");
+  res
+    .status(200)
+    .type("html")
+    .send(
+      buildWebLoginPageHtml({
+        nextPath,
+        errorMessage: hasError ? "Invalid login or password." : "",
+      }),
+    );
+});
+
+app.post("/login", (req, res) => {
+  const username = req.body?.username;
+  const password = req.body?.password;
+  const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
+
+  if (!isValidWebAuthCredentials(username, password)) {
+    clearWebAuthSessionCookie(req, res);
+    res.redirect(302, `/login?error=1&next=${encodeURIComponent(nextPath)}`);
+    return;
+  }
+
+  setWebAuthSessionCookie(req, res, WEB_AUTH_USERNAME);
+  res.redirect(302, nextPath);
+});
+
+function handleWebLogout(req, res) {
+  clearWebAuthSessionCookie(req, res);
+  res.redirect(302, "/login");
+}
+
+app.get("/logout", handleWebLogout);
+app.post("/logout", handleWebLogout);
+
+app.use(requireWebAuth);
+app.use(express.static(staticRoot));
+
+app.get("/api/auth/session", (req, res) => {
+  res.json({
+    ok: true,
+    user: {
+      username: sanitizeTextValue(req.webAuthUser, 200),
+    },
+  });
+});
+
+app.get("/api/quickbooks/payments/recent", async (req, res) => {
+  if (!isQuickBooksConfigured()) {
+    res.status(503).json({
+      error:
+        "QuickBooks is not configured. Set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN, and QUICKBOOKS_REALM_ID.",
+    });
+    return;
+  }
+
+  const range = getQuickBooksRecentDateRange(req.query.days);
+
+  try {
+    const accessToken = await fetchQuickBooksAccessToken();
+    const paymentRecords = await fetchQuickBooksPaymentsInRange(accessToken, range.from, range.to);
+    const items = paymentRecords.map(mapQuickBooksPayment);
+
+    res.json({
+      ok: true,
+      days: range.days,
+      range: {
+        from: range.from,
+        to: range.to,
+      },
+      count: items.length,
+      items,
+    });
+  } catch (error) {
+    console.error("GET /api/quickbooks/payments/recent failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load QuickBooks payments.",
+    });
+  }
+});
+
 app.get("/api/health", async (_req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -2073,6 +2739,10 @@ app.get("/mini", (_req, res) => {
   res.sendFile(path.join(staticRoot, "mini.html"));
 });
 
+app.get("/quickbooks-payments", (_req, res) => {
+  res.sendFile(path.join(staticRoot, "quickbooks-payments.html"));
+});
+
 app.get("/Client_Payments", (_req, res) => {
   res.sendFile(path.join(staticRoot, "client-payments.html"));
 });
@@ -2093,6 +2763,10 @@ app.get("*", (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  console.log("Web auth is enabled. Sign in at /login.");
+  if (WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME && WEB_AUTH_PASSWORD === DEFAULT_WEB_AUTH_PASSWORD) {
+    console.warn("Using default web auth credentials. Set WEB_AUTH_USERNAME and WEB_AUTH_PASSWORD in environment.");
+  }
   if (!pool) {
     console.warn("DATABASE_URL is missing. API routes will return 503 until configured.");
   }
@@ -2107,5 +2781,8 @@ app.listen(PORT, () => {
   }
   if (TELEGRAM_NOTIFY_THREAD_ID && !TELEGRAM_NOTIFY_CHAT_ID) {
     console.warn("TELEGRAM_NOTIFY_THREAD_ID is ignored because TELEGRAM_NOTIFY_CHAT_ID is not set.");
+  }
+  if (!isQuickBooksConfigured()) {
+    console.warn("QuickBooks test API is disabled. Set QUICKBOOKS_CLIENT_ID/SECRET/REFRESH_TOKEN/REALM_ID.");
   }
 });
