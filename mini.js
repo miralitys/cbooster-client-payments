@@ -5,6 +5,7 @@ const message = document.querySelector("#mini-message");
 const submitButton = document.querySelector("#mini-submit-button");
 const payment1DateInput = document.querySelector("#payment1Date");
 const ssnInput = document.querySelector("#ssn");
+const clientPhoneInput = document.querySelector("#clientPhoneNumber");
 const attachmentsInput = document.querySelector("#attachments");
 const attachmentsPreview = document.querySelector("#attachments-preview");
 const telegramApp = window.Telegram?.WebApp || null;
@@ -38,6 +39,7 @@ let isMiniAccessAllowed = false;
 
 initializeDateField(payment1DateInput);
 initializeSsnField(ssnInput);
+initializePhoneField(clientPhoneInput);
 setDefaultDateIfEmpty(payment1DateInput);
 setSubmittingState(true);
 void initializeTelegramContext();
@@ -58,8 +60,8 @@ if (form) {
       return;
     }
 
-    const payload = buildPayload();
-    if (!payload.client.clientName) {
+    const formData = new FormData(form);
+    if (!normalizeValue(formData.get("clientName"))) {
       setMessage("Client Name is required.", "error");
       return;
     }
@@ -70,6 +72,13 @@ if (form) {
       return;
     }
 
+    const phoneValidation = validatePhoneField();
+    if (!phoneValidation.ok) {
+      setMessage("Client Phone Number must match +1(XXX)XXX-XXXX.", "error");
+      return;
+    }
+
+    const payload = buildPayload();
     if (payload.attachmentsError) {
       setMessage(payload.attachmentsError, "error");
       return;
@@ -94,6 +103,7 @@ if (form) {
 
       form.reset();
       setInputInvalidState(ssnInput, false);
+      setInputInvalidState(clientPhoneInput, false);
       setDefaultDateIfEmpty(payment1DateInput);
       renderAttachmentsPreview([]);
       setMessage("Submitted for moderation. Client will appear after approval.", "success");
@@ -333,6 +343,84 @@ function validateSsnField() {
   ssnInput.value = formatted;
   const isValid = isValidSsnFormat(formatted);
   setInputInvalidState(ssnInput, !isValid);
+
+  return {
+    ok: isValid,
+    value: formatted,
+  };
+}
+
+function initializePhoneField(input) {
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+
+  input.addEventListener("input", () => {
+    const formatted = formatUsPhoneInputValue(input.value);
+    input.value = formatted;
+    const hasValue = Boolean(formatted.trim());
+    setInputInvalidState(input, hasValue && !isValidUsPhoneFormat(formatted));
+  });
+
+  input.addEventListener("blur", () => {
+    validatePhoneField();
+  });
+}
+
+function formatUsPhoneInputValue(rawValue) {
+  let digits = (rawValue || "").replace(/\D/g, "");
+  if (digits.startsWith("1") && digits.length > 10) {
+    digits = digits.slice(1);
+  }
+  digits = digits.slice(0, 10);
+
+  if (!digits.length) {
+    return "";
+  }
+
+  let result = "+1(";
+  result += digits.slice(0, 3);
+
+  if (digits.length >= 3) {
+    result += ")";
+  }
+
+  if (digits.length > 3) {
+    result += digits.slice(3, 6);
+  }
+
+  if (digits.length > 6) {
+    result += `-${digits.slice(6, 10)}`;
+  }
+
+  return result;
+}
+
+function isValidUsPhoneFormat(rawValue) {
+  return /^\+1\(\d{3}\)\d{3}-\d{4}$/.test((rawValue || "").trim());
+}
+
+function validatePhoneField() {
+  if (!(clientPhoneInput instanceof HTMLInputElement)) {
+    return {
+      ok: true,
+      value: "",
+    };
+  }
+
+  const rawValue = (clientPhoneInput.value || "").trim();
+  if (!rawValue) {
+    setInputInvalidState(clientPhoneInput, false);
+    return {
+      ok: true,
+      value: "",
+    };
+  }
+
+  const formatted = formatUsPhoneInputValue(rawValue);
+  clientPhoneInput.value = formatted;
+  const isValid = isValidUsPhoneFormat(formatted);
+  setInputInvalidState(clientPhoneInput, !isValid);
 
   return {
     ok: isValid,
