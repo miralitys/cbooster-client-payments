@@ -133,6 +133,42 @@
         resize: vertical;
       }
 
+      input[type="file"] {
+        padding: 8px;
+        line-height: 1.2;
+      }
+
+      .field-help {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .attachments-preview {
+        display: grid;
+        gap: 6px;
+        margin-top: 2px;
+      }
+
+      .attachments-preview[hidden] {
+        display: none;
+      }
+
+      .attachments-preview__item {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #0f141b;
+        padding: 8px 10px;
+        font-size: 13px;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .attachments-preview__meta {
+        color: var(--muted);
+        margin-left: 6px;
+      }
+
       .checkbox-row {
         display: grid;
         gap: 8px;
@@ -196,7 +232,7 @@
       }
     </style>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/mini.js" defer></script>
+    <script src="/mini.js?v=20260218-attachments" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -212,6 +248,36 @@
         <div class="field">
           <label for="closedBy">Closed By</label>
           <input id="closedBy" name="closedBy" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label for="leadSource">Lead Source</label>
+          <input id="leadSource" name="leadSource" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label for="ssn">SSN</label>
+          <input id="ssn" name="ssn" autocomplete="off" inputmode="numeric" />
+        </div>
+
+        <div class="field">
+          <label for="clientPhoneNumber">Client Phone Number</label>
+          <input id="clientPhoneNumber" name="clientPhoneNumber" autocomplete="off" type="tel" />
+        </div>
+
+        <div class="field">
+          <label for="futurePayment">Future Payment</label>
+          <input id="futurePayment" name="futurePayment" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label for="identityIq">IdentityIQ</label>
+          <input id="identityIq" name="identityIq" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label for="clientEmailAddress">Client Email Address</label>
+          <input id="clientEmailAddress" name="clientEmailAddress" autocomplete="off" type="email" />
         </div>
 
         <div class="field">
@@ -252,6 +318,18 @@
         <div class="field">
           <label for="notes">Notes</label>
           <textarea id="notes" name="notes"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="attachments">Attachments (up to 10 files)</label>
+          <input
+            id="attachments"
+            name="attachments"
+            type="file"
+            multiple
+          />
+          <p class="field-help">You can upload up to 10 files at once. Script and HTML files are blocked.</p>
+          <div id="attachments-preview" class="attachments-preview" hidden></div>
         </div>
 
         <div class="checkbox-row">

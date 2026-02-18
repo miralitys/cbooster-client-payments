@@ -33,6 +33,7 @@ npm start
    - `DATABASE_URL` = строка подключения Supabase;
    - `DB_TABLE_NAME` = `client_records_state`;
    - `DB_MODERATION_TABLE_NAME` = `mini_client_submissions`;
+   - `DB_MODERATION_FILES_TABLE_NAME` = `mini_submission_files`;
    - `TELEGRAM_BOT_TOKEN` = токен бота (для Mini App);
    - `TELEGRAM_ALLOWED_USER_IDS` = список Telegram user id через запятую (опционально);
    - `TELEGRAM_REQUIRED_CHAT_ID` = id группы, где пользователь должен состоять, чтобы пользоваться Mini App (опционально);
@@ -48,12 +49,15 @@ npm start
 - `POST /api/mini/access`
 - `POST /api/mini/clients`
 - `GET /api/moderation/submissions`
+- `GET /api/moderation/submissions/:id/files`
+- `GET /api/moderation/submissions/:id/files/:fileId`
 - `POST /api/moderation/submissions/:id/approve`
 - `POST /api/moderation/submissions/:id/reject`
 
 Таблица в Supabase создается автоматически при первом обращении:
 - `client_records_state(id, records, updated_at)`.
-- `mini_client_submissions(id, record, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note)`.
+- `mini_client_submissions(id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note)`.
+- `mini_submission_files(id, submission_id, file_name, mime_type, size_bytes, content, created_at)`.
 
 ## Доступ к страницам
 
@@ -76,6 +80,24 @@ npm start
 8. Поставьте галочку "Добавить в общую базу данных" и нажмите "Применить" для одобрения.
 9. После approve клиент появится на странице `https://<ваш-домен>.onrender.com/Client_Payments`.
 
+## Вложения в Mini App
+
+- В Mini App можно прикрепить до 10 файлов за одну отправку.
+- Разрешены любые файлы, кроме скриптов и HTML (`.js`, `.ts`, `.py`, `.sh`, `.html`, и т.д.).
+- Ограничение: до 10 MB на файл и до 40 MB суммарно на заявку.
+- На этапе премодерации вложения доступны в карточке заявки: просмотр (для изображений/PDF) и скачивание.
+
+## Дополнительные поля Mini App
+
+В Mini App добавлены отдельные поля, которые сохраняются только в модерационных заявках (`mini_client_submissions.mini_data`) и не попадают в основную таблицу клиентов (`client_records_state`):
+
+- `leadSource` (Источник лида)
+- `ssn` (SSN)
+- `clientPhoneNumber` (Телефон клиента)
+- `futurePayment` (Future payment)
+- `identityIq` (IdentityIQ)
+- `clientEmailAddress` (Email клиента)
+
 ## Уведомления в группу о новых заявках
 
 Если хотите получать сообщение в Telegram-группу сразу после отправки формы из Mini App:
@@ -86,10 +108,27 @@ npm start
 2. Убедитесь, что бот состоит в группе и имеет право отправлять сообщения.
 3. Redeploy сервиса.
 
-После этого при каждом `POST /api/mini/clients` бот отправит в группу сообщение с `submissionId`, автором заявки и заполненными полями клиента.
+После этого при каждом `POST /api/mini/clients` бот отправит в группу сообщение с автором заявки и заполненными полями клиента.
 
 ## Миграция текущих данных
 
 При первом старте с настроенной БД:
 - если в Supabase уже есть данные, они загрузятся в UI;
 - если БД пустая, локальные данные браузера будут отправлены в Supabase автоматически.
+
+## iPhone приложение
+
+Добавлен отдельный мобильный клиент на Expo:  
+`/Users/ramisyaparov/Desktop/Project/CBooster Client Payments/mobile-app`
+
+Быстрый старт:
+
+```bash
+cd "/Users/ramisyaparov/Desktop/Project/CBooster Client Payments/mobile-app"
+npm install
+cp .env.example .env
+# в .env укажите EXPO_PUBLIC_APP_URL=https://<ваш-домен>.onrender.com
+npm run start
+```
+
+Далее откройте `Expo Go` на iPhone и отсканируйте QR из терминала.
