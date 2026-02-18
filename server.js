@@ -753,14 +753,18 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
     <style>
       :root {
         color-scheme: light;
-        --bg: #f4f7fb;
-        --panel-bg: #ffffff;
-        --panel-border: #dbe3ef;
-        --text: #0f172a;
-        --muted: #5b667a;
-        --accent: #0ea5e9;
-        --accent-strong: #0284c7;
-        --danger: #dc2626;
+        --color-bg: #f3f4f6;
+        --color-surface: #ffffff;
+        --color-border: #d6dde6;
+        --color-border-strong: #c1ccd8;
+        --color-text: #0f172a;
+        --color-text-muted: #475569;
+        --color-primary: #0f766e;
+        --color-primary-hover: #115e59;
+        --color-primary-contrast: #ffffff;
+        --color-danger: #991b1b;
+        --font-family-base: "Avenir Next", "Avenir", "Segoe UI", Helvetica, sans-serif;
+        --font-family-heading: "Avenir Next Demi Bold", "Avenir Next", "Avenir", "Segoe UI", Helvetica, sans-serif;
       }
 
       * {
@@ -773,91 +777,120 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
         display: grid;
         place-items: center;
         padding: 24px;
-        font-family: "Avenir Next", "Segoe UI", Arial, sans-serif;
-        color: var(--text);
-        background: radial-gradient(circle at top left, #dff3ff 0%, var(--bg) 52%, #eef2f7 100%);
+        font-family: var(--font-family-base);
+        color: var(--color-text);
+        background: var(--color-bg);
       }
 
       .auth-shell {
-        width: min(420px, 100%);
-        background: var(--panel-bg);
-        border: 1px solid var(--panel-border);
+        width: min(450px, 100%);
+        border: 1px solid var(--color-border);
         border-radius: 18px;
-        box-shadow: 0 24px 80px rgba(15, 23, 42, 0.14);
-        padding: 28px;
+        background: var(--color-surface);
+        box-shadow: 0 20px 48px -28px rgba(15, 23, 42, 0.42);
+        padding: 24px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .auth-eyebrow {
+        margin: 0;
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--color-text-muted);
+        font-weight: 600;
       }
 
       h1 {
         margin: 0;
-        font-size: 28px;
-        line-height: 1.15;
+        font-family: var(--font-family-heading);
+        font-size: 1.62rem;
+        line-height: 1.2;
+        font-weight: 700;
       }
 
       .auth-subtitle {
-        margin: 8px 0 20px;
-        color: var(--muted);
-        font-size: 14px;
+        margin: 0;
+        color: var(--color-text-muted);
+        font-size: 0.78rem;
       }
 
       form {
         display: grid;
-        gap: 14px;
+        gap: 12px;
+        margin-top: 4px;
       }
 
       label {
         display: grid;
         gap: 6px;
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.06em;
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--muted);
+        color: var(--color-text-muted);
       }
 
       input {
         width: 100%;
-        border: 1px solid #cbd5e1;
+        border: 1px solid var(--color-border);
         border-radius: 10px;
-        padding: 12px;
-        font-size: 15px;
+        min-height: 38px;
+        padding: 10px 12px;
+        font-size: 0.88rem;
+        background: #ffffff;
+        color: var(--color-text);
       }
 
       input:focus {
         outline: none;
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.16);
+        border-color: var(--color-primary);
+        box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18);
       }
 
       button {
-        border: 0;
+        border: 1px solid var(--color-primary);
         border-radius: 10px;
-        padding: 12px;
-        font-size: 15px;
-        font-weight: 700;
-        color: #fff;
-        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        min-height: 38px;
+        padding: 10px 12px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: var(--color-primary-contrast);
+        background: var(--color-primary);
         cursor: pointer;
+        transition: background-color 0.16s ease, border-color 0.16s ease;
+      }
+
+      button:hover {
+        background: var(--color-primary-hover);
+        border-color: var(--color-primary-hover);
       }
 
       .auth-help,
       .auth-error {
-        margin: 0 0 8px;
-        font-size: 13px;
+        margin: 0;
+        font-size: 0.78rem;
       }
 
       .auth-help {
-        color: var(--muted);
+        color: var(--color-text-muted);
       }
 
       .auth-error {
-        color: var(--danger);
+        color: var(--color-danger);
+        background: #fef2f2;
+        border: 1px solid #fecaca;
+        border-radius: 10px;
+        padding: 8px 10px;
       }
     </style>
   </head>
   <body>
     <main class="auth-shell">
+      <p class="auth-eyebrow">Credit Booster</p>
       <h1>Sign In</h1>
-      <p class="auth-subtitle">Credit Booster Client Payments</p>
+      <p class="auth-subtitle">Client Payments Dashboard</p>
       ${errorBlock}
       <form method="post" action="/login" novalidate>
         <input type="hidden" name="next" value="${escapeHtml(safeNextPath)}" />
