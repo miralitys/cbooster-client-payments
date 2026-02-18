@@ -17,6 +17,7 @@ const DEFAULT_WEB_AUTH_PASSWORD = "Ringo@123Qwerty";
 const WEB_AUTH_USERNAME = normalizeWebAuthConfigValue(process.env.WEB_AUTH_USERNAME) || DEFAULT_WEB_AUTH_USERNAME;
 const WEB_AUTH_PASSWORD = normalizeWebAuthConfigValue(process.env.WEB_AUTH_PASSWORD) || DEFAULT_WEB_AUTH_PASSWORD;
 const WEB_AUTH_SESSION_COOKIE_NAME = "cbooster_auth_session";
+const WEB_AUTH_MOBILE_SESSION_HEADER = "x-cbooster-session";
 const WEB_AUTH_SESSION_TTL_SEC = parsePositiveInteger(process.env.WEB_AUTH_SESSION_TTL_SEC, 12 * 60 * 60);
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(process.env.WEB_AUTH_SESSION_SECRET);
@@ -711,8 +712,8 @@ function isSecureCookieRequired(req) {
   return false;
 }
 
-function setWebAuthSessionCookie(req, res, username) {
-  const token = createWebAuthSessionToken(username);
+function setWebAuthSessionCookie(req, res, username, sessionToken = "") {
+  const token = sanitizeTextValue(sessionToken, 1200) || createWebAuthSessionToken(username);
   res.cookie(WEB_AUTH_SESSION_COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: "lax",
@@ -729,6 +730,31 @@ function clearWebAuthSessionCookie(req, res) {
     secure: isSecureCookieRequired(req),
     path: "/",
   });
+}
+
+function getRequestWebAuthUser(req) {
+  const cookieToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+  const cookieUsername = parseWebAuthSessionToken(cookieToken);
+  if (cookieUsername) {
+    return cookieUsername;
+  }
+
+  const headerToken = sanitizeTextValue(req?.headers?.[WEB_AUTH_MOBILE_SESSION_HEADER], 1200);
+  const headerUsername = parseWebAuthSessionToken(headerToken);
+  if (headerUsername) {
+    return headerUsername;
+  }
+
+  const authorizationHeader = sanitizeTextValue(req?.headers?.authorization, 1400);
+  if (authorizationHeader.toLowerCase().startsWith("bearer ")) {
+    const bearerToken = authorizationHeader.slice("bearer ".length).trim();
+    const bearerUsername = parseWebAuthSessionToken(bearerToken);
+    if (bearerUsername) {
+      return bearerUsername;
+    }
+  }
+
+  return "";
 }
 
 function resolveSafeNextPath(rawValue) {
@@ -764,6 +790,8 @@ function isPublicWebAuthPath(pathname) {
     pathname === "/mini" ||
     pathname === "/mini.html" ||
     pathname === "/mini.js" ||
+    pathname === "/api/mobile/auth/login" ||
+    pathname === "/api/mobile/auth/logout" ||
     pathname === "/api/health"
   ) {
     return true;
@@ -965,8 +993,7 @@ function requireWebAuth(req, res, next) {
     return;
   }
 
-  const sessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
-  const username = parseWebAuthSessionToken(sessionToken);
+  const username = getRequestWebAuthUser(req);
   if (username) {
     req.webAuthUser = username;
     next();
@@ -4142,6 +4169,39 @@ app.post("/login", (req, res) => {
 
   setWebAuthSessionCookie(req, res, WEB_AUTH_USERNAME);
   res.redirect(302, nextPath);
+});
+
+app.post("/api/mobile/auth/login", (req, res) => {
+  const username = req.body?.username;
+  const password = req.body?.password;
+
+  if (!isValidWebAuthCredentials(username, password)) {
+    clearWebAuthSessionCookie(req, res);
+    res.status(401).json({
+      error: "Invalid login or password.",
+    });
+    return;
+  }
+
+  const authUsername = normalizeWebAuthConfigValue(WEB_AUTH_USERNAME);
+  const sessionToken = createWebAuthSessionToken(authUsername);
+  setWebAuthSessionCookie(req, res, authUsername, sessionToken);
+  res.setHeader("Cache-Control", "no-store, private");
+  res.json({
+    ok: true,
+    sessionToken,
+    user: {
+      username: authUsername,
+    },
+  });
+});
+
+app.post("/api/mobile/auth/logout", (req, res) => {
+  clearWebAuthSessionCookie(req, res);
+  res.setHeader("Cache-Control", "no-store, private");
+  res.json({
+    ok: true,
+  });
 });
 
 function handleWebLogout(req, res) {
