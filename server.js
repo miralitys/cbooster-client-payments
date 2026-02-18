@@ -1037,7 +1037,7 @@ function normalizeTelegramMessageFieldValue(value, maxLength = 600) {
   return sanitizeTextValue(value, maxLength).replace(/\s+/g, " ").trim();
 }
 
-function buildTelegramSubmissionMessage(record, miniData, _submission, telegramUser) {
+function buildTelegramSubmissionMessage(record, miniData, _submission, telegramUser, attachments = []) {
   const lines = ["New client submission from Mini App"];
 
   const submittedBy = buildTelegramUserLabel(telegramUser);
@@ -1067,6 +1067,11 @@ function buildTelegramSubmissionMessage(record, miniData, _submission, telegramU
     lines.push(`- ${label}: ${value}`);
   }
 
+  const attachmentsCount = Array.isArray(attachments) ? attachments.length : 0;
+  if (attachmentsCount > 0) {
+    lines.push(`- Attachments: ${attachmentsCount}`);
+  }
+
   const message = lines.join("\n").trim();
   const TELEGRAM_MAX_MESSAGE_LENGTH = 3900;
   if (message.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
@@ -1076,14 +1081,69 @@ function buildTelegramSubmissionMessage(record, miniData, _submission, telegramU
   return `${message.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH - 3)}...`;
 }
 
-async function sendMiniSubmissionTelegramNotification(record, miniData, submission, telegramUser) {
+async function sendMiniSubmissionTelegramAttachments(submission, attachments = []) {
+  const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
+  if (!normalizedAttachments.length) {
+    return;
+  }
+
+  const submissionId = sanitizeTextValue(submission?.id, 140);
+
+  for (let index = 0; index < normalizedAttachments.length; index += 1) {
+    const attachment = normalizedAttachments[index];
+    const fileName = sanitizeAttachmentFileName(attachment?.fileName);
+    const mimeType = normalizeAttachmentMimeType(attachment?.mimeType);
+    const content = Buffer.isBuffer(attachment?.content) ? attachment.content : null;
+
+    if (!content || !content.length) {
+      continue;
+    }
+
+    const payload = new FormData();
+    payload.append("chat_id", TELEGRAM_NOTIFY_CHAT_ID);
+    if (TELEGRAM_NOTIFY_THREAD_ID) {
+      payload.append("message_thread_id", String(TELEGRAM_NOTIFY_THREAD_ID));
+    }
+
+    if (submissionId) {
+      const caption = `Submission ${submissionId} · file ${index + 1}/${normalizedAttachments.length}`;
+      payload.append("caption", sanitizeTextValue(caption, 900));
+    }
+
+    payload.append("document", new Blob([content], { type: mimeType }), fileName);
+
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, {
+      method: "POST",
+      body: payload,
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(`Telegram sendDocument HTTP ${response.status}: ${sanitizeTextValue(responseText, 700)}`);
+    }
+
+    let body;
+    try {
+      body = JSON.parse(responseText);
+    } catch {
+      body = null;
+    }
+
+    if (!body?.ok) {
+      const description = sanitizeTextValue(body?.description || responseText, 700) || "Unknown Telegram API error.";
+      throw new Error(`Telegram sendDocument failed: ${description}`);
+    }
+  }
+}
+
+async function sendMiniSubmissionTelegramNotification(record, miniData, submission, telegramUser, attachments = []) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_NOTIFY_CHAT_ID) {
     return;
   }
 
   const payload = {
     chat_id: TELEGRAM_NOTIFY_CHAT_ID,
-    text: buildTelegramSubmissionMessage(record, miniData, submission, telegramUser),
+    text: buildTelegramSubmissionMessage(record, miniData, submission, telegramUser, attachments),
     disable_web_page_preview: true,
   };
 
@@ -1115,6 +1175,8 @@ async function sendMiniSubmissionTelegramNotification(record, miniData, submissi
     const description = sanitizeTextValue(body?.description || responseText, 700) || "Unknown Telegram API error.";
     throw new Error(`Telegram sendMessage failed: ${description}`);
   }
+
+  await sendMiniSubmissionTelegramAttachments(submission, attachments);
 }
 
 async function listModerationSubmissions(options = {}) {
@@ -1683,6 +1745,7 @@ app.post("/api/mini/clients", async (req, res) => {
         creationResult.miniData,
         submission,
         authResult.user,
+        attachmentsResult.attachments,
       );
     } catch (notificationError) {
       console.error("Mini App Telegram notification failed:", notificationError);
