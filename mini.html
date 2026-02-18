@@ -80,6 +80,12 @@
         font-size: 15px;
       }
 
+      input.input-invalid,
+      textarea.input-invalid {
+        border-color: var(--danger);
+        box-shadow: 0 0 0 1px rgba(248, 81, 73, 0.35);
+      }
+
       .date-input-shell {
         position: relative;
       }
@@ -232,7 +238,7 @@
       }
     </style>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/mini.js?v=20260218-attachments" defer></script>
+    <script src="/mini.js?v=20260218-ssn-format" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -257,7 +263,14 @@
 
         <div class="field">
           <label for="ssn">SSN</label>
-          <input id="ssn" name="ssn" autocomplete="off" inputmode="numeric" />
+          <input
+            id="ssn"
+            name="ssn"
+            autocomplete="off"
+            inputmode="numeric"
+            maxlength="11"
+            placeholder="123-45-6789"
+          />
         </div>
 
         <div class="field">
