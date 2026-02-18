@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>QuickBooks Payments</title>
-    <link rel="stylesheet" href="/styles.css?v=20260218-cache-sync" />
-    <script src="/quickbooks-payments.js?v=20260218-cache-sync" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260218-refund-filter" />
+    <script src="/quickbooks-payments.js?v=20260218-refund-filter" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -63,6 +63,10 @@
                   spellcheck="false"
                 />
               </div>
+              <label for="refund-only" class="checkbox-label quickbooks-refund-filter">
+                <input id="refund-only" type="checkbox" name="refund-only" />
+                Only refunds
+              </label>
               <button id="refresh-button" type="button" class="btn btn-primary">Refresh</button>
               <p id="range" class="quickbooks-range"></p>
             </div>

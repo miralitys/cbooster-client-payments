@@ -12,6 +12,7 @@ const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
 const refreshButton = document.querySelector("#refresh-button");
 const clientSearchInput = document.querySelector("#client-search");
+const refundOnlyCheckbox = document.querySelector("#refund-only");
 const statusElement = document.querySelector("#status");
 const rangeElement = document.querySelector("#range");
 const tableBody = document.querySelector("#payments-body");
@@ -35,6 +36,10 @@ refreshButton?.addEventListener("click", () => {
 });
 
 clientSearchInput?.addEventListener("input", () => {
+  applyTransactionsFilter();
+});
+
+refundOnlyCheckbox?.addEventListener("change", () => {
   applyTransactionsFilter();
 });
 
@@ -98,34 +103,51 @@ function buildQuickBooksPaymentsEndpoint(sync) {
 
 function applyTransactionsFilter() {
   const query = (clientSearchInput?.value || "").toString().trim();
-  const filteredItems = filterTransactionsByClientName(allTransactions, query);
-  renderPayments(filteredItems, query);
-  setStatus(buildFilterStatusMessage(allTransactions.length, filteredItems.length, query, lastLoadPrefix), false);
+  const showOnlyRefunds = Boolean(refundOnlyCheckbox?.checked);
+  const filteredItems = filterTransactions(allTransactions, query, showOnlyRefunds);
+  renderPayments(filteredItems, query, showOnlyRefunds);
+  setStatus(
+    buildFilterStatusMessage(allTransactions.length, filteredItems.length, query, showOnlyRefunds, lastLoadPrefix),
+    false,
+  );
 }
 
-function filterTransactionsByClientName(items, query) {
+function filterTransactions(items, query, showOnlyRefunds) {
   const normalizedQuery = query.toLowerCase();
-  if (!normalizedQuery) {
-    return [...items];
-  }
 
   return items.filter((item) => {
+    if (showOnlyRefunds && (item?.transactionType || "").toString().toLowerCase() !== "refund") {
+      return false;
+    }
+
+    if (!normalizedQuery) {
+      return true;
+    }
+
     const clientName = (item?.clientName || "").toString().toLowerCase();
     return clientName.includes(normalizedQuery);
   });
 }
 
-function buildFilterStatusMessage(totalCount, visibleCount, query, prefix = "") {
+function buildFilterStatusMessage(totalCount, visibleCount, query, showOnlyRefunds, prefix = "") {
   const normalizedQuery = query.toString().trim();
   const normalizedPrefix = prefix.toString().trim();
 
   let mainMessage = "";
   if (!normalizedQuery) {
-    mainMessage = `Loaded ${totalCount} transaction${totalCount === 1 ? "" : "s"}.`;
+    if (showOnlyRefunds) {
+      mainMessage = `Showing ${visibleCount} refund${visibleCount === 1 ? "" : "s"}.`;
+    } else {
+      mainMessage = `Loaded ${totalCount} transaction${totalCount === 1 ? "" : "s"}.`;
+    }
   } else if (visibleCount === 0) {
-    mainMessage = `No transactions found for "${normalizedQuery}".`;
+    mainMessage = showOnlyRefunds
+      ? `No refunds found for "${normalizedQuery}".`
+      : `No transactions found for "${normalizedQuery}".`;
   } else {
-    mainMessage = `Showing ${visibleCount} of ${totalCount} transactions for "${normalizedQuery}".`;
+    mainMessage = showOnlyRefunds
+      ? `Showing ${visibleCount} refund${visibleCount === 1 ? "" : "s"} for "${normalizedQuery}".`
+      : `Showing ${visibleCount} of ${totalCount} transactions for "${normalizedQuery}".`;
   }
 
   if (!normalizedPrefix) {
@@ -153,7 +175,7 @@ function buildLoadPrefixFromPayload(payload, syncRequested) {
   return "Refresh: no new.";
 }
 
-function renderPayments(items, query = "") {
+function renderPayments(items, query = "", showOnlyRefunds = false) {
   if (!tableBody) {
     return;
   }
@@ -164,9 +186,13 @@ function renderPayments(items, query = "") {
     const cell = document.createElement("td");
     cell.colSpan = 3;
     const normalizedQuery = query.toString().trim();
-    cell.textContent = normalizedQuery
-      ? `No transactions found for "${normalizedQuery}".`
-      : "No transactions found for the selected period.";
+    if (normalizedQuery) {
+      cell.textContent = showOnlyRefunds
+        ? `No refunds found for "${normalizedQuery}".`
+        : `No transactions found for "${normalizedQuery}".`;
+    } else {
+      cell.textContent = showOnlyRefunds ? "No refunds found for the selected period." : "No transactions found for the selected period.";
+    }
     row.append(cell);
     tableBody.replaceChildren(row);
     return;
@@ -225,6 +251,10 @@ function setLoadingState(isLoading) {
 
   if (clientSearchInput) {
     clientSearchInput.disabled = isLoading;
+  }
+
+  if (refundOnlyCheckbox) {
+    refundOnlyCheckbox.disabled = isLoading;
   }
 }
 

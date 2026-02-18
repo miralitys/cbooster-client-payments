@@ -1683,6 +1683,13 @@ tbody tr.row-tone-active:hover td {
   margin: 0;
 }
 
+.quickbooks-refund-filter {
+  width: auto;
+  min-height: 42px;
+  align-self: flex-end;
+  white-space: nowrap;
+}
+
 .quickbooks-status {
   margin: 0;
 }
@@ -2083,6 +2090,10 @@ body.modal-open {
   .quickbooks-search-field {
     width: 100%;
     min-width: 0;
+  }
+
+  .quickbooks-refund-filter {
+    width: 100%;
   }
 
   .table-wrap {
