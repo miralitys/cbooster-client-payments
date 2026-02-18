@@ -1720,6 +1720,68 @@ tbody tr.row-tone-active:hover td {
   padding-block: var(--space-8);
 }
 
+.client-manager-page {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.client-manager-page-header {
+  align-items: flex-end;
+}
+
+.client-manager-subtitle {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.client-manager-table-panel {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+.client-manager-status {
+  margin: 0;
+}
+
+.client-manager-status.error {
+  color: var(--color-error-text);
+}
+
+.client-manager-table-wrap {
+  min-height: 280px;
+  height: auto;
+  max-height: 72vh;
+  resize: vertical;
+}
+
+.client-manager-table {
+  min-width: 760px;
+}
+
+.client-manager-table .client-manager-table__empty-row td {
+  text-align: center;
+  color: var(--color-text-muted);
+  padding-block: var(--space-8);
+}
+
+.client-manager-status-chip {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.client-manager-status-chip--assigned {
+  color: var(--color-success);
+}
+
+.client-manager-status-chip--unassigned {
+  color: var(--color-warning);
+}
+
+.client-manager-status-chip--error {
+  color: var(--color-error-text);
+}
+
 tfoot td {
   position: sticky;
   bottom: 0;
