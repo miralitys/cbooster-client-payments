@@ -240,7 +240,6 @@ function buildPayload() {
     payment1Date: normalizeValue(formData.get("payment1Date")),
     notes: normalizeValue(formData.get("notes")),
     afterResult: formData.get("afterResult") === "on",
-    writtenOff: formData.get("writtenOff") === "on",
   };
 
   return {
