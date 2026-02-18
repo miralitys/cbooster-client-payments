@@ -66,6 +66,11 @@ const QUICKBOOKS_TRANSACTIONS_TABLE_NAME = resolveTableName(
   process.env.DB_QUICKBOOKS_TRANSACTIONS_TABLE_NAME,
   DEFAULT_QUICKBOOKS_TRANSACTIONS_TABLE_NAME,
 );
+const DEFAULT_QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME = "quickbooks_customers_cache";
+const QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME = resolveTableName(
+  process.env.DB_QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME,
+  DEFAULT_QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME,
+);
 const DEFAULT_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME = "ghl_client_manager_cache";
 const GHL_CLIENT_MANAGER_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME,
@@ -76,6 +81,7 @@ const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
 const MODERATION_FILES_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_FILES_TABLE_NAME);
 const QUICKBOOKS_TRANSACTIONS_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_TRANSACTIONS_TABLE_NAME);
+const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME);
 const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
@@ -1810,6 +1816,32 @@ function parseQuickBooksTotalRefreshFlag(rawValue) {
   );
 }
 
+function normalizeQuickBooksCustomerId(rawValue) {
+  return sanitizeTextValue(rawValue, 120);
+}
+
+function normalizeQuickBooksCustomerPhone(rawValue) {
+  return sanitizeTextValue(rawValue, 80);
+}
+
+function normalizeQuickBooksCustomerEmail(rawValue) {
+  return sanitizeTextValue(rawValue, 320).toLowerCase();
+}
+
+function mapQuickBooksCustomerContactRow(row) {
+  const customerId = normalizeQuickBooksCustomerId(row?.customer_id);
+  if (!customerId) {
+    return null;
+  }
+
+  return {
+    customerId,
+    clientName: sanitizeTextValue(row?.client_name, 300) || "",
+    clientPhone: normalizeQuickBooksCustomerPhone(row?.client_phone),
+    clientEmail: normalizeQuickBooksCustomerEmail(row?.client_email),
+  };
+}
+
 function normalizeQuickBooksTransaction(item) {
   const transactionType = sanitizeTextValue(item?.transactionType, 40).toLowerCase();
   if (transactionType !== "payment" && transactionType !== "refund") {
@@ -1822,6 +1854,9 @@ function normalizeQuickBooksTransaction(item) {
   }
 
   const clientName = sanitizeTextValue(item?.clientName, 300) || "Unknown client";
+  const customerId = normalizeQuickBooksCustomerId(item?.customerId);
+  const clientPhone = normalizeQuickBooksCustomerPhone(item?.clientPhone);
+  const clientEmail = normalizeQuickBooksCustomerEmail(item?.clientEmail);
   const parsedAmount = Number.parseFloat(item?.paymentAmount);
   const paymentAmount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
   const paymentDate = sanitizeTextValue(item?.paymentDate, 20);
@@ -1832,7 +1867,10 @@ function normalizeQuickBooksTransaction(item) {
   return {
     transactionType,
     transactionId,
+    customerId,
     clientName,
+    clientPhone,
+    clientEmail,
     paymentAmount,
     paymentDate,
   };
@@ -1842,7 +1880,10 @@ function mapQuickBooksTransactionRow(row) {
   const normalized = normalizeQuickBooksTransaction({
     transactionType: row?.transaction_type,
     transactionId: row?.transaction_id,
+    customerId: row?.customer_id,
     clientName: row?.client_name,
+    clientPhone: row?.client_phone,
+    clientEmail: row?.client_email,
     paymentAmount: row?.payment_amount,
     paymentDate: row?.payment_date,
   });
@@ -1853,6 +1894,8 @@ function mapQuickBooksTransactionRow(row) {
 
   return {
     clientName: normalized.clientName,
+    clientPhone: normalized.clientPhone,
+    clientEmail: normalized.clientEmail,
     paymentAmount: normalized.paymentAmount,
     paymentDate: normalized.paymentDate,
     transactionType: normalized.transactionType,
@@ -2066,6 +2109,94 @@ async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
   return null;
 }
 
+function extractQuickBooksCustomerContact(customerRecord) {
+  const customerId = normalizeQuickBooksCustomerId(customerRecord?.Id);
+  if (!customerId) {
+    return null;
+  }
+
+  const displayName = sanitizeTextValue(customerRecord?.DisplayName, 300);
+  const fullyQualifiedName = sanitizeTextValue(customerRecord?.FullyQualifiedName, 300);
+  const fallbackName = sanitizeTextValue(customerRecord?.CompanyName, 300);
+  const clientName = displayName || fullyQualifiedName || fallbackName || "";
+
+  const primaryPhone = normalizeQuickBooksCustomerPhone(customerRecord?.PrimaryPhone?.FreeFormNumber);
+  const mobilePhone = normalizeQuickBooksCustomerPhone(customerRecord?.Mobile?.FreeFormNumber);
+  const altPhone = normalizeQuickBooksCustomerPhone(customerRecord?.AlternatePhone?.FreeFormNumber);
+  const resPhone = normalizeQuickBooksCustomerPhone(customerRecord?.PrimaryPhone?.FreeFormNumber);
+  const clientPhone = primaryPhone || mobilePhone || altPhone || resPhone || "";
+
+  const clientEmail = normalizeQuickBooksCustomerEmail(customerRecord?.PrimaryEmailAddr?.Address);
+
+  return {
+    customerId,
+    clientName,
+    clientPhone,
+    clientEmail,
+  };
+}
+
+async function fetchQuickBooksCustomerById(accessToken, customerId) {
+  const normalizedCustomerId = normalizeQuickBooksCustomerId(customerId);
+  if (!normalizedCustomerId) {
+    return null;
+  }
+
+  const endpoint = `${QUICKBOOKS_API_BASE_URL}/v3/company/${encodeURIComponent(QUICKBOOKS_REALM_ID)}/customer/${encodeURIComponent(normalizedCustomerId)}`;
+  const queryParams = new URLSearchParams({
+    minorversion: "75",
+  });
+
+  for (let attempt = 1; attempt <= QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`${endpoint}?${queryParams.toString()}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+    } catch (error) {
+      console.warn(
+        "QuickBooks customer request failed:",
+        normalizedCustomerId,
+        sanitizeTextValue(error?.message, 300),
+      );
+      return null;
+    }
+
+    const responseText = await response.text();
+    let body = null;
+    try {
+      body = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      body = null;
+    }
+
+    if (response.ok) {
+      return extractQuickBooksCustomerContact(body?.Customer);
+    }
+
+    const shouldRetry = response.status === 429 && attempt < QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES;
+    if (shouldRetry) {
+      const retryDelay = QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS * attempt;
+      await sleepMilliseconds(retryDelay);
+      continue;
+    }
+
+    const faultError = body?.Fault?.Error?.[0];
+    console.warn(
+      "QuickBooks customer query failed:",
+      normalizedCustomerId,
+      sanitizeTextValue(faultError?.Detail || faultError?.Message || responseText, 400),
+    );
+    return null;
+  }
+
+  return null;
+}
+
 function deriveQuickBooksDepositLinkedAmount(payment) {
   const lines = Array.isArray(payment?.Line) ? payment.Line : [];
   let total = 0;
@@ -2170,7 +2301,7 @@ async function enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentR
 
 function mapQuickBooksPayment(record) {
   const customerName = sanitizeTextValue(record?.CustomerRef?.name, 300);
-  const customerId = sanitizeTextValue(record?.CustomerRef?.value, 100);
+  const customerId = normalizeQuickBooksCustomerId(record?.CustomerRef?.value);
   const transactionId = sanitizeTextValue(record?.Id, 160);
   const parsedAmount = Number.parseFloat(record?._effectiveAmount ?? record?.TotalAmt);
   const paymentAmount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
@@ -2178,7 +2309,10 @@ function mapQuickBooksPayment(record) {
 
   return {
     transactionId,
+    customerId,
     clientName: customerName || (customerId ? `Customer ${customerId}` : "Unknown client"),
+    clientPhone: "",
+    clientEmail: "",
     paymentAmount,
     paymentDate: paymentDate || "",
     transactionType: "payment",
@@ -2187,7 +2321,7 @@ function mapQuickBooksPayment(record) {
 
 function mapQuickBooksRefund(record) {
   const customerName = sanitizeTextValue(record?.CustomerRef?.name, 300);
-  const customerId = sanitizeTextValue(record?.CustomerRef?.value, 100);
+  const customerId = normalizeQuickBooksCustomerId(record?.CustomerRef?.value);
   const transactionId = sanitizeTextValue(record?.Id, 160);
   const parsedAmount = Number.parseFloat(record?.TotalAmt);
   const refundAmount = Number.isFinite(parsedAmount) ? -Math.abs(parsedAmount) : 0;
@@ -2195,7 +2329,10 @@ function mapQuickBooksRefund(record) {
 
   return {
     transactionId,
+    customerId,
     clientName: customerName || (customerId ? `Customer ${customerId}` : "Unknown client"),
+    clientPhone: "",
+    clientEmail: "",
     paymentAmount: refundAmount,
     paymentDate: paymentDate || "",
     transactionType: "refund",
@@ -2479,7 +2616,10 @@ async function ensureDatabaseReady() {
         CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE} (
           transaction_type TEXT NOT NULL,
           transaction_id TEXT NOT NULL,
+          customer_id TEXT NOT NULL DEFAULT '',
           client_name TEXT NOT NULL,
+          client_phone TEXT NOT NULL DEFAULT '',
+          client_email TEXT NOT NULL DEFAULT '',
           payment_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
           payment_date DATE NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2489,8 +2629,38 @@ async function ensureDatabaseReady() {
       `);
 
       await pool.query(`
+        ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        ADD COLUMN IF NOT EXISTS customer_id TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        ADD COLUMN IF NOT EXISTS client_phone TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        ADD COLUMN IF NOT EXISTS client_email TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
         CREATE INDEX IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE_NAME}_payment_date_idx
         ON ${QUICKBOOKS_TRANSACTIONS_TABLE} (payment_date DESC)
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE} (
+          customer_id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL DEFAULT '',
+          client_phone TEXT NOT NULL DEFAULT '',
+          client_email TEXT NOT NULL DEFAULT '',
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME}_updated_at_idx
+        ON ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE} (updated_at DESC)
       `);
 
       await pool.query(`
@@ -2549,12 +2719,203 @@ async function saveStoredRecords(records) {
   return result.rows[0]?.updated_at || null;
 }
 
+async function listCachedQuickBooksCustomerContacts(customerIds) {
+  await ensureDatabaseReady();
+
+  const normalizedIds = [...new Set((Array.isArray(customerIds) ? customerIds : []).map(normalizeQuickBooksCustomerId))]
+    .filter(Boolean);
+  if (!normalizedIds.length) {
+    return new Map();
+  }
+
+  const result = await pool.query(
+    `
+      SELECT customer_id, client_name, client_phone, client_email
+      FROM ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE}
+      WHERE customer_id = ANY($1::text[])
+    `,
+    [normalizedIds],
+  );
+
+  const cache = new Map();
+  for (const row of result.rows) {
+    const mapped = mapQuickBooksCustomerContactRow(row);
+    if (!mapped) {
+      continue;
+    }
+    cache.set(mapped.customerId, mapped);
+  }
+
+  return cache;
+}
+
+async function upsertQuickBooksCustomerContacts(customerContacts) {
+  await ensureDatabaseReady();
+
+  const items = (Array.isArray(customerContacts) ? customerContacts : [])
+    .map((item) => {
+      const customerId = normalizeQuickBooksCustomerId(item?.customerId);
+      if (!customerId) {
+        return null;
+      }
+      return {
+        customerId,
+        clientName: sanitizeTextValue(item?.clientName, 300) || "",
+        clientPhone: normalizeQuickBooksCustomerPhone(item?.clientPhone),
+        clientEmail: normalizeQuickBooksCustomerEmail(item?.clientEmail),
+      };
+    })
+    .filter((item) => item !== null);
+  if (!items.length) {
+    return {
+      writtenCount: 0,
+    };
+  }
+
+  const client = await pool.connect();
+  let writtenCount = 0;
+
+  try {
+    await client.query("BEGIN");
+
+    for (let offset = 0; offset < items.length; offset += QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE) {
+      const batch = items.slice(offset, offset + QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE);
+      const placeholders = [];
+      const values = [];
+
+      for (let index = 0; index < batch.length; index += 1) {
+        const item = batch[index];
+        const base = index * 4;
+        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`);
+        values.push(item.customerId, item.clientName, item.clientPhone, item.clientEmail);
+      }
+
+      const result = await client.query(
+        `
+          INSERT INTO ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE}
+            (customer_id, client_name, client_phone, client_email)
+          VALUES ${placeholders.join(", ")}
+          ON CONFLICT (customer_id)
+          DO UPDATE
+          SET
+            client_name = EXCLUDED.client_name,
+            client_phone = EXCLUDED.client_phone,
+            client_email = EXCLUDED.client_email,
+            updated_at = NOW()
+        `,
+        values,
+      );
+
+      writtenCount += result.rowCount || 0;
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      writtenCount,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function enrichQuickBooksTransactionsWithCustomerContacts(accessToken, transactionItems, options = {}) {
+  const records = Array.isArray(transactionItems) ? transactionItems : [];
+  if (!records.length) {
+    return [];
+  }
+
+  const forceRefresh = Boolean(options?.forceRefresh);
+  const customerIds = [
+    ...new Set(
+      records
+        .map((item) => normalizeQuickBooksCustomerId(item?.customerId))
+        .filter(Boolean),
+    ),
+  ];
+  if (!customerIds.length) {
+    return records.map((item) => ({
+      ...item,
+      customerId: normalizeQuickBooksCustomerId(item?.customerId),
+      clientPhone: normalizeQuickBooksCustomerPhone(item?.clientPhone),
+      clientEmail: normalizeQuickBooksCustomerEmail(item?.clientEmail),
+    }));
+  }
+
+  const contactsById = await listCachedQuickBooksCustomerContacts(customerIds);
+  const missingIds = forceRefresh ? customerIds : customerIds.filter((customerId) => !contactsById.has(customerId));
+
+  if (missingIds.length) {
+    const fetchedContacts = [];
+    const workerCount = Math.min(QUICKBOOKS_PAYMENT_DETAILS_CONCURRENCY, missingIds.length);
+    let cursor = 0;
+
+    async function worker() {
+      while (cursor < missingIds.length) {
+        const currentIndex = cursor;
+        cursor += 1;
+        const customerId = missingIds[currentIndex];
+        const contact = await fetchQuickBooksCustomerById(accessToken, customerId);
+        if (!contact) {
+          continue;
+        }
+        fetchedContacts.push(contact);
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    if (fetchedContacts.length) {
+      await upsertQuickBooksCustomerContacts(fetchedContacts);
+      for (const contact of fetchedContacts) {
+        const customerId = normalizeQuickBooksCustomerId(contact.customerId);
+        if (!customerId) {
+          continue;
+        }
+        contactsById.set(customerId, {
+          customerId,
+          clientName: sanitizeTextValue(contact.clientName, 300) || "",
+          clientPhone: normalizeQuickBooksCustomerPhone(contact.clientPhone),
+          clientEmail: normalizeQuickBooksCustomerEmail(contact.clientEmail),
+        });
+      }
+    }
+  }
+
+  return records.map((item) => {
+    const customerId = normalizeQuickBooksCustomerId(item?.customerId);
+    const cachedContact = customerId ? contactsById.get(customerId) : null;
+
+    return {
+      ...item,
+      customerId: customerId || "",
+      clientName: sanitizeTextValue(cachedContact?.clientName, 300) || sanitizeTextValue(item?.clientName, 300) || "Unknown client",
+      clientPhone: normalizeQuickBooksCustomerPhone(cachedContact?.clientPhone || item?.clientPhone),
+      clientEmail: normalizeQuickBooksCustomerEmail(cachedContact?.clientEmail || item?.clientEmail),
+    };
+  });
+}
+
 async function listCachedQuickBooksTransactionsInRange(fromDate, toDate) {
   await ensureDatabaseReady();
 
   const result = await pool.query(
     `
-      SELECT transaction_type, transaction_id, client_name, payment_amount, payment_date::text AS payment_date
+      SELECT
+        transaction_type,
+        transaction_id,
+        customer_id,
+        client_name,
+        client_phone,
+        client_email,
+        payment_amount,
+        payment_date::text AS payment_date
       FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
       WHERE payment_date >= $1::date
         AND payment_date <= $2::date
@@ -2600,7 +2961,13 @@ async function listCachedQuickBooksZeroPaymentsInRange(fromDate, toDate) {
 
   const result = await pool.query(
     `
-      SELECT transaction_id, client_name, payment_date::text AS payment_date
+      SELECT
+        transaction_id,
+        customer_id,
+        client_name,
+        client_phone,
+        client_email,
+        payment_date::text AS payment_date
       FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
       WHERE transaction_type = 'payment'
         AND payment_date >= $1::date
@@ -2615,7 +2982,10 @@ async function listCachedQuickBooksZeroPaymentsInRange(fromDate, toDate) {
   return result.rows
     .map((row) => ({
       transactionId: sanitizeTextValue(row?.transaction_id, 160),
+      customerId: normalizeQuickBooksCustomerId(row?.customer_id),
       clientName: sanitizeTextValue(row?.client_name, 300) || "Unknown client",
+      clientPhone: normalizeQuickBooksCustomerPhone(row?.client_phone),
+      clientEmail: normalizeQuickBooksCustomerEmail(row?.client_email),
       paymentDate: sanitizeTextValue(row?.payment_date, 20),
     }))
     .filter((row) => row.transactionId && isValidIsoDateString(row.paymentDate));
@@ -2663,7 +3033,10 @@ async function reconcileCachedQuickBooksZeroPayments(accessToken, fromDate, toDa
         updates.push({
           transactionType: "payment",
           transactionId: row.transactionId,
+          customerId: row.customerId,
           clientName: row.clientName,
+          clientPhone: row.clientPhone,
+          clientEmail: row.clientEmail,
           paymentAmount: derivedDepositAmount,
           paymentDate: row.paymentDate,
         });
@@ -2675,7 +3048,10 @@ async function reconcileCachedQuickBooksZeroPayments(accessToken, fromDate, toDa
         updates.push({
           transactionType: "payment",
           transactionId: row.transactionId,
+          customerId: row.customerId,
           clientName: row.clientName,
+          clientPhone: row.clientPhone,
+          clientEmail: row.clientEmail,
           paymentAmount: -Math.abs(derivedCreditMemoAmount),
           paymentDate: row.paymentDate,
         });
@@ -2727,20 +3103,34 @@ async function upsertQuickBooksTransactions(items) {
 
       for (let index = 0; index < batch.length; index += 1) {
         const item = batch[index];
-        const base = index * 5;
-        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}::date)`);
-        values.push(item.transactionType, item.transactionId, item.clientName, item.paymentAmount, item.paymentDate);
+        const base = index * 8;
+        placeholders.push(
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}::date)`,
+        );
+        values.push(
+          item.transactionType,
+          item.transactionId,
+          item.customerId,
+          item.clientName,
+          item.clientPhone,
+          item.clientEmail,
+          item.paymentAmount,
+          item.paymentDate,
+        );
       }
 
       const result = await client.query(
         `
           INSERT INTO ${QUICKBOOKS_TRANSACTIONS_TABLE}
-            (transaction_type, transaction_id, client_name, payment_amount, payment_date)
+            (transaction_type, transaction_id, customer_id, client_name, client_phone, client_email, payment_amount, payment_date)
           VALUES ${placeholders.join(", ")}
           ON CONFLICT (transaction_type, transaction_id)
           DO UPDATE
           SET
+            customer_id = EXCLUDED.customer_id,
             client_name = EXCLUDED.client_name,
+            client_phone = EXCLUDED.client_phone,
+            client_email = EXCLUDED.client_email,
             payment_amount = EXCLUDED.payment_amount,
             payment_date = EXCLUDED.payment_date,
             updated_at = NOW()
@@ -3845,12 +4235,15 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
         const paymentItems = normalizedPaymentRecords.map(mapQuickBooksPayment);
         const refundItems = refundRecords.map(mapQuickBooksRefund);
         const fetchedItems = sortQuickBooksTransactionsByDateDesc([...paymentItems, ...refundItems]);
-        const upsertResult = await upsertQuickBooksTransactions(fetchedItems);
+        const enrichedItems = await enrichQuickBooksTransactionsWithCustomerContacts(accessToken, fetchedItems, {
+          forceRefresh: shouldTotalRefresh,
+        });
+        const upsertResult = await upsertQuickBooksTransactions(enrichedItems);
 
         syncMeta = {
           ...syncMeta,
           performed: true,
-          fetchedCount: fetchedItems.length,
+          fetchedCount: enrichedItems.length,
           insertedCount: upsertResult.insertedCount,
           writtenCount: upsertResult.writtenCount,
         };
