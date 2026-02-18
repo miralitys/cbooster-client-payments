@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: cbooster-client-payments
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_TABLE_NAME
+        value: client_records_state
