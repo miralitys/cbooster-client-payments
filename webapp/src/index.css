@@ -1231,6 +1231,92 @@ a {
   gap: var(--space-3);
 }
 
+.record-profile-header {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.record-profile-header__name {
+  margin: 0;
+  font-size: clamp(1.05rem, 1.2vw + 0.8rem, 1.45rem);
+  line-height: 1.2;
+  font-weight: 800;
+  color: var(--color-text);
+}
+
+.record-profile-header__contract {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.record-profile-header__contract strong {
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+}
+
+.record-profile-header__money-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.record-profile-header__money-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.record-profile-header__money-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xxs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.record-profile-header__money-value {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  line-height: 1.15;
+}
+
+.record-profile-header__contact-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.record-profile-header__contact-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.record-profile-header__contact-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xxs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.record-profile-header__contact-value {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .record-details-grid__item {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -1249,6 +1335,8 @@ a {
 
 .record-details-grid__value {
   font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .record-details-ghl-note {
@@ -2129,7 +2217,9 @@ a {
   }
 
   .record-details-grid,
-  .record-editor-form {
+  .record-editor-form,
+  .record-profile-header__money-row,
+  .record-profile-header__contact-row {
     grid-template-columns: 1fr;
   }
 
