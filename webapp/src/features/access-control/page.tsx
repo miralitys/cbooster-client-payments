@@ -68,6 +68,7 @@ export default function AccessControlPage() {
   const [assistantReviewsStatusText, setAssistantReviewsStatusText] = useState("Owner review queue is empty.");
   const [assistantReviewDrafts, setAssistantReviewDrafts] = useState<Record<string, AssistantReviewDraft>>({});
   const [assistantReviewSavingIds, setAssistantReviewSavingIds] = useState<Record<string, boolean>>({});
+  const [expandedAssistantReviewId, setExpandedAssistantReviewId] = useState<number | null>(null);
 
   const departments = useMemo(() => model?.departments || [], [model]);
   const users = useMemo(() => model?.users || [], [model]);
@@ -116,6 +117,12 @@ export default function AccessControlPage() {
         }
         return next;
       });
+      setExpandedAssistantReviewId((previous) => {
+        if (previous !== null && items.some((item) => item.id === previous)) {
+          return previous;
+        }
+        return null;
+      });
       if (!items.length) {
         setAssistantReviewsStatusText("No assistant questions yet.");
       } else {
@@ -127,6 +134,7 @@ export default function AccessControlPage() {
       setAssistantReviewsTotal(0);
       setAssistantReviewsError(message);
       setAssistantReviewsStatusText(message);
+      setExpandedAssistantReviewId(null);
     } finally {
       setAssistantReviewsLoading(false);
     }
@@ -159,6 +167,7 @@ export default function AccessControlPage() {
         setAssistantReviewsStatusText("Owner review queue is available only for owner accounts.");
         setAssistantReviewDrafts({});
         setAssistantReviewSavingIds({});
+        setExpandedAssistantReviewId(null);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load access model.";
@@ -175,6 +184,7 @@ export default function AccessControlPage() {
       setAssistantReviewsStatusText("Owner review queue is unavailable until access model is loaded.");
       setAssistantReviewDrafts({});
       setAssistantReviewSavingIds({});
+      setExpandedAssistantReviewId(null);
     } finally {
       setIsLoading(false);
     }
@@ -397,6 +407,10 @@ export default function AccessControlPage() {
     }));
   }
 
+  function toggleAssistantReviewItem(reviewId: number) {
+    setExpandedAssistantReviewId((previous) => (previous === reviewId ? null : reviewId));
+  }
+
   async function submitAssistantReviewCorrection(item: AssistantReviewItem) {
     if (!isOwnerUser) {
       return;
@@ -487,116 +501,6 @@ export default function AccessControlPage() {
           </div>
         ) : null}
       </Panel>
-
-      {isOwnerUser ? (
-        <Panel
-          title="Assistant Review Queue (Owner)"
-          actions={
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              onClick={() => void loadAssistantReviewQueue()}
-              disabled={assistantReviewsLoading}
-            >
-              Refresh
-            </Button>
-          }
-        >
-          <p className={`dashboard-message ${assistantReviewsError ? "error" : ""}`.trim()}>{assistantReviewsStatusText}</p>
-
-          {assistantReviewsLoading ? <EmptyState title="Loading assistant questions..." /> : null}
-
-          {!assistantReviewsLoading && assistantReviewsError ? (
-            <ErrorState
-              title="Failed to load assistant review queue"
-              description={assistantReviewsError}
-              actionLabel="Retry"
-              onAction={() => void loadAssistantReviewQueue()}
-            />
-          ) : null}
-
-          {!assistantReviewsLoading && !assistantReviewsError && !assistantReviews.length ? (
-            <EmptyState title="No assistant questions yet." />
-          ) : null}
-
-          {!assistantReviewsLoading && !assistantReviewsError && assistantReviews.length ? (
-            <div className="access-control-assistant-review-list-react">
-              {assistantReviews.map((item) => {
-                const draft = getAssistantReviewDraft(item);
-                const itemSaving = Boolean(assistantReviewSavingIds[String(item.id)]);
-                return (
-                  <article key={`assistant-review-${item.id}`} className="access-control-assistant-review-card-react">
-                    <header className="access-control-assistant-review-meta-react">
-                      <span>#{item.id}</span>
-                      <span>{formatDateTime(item.askedAt)}</span>
-                      <span>{item.askedByDisplayName || item.askedByUsername || "-"}</span>
-                      <span>{item.mode === "voice" ? "Voice" : "Text"}</span>
-                      <span>{item.provider || "-"}</span>
-                      <span>{item.recordsUsed} records</span>
-                    </header>
-
-                    <div className="access-control-assistant-review-block-react">
-                      <h4>Question</h4>
-                      <p>{item.question || "-"}</p>
-                    </div>
-
-                    <div className="access-control-assistant-review-block-react">
-                      <h4>Assistant Answer</h4>
-                      <p>{item.assistantReply || "-"}</p>
-                    </div>
-
-                    <Field label="Owner Corrected Answer" htmlFor={`assistant-review-corrected-${item.id}`}>
-                      <Textarea
-                        id={`assistant-review-corrected-${item.id}`}
-                        rows={4}
-                        value={draft.correctedReply}
-                        onChange={(event) => updateAssistantReviewDraftField(item.id, "correctedReply", event.target.value)}
-                        placeholder="Write the correct answer that assistant should have returned..."
-                        disabled={itemSaving}
-                      />
-                    </Field>
-
-                    <Field label="Correction Note (optional)" htmlFor={`assistant-review-note-${item.id}`}>
-                      <Textarea
-                        id={`assistant-review-note-${item.id}`}
-                        rows={2}
-                        value={draft.correctionNote}
-                        onChange={(event) => updateAssistantReviewDraftField(item.id, "correctionNote", event.target.value)}
-                        placeholder="Optional explanation for future tuning..."
-                        disabled={itemSaving}
-                      />
-                    </Field>
-
-                    <div className="access-control-assistant-review-actions-react">
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={() => void submitAssistantReviewCorrection(item)}
-                        isLoading={itemSaving}
-                        disabled={itemSaving}
-                      >
-                        Save Correction
-                      </Button>
-                      <span className="access-control-assistant-review-updated-react">
-                        {item.correctedAt
-                          ? `Last correction: ${formatDateTime(item.correctedAt)} by ${item.correctedBy || "-"}`
-                          : "No correction yet"}
-                      </span>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : null}
-
-          {!assistantReviewsLoading && !assistantReviewsError && assistantReviews.length ? (
-            <p className="access-control-assistant-review-total-react">
-              Showing {assistantReviews.length} of {assistantReviewsTotal} latest assistant questions.
-            </p>
-          ) : null}
-        </Panel>
-      ) : null}
 
       {registrationOpen && canManageAccess ? (
         <Panel title="User Registration">
@@ -717,6 +621,138 @@ export default function AccessControlPage() {
           </div>
         )}
       </Panel>
+
+      {isOwnerUser ? (
+        <Panel
+          title="Assistant Review Queue (Owner)"
+          actions={
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => void loadAssistantReviewQueue()}
+              disabled={assistantReviewsLoading}
+            >
+              Refresh
+            </Button>
+          }
+        >
+          <p className={`dashboard-message ${assistantReviewsError ? "error" : ""}`.trim()}>{assistantReviewsStatusText}</p>
+
+          {assistantReviewsLoading ? <EmptyState title="Loading assistant questions..." /> : null}
+
+          {!assistantReviewsLoading && assistantReviewsError ? (
+            <ErrorState
+              title="Failed to load assistant review queue"
+              description={assistantReviewsError}
+              actionLabel="Retry"
+              onAction={() => void loadAssistantReviewQueue()}
+            />
+          ) : null}
+
+          {!assistantReviewsLoading && !assistantReviewsError && !assistantReviews.length ? (
+            <EmptyState title="No assistant questions yet." />
+          ) : null}
+
+          {!assistantReviewsLoading && !assistantReviewsError && assistantReviews.length ? (
+            <div className="access-control-assistant-review-list-react">
+              {assistantReviews.map((item) => {
+                const draft = getAssistantReviewDraft(item);
+                const itemSaving = Boolean(assistantReviewSavingIds[String(item.id)]);
+                const isExpanded = expandedAssistantReviewId === item.id;
+                const askerName = item.askedByDisplayName || "-";
+                const askerUsername = item.askedByUsername || "-";
+
+                return (
+                  <article key={`assistant-review-${item.id}`} className="access-control-assistant-review-card-react">
+                    <button
+                      type="button"
+                      className={`access-control-assistant-review-summary-react ${isExpanded ? "is-expanded" : ""}`.trim()}
+                      onClick={() => toggleAssistantReviewItem(item.id)}
+                    >
+                      <span className="access-control-assistant-review-summary-cell-react">
+                        <strong>Date:</strong> {formatDateTime(item.askedAt)}
+                      </span>
+                      <span className="access-control-assistant-review-summary-cell-react">
+                        <strong>Entered By:</strong> {askerName}
+                      </span>
+                      <span className="access-control-assistant-review-summary-cell-react">
+                        <strong>Username:</strong> {askerUsername}
+                      </span>
+                    </button>
+
+                    {isExpanded ? (
+                      <div className="access-control-assistant-review-expanded-react">
+                        <div className="access-control-assistant-review-meta-react">
+                          <span>#{item.id}</span>
+                          <span>{item.mode === "voice" ? "Voice" : "Text"}</span>
+                          <span>{item.provider || "-"}</span>
+                          <span>{item.recordsUsed} records</span>
+                        </div>
+
+                        <div className="access-control-assistant-review-block-react">
+                          <h4>Question</h4>
+                          <p>{item.question || "-"}</p>
+                        </div>
+
+                        <div className="access-control-assistant-review-block-react">
+                          <h4>Assistant Answer</h4>
+                          <p>{item.assistantReply || "-"}</p>
+                        </div>
+
+                        <Field label="Owner Corrected Answer" htmlFor={`assistant-review-corrected-${item.id}`}>
+                          <Textarea
+                            id={`assistant-review-corrected-${item.id}`}
+                            rows={4}
+                            value={draft.correctedReply}
+                            onChange={(event) => updateAssistantReviewDraftField(item.id, "correctedReply", event.target.value)}
+                            placeholder="Write the correct answer that assistant should have returned..."
+                            disabled={itemSaving}
+                          />
+                        </Field>
+
+                        <Field label="Correction Note (optional)" htmlFor={`assistant-review-note-${item.id}`}>
+                          <Textarea
+                            id={`assistant-review-note-${item.id}`}
+                            rows={2}
+                            value={draft.correctionNote}
+                            onChange={(event) => updateAssistantReviewDraftField(item.id, "correctionNote", event.target.value)}
+                            placeholder="Optional explanation for future tuning..."
+                            disabled={itemSaving}
+                          />
+                        </Field>
+
+                        <div className="access-control-assistant-review-actions-react">
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => void submitAssistantReviewCorrection(item)}
+                            isLoading={itemSaving}
+                            disabled={itemSaving}
+                          >
+                            Save Correction
+                          </Button>
+                          <span className="access-control-assistant-review-updated-react">
+                            {item.correctedAt
+                              ? `Last correction: ${formatDateTime(item.correctedAt)} by ${item.correctedBy || "-"}`
+                              : "No correction yet"}
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {!assistantReviewsLoading && !assistantReviewsError && assistantReviews.length ? (
+            <p className="access-control-assistant-review-total-react">
+              Showing {assistantReviews.length} of {assistantReviewsTotal} latest assistant questions.
+            </p>
+          ) : null}
+        </Panel>
+      ) : null}
 
       <Modal
         open={Boolean(editingOriginalUsername && canManageAccess && editingUser)}
