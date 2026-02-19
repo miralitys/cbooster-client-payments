@@ -9060,7 +9060,14 @@ app.use("/api", (_req, res) => {
   });
 });
 
-app.get("/app/*", (_req, res) => {
+app.get("/app/*", (req, res) => {
+  const requestPath = sanitizeTextValue(req.path, 2048);
+  const hasFileExtension = path.extname(requestPath || "") !== "";
+  if (hasFileExtension) {
+    res.status(404).type("text/plain").send("Asset not found");
+    return;
+  }
+
   if (!webAppDistAvailable) {
     res
       .status(503)
@@ -9071,6 +9078,7 @@ app.get("/app/*", (_req, res) => {
     return;
   }
 
+  res.setHeader("Cache-Control", "no-store, private");
   res.sendFile(webAppIndexFile);
 });
 
