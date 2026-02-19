@@ -293,6 +293,11 @@ const GHL_BASIC_NOTE_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_BASIC_NOTE_CACHE_TABLE_NAME,
   DEFAULT_GHL_BASIC_NOTE_CACHE_TABLE_NAME,
 );
+const DEFAULT_ASSISTANT_REVIEW_TABLE_NAME = "assistant_review_queue";
+const ASSISTANT_REVIEW_TABLE_NAME = resolveTableName(
+  process.env.DB_ASSISTANT_REVIEW_TABLE_NAME,
+  DEFAULT_ASSISTANT_REVIEW_TABLE_NAME,
+);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
@@ -302,6 +307,7 @@ const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_
 const QUICKBOOKS_AUTH_STATE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_AUTH_STATE_TABLE_NAME);
 const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
 const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CACHE_TABLE_NAME);
+const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
@@ -424,6 +430,10 @@ const MINI_EXTRA_MAX_LENGTH = {
 };
 const MINI_REQUIRED_FIELDS = ["clientName"];
 const ASSISTANT_MAX_MESSAGE_LENGTH = 2000;
+const ASSISTANT_REVIEW_MAX_TEXT_LENGTH = 8000;
+const ASSISTANT_REVIEW_MAX_COMMENT_LENGTH = 4000;
+const ASSISTANT_REVIEW_DEFAULT_LIMIT = 60;
+const ASSISTANT_REVIEW_MAX_LIMIT = 200;
 const ASSISTANT_ZERO_TOLERANCE = 0.000001;
 const ASSISTANT_DAY_IN_MS = 24 * 60 * 60 * 1000;
 const ASSISTANT_LLM_MAX_CONTEXT_RECORDS = 18;
@@ -3708,6 +3718,154 @@ function buildContactCandidateName(contact) {
   return variants[0] || "";
 }
 
+function parseGhlContactTimestamp(contact) {
+  const candidates = [
+    contact?.updatedAt,
+    contact?.updated_at,
+    contact?.dateUpdated,
+    contact?.date_updated,
+    contact?.lastActivityDate,
+    contact?.last_activity_date,
+    contact?.createdAt,
+    contact?.created_at,
+    contact?.dateAdded,
+    contact?.date_added,
+  ];
+
+  for (const candidate of candidates) {
+    const timestamp = parseGhlNoteTimestamp(candidate);
+    if (timestamp > 0) {
+      return timestamp;
+    }
+  }
+
+  return 0;
+}
+
+function isLooseNameMatch(expectedName, candidateName) {
+  const expected = normalizeNameForLookup(expectedName);
+  const candidate = normalizeNameForLookup(candidateName);
+  if (!expected || !candidate) {
+    return false;
+  }
+  return candidate.includes(expected) || expected.includes(candidate);
+}
+
+function extractMemoNoteFromContactObject(contact, contactName, contactId) {
+  if (!contact || typeof contact !== "object") {
+    return null;
+  }
+
+  const directMemoCandidates = [
+    contact.memo,
+    contact.memoText,
+    contact.memo_text,
+    contact.notes,
+    contact.note,
+    contact.description,
+    contact.additionalNotes,
+    contact.additional_notes,
+  ];
+
+  for (const candidate of directMemoCandidates) {
+    const body = normalizeGhlNoteBody(candidate, 12000);
+    if (!body) {
+      continue;
+    }
+
+    const timestamp = parseGhlContactTimestamp(contact);
+    return {
+      id: sanitizeTextValue(`${contactId}:memo:direct`, 180),
+      title: "MEMO",
+      body,
+      createdAt: timestamp > 0 ? new Date(timestamp).toISOString() : "",
+      timestamp,
+      source: "contacts.memo_field.direct",
+      contactName,
+      contactId,
+    };
+  }
+
+  const customFields = Array.isArray(contact.customFields)
+    ? contact.customFields
+    : Array.isArray(contact.custom_fields)
+      ? contact.custom_fields
+      : null;
+  if (customFields) {
+    for (const field of customFields) {
+      if (!field || typeof field !== "object") {
+        continue;
+      }
+      const label = sanitizeTextValue(
+        field.name || field.label || field.key || field.fieldKey || field.customFieldName || field.id,
+        300,
+      );
+      if (!GHL_MEMO_NOTE_KEYWORD_PATTERN.test(label)) {
+        continue;
+      }
+
+      const body = normalizeGhlNoteBody(field.value || field.fieldValue || field.text || field.body, 12000);
+      if (!body) {
+        continue;
+      }
+
+      const timestamp = parseGhlNoteTimestamp(
+        field.updatedAt || field.updated_at || field.createdAt || field.created_at,
+      ) || parseGhlContactTimestamp(contact);
+      return {
+        id: sanitizeTextValue(`${contactId}:memo:custom:${label || "memo"}`, 180),
+        title: label || "MEMO",
+        body,
+        createdAt: timestamp > 0 ? new Date(timestamp).toISOString() : "",
+        timestamp,
+        source: "contacts.memo_field.custom",
+        contactName,
+        contactId,
+      };
+    }
+  }
+
+  if (contact.customFields && typeof contact.customFields === "object" && !Array.isArray(contact.customFields)) {
+    for (const [key, value] of Object.entries(contact.customFields)) {
+      if (!GHL_MEMO_NOTE_KEYWORD_PATTERN.test(sanitizeTextValue(key, 300))) {
+        continue;
+      }
+      const body = normalizeGhlNoteBody(value, 12000);
+      if (!body) {
+        continue;
+      }
+
+      const timestamp = parseGhlContactTimestamp(contact);
+      return {
+        id: sanitizeTextValue(`${contactId}:memo:map:${key}`, 180),
+        title: sanitizeTextValue(key, 300) || "MEMO",
+        body,
+        createdAt: timestamp > 0 ? new Date(timestamp).toISOString() : "",
+        timestamp,
+        source: "contacts.memo_field.map",
+        contactName,
+        contactId,
+      };
+    }
+  }
+
+  return null;
+}
+
+function extractMemoNoteFromContact(rawContact, contactName, contactId) {
+  const memoFromRoot = extractMemoNoteFromContactObject(rawContact, contactName, contactId);
+  if (memoFromRoot) {
+    return memoFromRoot;
+  }
+
+  const nestedContact = rawContact?.contact && typeof rawContact.contact === "object" ? rawContact.contact : null;
+  if (nestedContact) {
+    return extractMemoNoteFromContactObject(nestedContact, contactName, contactId);
+  }
+
+  return null;
+}
+
 function areNamesEquivalentTokens(expectedToken, candidateToken) {
   const expected = sanitizeTextValue(expectedToken, 80).toLowerCase();
   const candidate = sanitizeTextValue(candidateToken, 80).toLowerCase();
@@ -4018,7 +4176,7 @@ async function searchGhlContactsByClientName(clientName) {
     const contacts = extractGhlContactsFromPayload(response.body);
     for (const contact of contacts) {
       const candidateName = buildContactCandidateName(contact);
-      if (!areNamesEquivalent(normalizedClientName, candidateName)) {
+      if (!areNamesEquivalent(normalizedClientName, candidateName) && !isLooseNameMatch(normalizedClientName, candidateName)) {
         continue;
       }
 
@@ -4041,7 +4199,26 @@ async function searchGhlContactsByClientName(clientName) {
     throw lastError;
   }
 
-  return [...contactsById.values()];
+  const orderedContacts = [...contactsById.values()];
+  orderedContacts.sort((left, right) => {
+    const leftName = buildContactCandidateName(left);
+    const rightName = buildContactCandidateName(right);
+    const leftExact = areNamesEquivalent(normalizedClientName, leftName) ? 1 : 0;
+    const rightExact = areNamesEquivalent(normalizedClientName, rightName) ? 1 : 0;
+    if (leftExact !== rightExact) {
+      return rightExact - leftExact;
+    }
+
+    const leftUpdated = parseGhlContactTimestamp(left);
+    const rightUpdated = parseGhlContactTimestamp(right);
+    if (leftUpdated !== rightUpdated) {
+      return rightUpdated - leftUpdated;
+    }
+
+    return sanitizeTextValue(leftName, 300).localeCompare(sanitizeTextValue(rightName, 300), "en", { sensitivity: "base" });
+  });
+
+  return orderedContacts;
 }
 
 function extractGhlNotesFromPayload(payload) {
@@ -4304,7 +4481,7 @@ async function findGhlBasicNoteByClientName(clientName) {
     };
   }
 
-  const contactsToInspect = contacts.slice(0, 10);
+  const contactsToInspect = contacts.slice(0, 25);
   let inspectedContacts = 0;
   let successfulContactLookups = 0;
   let lastLookupError = null;
@@ -4324,6 +4501,17 @@ async function findGhlBasicNoteByClientName(clientName) {
     if (!fallbackContactName) {
       fallbackContactName = contactName;
       fallbackContactId = contactId;
+    }
+
+    if (!memoMatch) {
+      const memoFromContact = extractMemoNoteFromContact(rawContact, contactName, contactId);
+      if (memoFromContact) {
+        memoMatch = {
+          contactName,
+          contactId,
+          note: memoFromContact,
+        };
+      }
     }
 
     let notes = [];
@@ -9915,7 +10103,8 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
     const isWrittenOff = writtenOffQueryFlag === true || isWrittenOffInRecords;
 
     const cachedRow = await getCachedGhlBasicNoteByClientName(clientName);
-    const shouldRefresh = shouldRefreshGhlBasicNoteCache(cachedRow, isWrittenOff);
+    const memoMissingInCache = !sanitizeTextValue(cachedRow?.memoBody, 12000);
+    const shouldRefresh = shouldRefreshGhlBasicNoteCache(cachedRow, isWrittenOff) || memoMissingInCache;
 
     if (!shouldRefresh && cachedRow) {
       res.json({
