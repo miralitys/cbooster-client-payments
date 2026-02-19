@@ -95,8 +95,6 @@ export default function ClientPaymentsPage() {
     setDateRange,
     setOverviewPeriod,
     setFiltersCollapsed,
-    tableDensity,
-    setTableDensity,
     toggleSort,
     forceRefresh,
     openCreateModal,
@@ -525,14 +523,6 @@ export default function ClientPaymentsPage() {
           title="Records"
           actions={
             <div className="table-panel__actions">
-              <SegmentedControl
-                value={tableDensity}
-                options={[
-                  { key: "compact", label: "Compact" },
-                  { key: "comfortable", label: "Comfortable" },
-                ]}
-                onChange={(value) => setTableDensity(value as "compact" | "comfortable")}
-              />
               <Button variant="secondary" size="sm" onClick={() => void forceRefresh()} isLoading={isLoading}>
                 Refresh
               </Button>
@@ -545,7 +535,7 @@ export default function ClientPaymentsPage() {
             </div>
           }
         >
-          {isLoading ? <TableLoadingSkeleton tableDensity={tableDensity} /> : null}
+          {isLoading ? <TableLoadingSkeleton /> : null}
           {!isLoading && loadError ? (
             <ErrorState
               title="Failed to load records"
@@ -564,7 +554,7 @@ export default function ClientPaymentsPage() {
               columns={tableColumns}
               rows={visibleRecords}
               rowKey={(record) => record.id}
-              density={tableDensity}
+              density="compact"
               onRowActivate={(record) => openRecordModal(record)}
               footer={
                 <tr>
@@ -656,12 +646,12 @@ function getColumnAlign(column: keyof ClientRecord): TableAlign {
   return "left";
 }
 
-function TableLoadingSkeleton({ tableDensity }: { tableDensity: "compact" | "comfortable" }) {
+function TableLoadingSkeleton() {
   const columnCount = TABLE_COLUMNS.length;
 
   return (
     <div className="table-wrap table-wrap--loading">
-      <table className={`cb-table cb-table--${tableDensity}`.trim()}>
+      <table className="cb-table cb-table--compact">
         <thead>
           <tr>
             {Array.from({ length: columnCount }).map((_, index) => (

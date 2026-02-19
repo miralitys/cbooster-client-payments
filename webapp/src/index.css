@@ -655,13 +655,6 @@ a {
   padding: 8px 12px;
 }
 
-.cb-table--comfortable th,
-.cb-table--comfortable td,
-.cb-table--comfortable .cb-table__head-cell,
-.cb-table--comfortable .cb-table__cell {
-  padding: 12px 16px;
-}
-
 .cb-table__cell--align-left {
   text-align: left;
 }
@@ -685,6 +678,20 @@ a {
 .cb-table tfoot td {
   background: #fbfdff;
   font-weight: 600;
+}
+
+.client-payments-react-page .table-wrap {
+  --totals-sticky-offset: 16px;
+  scrollbar-gutter: stable both-edges;
+}
+
+.client-payments-react-page .table-wrap .cb-table tfoot td {
+  position: sticky;
+  bottom: var(--totals-sticky-offset);
+  z-index: calc(var(--z-sticky) + 1);
+  background: #f8fbff;
+  border-top: 1px solid var(--color-border-strong);
+  box-shadow: 0 -6px 12px -10px rgba(15, 23, 42, 0.35);
 }
 
 .th-sort-btn {
@@ -1319,6 +1326,7 @@ a {
 .dashboard-react-page .table-panel,
 .dashboard-react-page .period-dashboard-shell-react {
   grid-column: 1 / -1;
+  grid-row: auto;
 }
 
 .dashboard-react-page {
