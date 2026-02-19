@@ -31,8 +31,10 @@ const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
 const ownerOnlyMenuItems = [...document.querySelectorAll('[data-owner-only="true"]')];
 const refreshSubmissionsButton = document.querySelector("#refresh-submissions-button");
+const submissionsUpdatedAtElement = document.querySelector("#submissions-updated-at");
 const dashboardMessage = document.querySelector("#dashboard-message");
 const paymentsTodayMessage = document.querySelector("#payments-today-message");
+const paymentsTodayDateElement = document.querySelector("#payments-today-date");
 const paymentsTodayTableBody = document.querySelector("#payments-today-table-body");
 
 const overviewPanel = document.querySelector(".period-dashboard-shell");
@@ -70,6 +72,12 @@ const paymentMoneyFormatter = new Intl.NumberFormat("en-US", {
   currency: "USD",
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
+});
+const paymentMoneyCompactFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
 });
 const chicagoDateFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: QUICKBOOKS_DASHBOARD_TIME_ZONE,
@@ -585,9 +593,10 @@ function renderTodayPayments(quickBooksItems = [], errorText = "") {
   const items = (Array.isArray(quickBooksItems) ? quickBooksItems : []).map((item) => {
     const amount = Number(item?.paymentAmount);
     const normalizedAmount = Number.isFinite(amount) ? amount : 0;
+    const clientName = (item?.clientName || "Unknown client").toString().trim() || "Unknown client";
+    const transactionType = normalizeQuickBooksTransactionType(item);
     return {
-      clientName: (item?.clientName || "Unknown client").toString().trim() || "Unknown client",
-      paymentLabel: formatQuickBooksPaymentType(item),
+      clientName: formatQuickBooksClientLabel(clientName, transactionType, normalizedAmount),
       paymentAmount: normalizedAmount,
       paymentDateText: formatQuickBooksDateForCell(item?.paymentDate),
     };
@@ -595,26 +604,30 @@ function renderTodayPayments(quickBooksItems = [], errorText = "") {
   const normalizedErrorText = (errorText || "").toString().trim();
   const todayLabel = formatDateLabelInChicago(new Date());
 
+  if (paymentsTodayDateElement) {
+    paymentsTodayDateElement.textContent = `${todayLabel} (Chicago time)`;
+  }
+
   if (paymentsTodayMessage) {
     if (normalizedErrorText) {
       paymentsTodayMessage.textContent = normalizedErrorText;
-      paymentsTodayMessage.className = "dashboard-message error";
+      paymentsTodayMessage.className = "payments-today-kpi error";
     } else if (!items.length) {
-      paymentsTodayMessage.textContent = `No QuickBooks payments for ${todayLabel}.`;
-      paymentsTodayMessage.className = "dashboard-message";
+      paymentsTodayMessage.textContent = "No QuickBooks payments recorded today.";
+      paymentsTodayMessage.className = "payments-today-kpi is-muted";
     } else {
       const totalAmount = items.reduce((sum, item) => sum + item.paymentAmount, 0);
-      paymentsTodayMessage.textContent = `${todayLabel}: ${items.length} QuickBooks payment${items.length === 1 ? "" : "s"}, total ${paymentMoneyFormatter.format(totalAmount)}.`;
-      paymentsTodayMessage.className = "dashboard-message";
+      paymentsTodayMessage.textContent = `${paymentMoneyCompactFormatter.format(totalAmount)} - ${items.length} QuickBooks payment${items.length === 1 ? "" : "s"}`;
+      paymentsTodayMessage.className = "payments-today-kpi";
     }
   }
 
   if (!items.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 4;
+    cell.colSpan = 3;
     cell.className = "empty-state";
-    cell.textContent = normalizedErrorText || `No QuickBooks payments for ${todayLabel}.`;
+    cell.textContent = normalizedErrorText || "No QuickBooks payments recorded for today.";
     row.append(cell);
     paymentsTodayTableBody.replaceChildren(row);
     return;
@@ -624,7 +637,6 @@ function renderTodayPayments(quickBooksItems = [], errorText = "") {
   for (const item of items) {
     const row = document.createElement("tr");
     appendCell(row, item.clientName);
-    appendCell(row, item.paymentLabel);
 
     const amountCell = document.createElement("td");
     amountCell.className = "payments-today-table__amount";
@@ -638,24 +650,20 @@ function renderTodayPayments(quickBooksItems = [], errorText = "") {
   paymentsTodayTableBody.replaceChildren(fragment);
 }
 
-function formatQuickBooksPaymentType(item) {
-  const transactionType = (item?.transactionType || "").toString().trim().toLowerCase();
-  const amount = Number(item?.paymentAmount);
-  const normalizedAmount = Number.isFinite(amount) ? amount : 0;
+function normalizeQuickBooksTransactionType(item) {
+  return (item?.transactionType || "").toString().trim().toLowerCase();
+}
 
+function formatQuickBooksClientLabel(clientName, transactionType, amount) {
   if (transactionType === "refund") {
-    return "Refund";
+    return `${clientName} (Refund)`;
   }
 
-  if (transactionType === "payment" && normalizedAmount < 0) {
-    return "Write-off";
+  if (transactionType === "creditmemo" || (transactionType === "payment" && amount < 0)) {
+    return `${clientName} (Write-off)`;
   }
 
-  if (transactionType === "payment") {
-    return "Payment";
-  }
-
-  return transactionType ? transactionType.charAt(0).toUpperCase() + transactionType.slice(1) : "Payment";
+  return clientName;
 }
 
 function formatQuickBooksDateForCell(rawValue) {
@@ -832,10 +840,32 @@ async function loadPendingSubmissions() {
 
     pendingSubmissions = Array.isArray(body.items) ? body.items : [];
     renderPendingSubmissions();
+    setSubmissionsUpdatedAt(new Date());
   } catch (error) {
     pendingSubmissions = [];
     renderPendingSubmissions(error.message || "Failed to load submissions.");
+    setSubmissionsUpdatedAt(null, true);
   }
+}
+
+function setSubmissionsUpdatedAt(dateValue, isError = false) {
+  if (!submissionsUpdatedAtElement) {
+    return;
+  }
+
+  const date = dateValue instanceof Date ? dateValue : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    submissionsUpdatedAtElement.textContent = isError ? "Last refresh failed." : "";
+    submissionsUpdatedAtElement.classList.toggle("error", Boolean(isError));
+    return;
+  }
+
+  submissionsUpdatedAtElement.textContent = `Updated ${date.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })}`;
+  submissionsUpdatedAtElement.classList.remove("error");
 }
 
 function renderPendingSubmissions(errorText = "") {
