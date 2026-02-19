@@ -1,72 +1,120 @@
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 const NAV_ITEMS = [
-  { to: "/client-payments", label: "Client Payments" },
   { to: "/dashboard", label: "Dashboard" },
+  { to: "/client-payments", label: "Client Payments" },
   { to: "/quickbooks", label: "QuickBooks" },
+  { to: "/legacy/client-payments", label: "Legacy Client Payments", external: true },
+  { to: "/legacy/dashboard", label: "Legacy Dashboard", external: true },
 ];
 
-const PAGE_TITLES: Record<string, string> = {
-  "/client-payments": "Client Payments",
-  "/dashboard": "Dashboard",
-  "/quickbooks": "QuickBooks",
-};
-
 function resolvePageTitle(pathname: string): string {
-  if (pathname.startsWith("/client-payments")) {
-    return PAGE_TITLES["/client-payments"];
-  }
-
   if (pathname.startsWith("/dashboard")) {
-    return PAGE_TITLES["/dashboard"];
+    return "Dashboard";
   }
 
   if (pathname.startsWith("/quickbooks")) {
-    return PAGE_TITLES["/quickbooks"];
+    return "QuickBooks";
   }
 
-  return "Client Payments";
+  return "Client Payments Dashboard";
 }
 
 export function Layout() {
   const location = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const pageTitle = resolvePageTitle(location.pathname);
 
+  useEffect(() => {
+    function onPointerDown(event: MouseEvent) {
+      if (!menuRef.current) {
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof Node && !menuRef.current.contains(target)) {
+        setMenuOpen(false);
+      }
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
   return (
-    <div className="app-shell">
-      <aside className="app-sidebar">
-        <div className="app-brand">
-          <span className="app-brand__eyebrow">Credit Booster</span>
-          <strong className="app-brand__title">Web App</strong>
-        </div>
+    <main className="page-shell">
+      <div className="container">
+        <header className="section page-header">
+          <div className="page-header__title">
+            <p className="eyebrow">Credit Booster</p>
+            <h1>{pageTitle}</h1>
+          </div>
 
-        <nav className="app-nav" aria-label="Application pages">
-          {NAV_ITEMS.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) =>
-                `app-nav__link ${isActive ? "is-active" : ""}`.trim()
-              }
+          <div ref={menuRef} className={`account-menu ${menuOpen ? "is-open" : ""}`.trim()}>
+            <button
+              type="button"
+              className="account-menu__toggle"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              aria-controls="app-account-menu-panel"
+              aria-label="Open account menu"
+              onClick={() => setMenuOpen((prev) => !prev)}
             >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
-      </aside>
+              <span className="account-menu__line" aria-hidden="true" />
+              <span className="account-menu__line" aria-hidden="true" />
+              <span className="account-menu__line" aria-hidden="true" />
+            </button>
 
-      <div className="app-main">
-        <header className="app-header">
-          <div>
-            <p className="app-header__label">CREDIT BOOSTER</p>
-            <h1 className="app-header__title">{pageTitle}</h1>
+            <div id="app-account-menu-panel" className="account-menu__panel" role="menu" hidden={!menuOpen}>
+              {NAV_ITEMS.map((item) => {
+                if (item.external) {
+                  return (
+                    <a
+                      key={item.to}
+                      href={item.to}
+                      className="account-menu__item"
+                      role="menuitem"
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      {item.label}
+                    </a>
+                  );
+                }
+
+                return (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    className="account-menu__item"
+                    role="menuitem"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    {item.label}
+                  </NavLink>
+                );
+              })}
+              <div className="account-menu__divider" aria-hidden="true" />
+              <a href="/logout" className="account-menu__item" role="menuitem" onClick={() => setMenuOpen(false)}>
+                Log Out
+              </a>
+            </div>
           </div>
         </header>
 
-        <main className="app-content">
-          <Outlet />
-        </main>
+        <Outlet />
       </div>
-    </div>
+    </main>
   );
 }
