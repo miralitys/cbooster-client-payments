@@ -201,6 +201,22 @@ const QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE = 250;
 const QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT = 0.000001;
 const QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS = 200;
 const QUICKBOOKS_DEFAULT_FROM_DATE = "2026-01-01";
+const QUICKBOOKS_AUTO_SYNC_ENABLED_RAW = resolveOptionalBoolean(process.env.QUICKBOOKS_AUTO_SYNC_ENABLED);
+const QUICKBOOKS_AUTO_SYNC_ENABLED = QUICKBOOKS_AUTO_SYNC_ENABLED_RAW !== false;
+const QUICKBOOKS_AUTO_SYNC_TIME_ZONE = "America/Chicago";
+const QUICKBOOKS_AUTO_SYNC_START_HOUR = 8;
+const QUICKBOOKS_AUTO_SYNC_END_HOUR = 22;
+const QUICKBOOKS_AUTO_SYNC_TRIGGER_MINUTE_MAX = 8;
+const QUICKBOOKS_AUTO_SYNC_TICK_INTERVAL_MS = 60 * 1000;
+const QUICKBOOKS_AUTO_SYNC_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: QUICKBOOKS_AUTO_SYNC_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 const GHL_API_KEY = (process.env.GHL_API_KEY || process.env.GOHIGHLEVEL_API_KEY || "").toString().trim();
 const GHL_LOCATION_ID = (process.env.GHL_LOCATION_ID || "").toString().trim();
 const GHL_API_BASE_URL = (
@@ -413,6 +429,10 @@ const miniAttachmentsUploadMiddleware = multer({
 }).array("attachments", MINI_MAX_ATTACHMENTS_COUNT);
 
 let dbReadyPromise = null;
+let quickBooksSyncQueue = Promise.resolve();
+let quickBooksAutoSyncIntervalId = null;
+let quickBooksAutoSyncInFlightSlotKey = "";
+let quickBooksAutoSyncLastCompletedSlotKey = "";
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
@@ -1647,6 +1667,106 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     roleId,
     teamUsernames,
   };
+}
+
+function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
+  const payload = rawBody && typeof rawBody === "object" ? rawBody : {};
+  const existing = existingUser && typeof existingUser === "object" ? existingUser : null;
+  if (!existing) {
+    throw createHttpError("User not found.", 404);
+  }
+
+  const existingUsername = normalizeWebAuthUsername(existing.username);
+  if (!existingUsername) {
+    throw createHttpError("Invalid existing user.", 400);
+  }
+
+  const existingDisplayName = sanitizeTextValue(existing.displayName, 140) || existingUsername;
+  let username = normalizeWebAuthUsername(payload.username || payload.email);
+  if (!username) {
+    username = existingUsername;
+  }
+  if (username === WEB_AUTH_OWNER_USERNAME && !existing.isOwner) {
+    throw createHttpError("Owner account cannot be assigned.", 400);
+  }
+
+  let password = normalizeWebAuthConfigValue(payload.password);
+  if (password && password.length < 8) {
+    throw createHttpError("Password must be at least 8 characters.", 400);
+  }
+  if (!password) {
+    password = normalizeWebAuthConfigValue(existing.password);
+  }
+  if (!password) {
+    password = generateWebAuthTemporaryPassword();
+  }
+
+  const displayName = sanitizeTextValue(payload.displayName || payload.name, 140) || existingDisplayName;
+  const hasDepartmentInPayload = Object.prototype.hasOwnProperty.call(payload, "departmentId") || Object.prototype.hasOwnProperty.call(payload, "department");
+  const hasRoleInPayload = Object.prototype.hasOwnProperty.call(payload, "roleId") || Object.prototype.hasOwnProperty.call(payload, "role");
+  const hasTeamInPayload = Object.prototype.hasOwnProperty.call(payload, "teamUsernames") || Object.prototype.hasOwnProperty.call(payload, "team");
+
+  const departmentId = hasDepartmentInPayload
+    ? normalizeWebAuthDepartmentId(payload.departmentId || payload.department)
+    : normalizeWebAuthDepartmentId(existing.departmentId);
+  if (!departmentId) {
+    throw createHttpError("Department is required.", 400);
+  }
+
+  const roleId = hasRoleInPayload
+    ? normalizeWebAuthRoleId(payload.roleId || payload.role, departmentId)
+    : normalizeWebAuthRoleId(existing.roleId, departmentId);
+  if (!roleId || roleId === WEB_AUTH_ROLE_OWNER) {
+    throw createHttpError("Role is required.", 400);
+  }
+
+  if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
+    throw createHttpError("Selected role is not allowed for this department.", 400);
+  }
+
+  const teamUsernames = hasTeamInPayload
+    ? normalizeWebAuthTeamUsernames(payload.teamUsernames || payload.team)
+    : normalizeWebAuthTeamUsernames(existing.teamUsernames);
+
+  return {
+    username,
+    password,
+    displayName,
+    isOwner: false,
+    departmentId,
+    roleId,
+    teamUsernames: roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER ? teamUsernames : [],
+  };
+}
+
+function updateWebAuthUserInDirectory(existingUsername, rawBody) {
+  const normalizedExistingUsername = normalizeWebAuthUsername(existingUsername);
+  if (!normalizedExistingUsername) {
+    throw createHttpError("Username is required.", 400);
+  }
+
+  const existingUser = getWebAuthUserByUsername(normalizedExistingUsername);
+  if (!existingUser) {
+    throw createHttpError("User not found.", 404);
+  }
+
+  if (existingUser.isOwner) {
+    throw createHttpError("Owner account cannot be edited from this page.", 403);
+  }
+
+  const normalizedPayload = normalizeWebAuthUpdatePayload(rawBody, existingUser);
+  const conflictUser = getWebAuthUserByUsername(normalizedPayload.username);
+  if (conflictUser && normalizeWebAuthUsername(conflictUser.username) !== normalizedExistingUsername) {
+    throw createHttpError("User with this username already exists.", 409);
+  }
+
+  WEB_AUTH_USERS_BY_USERNAME.delete(normalizedExistingUsername);
+  try {
+    return upsertWebAuthUserInDirectory(normalizedPayload);
+  } catch (error) {
+    WEB_AUTH_USERS_BY_USERNAME.set(normalizedExistingUsername, existingUser);
+    throw error;
+  }
 }
 
 function buildWebAuthAccessModel() {
@@ -4171,6 +4291,193 @@ async function upsertQuickBooksTransactions(items) {
   }
 }
 
+function buildQuickBooksSyncMeta(options = {}) {
+  const requested = Boolean(options?.requested);
+  const syncMode = (options?.syncMode || "").toString().trim().toLowerCase() === "full" ? "full" : "incremental";
+  return {
+    requested,
+    syncMode,
+    performed: false,
+    syncFrom: "",
+    fetchedCount: 0,
+    insertedCount: 0,
+    writtenCount: 0,
+    reconciledScannedCount: 0,
+    reconciledCount: 0,
+    reconciledWrittenCount: 0,
+  };
+}
+
+async function syncQuickBooksTransactionsInRange(range, options = {}) {
+  const normalizedRange = range && typeof range === "object" ? range : {};
+  const fromDate = sanitizeTextValue(normalizedRange.from, 20);
+  const toDate = sanitizeTextValue(normalizedRange.to, 20);
+  if (!isValidIsoDateString(fromDate) || !isValidIsoDateString(toDate) || fromDate > toDate) {
+    throw createHttpError("Invalid QuickBooks sync range.", 400);
+  }
+
+  const shouldTotalRefresh = Boolean(options?.fullSync);
+  let syncMeta = buildQuickBooksSyncMeta({
+    requested: true,
+    syncMode: shouldTotalRefresh ? "full" : "incremental",
+  });
+
+  const latestCachedDate = await getLatestCachedQuickBooksPaymentDate(fromDate, toDate);
+  const syncFromDate = shouldTotalRefresh ? fromDate : buildQuickBooksIncrementalSyncFromDate(fromDate, toDate, latestCachedDate);
+  syncMeta.syncFrom = syncFromDate;
+
+  const accessToken = await fetchQuickBooksAccessToken();
+  if (syncFromDate) {
+    const [paymentRecords, refundRecords] = await Promise.all([
+      fetchQuickBooksPaymentsInRange(accessToken, syncFromDate, toDate),
+      fetchQuickBooksRefundsInRange(accessToken, syncFromDate, toDate),
+    ]);
+    const normalizedPaymentRecords = await enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentRecords);
+    const paymentItems = normalizedPaymentRecords.map(mapQuickBooksPayment);
+    const refundItems = refundRecords.map(mapQuickBooksRefund);
+    const fetchedItems = sortQuickBooksTransactionsByDateDesc([...paymentItems, ...refundItems]);
+    const enrichedItems = await enrichQuickBooksTransactionsWithCustomerContacts(accessToken, fetchedItems, {
+      forceRefresh: shouldTotalRefresh,
+    });
+    const upsertResult = await upsertQuickBooksTransactions(enrichedItems);
+
+    syncMeta = {
+      ...syncMeta,
+      performed: true,
+      fetchedCount: enrichedItems.length,
+      insertedCount: upsertResult.insertedCount,
+      writtenCount: upsertResult.writtenCount,
+    };
+  }
+
+  const reconcileResult = await reconcileCachedQuickBooksZeroPayments(accessToken, fromDate, toDate);
+  syncMeta = {
+    ...syncMeta,
+    reconciledScannedCount: reconcileResult.scannedCount,
+    reconciledCount: reconcileResult.reconciledCount,
+    reconciledWrittenCount: reconcileResult.writtenCount,
+  };
+
+  return syncMeta;
+}
+
+function queueQuickBooksSyncTask(taskFactory) {
+  const runTask = () => Promise.resolve().then(() => taskFactory());
+  const runPromise = quickBooksSyncQueue.then(runTask, runTask);
+  quickBooksSyncQueue = runPromise.catch(() => {});
+  return runPromise;
+}
+
+function getQuickBooksAutoSyncClockParts(dateValue = new Date()) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const values = {};
+  for (const part of QUICKBOOKS_AUTO_SYNC_DATE_TIME_FORMATTER.formatToParts(date)) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+
+  const fallbackIsoDate = formatQuickBooksDateUtc(date);
+  const [fallbackYear, fallbackMonth, fallbackDay] = fallbackIsoDate.split("-");
+  const rawHour = Number.parseInt(values.hour || "0", 10);
+  const rawMinute = Number.parseInt(values.minute || "0", 10);
+  const normalizedHour = Number.isFinite(rawHour) ? ((rawHour % 24) + 24) % 24 : 0;
+  const normalizedMinute = Number.isFinite(rawMinute) ? Math.max(0, Math.min(rawMinute, 59)) : 0;
+
+  return {
+    year: values.year || fallbackYear,
+    month: values.month || fallbackMonth,
+    day: values.day || fallbackDay,
+    hour: normalizedHour,
+    minute: normalizedMinute,
+  };
+}
+
+function buildQuickBooksAutoSyncSlotKey(clockParts) {
+  if (!clockParts || typeof clockParts !== "object") {
+    return "";
+  }
+
+  const year = sanitizeTextValue(clockParts.year, 4);
+  const month = sanitizeTextValue(clockParts.month, 2);
+  const day = sanitizeTextValue(clockParts.day, 2);
+  const hour = Number.isFinite(clockParts.hour) ? String(clockParts.hour).padStart(2, "0") : "";
+  if (!year || !month || !day || !hour) {
+    return "";
+  }
+  return `${year}-${month}-${day}T${hour}`;
+}
+
+function isQuickBooksAutoSyncHourInWindow(hour) {
+  if (!Number.isFinite(hour)) {
+    return false;
+  }
+  return hour >= QUICKBOOKS_AUTO_SYNC_START_HOUR && hour <= QUICKBOOKS_AUTO_SYNC_END_HOUR;
+}
+
+function getQuickBooksAutoSyncRange() {
+  const chicagoClock = getQuickBooksAutoSyncClockParts(new Date());
+  const chicagoTodayIso = `${chicagoClock.year}-${chicagoClock.month}-${chicagoClock.day}`;
+  return getQuickBooksDateRange(QUICKBOOKS_DEFAULT_FROM_DATE, chicagoTodayIso);
+}
+
+async function runQuickBooksAutoSyncTick() {
+  if (!QUICKBOOKS_AUTO_SYNC_ENABLED || !pool || !isQuickBooksConfigured()) {
+    return;
+  }
+
+  const chicagoClock = getQuickBooksAutoSyncClockParts(new Date());
+  if (!isQuickBooksAutoSyncHourInWindow(chicagoClock.hour)) {
+    return;
+  }
+  if (chicagoClock.minute > QUICKBOOKS_AUTO_SYNC_TRIGGER_MINUTE_MAX) {
+    return;
+  }
+
+  const slotKey = buildQuickBooksAutoSyncSlotKey(chicagoClock);
+  if (!slotKey) {
+    return;
+  }
+  if (quickBooksAutoSyncInFlightSlotKey === slotKey || quickBooksAutoSyncLastCompletedSlotKey === slotKey) {
+    return;
+  }
+
+  quickBooksAutoSyncInFlightSlotKey = slotKey;
+  try {
+    const range = getQuickBooksAutoSyncRange();
+    const syncMeta = await queueQuickBooksSyncTask(() =>
+      syncQuickBooksTransactionsInRange(range, {
+        fullSync: false,
+      }),
+    );
+    quickBooksAutoSyncLastCompletedSlotKey = slotKey;
+    console.log(
+      `[QuickBooks Auto Sync] ${slotKey} (${QUICKBOOKS_AUTO_SYNC_TIME_ZONE}): +${syncMeta.insertedCount} new, ${syncMeta.writtenCount} written, ${syncMeta.reconciledWrittenCount} reconciled.`,
+    );
+  } catch (error) {
+    console.error("[QuickBooks Auto Sync] Hourly sync failed:", error);
+  } finally {
+    if (quickBooksAutoSyncInFlightSlotKey === slotKey) {
+      quickBooksAutoSyncInFlightSlotKey = "";
+    }
+  }
+}
+
+function startQuickBooksAutoSyncScheduler() {
+  if (!QUICKBOOKS_AUTO_SYNC_ENABLED || !pool || !isQuickBooksConfigured()) {
+    return false;
+  }
+  if (quickBooksAutoSyncIntervalId) {
+    return true;
+  }
+
+  quickBooksAutoSyncIntervalId = setInterval(() => {
+    void runQuickBooksAutoSyncTick();
+  }, QUICKBOOKS_AUTO_SYNC_TICK_INTERVAL_MS);
+  void runQuickBooksAutoSyncTick();
+  return true;
+}
+
 function isValidRecordsPayload(value) {
   return Array.isArray(value);
 }
@@ -5259,6 +5566,35 @@ app.post("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCE
   }
 });
 
+app.put("/api/auth/users/:username", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (req, res) => {
+  const targetUsername = normalizeWebAuthUsername(req.params.username);
+  if (!targetUsername) {
+    res.status(400).json({
+      error: "Username is required.",
+    });
+    return;
+  }
+
+  try {
+    const updatedUser = updateWebAuthUserInDirectory(targetUsername, req.body);
+    if (normalizeWebAuthUsername(req.webAuthUser) === targetUsername && updatedUser?.username) {
+      const sessionToken = createWebAuthSessionToken(updatedUser.username);
+      setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
+      req.webAuthUser = updatedUser.username;
+      req.webAuthProfile = updatedUser;
+    }
+
+    res.json({
+      ok: true,
+      item: buildWebAuthPublicUser(updatedUser),
+    });
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 260) || "Failed to update user.",
+    });
+  }
+});
+
 app.all("/api/quickbooks/*", (req, res, next) => {
   if (req.method === "GET") {
     next();
@@ -5305,58 +5641,17 @@ app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISS
   }
 
   try {
-    let syncMeta = {
+    let syncMeta = buildQuickBooksSyncMeta({
       requested: shouldSync,
       syncMode: shouldTotalRefresh ? "full" : "incremental",
-      performed: false,
-      syncFrom: "",
-      fetchedCount: 0,
-      insertedCount: 0,
-      writtenCount: 0,
-      reconciledScannedCount: 0,
-      reconciledCount: 0,
-      reconciledWrittenCount: 0,
-    };
+    });
 
     if (shouldSync) {
-      const latestCachedDate = await getLatestCachedQuickBooksPaymentDate(range.from, range.to);
-      const syncFromDate = shouldTotalRefresh
-        ? range.from
-        : buildQuickBooksIncrementalSyncFromDate(range.from, range.to, latestCachedDate);
-
-      syncMeta.syncFrom = syncFromDate;
-      const accessToken = await fetchQuickBooksAccessToken();
-
-      if (syncFromDate) {
-        const [paymentRecords, refundRecords] = await Promise.all([
-          fetchQuickBooksPaymentsInRange(accessToken, syncFromDate, range.to),
-          fetchQuickBooksRefundsInRange(accessToken, syncFromDate, range.to),
-        ]);
-        const normalizedPaymentRecords = await enrichQuickBooksPaymentsWithEffectiveAmount(accessToken, paymentRecords);
-        const paymentItems = normalizedPaymentRecords.map(mapQuickBooksPayment);
-        const refundItems = refundRecords.map(mapQuickBooksRefund);
-        const fetchedItems = sortQuickBooksTransactionsByDateDesc([...paymentItems, ...refundItems]);
-        const enrichedItems = await enrichQuickBooksTransactionsWithCustomerContacts(accessToken, fetchedItems, {
-          forceRefresh: shouldTotalRefresh,
-        });
-        const upsertResult = await upsertQuickBooksTransactions(enrichedItems);
-
-        syncMeta = {
-          ...syncMeta,
-          performed: true,
-          fetchedCount: enrichedItems.length,
-          insertedCount: upsertResult.insertedCount,
-          writtenCount: upsertResult.writtenCount,
-        };
-      }
-
-      const reconcileResult = await reconcileCachedQuickBooksZeroPayments(accessToken, range.from, range.to);
-      syncMeta = {
-        ...syncMeta,
-        reconciledScannedCount: reconcileResult.scannedCount,
-        reconciledCount: reconcileResult.reconciledCount,
-        reconciledWrittenCount: reconcileResult.writtenCount,
-      };
+      syncMeta = await queueQuickBooksSyncTask(() =>
+        syncQuickBooksTransactionsInRange(range, {
+          fullSync: shouldTotalRefresh,
+        }),
+      );
     }
 
     const items = await listCachedQuickBooksTransactionsInRange(range.from, range.to);
@@ -5853,8 +6148,20 @@ app.listen(PORT, () => {
   if (TELEGRAM_NOTIFY_THREAD_ID && !TELEGRAM_NOTIFY_CHAT_ID) {
     console.warn("TELEGRAM_NOTIFY_THREAD_ID is ignored because TELEGRAM_NOTIFY_CHAT_ID is not set.");
   }
-  if (!isQuickBooksConfigured()) {
+  const quickBooksConfigured = isQuickBooksConfigured();
+  if (!quickBooksConfigured) {
     console.warn("QuickBooks test API is disabled. Set QUICKBOOKS_CLIENT_ID/SECRET/REFRESH_TOKEN/REALM_ID.");
+  }
+  if (!QUICKBOOKS_AUTO_SYNC_ENABLED) {
+    console.warn("QuickBooks auto sync scheduler is disabled (QUICKBOOKS_AUTO_SYNC_ENABLED=false).");
+  } else if (!pool) {
+    console.warn("QuickBooks auto sync scheduler is disabled because DATABASE_URL is missing.");
+  } else if (!quickBooksConfigured) {
+    console.warn("QuickBooks auto sync scheduler is disabled because QuickBooks credentials are missing.");
+  } else if (startQuickBooksAutoSyncScheduler()) {
+    console.log(
+      `QuickBooks auto sync scheduler started: hourly from ${String(QUICKBOOKS_AUTO_SYNC_START_HOUR).padStart(2, "0")}:00 to ${String(QUICKBOOKS_AUTO_SYNC_END_HOUR).padStart(2, "0")}:00 (${QUICKBOOKS_AUTO_SYNC_TIME_ZONE}).`,
+    );
   }
   if (!isGhlConfigured()) {
     console.warn("GHL client-manager lookup is disabled. Set GHL_API_KEY and GHL_LOCATION_ID.");

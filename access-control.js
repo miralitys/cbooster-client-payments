@@ -4,6 +4,7 @@ const LOGIN_PATH = "/login";
 const AUTH_SESSION_ENDPOINT = "/api/auth/session";
 const AUTH_ACCESS_MODEL_ENDPOINT = "/api/auth/access-model";
 const AUTH_CREATE_USER_ENDPOINT = "/api/auth/users";
+const AUTH_UPDATE_USER_ENDPOINT_BASE = "/api/auth/users";
 const AUTH_LOGOUT_PATH = "/logout";
 
 const ROLE_OPTIONS_BY_DEPARTMENT = {
@@ -50,14 +51,33 @@ const teamInput = document.querySelector("#access-control-new-user-team");
 const createUserButton = document.querySelector("#access-control-create-user-button");
 const usersTableBody = document.querySelector("#access-control-users-body");
 
+const editUserModal = document.querySelector("#access-control-edit-user-modal");
+const editUserDialog = editUserModal?.querySelector(".access-control-edit-modal-dialog") || null;
+const editUserBackdropButton = document.querySelector("#access-control-edit-user-backdrop");
+const closeEditUserButton = document.querySelector("#access-control-close-edit-user-button");
+const cancelEditUserButton = document.querySelector("#access-control-cancel-edit-user-button");
+const editUserFormElement = document.querySelector("#access-control-edit-user-form");
+const editUserStatusElement = document.querySelector("#access-control-edit-user-status");
+const editUserUsernameInput = document.querySelector("#access-control-edit-user-username");
+const editUserPasswordInput = document.querySelector("#access-control-edit-user-password");
+const editUserDisplayNameInput = document.querySelector("#access-control-edit-user-display-name");
+const editUserDepartmentSelect = document.querySelector("#access-control-edit-user-department");
+const editUserRoleSelect = document.querySelector("#access-control-edit-user-role");
+const editUserTeamField = document.querySelector("#access-control-edit-user-team-field");
+const editUserTeamInput = document.querySelector("#access-control-edit-user-team");
+const saveUserButton = document.querySelector("#access-control-save-user-button");
+
 let currentAuthUser = "";
 let currentAuthLabel = "";
 let currentAuthIsOwner = false;
 let currentAuthCanManageAccess = false;
+let accessModelUsersByUsername = new Map();
+let editingOriginalUsername = "";
 
 initializeAccountMenu();
 initializeAuthSession();
 initializeRegistrationForm();
+initializeEditUserModal();
 void loadAccessModel();
 
 function initializeAccountMenu() {
@@ -130,6 +150,42 @@ function initializeRegistrationForm() {
   });
 }
 
+function initializeEditUserModal() {
+  renderEditRoleOptions(editUserDepartmentSelect?.value || "accounting", editUserRoleSelect?.value || "");
+  syncEditTeamFieldVisibility();
+
+  editUserDepartmentSelect?.addEventListener("change", () => {
+    renderEditRoleOptions(editUserDepartmentSelect?.value || "", editUserRoleSelect?.value || "");
+  });
+
+  editUserRoleSelect?.addEventListener("change", () => {
+    syncEditTeamFieldVisibility();
+  });
+
+  editUserBackdropButton?.addEventListener("click", () => {
+    closeEditUserModal();
+  });
+
+  closeEditUserButton?.addEventListener("click", () => {
+    closeEditUserModal();
+  });
+
+  cancelEditUserButton?.addEventListener("click", () => {
+    closeEditUserModal();
+  });
+
+  editUserFormElement?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await updateUser();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && isEditUserModalOpen()) {
+      closeEditUserModal();
+    }
+  });
+}
+
 function setAccountMenuOpen(isOpen) {
   if (!accountMenu || !accountMenuToggleButton || !accountMenuPanel) {
     return;
@@ -173,6 +229,7 @@ function syncRegistrationAvailability() {
 
   if (!currentAuthCanManageAccess) {
     setRegistrationPanelOpen(false);
+    closeEditUserModal();
   }
 }
 
@@ -190,6 +247,33 @@ function setRegistrationPanelOpen(isOpen) {
 
   if (shouldOpen) {
     usernameInput?.focus();
+  }
+}
+
+function isEditUserModalOpen() {
+  return Boolean(editUserModal && !editUserModal.hidden);
+}
+
+function setEditUserModalOpen(isOpen) {
+  if (!editUserModal) {
+    return;
+  }
+
+  const shouldOpen = Boolean(isOpen) && currentAuthCanManageAccess;
+  editUserModal.hidden = !shouldOpen;
+  document.body.classList.toggle("modal-open", shouldOpen);
+
+  if (shouldOpen) {
+    editUserDialog?.focus();
+    editUserDisplayNameInput?.focus();
+  }
+}
+
+function closeEditUserModal() {
+  setEditUserModalOpen(false);
+  editingOriginalUsername = "";
+  if (editUserPasswordInput) {
+    editUserPasswordInput.value = "";
   }
 }
 
@@ -266,11 +350,7 @@ async function createUser() {
   const displayName = (displayNameInput?.value || "").toString().trim();
   const departmentId = (departmentSelect?.value || "").toString().trim();
   const roleId = (roleSelect?.value || "").toString().trim();
-  const teamUsernames = (teamInput?.value || "")
-    .toString()
-    .split(/[\n,;]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+  const teamUsernames = parseTeamUsernamesInput(teamInput?.value);
 
   setLoadingState(true);
   setRegistrationStatus("Creating user...", false);
@@ -315,13 +395,67 @@ async function createUser() {
       teamInput.value = "";
     }
 
-    setRegistrationStatus(`User "${payload?.item?.username || username}" created.`, false);
+    setRegistrationStatus(`User "${payload?.item?.username || username || displayName}" created.`, false);
     await loadAccessModel();
     setRegistrationPanelOpen(false);
   } catch (error) {
     setRegistrationStatus(error.message || "Failed to create user.", true);
   } finally {
     setLoadingState(false);
+  }
+}
+
+async function updateUser() {
+  if (!editingOriginalUsername) {
+    setEditUserStatus("Unable to update: user is not selected.", true);
+    return;
+  }
+
+  const username = (editUserUsernameInput?.value || "").toString().trim();
+  const password = (editUserPasswordInput?.value || "").toString();
+  const displayName = (editUserDisplayNameInput?.value || "").toString().trim();
+  const departmentId = (editUserDepartmentSelect?.value || "").toString().trim();
+  const roleId = (editUserRoleSelect?.value || "").toString().trim();
+  const teamUsernames = parseTeamUsernamesInput(editUserTeamInput?.value);
+
+  setEditUserLoadingState(true);
+  setEditUserStatus("Saving changes...", false);
+
+  try {
+    const response = await fetch(`${AUTH_UPDATE_USER_ENDPOINT_BASE}/${encodeURIComponent(editingOriginalUsername)}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        username,
+        password,
+        displayName,
+        departmentId,
+        roleId,
+        teamUsernames,
+      }),
+    });
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Failed to update user (${response.status})`);
+    }
+
+    const updatedName = (payload?.item?.displayName || payload?.item?.username || displayName || editingOriginalUsername).toString();
+    setEditUserStatus(`User "${updatedName}" updated.`, false);
+    await loadAccessModel();
+    closeEditUserModal();
+  } catch (error) {
+    setEditUserStatus(error.message || "Failed to update user.", true);
+  } finally {
+    setEditUserLoadingState(false);
   }
 }
 
@@ -468,6 +602,8 @@ function renderUsers(users) {
     return;
   }
 
+  accessModelUsersByUsername = new Map();
+
   if (!currentAuthCanManageAccess) {
     usersTableBody.replaceChildren();
     return;
@@ -488,8 +624,30 @@ function renderUsers(users) {
   const fragment = document.createDocumentFragment();
   for (const item of items) {
     const row = document.createElement("tr");
-    appendCell(row, (item?.username || "-").toString());
-    appendCell(row, (item?.displayName || "-").toString());
+    const username = (item?.username || "").toString().trim();
+    const displayName = (item?.displayName || "").toString().trim() || username || "-";
+    if (username) {
+      accessModelUsersByUsername.set(username, item);
+    }
+
+    appendCell(row, username || "-");
+
+    const displayNameCell = document.createElement("td");
+    if (!item?.isOwner && username) {
+      const trigger = document.createElement("button");
+      trigger.type = "button";
+      trigger.className = "access-control-user-edit-trigger";
+      trigger.textContent = displayName;
+      trigger.title = "Edit user";
+      trigger.addEventListener("click", () => {
+        openEditUserModalForUsername(username);
+      });
+      displayNameCell.append(trigger);
+    } else {
+      displayNameCell.textContent = displayName;
+    }
+    row.append(displayNameCell);
+
     appendCell(row, (item?.roleName || "-").toString());
     appendCell(row, (item?.departmentName || "-").toString());
     appendCell(row, item?.isOwner ? "Yes" : "No");
@@ -497,6 +655,56 @@ function renderUsers(users) {
   }
 
   usersTableBody.replaceChildren(fragment);
+}
+
+function openEditUserModalForUsername(username) {
+  if (!currentAuthCanManageAccess) {
+    return;
+  }
+
+  const normalizedUsername = (username || "").toString().trim();
+  if (!normalizedUsername) {
+    return;
+  }
+
+  const user = accessModelUsersByUsername.get(normalizedUsername);
+  if (!user) {
+    setRegistrationStatus("Unable to open edit window: user was not found.", true);
+    return;
+  }
+
+  if (user?.isOwner) {
+    setRegistrationStatus("Owner account is not editable from this page.", true);
+    return;
+  }
+
+  editingOriginalUsername = normalizedUsername;
+  if (editUserUsernameInput) {
+    editUserUsernameInput.value = normalizedUsername;
+  }
+  if (editUserPasswordInput) {
+    editUserPasswordInput.value = "";
+  }
+  if (editUserDisplayNameInput) {
+    editUserDisplayNameInput.value = (user?.displayName || "").toString().trim();
+  }
+
+  const departmentId = (user?.departmentId || "accounting").toString().trim() || "accounting";
+  if (editUserDepartmentSelect) {
+    editUserDepartmentSelect.value = departmentId;
+  }
+
+  const roleId = (user?.roleId || "manager").toString().trim();
+  renderEditRoleOptions(departmentId, roleId);
+
+  if (editUserTeamInput) {
+    const teamUsernames = Array.isArray(user?.teamUsernames) ? user.teamUsernames : [];
+    editUserTeamInput.value = teamUsernames.join(", ");
+  }
+  syncEditTeamFieldVisibility();
+  setEditUserStatus(`Editing "${(user?.displayName || normalizedUsername).toString()}".`, false);
+  setEditUserLoadingState(false);
+  setEditUserModalOpen(true);
 }
 
 function renderRoleOptions(departmentId) {
@@ -523,6 +731,30 @@ function renderRoleOptions(departmentId) {
   syncTeamFieldVisibility();
 }
 
+function renderEditRoleOptions(departmentId, preferredRoleId) {
+  if (!editUserRoleSelect) {
+    return;
+  }
+
+  const options = ROLE_OPTIONS_BY_DEPARTMENT[departmentId] || ROLE_OPTIONS_BY_DEPARTMENT.accounting;
+  const fragment = document.createDocumentFragment();
+
+  for (const option of options) {
+    const element = document.createElement("option");
+    element.value = option.id;
+    element.textContent = option.name;
+    fragment.append(element);
+  }
+
+  editUserRoleSelect.replaceChildren(fragment);
+  const normalizedPreferredRoleId = (preferredRoleId || "").toString().trim();
+  if (normalizedPreferredRoleId && options.some((option) => option.id === normalizedPreferredRoleId)) {
+    editUserRoleSelect.value = normalizedPreferredRoleId;
+  }
+
+  syncEditTeamFieldVisibility();
+}
+
 function syncTeamFieldVisibility() {
   const isMiddleManager = (roleSelect?.value || "").toString().trim() === "middle_manager";
   if (teamField) {
@@ -532,6 +764,25 @@ function syncTeamFieldVisibility() {
   if (!isMiddleManager && teamInput) {
     teamInput.value = "";
   }
+}
+
+function syncEditTeamFieldVisibility() {
+  const isMiddleManager = (editUserRoleSelect?.value || "").toString().trim() === "middle_manager";
+  if (editUserTeamField) {
+    editUserTeamField.hidden = !isMiddleManager;
+  }
+
+  if (!isMiddleManager && editUserTeamInput) {
+    editUserTeamInput.value = "";
+  }
+}
+
+function parseTeamUsernamesInput(rawValue) {
+  return (rawValue || "")
+    .toString()
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function appendCell(row, value) {
@@ -564,6 +815,36 @@ function setLoadingState(isLoading) {
   }
 }
 
+function setEditUserLoadingState(isLoading) {
+  if (saveUserButton) {
+    saveUserButton.disabled = isLoading;
+  }
+  if (cancelEditUserButton) {
+    cancelEditUserButton.disabled = isLoading;
+  }
+  if (closeEditUserButton) {
+    closeEditUserButton.disabled = isLoading;
+  }
+  if (editUserUsernameInput) {
+    editUserUsernameInput.disabled = isLoading;
+  }
+  if (editUserPasswordInput) {
+    editUserPasswordInput.disabled = isLoading;
+  }
+  if (editUserDisplayNameInput) {
+    editUserDisplayNameInput.disabled = isLoading;
+  }
+  if (editUserDepartmentSelect) {
+    editUserDepartmentSelect.disabled = isLoading;
+  }
+  if (editUserRoleSelect) {
+    editUserRoleSelect.disabled = isLoading;
+  }
+  if (editUserTeamInput) {
+    editUserTeamInput.disabled = isLoading;
+  }
+}
+
 function setStatus(message, isError) {
   if (!statusElement) {
     return;
@@ -580,6 +861,15 @@ function setRegistrationStatus(message, isError) {
 
   registrationStatusElement.textContent = message || "";
   registrationStatusElement.classList.toggle("error", Boolean(isError));
+}
+
+function setEditUserStatus(message, isError) {
+  if (!editUserStatusElement) {
+    return;
+  }
+
+  editUserStatusElement.textContent = message || "";
+  editUserStatusElement.classList.toggle("error", Boolean(isError));
 }
 
 function buildUserLabel(roleName, departmentName) {

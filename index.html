@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Credit Booster Dashboard</title>
-    <link rel="stylesheet" href="/styles.css?v=20260219-owner-registration" />
-    <script src="/dashboard.js?v=20260219-owner-registration" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260219-dashboard-today-payments" />
+    <script src="/dashboard.js?v=20260219-dashboard-today-payments" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -150,7 +150,7 @@
 
             <p id="dashboard-message" class="dashboard-message" role="status" aria-live="polite"></p>
 
-            <div class="table-wrap moderation-table-wrap">
+            <div class="table-wrap moderation-table-wrap mini-clients-table-wrap">
               <table id="submissions-table" class="moderation-table">
                 <thead>
                   <tr>
@@ -162,6 +162,28 @@
                   </tr>
                 </thead>
                 <tbody id="submissions-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="section table-panel payments-today-panel" aria-label="New payments today">
+            <header class="table-panel__header">
+              <h2 class="section-heading">New Payment Today</h2>
+            </header>
+
+            <p id="payments-today-message" class="dashboard-message" role="status" aria-live="polite"></p>
+
+            <div class="table-wrap payments-today-table-wrap">
+              <table class="payments-today-table">
+                <thead>
+                  <tr>
+                    <th>Client Name</th>
+                    <th>Payment</th>
+                    <th>Amount</th>
+                    <th>Date</th>
+                  </tr>
+                </thead>
+                <tbody id="payments-today-table-body"></tbody>
               </table>
             </div>
           </section>

@@ -30,6 +30,8 @@ const accountLogoutActionButton = document.querySelector("#account-logout-action
 const ownerOnlyMenuItems = [...document.querySelectorAll('[data-owner-only="true"]')];
 const refreshSubmissionsButton = document.querySelector("#refresh-submissions-button");
 const dashboardMessage = document.querySelector("#dashboard-message");
+const paymentsTodayMessage = document.querySelector("#payments-today-message");
+const paymentsTodayTableBody = document.querySelector("#payments-today-table-body");
 
 const overviewPanel = document.querySelector(".period-dashboard-shell");
 const overviewContent = document.querySelector("#overview-content");
@@ -60,6 +62,12 @@ const kpiMoneyFormatter = new Intl.NumberFormat("en-US", {
   currency: "USD",
   minimumFractionDigits: 0,
   maximumFractionDigits: 0,
+});
+const paymentMoneyFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
 });
 
 let pendingSubmissions = [];
@@ -385,9 +393,11 @@ async function loadOverviewData() {
     const records = Array.isArray(body.records) ? body.records : [];
     cachedOverviewRecords = records;
     updatePeriodDashboard(records);
+    renderTodayPayments(records);
   } catch (error) {
     cachedOverviewRecords = [];
     updatePeriodDashboard([]);
+    renderTodayPayments([], error.message || "Failed to load today's payments.");
     showMessage(error.message || "Failed to load overview data.", "error");
   }
 }
@@ -477,6 +487,11 @@ function getCurrentUtcDayStart() {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
+function getCurrentLocalDayStartAsUtc() {
+  const now = new Date();
+  return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
 function getCurrentWeekStartUtc(dayUtcStart) {
   const dayOfWeek = new Date(dayUtcStart).getUTCDay();
   const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
@@ -531,6 +546,98 @@ function calculatePeriodMetrics(recordsToMeasure, range) {
     sales,
     received,
   };
+}
+
+function collectTodayPayments(recordsToMeasure) {
+  const items = [];
+  const records = Array.isArray(recordsToMeasure) ? recordsToMeasure : [];
+  const todayLocalStartAsUtc = getCurrentLocalDayStartAsUtc();
+
+  for (const record of records) {
+    const clientName = (record?.clientName || "").toString().trim() || "Unnamed";
+
+    for (let paymentIndex = 0; paymentIndex < PAYMENT_PAIRS.length; paymentIndex += 1) {
+      const [paymentFieldKey, paymentDateFieldKey] = PAYMENT_PAIRS[paymentIndex];
+      const paymentDate = parseDateValue(record?.[paymentDateFieldKey]);
+      if (paymentDate !== todayLocalStartAsUtc) {
+        continue;
+      }
+
+      const paymentAmount = parseMoneyValue(record?.[paymentFieldKey]);
+      if (paymentAmount === null || Math.abs(paymentAmount) < ZERO_TOLERANCE) {
+        continue;
+      }
+
+      items.push({
+        clientName,
+        paymentLabel: `Payment ${paymentIndex + 1}`,
+        paymentAmount,
+        paymentDateText:
+          (record?.[paymentDateFieldKey] || "").toString().trim() || new Date(paymentDate).toLocaleDateString(),
+      });
+    }
+  }
+
+  items.sort((left, right) => {
+    const amountDiff = Math.abs(right.paymentAmount) - Math.abs(left.paymentAmount);
+    if (Math.abs(amountDiff) > ZERO_TOLERANCE) {
+      return amountDiff;
+    }
+    return left.clientName.localeCompare(right.clientName, "en-US", { sensitivity: "base" });
+  });
+
+  return items;
+}
+
+function renderTodayPayments(recordsToMeasure = [], errorText = "") {
+  if (!paymentsTodayTableBody) {
+    return;
+  }
+
+  const items = collectTodayPayments(recordsToMeasure);
+  const normalizedErrorText = (errorText || "").toString().trim();
+
+  if (paymentsTodayMessage) {
+    if (normalizedErrorText) {
+      paymentsTodayMessage.textContent = normalizedErrorText;
+      paymentsTodayMessage.className = "dashboard-message error";
+    } else if (!items.length) {
+      paymentsTodayMessage.textContent = "No payments recorded today.";
+      paymentsTodayMessage.className = "dashboard-message";
+    } else {
+      const totalAmount = items.reduce((sum, item) => sum + item.paymentAmount, 0);
+      paymentsTodayMessage.textContent = `Today: ${items.length} payment${items.length === 1 ? "" : "s"}, total ${paymentMoneyFormatter.format(totalAmount)}.`;
+      paymentsTodayMessage.className = "dashboard-message";
+    }
+  }
+
+  if (!items.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.className = "empty-state";
+    cell.textContent = normalizedErrorText || "No payments recorded for today.";
+    row.append(cell);
+    paymentsTodayTableBody.replaceChildren(row);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of items) {
+    const row = document.createElement("tr");
+    appendCell(row, item.clientName);
+    appendCell(row, item.paymentLabel);
+
+    const amountCell = document.createElement("td");
+    amountCell.className = "payments-today-table__amount";
+    amountCell.textContent = paymentMoneyFormatter.format(item.paymentAmount);
+    row.append(amountCell);
+
+    appendCell(row, item.paymentDateText);
+    fragment.append(row);
+  }
+
+  paymentsTodayTableBody.replaceChildren(fragment);
 }
 
 function calculateOverallDebt(recordsToMeasure) {

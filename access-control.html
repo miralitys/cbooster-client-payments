@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Access Control</title>
-    <link rel="stylesheet" href="/styles.css?v=20260219-access-departments-polish" />
-    <script src="/access-control.js?v=20260219-access-departments-polish" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260219-access-user-edit-modal-v3" />
+    <script src="/access-control.js?v=20260219-access-user-edit-modal-v3" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -162,5 +162,108 @@
         </section>
       </div>
     </main>
+
+    <div id="access-control-edit-user-modal" class="modal" hidden>
+      <button
+        id="access-control-edit-user-backdrop"
+        type="button"
+        class="modal-backdrop"
+        aria-label="Close edit user dialog"
+      ></button>
+      <div
+        class="modal-dialog access-control-edit-modal-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="access-control-edit-user-title"
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <div class="modal-title-wrap">
+            <h2 id="access-control-edit-user-title">Edit User</h2>
+          </div>
+          <button
+            id="access-control-close-edit-user-button"
+            type="button"
+            class="modal-close"
+            aria-label="Close edit user dialog"
+          >
+            ×
+          </button>
+        </div>
+
+        <form id="access-control-edit-user-form" class="modal-form access-control-edit-user-form" novalidate>
+          <p id="access-control-edit-user-status" class="dashboard-message user-registration-status access-control-edit-user-status">
+            Update user data and click Save Changes.
+          </p>
+
+          <div class="user-registration-form access-control-edit-user-form-grid">
+            <label class="user-registration-field">
+              <span>Username / Email (optional)</span>
+              <input
+                id="access-control-edit-user-username"
+                name="username"
+                type="text"
+                autocomplete="off"
+                placeholder="Optional: user email or login"
+              />
+            </label>
+
+            <label class="user-registration-field">
+              <span>New Password (optional)</span>
+              <input
+                id="access-control-edit-user-password"
+                name="password"
+                type="password"
+                autocomplete="new-password"
+                placeholder="Leave empty to keep current password"
+              />
+            </label>
+
+            <label class="user-registration-field">
+              <span>Display Name</span>
+              <input
+                id="access-control-edit-user-display-name"
+                name="displayName"
+                type="text"
+                maxlength="140"
+                autocomplete="off"
+                required
+              />
+            </label>
+
+            <label class="user-registration-field">
+              <span>Department</span>
+              <select id="access-control-edit-user-department" name="departmentId" required>
+                <option value="accounting">Accounting Department</option>
+                <option value="client_service">Client Service Department</option>
+                <option value="sales">Sales Department</option>
+                <option value="collection">Collection Department</option>
+              </select>
+            </label>
+
+            <label class="user-registration-field">
+              <span>Role</span>
+              <select id="access-control-edit-user-role" name="roleId" required></select>
+            </label>
+
+            <label
+              class="user-registration-field user-registration-field--wide"
+              id="access-control-edit-user-team-field"
+              hidden
+            >
+              <span>Team Usernames (comma separated, for Middle Manager)</span>
+              <input id="access-control-edit-user-team" name="teamUsernames" type="text" autocomplete="off" />
+            </label>
+          </div>
+
+          <div class="modal-footer access-control-edit-user-footer">
+            <div class="access-control-edit-user-actions">
+              <button id="access-control-cancel-edit-user-button" type="button" class="btn btn-secondary">Cancel</button>
+              <button id="access-control-save-user-button" type="submit" class="btn btn-primary">Save Changes</button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
   </body>
 </html>
