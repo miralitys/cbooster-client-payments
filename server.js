@@ -123,6 +123,12 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
     departmentId: WEB_AUTH_DEPARTMENT_ACCOUNTING,
     roleId: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
   },
+  {
+    displayName: "Maryna Shuliatytska",
+    username: "garbarmarina13@gmail.com",
+    departmentId: WEB_AUTH_DEPARTMENT_SALES,
+    roleId: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
+  },
 ];
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
@@ -938,6 +944,7 @@ function hasWebAuthUserWithDisplayName(displayName) {
 function seedWebAuthBootstrapUsers() {
   for (const bootstrapUser of WEB_AUTH_BOOTSTRAP_USERS) {
     const displayName = sanitizeTextValue(bootstrapUser?.displayName, 140);
+    const preferredUsername = normalizeWebAuthUsername(bootstrapUser?.username || bootstrapUser?.email);
     const departmentId = normalizeWebAuthDepartmentId(bootstrapUser?.departmentId);
     const roleId = normalizeWebAuthRoleId(bootstrapUser?.roleId, departmentId);
 
@@ -949,7 +956,10 @@ function seedWebAuthBootstrapUsers() {
       continue;
     }
 
-    const username = generateWebAuthUsernameFromDisplayName(displayName);
+    const username =
+      preferredUsername && preferredUsername !== WEB_AUTH_OWNER_USERNAME && !WEB_AUTH_USERS_BY_USERNAME.has(preferredUsername)
+        ? preferredUsername
+        : generateWebAuthUsernameFromDisplayName(displayName);
     const password = buildWebAuthBootstrapUserPassword(username);
     const finalized = finalizeWebAuthDirectoryUser(
       {
