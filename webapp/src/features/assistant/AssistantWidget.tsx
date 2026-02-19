@@ -9,7 +9,14 @@ interface ChatMessage {
   id: string;
   role: "assistant" | "user";
   text: string;
+  mentions: string[];
   createdAt: number;
+}
+
+interface MessagePart {
+  type: "text" | "mention";
+  text: string;
+  mention?: string;
 }
 
 interface SpeechRecognitionAlternativeLike {
@@ -145,6 +152,76 @@ function resolveUserLanguage(): "ru" | "en" {
   return /^ru\b/i.test(navigator.language || "") ? "ru" : "en";
 }
 
+function normalizeMentionList(rawMentions: string[] | undefined): string[] {
+  if (!Array.isArray(rawMentions)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const mentions: string[] = [];
+
+  for (const rawMention of rawMentions) {
+    const mention = normalizeDisplayMessage(rawMention);
+    if (!mention) {
+      continue;
+    }
+
+    const key = mention.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    mentions.push(mention);
+  }
+
+  return mentions.sort((left, right) => right.length - left.length);
+}
+
+function splitMessageByMentions(text: string, mentions: string[]): MessagePart[] {
+  const normalizedText = text || "";
+  const mentionList = normalizeMentionList(mentions);
+  if (!mentionList.length) {
+    return [{ type: "text", text: normalizedText }];
+  }
+
+  const lowerText = normalizedText.toLowerCase();
+  const parts: MessagePart[] = [];
+  let cursor = 0;
+
+  while (cursor < normalizedText.length) {
+    let bestStart = -1;
+    let bestMention = "";
+
+    for (const mention of mentionList) {
+      const start = lowerText.indexOf(mention.toLowerCase(), cursor);
+      if (start === -1) {
+        continue;
+      }
+
+      if (bestStart === -1 || start < bestStart || (start === bestStart && mention.length > bestMention.length)) {
+        bestStart = start;
+        bestMention = mention;
+      }
+    }
+
+    if (bestStart === -1) {
+      parts.push({ type: "text", text: normalizedText.slice(cursor) });
+      break;
+    }
+
+    if (bestStart > cursor) {
+      parts.push({ type: "text", text: normalizedText.slice(cursor, bestStart) });
+    }
+
+    const mentionText = normalizedText.slice(bestStart, bestStart + bestMention.length);
+    parts.push({ type: "mention", text: mentionText, mention: mentionText });
+    cursor = bestStart + bestMention.length;
+  }
+
+  return parts.filter((part) => part.text.length > 0);
+}
+
 export function AssistantWidget() {
   const language = useMemo(() => resolveUserLanguage(), []);
   const isRussian = language === "ru";
@@ -161,6 +238,7 @@ export function AssistantWidget() {
       text: isRussian
         ? "Привет. Я могу ответить по вашим клиентским данным: сводка, долги, просрочки, статус конкретного клиента."
         : "Hi. I can answer from your internal client data: summaries, debt, overdue status, and specific client details.",
+      mentions: [],
       createdAt: Date.now(),
     },
   ]);
@@ -202,11 +280,13 @@ export function AssistantWidget() {
     };
   }, []);
 
-  function appendMessage(role: ChatMessage["role"], text: string): void {
+  function appendMessage(role: ChatMessage["role"], text: string, mentions: string[] = []): void {
     const normalizedText = normalizeDisplayMessage(text);
     if (!normalizedText) {
       return;
     }
+
+    const normalizedMentions = role === "assistant" ? normalizeMentionList(mentions) : [];
 
     setMessages((previous) => [
       ...previous,
@@ -214,9 +294,25 @@ export function AssistantWidget() {
         id: generateMessageId(),
         role,
         text: normalizedText,
+        mentions: normalizedMentions,
         createdAt: Date.now(),
       },
     ]);
+  }
+
+  function emitOpenClientEvent(clientName: string): void {
+    const normalizedClientName = normalizeDisplayMessage(clientName);
+    if (!normalizedClientName || typeof window === "undefined") {
+      return;
+    }
+
+    window.dispatchEvent(
+      new CustomEvent("cb-assistant-open-client", {
+        detail: {
+          clientName: normalizedClientName,
+        },
+      }),
+    );
   }
 
   function speakText(rawText: string): void {
@@ -334,7 +430,7 @@ export function AssistantWidget() {
       const replyText = normalizeDisplayMessage(response.reply || "");
 
       if (replyText) {
-        appendMessage("assistant", replyText);
+        appendMessage("assistant", replyText, response.clientMentions || []);
         if (mode === "voice") {
           speakText(replyText);
         }
@@ -403,6 +499,31 @@ export function AssistantWidget() {
     speakText(lastAssistantMessage.text);
   }
 
+  function renderMessageParts(message: ChatMessage) {
+    if (message.role !== "assistant" || !message.mentions.length) {
+      return message.text;
+    }
+
+    const parts = splitMessageByMentions(message.text, message.mentions);
+    return parts.map((part, index) => {
+      if (part.type !== "mention" || !part.mention) {
+        return <span key={`${message.id}-text-${index}`}>{part.text}</span>;
+      }
+
+      return (
+        <button
+          key={`${message.id}-mention-${index}`}
+          type="button"
+          className="assistant-widget__client-link"
+          onClick={() => emitOpenClientEvent(part.mention || part.text)}
+          title={isRussian ? "Открыть карточку клиента" : "Open client card"}
+        >
+          {part.text}
+        </button>
+      );
+    });
+  }
+
   return (
     <div className="assistant-widget" aria-live="polite">
       {!isOpen ? (
@@ -468,7 +589,7 @@ export function AssistantWidget() {
                   message.role === "assistant" ? "assistant-widget__message--assistant" : "assistant-widget__message--user",
                 )}
               >
-                <p>{message.text}</p>
+                <p>{renderMessageParts(message)}</p>
               </article>
             ))}
             {isSending ? (

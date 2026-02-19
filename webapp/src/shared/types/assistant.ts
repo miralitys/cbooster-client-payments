@@ -13,6 +13,7 @@ export interface AssistantChatSource {
 export interface AssistantChatResponse {
   ok: boolean;
   reply: string;
+  clientMentions?: string[];
   suggestions?: string[];
   source?: AssistantChatSource;
 }
