@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Client Manager Lookup</title>
-    <link rel="stylesheet" href="/styles.css?v=20260219-owner-registration" />
-    <script src="/client-managers.js?v=20260219-owner-registration" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260219-client-managers-no-manager-filter" />
+    <script src="/client-managers.js?v=20260219-client-managers-no-manager-filter" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -54,6 +54,10 @@
           <header class="table-panel__header">
             <h2 class="section-heading">Client - Manager Table</h2>
             <div class="table-panel__actions">
+              <label for="client-managers-no-manager-only" class="checkbox-label client-manager-no-manager-filter">
+                <input id="client-managers-no-manager-only" type="checkbox" />
+                <span>No manager</span>
+              </label>
               <button id="refresh-client-managers" type="button" class="btn btn-primary">Refresh</button>
               <button id="total-refresh-client-managers" type="button" class="btn btn-secondary">Total Refresh</button>
             </div>

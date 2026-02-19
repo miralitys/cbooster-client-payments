@@ -1459,6 +1459,11 @@ tbody tr.row-tone-active:hover td {
   gap: var(--space-3);
 }
 
+.payments-today-panel {
+  display: grid;
+  gap: var(--space-3);
+}
+
 .dashboard-message {
   margin: 0;
   min-height: 1.2em;
@@ -1480,9 +1485,42 @@ tbody tr.row-tone-active:hover td {
   max-height: 70vh;
 }
 
+.mini-clients-table-wrap {
+  min-height: 0;
+  height: auto;
+  max-height: 210px;
+  resize: none;
+}
+
+.mini-clients-table-wrap .empty-state {
+  padding: var(--space-3) var(--space-2);
+}
+
 .moderation-table {
   width: 100%;
   min-width: 860px;
+}
+
+.payments-today-table-wrap {
+  min-height: 0;
+  height: auto;
+  max-height: 280px;
+  resize: none;
+}
+
+.payments-today-table {
+  width: 100%;
+  min-width: 720px;
+}
+
+.payments-today-table th:nth-child(3),
+.payments-today-table td:nth-child(3) {
+  text-align: right;
+}
+
+.payments-today-table__amount {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-semibold);
 }
 
 .moderation-table th:last-child,
@@ -1739,6 +1777,13 @@ tbody tr.row-tone-active:hover td {
   color: var(--color-text-muted);
 }
 
+.client-manager-no-manager-filter {
+  width: auto;
+  min-height: 36px;
+  align-self: center;
+  white-space: nowrap;
+}
+
 .client-manager-table-panel {
   grid-column: 1 / -1;
   grid-row: auto;
@@ -1757,6 +1802,18 @@ tbody tr.row-tone-active:hover td {
   gap: var(--space-4);
 }
 
+.access-control-registration-panel {
+  order: 1;
+}
+
+.access-control-current-user-panel {
+  order: 2;
+}
+
+.access-control-departments-panel {
+  order: 3;
+}
+
 .access-control-page-header {
   align-items: flex-end;
 }
@@ -1773,39 +1830,79 @@ tbody tr.row-tone-active:hover td {
   color: var(--color-text-muted);
 }
 
+.access-control-current-user-panel {
+  position: relative;
+  overflow: hidden;
+  border-color: var(--color-border-strong);
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.access-control-current-user-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: linear-gradient(90deg, var(--color-primary), #1d4ed8);
+}
+
 .access-control-status {
   margin: 0;
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(15, 118, 110, 0.24);
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--color-primary-hover);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
 }
 
 .access-control-status.error {
+  border-color: rgba(185, 28, 28, 0.28);
+  background: rgba(185, 28, 28, 0.1);
   color: var(--color-error-text);
 }
 
 .access-control-current-user {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface-muted);
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
 }
 
 .access-control-current-user__row {
-  display: grid;
-  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
-  gap: var(--space-2);
-  align-items: baseline;
+  min-height: 84px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
 }
 
 .access-control-current-user__label {
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-xxs);
   color: var(--color-text-muted);
   font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .access-control-current-user__value {
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-md);
   color: var(--color-text);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 .access-control-departments {
@@ -1970,6 +2067,58 @@ tbody tr.row-tone-active:hover td {
   color: var(--color-text-muted);
   background: #f8fafc;
   font-size: var(--font-size-xs);
+}
+
+.access-control-user-edit-trigger {
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.35;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: rgba(15, 118, 110, 0.45);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.access-control-user-edit-trigger:hover,
+.access-control-user-edit-trigger:focus-visible {
+  color: var(--color-primary-hover);
+  text-decoration-color: var(--color-primary-hover);
+}
+
+.access-control-edit-modal-dialog {
+  width: min(760px, calc(100vw - 24px));
+}
+
+.access-control-edit-user-form {
+  gap: var(--space-3);
+}
+
+.access-control-edit-user-status {
+  margin: 0;
+}
+
+.access-control-edit-user-form-grid {
+  align-items: end;
+}
+
+.access-control-edit-user-footer {
+  margin-top: var(--space-2);
+}
+
+.access-control-edit-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.access-control-edit-user-actions .btn {
+  width: auto;
 }
 
 .access-control-empty {
@@ -2563,9 +2712,8 @@ body.modal-open {
     grid-template-columns: 1fr;
   }
 
-  .access-control-current-user__row {
+  .access-control-current-user {
     grid-template-columns: 1fr;
-    gap: 4px;
   }
 
   .user-registration-form {
