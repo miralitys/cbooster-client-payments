@@ -282,6 +282,7 @@ const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_
 const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
+const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", "error"]);
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
@@ -3745,6 +3746,804 @@ function getUniqueClientNamesFromRecords(records) {
   return [...names].sort((left, right) => left.localeCompare(right, "en", { sensitivity: "base" }));
 }
 
+function getFirstUniqueClientNamesFromRecords(records, limit = 10) {
+  const normalizedRecords = Array.isArray(records) ? records : [];
+  const maxItems = Math.min(Math.max(parsePositiveInteger(limit, 10), 1), 50);
+  const names = [];
+  const seen = new Set();
+
+  for (const record of normalizedRecords) {
+    const clientName = sanitizeTextValue(record?.clientName, 300);
+    if (!clientName || seen.has(clientName)) {
+      continue;
+    }
+
+    seen.add(clientName);
+    names.push(clientName);
+
+    if (names.length >= maxItems) {
+      break;
+    }
+  }
+
+  return names;
+}
+
+function normalizeGhlClientContractsLimit(rawLimit) {
+  const fallbackLimit = 10;
+  return Math.min(Math.max(parsePositiveInteger(rawLimit, fallbackLimit), 1), 50);
+}
+
+function extractGhlUrlsFromText(rawValue) {
+  const value = sanitizeTextValue(rawValue, 4000);
+  if (!value) {
+    return [];
+  }
+
+  const matches = value.match(/https?:\/\/[^\s<>"')]+/gi);
+  if (!matches) {
+    return [];
+  }
+
+  const deduped = new Set();
+  for (const match of matches) {
+    const normalized = sanitizeTextValue(match, 2000);
+    if (normalized) {
+      deduped.add(normalized);
+    }
+  }
+
+  return [...deduped];
+}
+
+function normalizeGhlContractCandidate(candidate, fallbackSource = "") {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+
+  const title = sanitizeTextValue(candidate.title, 300);
+  const url = extractGhlUrlsFromText(candidate.url)[0] || "";
+  const snippet = sanitizeTextValue(candidate.snippet, 300);
+  const source = sanitizeTextValue(candidate.source || fallbackSource, 120) || "unknown";
+  const contactName = sanitizeTextValue(candidate.contactName, 300);
+  const contactId = sanitizeTextValue(candidate.contactId, 160);
+
+  if (!title && !url && !snippet) {
+    return null;
+  }
+
+  return {
+    title,
+    url,
+    snippet,
+    source,
+    contactName,
+    contactId,
+  };
+}
+
+function buildGhlContractSignalText(candidate) {
+  return `${candidate?.title || ""} ${candidate?.url || ""} ${candidate?.snippet || ""} ${candidate?.source || ""}`
+    .toLowerCase()
+    .trim();
+}
+
+function analyzeGhlContractCandidate(candidate) {
+  const signal = buildGhlContractSignalText(candidate);
+  if (!signal) {
+    return {
+      score: 0,
+      isContractMatch: false,
+    };
+  }
+
+  const isContractMatch = /\b(contract|agreement)\b/.test(signal);
+  const hasDocumentHints = /\b(document|proposal|file|pdf|signed|signature)\b/.test(signal);
+  let score = 0;
+
+  if (candidate?.url) {
+    score += 3;
+  }
+
+  if (hasDocumentHints) {
+    score += 2;
+  }
+
+  if (isContractMatch) {
+    score += 10;
+  }
+
+  return {
+    score,
+    isContractMatch,
+  };
+}
+
+function dedupeGhlContractCandidates(candidates) {
+  const source = Array.isArray(candidates) ? candidates : [];
+  const deduped = [];
+  const seen = new Set();
+
+  for (const rawCandidate of source) {
+    const candidate = normalizeGhlContractCandidate(rawCandidate);
+    if (!candidate) {
+      continue;
+    }
+
+    const key = [
+      candidate.title.toLowerCase(),
+      candidate.url.toLowerCase(),
+      candidate.snippet.toLowerCase(),
+      candidate.source.toLowerCase(),
+      candidate.contactName.toLowerCase(),
+      candidate.contactId.toLowerCase(),
+    ].join("::");
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(candidate);
+  }
+
+  return deduped;
+}
+
+function isGhlContractCandidateRelatedToContact(candidate, contactName, contactId) {
+  const normalizedContactId = sanitizeTextValue(contactId, 160).toLowerCase();
+  const candidateContactId = sanitizeTextValue(candidate?.contactId, 160).toLowerCase();
+  if (normalizedContactId && candidateContactId && candidateContactId === normalizedContactId) {
+    return true;
+  }
+
+  const normalizedContactName = normalizeNameForLookup(contactName);
+  const candidateContactName = normalizeNameForLookup(candidate?.contactName);
+  if (normalizedContactName && candidateContactName) {
+    if (
+      candidateContactName === normalizedContactName ||
+      candidateContactName.includes(normalizedContactName) ||
+      normalizedContactName.includes(candidateContactName)
+    ) {
+      return true;
+    }
+  }
+
+  const signalText = normalizeNameForLookup(`${candidate?.title || ""} ${candidate?.snippet || ""} ${candidate?.url || ""}`);
+  if (normalizedContactId && signalText.includes(normalizedContactId)) {
+    return true;
+  }
+  if (normalizedContactName && signalText.includes(normalizedContactName)) {
+    return true;
+  }
+
+  return false;
+}
+
+function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, depth = 0) {
+  if (!target || !(target instanceof Array) || depth > 6 || node === null || node === undefined) {
+    return;
+  }
+
+  if (Array.isArray(node)) {
+    for (const item of node.slice(0, 150)) {
+      collectGhlContractCandidatesFromPayloadNode(item, target, sourceLabel, depth + 1);
+    }
+    return;
+  }
+
+  if (typeof node === "string") {
+    for (const url of extractGhlUrlsFromText(node)) {
+      target.push({
+        title: "",
+        url,
+        snippet: "",
+        source: sourceLabel,
+      });
+    }
+    return;
+  }
+
+  if (typeof node !== "object") {
+    return;
+  }
+
+  const object = node;
+  const title = sanitizeTextValue(
+    object.title ||
+      object.name ||
+      object.documentName ||
+      object.document_name ||
+      object.fileName ||
+      object.file_name ||
+      object.filename ||
+      object.label,
+    300,
+  );
+  const snippet = sanitizeTextValue(
+    object.type ||
+      object.documentType ||
+      object.document_type ||
+      object.mimeType ||
+      object.mime_type ||
+      object.status ||
+      object.note ||
+      object.description ||
+      object.id ||
+      object.documentId ||
+      object.document_id,
+    300,
+  );
+  const candidateContactName = sanitizeTextValue(
+    object.contactName ||
+      object.contact_name ||
+      object.recipientName ||
+      object.recipient_name ||
+      object.customerName ||
+      object.customer_name ||
+      object.clientName ||
+      object.client_name,
+    300,
+  );
+  const candidateContactId = sanitizeTextValue(
+    object.contactId ||
+      object.contact_id ||
+      object.recipientId ||
+      object.recipient_id ||
+      object.customerId ||
+      object.customer_id ||
+      object.clientId ||
+      object.client_id,
+    160,
+  );
+  const urlCandidates = [
+    object.url,
+    object.fileUrl,
+    object.file_url,
+    object.downloadUrl,
+    object.download_url,
+    object.link,
+    object.href,
+    object.publicUrl,
+    object.public_url,
+    object.signedUrl,
+    object.signed_url,
+    object.documentUrl,
+    object.document_url,
+    object.attachmentUrl,
+    object.attachment_url,
+    object.src,
+  ];
+  const extractedUrls = [];
+  for (const urlCandidate of urlCandidates) {
+    extractedUrls.push(...extractGhlUrlsFromText(urlCandidate));
+  }
+
+  if (extractedUrls.length) {
+    for (const url of new Set(extractedUrls)) {
+      target.push({
+        title,
+        url,
+        snippet,
+        source: sourceLabel,
+        contactName: candidateContactName,
+        contactId: candidateContactId,
+      });
+    }
+  } else if (title && /\b(contract|agreement)\b/i.test(`${title} ${snippet}`)) {
+    target.push({
+      title,
+      url: "",
+      snippet,
+      source: sourceLabel,
+      contactName: candidateContactName,
+      contactId: candidateContactId,
+    });
+  }
+
+  for (const value of Object.values(object)) {
+    collectGhlContractCandidatesFromPayloadNode(value, target, sourceLabel, depth + 1);
+  }
+}
+
+function extractGhlContractCandidatesFromPayload(payload, sourceLabel = "payload") {
+  const rawCandidates = [];
+  collectGhlContractCandidatesFromPayloadNode(payload, rawCandidates, sanitizeTextValue(sourceLabel, 120) || "payload", 0);
+  return dedupeGhlContractCandidates(rawCandidates);
+}
+
+function extractGhlContractCandidatesFromContact(contact) {
+  if (!contact || typeof contact !== "object") {
+    return [];
+  }
+
+  const rawCandidates = [];
+  const contactLabel = buildContactCandidateName(contact) || sanitizeTextValue(contact?.email, 240);
+  const directFields = [
+    {
+      label: "contact.website",
+      value: contact?.website,
+    },
+    {
+      label: "contact.source_url",
+      value: contact?.sourceUrl || contact?.source_url || contact?.url,
+    },
+  ];
+
+  for (const field of directFields) {
+    const urls = extractGhlUrlsFromText(field.value);
+    for (const url of urls) {
+      rawCandidates.push({
+        title: "Contact Link",
+        url,
+        snippet: "",
+        source: field.label,
+        contactName: contactLabel,
+        contactId: sanitizeTextValue(contact?.id || contact?._id || contact?.contactId, 160),
+      });
+    }
+  }
+
+  const customFieldCollections = [
+    contact?.customFields,
+    contact?.customField,
+    contact?.custom_fields,
+    contact?.fields,
+    contact?.additionalFields,
+  ];
+  for (const collection of customFieldCollections) {
+    if (!Array.isArray(collection)) {
+      continue;
+    }
+
+    for (const field of collection) {
+      if (!field || typeof field !== "object") {
+        continue;
+      }
+
+      const fieldLabel =
+        sanitizeTextValue(
+          field?.name ||
+            field?.label ||
+            field?.fieldName ||
+            field?.field_name ||
+            field?.key ||
+            field?.fieldKey ||
+            field?.field_key,
+          220,
+        ) || "Custom Field";
+      const values = [];
+      const valueCandidates = [
+        field?.value,
+        field?.fieldValue,
+        field?.field_value,
+        field?.values,
+        field?.text,
+        field?.url,
+        field?.link,
+      ];
+      for (const candidate of valueCandidates) {
+        if (Array.isArray(candidate)) {
+          values.push(...candidate);
+        } else {
+          values.push(candidate);
+        }
+      }
+
+      for (const value of values) {
+        if (value === null || value === undefined) {
+          continue;
+        }
+
+        if (typeof value === "object") {
+          const nestedCandidates = extractGhlContractCandidatesFromPayload(value, `contact.custom_field:${fieldLabel}`);
+          for (const nestedCandidate of nestedCandidates) {
+            rawCandidates.push({
+              ...nestedCandidate,
+              contactName: contactLabel,
+              contactId: sanitizeTextValue(contact?.id || contact?._id || contact?.contactId, 160),
+            });
+          }
+          continue;
+        }
+
+        const textValue = sanitizeTextValue(value, 2000);
+        if (!textValue) {
+          continue;
+        }
+
+        const urls = extractGhlUrlsFromText(textValue);
+        if (urls.length) {
+          for (const url of urls) {
+            rawCandidates.push({
+              title: fieldLabel,
+              url,
+              snippet: "",
+              source: `contact.custom_field:${fieldLabel}`,
+              contactName: contactLabel,
+              contactId: sanitizeTextValue(contact?.id || contact?._id || contact?.contactId, 160),
+            });
+          }
+          continue;
+        }
+
+        if (/\b(contract|agreement)\b/i.test(fieldLabel) || /\b(contract|agreement)\b/i.test(textValue)) {
+          rawCandidates.push({
+            title: fieldLabel,
+            url: "",
+            snippet: textValue,
+            source: `contact.custom_field:${fieldLabel}`,
+            contactName: contactLabel,
+            contactId: sanitizeTextValue(contact?.id || contact?._id || contact?.contactId, 160),
+          });
+        }
+      }
+    }
+  }
+
+  for (const key of ["documents", "attachments", "files"]) {
+    if (!contact[key]) {
+      continue;
+    }
+    const nestedCandidates = extractGhlContractCandidatesFromPayload(contact[key], `contact.${key}`);
+    for (const nestedCandidate of nestedCandidates) {
+      rawCandidates.push({
+        ...nestedCandidate,
+        contactName: contactLabel,
+        contactId: sanitizeTextValue(contact?.id || contact?._id || contact?.contactId, 160),
+      });
+    }
+  }
+
+  return dedupeGhlContractCandidates(rawCandidates);
+}
+
+function normalizeGhlClientContractStatus(rawStatus, fallback = "not_found") {
+  const normalized = sanitizeTextValue(rawStatus, 40).toLowerCase();
+  if (GHL_CLIENT_CONTRACT_STATUSES.has(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function pickBestGhlContractCandidate(candidates) {
+  const normalizedCandidates = dedupeGhlContractCandidates(candidates);
+  if (!normalizedCandidates.length) {
+    return null;
+  }
+
+  let best = null;
+  let bestScore = -1;
+  let bestIsContractMatch = false;
+  for (const candidate of normalizedCandidates) {
+    const analysis = analyzeGhlContractCandidate(candidate);
+    const tieBreaker = candidate.url ? 1 : 0;
+    const totalScore = analysis.score * 10 + tieBreaker;
+    if (totalScore > bestScore) {
+      best = candidate;
+      bestScore = totalScore;
+      bestIsContractMatch = analysis.isContractMatch;
+    }
+  }
+
+  if (!best) {
+    return null;
+  }
+
+  return {
+    ...best,
+    isContractMatch: bestIsContractMatch,
+    status: bestIsContractMatch ? "found" : "possible",
+  };
+}
+
+async function fetchGhlContactById(contactId) {
+  const normalizedContactId = sanitizeTextValue(contactId, 160);
+  if (!normalizedContactId) {
+    return null;
+  }
+
+  const encodedContactId = encodeURIComponent(normalizedContactId);
+  const attempts = [
+    () =>
+      requestGhlApi(`/contacts/${encodedContactId}`, {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi(`/contacts/${encodedContactId}/`, {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+        tolerateNotFound: true,
+      }),
+  ];
+
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt();
+    } catch {
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const body = response.body;
+    if (body?.contact && typeof body.contact === "object") {
+      return body.contact;
+    }
+
+    if (body?.data && typeof body.data === "object" && !Array.isArray(body.data)) {
+      if (body.data.contact && typeof body.data.contact === "object") {
+        return body.data.contact;
+      }
+      return body.data;
+    }
+
+    const contacts = extractGhlContactsFromPayload(body);
+    if (contacts.length) {
+      return contacts[0];
+    }
+  }
+
+  return null;
+}
+
+function mergeGhlContactSnapshots(baseContact, detailedContact) {
+  const base = baseContact && typeof baseContact === "object" ? baseContact : {};
+  const details = detailedContact && typeof detailedContact === "object" ? detailedContact : {};
+
+  return {
+    ...base,
+    ...details,
+    customFields: Array.isArray(details.customFields)
+      ? details.customFields
+      : Array.isArray(base.customFields)
+        ? base.customFields
+        : details.customFields || base.customFields,
+    customField: details.customField || base.customField,
+    custom_fields: details.custom_fields || base.custom_fields,
+    documents: details.documents || base.documents,
+    attachments: details.attachments || base.attachments,
+    files: details.files || base.files,
+  };
+}
+
+async function listGhlContractCandidatesForContact(contactId) {
+  const normalizedContactId = sanitizeTextValue(contactId, 160);
+  if (!normalizedContactId) {
+    return [];
+  }
+
+  const encodedContactId = encodeURIComponent(normalizedContactId);
+  const attempts = [
+    {
+      source: "contacts.documents",
+      request: () =>
+        requestGhlApi(`/contacts/${encodedContactId}/documents`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contacts.files",
+      request: () =>
+        requestGhlApi(`/contacts/${encodedContactId}/files`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contacts.attachments",
+      request: () =>
+        requestGhlApi(`/contacts/${encodedContactId}/attachments`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contacts.notes",
+      request: () =>
+        requestGhlApi(`/contacts/${encodedContactId}/notes`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            limit: 100,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.document",
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            contactId: normalizedContactId,
+            limit: 100,
+            page: 1,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.documents",
+      request: () =>
+        requestGhlApi("/proposals/documents", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            contactId: normalizedContactId,
+            limit: 100,
+            page: 1,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+  ];
+
+  const candidates = [];
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt.request();
+    } catch {
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const extracted = extractGhlContractCandidatesFromPayload(response.body, attempt.source);
+    if (extracted.length) {
+      candidates.push(...extracted);
+    }
+  }
+
+  return dedupeGhlContractCandidates(candidates);
+}
+
+async function buildGhlClientContractLookupRows(clientNames) {
+  const names = Array.isArray(clientNames) ? clientNames : [];
+  if (!names.length) {
+    return [];
+  }
+
+  const rows = new Array(names.length);
+  let cursor = 0;
+  const workerCount = Math.min(GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY, names.length);
+
+  async function worker() {
+    while (cursor < names.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+
+      const clientName = sanitizeTextValue(names[currentIndex], 300);
+      if (!clientName) {
+        rows[currentIndex] = {
+          clientName: "",
+          contactName: "-",
+          matchedContacts: 0,
+          contractTitle: "-",
+          contractUrl: "",
+          source: "",
+          status: "not_found",
+          error: "",
+        };
+        continue;
+      }
+
+      try {
+        const contacts = await searchGhlContactsByClientName(clientName);
+        if (!contacts.length) {
+          rows[currentIndex] = {
+            clientName,
+            contactName: "-",
+            matchedContacts: 0,
+            contractTitle: "-",
+            contractUrl: "",
+            source: "contacts.search",
+            status: "not_found",
+            error: "",
+          };
+          continue;
+        }
+
+        const contactsToInspect = contacts.slice(0, 3);
+        const candidates = [];
+        for (const rawContact of contactsToInspect) {
+          const contactId = sanitizeTextValue(rawContact?.id || rawContact?._id || rawContact?.contactId, 160);
+          const detailedContact = contactId ? await fetchGhlContactById(contactId) : null;
+          const contact = mergeGhlContactSnapshots(rawContact, detailedContact);
+          const contactName = buildContactCandidateName(contact) || clientName;
+
+          const fromContact = extractGhlContractCandidatesFromContact(contact).map((candidate) => ({
+            ...candidate,
+            contactName: candidate.contactName || contactName,
+            contactId: candidate.contactId || contactId,
+          }));
+          candidates.push(...fromContact);
+
+          if (!contactId) {
+            continue;
+          }
+
+          const fromApi = await listGhlContractCandidatesForContact(contactId);
+          for (const candidate of fromApi) {
+            const source = sanitizeTextValue(candidate?.source, 120).toLowerCase();
+            if (source.startsWith("proposals.") && !isGhlContractCandidateRelatedToContact(candidate, contactName, contactId)) {
+              continue;
+            }
+
+            candidates.push({
+              ...candidate,
+              contactName: candidate.contactName || contactName,
+              contactId: candidate.contactId || contactId,
+            });
+          }
+        }
+
+        const bestCandidate = pickBestGhlContractCandidate(candidates);
+        if (!bestCandidate) {
+          rows[currentIndex] = {
+            clientName,
+            contactName: buildContactCandidateName(contactsToInspect[0]) || clientName,
+            matchedContacts: contacts.length,
+            contractTitle: "-",
+            contractUrl: "",
+            source: "gohighlevel",
+            status: "not_found",
+            error: "",
+          };
+          continue;
+        }
+
+        rows[currentIndex] = {
+          clientName,
+          contactName: sanitizeTextValue(bestCandidate.contactName, 300) || buildContactCandidateName(contactsToInspect[0]) || clientName,
+          matchedContacts: contacts.length,
+          contractTitle: sanitizeTextValue(bestCandidate.title, 300) || "Contract",
+          contractUrl: sanitizeTextValue(bestCandidate.url, 2000),
+          source: sanitizeTextValue(bestCandidate.source, 120) || "gohighlevel",
+          status: normalizeGhlClientContractStatus(bestCandidate.status, bestCandidate.isContractMatch ? "found" : "possible"),
+          error: "",
+        };
+      } catch (error) {
+        rows[currentIndex] = {
+          clientName,
+          contactName: "-",
+          matchedContacts: 0,
+          contractTitle: "-",
+          contractUrl: "",
+          source: "gohighlevel",
+          status: "error",
+          error: sanitizeTextValue(error?.message, 500) || "GHL lookup failed.",
+        };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return rows.filter(Boolean);
+}
+
 async function buildGhlClientManagerLookupRows(clientNames) {
   const names = Array.isArray(clientNames) ? clientNames : [];
   if (!names.length) {
@@ -7011,6 +7810,43 @@ app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIE
   }
 });
 
+app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  const limit = normalizeGhlClientContractsLimit(req.query.limit);
+
+  try {
+    const state = await getStoredRecords();
+    const clientNames = getFirstUniqueClientNamesFromRecords(state.records, limit);
+    const items = await buildGhlClientContractLookupRows(clientNames);
+    res.json({
+      ok: true,
+      count: items.length,
+      limit,
+      items,
+      source: "gohighlevel",
+      updatedAt: state.updatedAt || null,
+    });
+  } catch (error) {
+    console.error("GET /api/ghl/client-contracts failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 500) || "Failed to load client contracts from GHL.",
+    });
+  }
+});
+
 app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS), async (req, res) => {
   const nextRecords = req.body?.records;
   if (!isValidRecordsPayload(nextRecords)) {
@@ -7317,6 +8153,10 @@ app.get("/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QU
 
 app.get("/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
   res.sendFile(path.join(staticRoot, "client-managers.html"));
+});
+
+app.get("/ghl-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "ghl-contracts.html"));
 });
 
 app.get("/Client_Payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {

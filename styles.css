@@ -1927,6 +1927,34 @@ tbody tr.row-tone-active:hover td {
   color: var(--color-error-text);
 }
 
+.client-contract-page {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.client-contract-page-header {
+  align-items: flex-end;
+}
+
+.client-contract-subtitle {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.client-contract-table-panel {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+.client-contract-status {
+  margin: 0;
+}
+
+.client-contract-status.error {
+  color: var(--color-error-text);
+}
+
 .access-control-page {
   display: grid;
   gap: var(--space-4);
@@ -2369,6 +2397,67 @@ tbody tr.row-tone-active:hover td {
 }
 
 .client-manager-status-chip--error {
+  color: var(--color-error-text);
+}
+
+.client-contract-table-wrap {
+  min-height: 280px;
+  height: auto;
+  max-height: 72vh;
+  resize: vertical;
+}
+
+.client-contract-table {
+  min-width: 880px;
+}
+
+.client-contract-table .client-contract-table__empty-row td {
+  text-align: center;
+  color: var(--color-text-muted);
+  padding-block: var(--space-8);
+}
+
+.client-contract-contract-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.client-contract-link {
+  width: fit-content;
+  color: var(--color-primary);
+  font-weight: var(--font-weight-semibold);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.client-contract-link:hover,
+.client-contract-link:focus-visible {
+  color: var(--color-primary-hover);
+}
+
+.client-contract-source {
+  font-size: var(--font-size-xxs);
+  color: var(--color-text-muted);
+}
+
+.client-contract-status-chip {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.client-contract-status-chip--found {
+  color: var(--color-success);
+}
+
+.client-contract-status-chip--possible {
+  color: var(--color-info);
+}
+
+.client-contract-status-chip--not_found {
+  color: var(--color-warning);
+}
+
+.client-contract-status-chip--error {
   color: var(--color-error-text);
 }
 
