@@ -57,3 +57,38 @@ export interface UpsertUserResponse {
   ok: boolean;
   item: AuthUser;
 }
+
+export interface AssistantReviewItem {
+  id: number;
+  askedAt: string | null;
+  askedByUsername: string;
+  askedByDisplayName: string;
+  mode: "text" | "voice";
+  question: string;
+  assistantReply: string;
+  provider: string;
+  recordsUsed: number;
+  correctedReply: string;
+  correctionNote: string;
+  correctedBy: string;
+  correctedAt: string | null;
+}
+
+export interface AssistantReviewListPayload {
+  ok: boolean;
+  total: number;
+  count: number;
+  limit: number;
+  offset: number;
+  items: AssistantReviewItem[];
+}
+
+export interface AssistantReviewUpdatePayload {
+  correctedReply?: string;
+  correctionNote?: string;
+}
+
+export interface AssistantReviewUpdateResponse {
+  ok: boolean;
+  item: AssistantReviewItem;
+}
