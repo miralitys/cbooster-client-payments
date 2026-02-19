@@ -79,7 +79,23 @@ const DEFAULT_SUGGESTIONS_RU = [
   "Сколько просроченных клиентов?",
   "Покажи клиента John Smith",
 ];
-const ASSISTANT_TTS_API_PATH = "/api/assistant/tts";
+const FEMALE_VOICE_HINTS = [
+  "female",
+  "woman",
+  "samantha",
+  "victoria",
+  "karen",
+  "olga",
+  "maria",
+  "anna",
+  "alena",
+  "alice",
+  "katya",
+  "zira",
+  "jenny",
+];
+const MALE_VOICE_HINTS = ["male", "man", "alex", "david", "daniel", "george", "sergey", "pavel"];
+const NATURAL_VOICE_HINTS = ["natural", "neural", "premium", "enhanced", "wavenet", "online"];
 
 function resolveSpeechRecognitionConstructor(): SpeechRecognitionConstructorLike | null {
   if (typeof window === "undefined") {
@@ -219,6 +235,173 @@ function splitMessageByMentions(text: string, mentions: string[]): MessagePart[]
   return parts.filter((part) => part.text.length > 0);
 }
 
+function scoreSpeechVoice(voice: SpeechSynthesisVoice, isRussian: boolean): number {
+  const name = `${voice.name || ""} ${voice.voiceURI || ""}`.toLowerCase();
+  const lang = (voice.lang || "").toLowerCase();
+  let score = 0;
+
+  if (isRussian) {
+    if (lang.startsWith("ru")) {
+      score += 100;
+    }
+    if (lang.startsWith("ru-ru")) {
+      score += 16;
+    }
+  } else {
+    if (lang.startsWith("en")) {
+      score += 100;
+    }
+    if (lang.startsWith("en-us")) {
+      score += 16;
+    }
+  }
+
+  if (FEMALE_VOICE_HINTS.some((hint) => name.includes(hint))) {
+    score += 42;
+  }
+  if (MALE_VOICE_HINTS.some((hint) => name.includes(hint))) {
+    score -= 30;
+  }
+  if (NATURAL_VOICE_HINTS.some((hint) => name.includes(hint))) {
+    score += 18;
+  }
+  if (voice.localService === false) {
+    score += 8;
+  }
+  if (voice.default) {
+    score += 4;
+  }
+
+  return score;
+}
+
+function pickPreferredSpeechVoice(voices: SpeechSynthesisVoice[], isRussian: boolean): SpeechSynthesisVoice | null {
+  if (!voices.length) {
+    return null;
+  }
+
+  let bestVoice: SpeechSynthesisVoice | null = null;
+  let bestScore = -Infinity;
+
+  for (const voice of voices) {
+    const score = scoreSpeechVoice(voice, isRussian);
+    if (score > bestScore) {
+      bestScore = score;
+      bestVoice = voice;
+    }
+  }
+
+  return bestVoice;
+}
+
+function splitSpeechIntoChunks(rawText: string, maxLength = 220): string[] {
+  const normalized = rawText.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const sentenceCandidates = normalized
+    .replace(/([.!?;:])\s+/g, "$1\n")
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  const chunks: string[] = [];
+  let current = "";
+
+  const pushValue = (value: string): void => {
+    const text = value.trim();
+    if (!text) {
+      return;
+    }
+    if (text.length <= maxLength) {
+      chunks.push(text);
+      return;
+    }
+
+    const commaParts = text
+      .split(/,\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    if (commaParts.length > 1) {
+      for (const part of commaParts) {
+        if (part.length <= maxLength) {
+          chunks.push(part);
+          continue;
+        }
+        const words = part.split(/\s+/);
+        let buffer = "";
+        for (const word of words) {
+          const candidate = buffer ? `${buffer} ${word}` : word;
+          if (candidate.length > maxLength) {
+            if (buffer) {
+              chunks.push(buffer);
+            }
+            buffer = word;
+          } else {
+            buffer = candidate;
+          }
+        }
+        if (buffer) {
+          chunks.push(buffer);
+        }
+      }
+      return;
+    }
+
+    chunks.push(text);
+  };
+
+  for (const sentence of sentenceCandidates) {
+    const candidate = current ? `${current} ${sentence}` : sentence;
+    if (candidate.length > maxLength) {
+      if (current) {
+        pushValue(current);
+      }
+      current = sentence;
+      continue;
+    }
+    current = candidate;
+  }
+
+  if (current) {
+    pushValue(current);
+  }
+
+  return chunks;
+}
+
+function resolvePreferredSpeechVoice(isRussian: boolean): Promise<SpeechSynthesisVoice | null> {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    return Promise.resolve(null);
+  }
+
+  const synthesis = window.speechSynthesis;
+  const immediateVoice = pickPreferredSpeechVoice(synthesis.getVoices(), isRussian);
+  if (immediateVoice) {
+    return Promise.resolve(immediateVoice);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      synthesis.removeEventListener("voiceschanged", handleVoicesChanged);
+      clearTimeout(timeoutId);
+      resolve(pickPreferredSpeechVoice(synthesis.getVoices(), isRussian));
+    };
+    const handleVoicesChanged = () => {
+      settle();
+    };
+    const timeoutId = window.setTimeout(settle, 1200);
+    synthesis.addEventListener("voiceschanged", handleVoicesChanged);
+  });
+}
+
 export function AssistantWidget() {
   const language = useMemo(() => resolveUserLanguage(), []);
   const isRussian = language === "ru";
@@ -248,9 +431,7 @@ export function AssistantWidget() {
   const isMountedRef = useRef(true);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const ttsAbortControllerRef = useRef<AbortController | null>(null);
-  const audioElementRef = useRef<HTMLAudioElement | null>(null);
-  const audioObjectUrlRef = useRef("");
+  const speechSequenceRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const hasSendableText = normalizeOutgoingMessage(draft).length > 0;
@@ -313,30 +494,8 @@ export function AssistantWidget() {
     );
   }
 
-  function stopAudioPlayback(resetSpeaking = true): void {
-    const currentAudio = audioElementRef.current;
-    if (currentAudio) {
-      currentAudio.pause();
-      currentAudio.onended = null;
-      currentAudio.onerror = null;
-      currentAudio.src = "";
-      audioElementRef.current = null;
-    }
-
-    if (audioObjectUrlRef.current) {
-      URL.revokeObjectURL(audioObjectUrlRef.current);
-      audioObjectUrlRef.current = "";
-    }
-
-    if (resetSpeaking && isMountedRef.current) {
-      setIsSpeaking(false);
-    }
-  }
-
   function stopSpeaking(resetSpeaking = true): void {
-    ttsAbortControllerRef.current?.abort();
-    ttsAbortControllerRef.current = null;
-    stopAudioPlayback(false);
+    speechSequenceRef.current += 1;
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
@@ -351,86 +510,75 @@ export function AssistantWidget() {
       return;
     }
 
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setVoiceError(isRussian ? "Ваш браузер не поддерживает голосовой синтез." : "Your browser does not support speech synthesis.");
+      return;
+    }
+
     stopSpeaking(false);
     setVoiceError("");
-
-    const controller = new AbortController();
-    ttsAbortControllerRef.current = controller;
     if (isMountedRef.current) {
       setIsSpeaking(true);
     }
 
-    try {
-      const response = await fetch(ASSISTANT_TTS_API_PATH, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "audio/mpeg",
-        },
-        body: JSON.stringify({ text }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        let errorMessage = "";
-        const contentType = (response.headers.get("content-type") || "").toLowerCase();
-        if (contentType.includes("application/json")) {
-          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-          errorMessage = normalizeDisplayMessage(payload?.error || "");
-        } else {
-          errorMessage = normalizeDisplayMessage(await response.text().catch(() => ""));
-        }
-        if (!errorMessage) {
-          errorMessage = isRussian
-            ? `Ошибка озвучки (HTTP ${response.status}).`
-            : `TTS request failed (HTTP ${response.status}).`;
-        }
-        throw new Error(errorMessage);
-      }
-
-      const audioBlob = await response.blob();
-      if (!audioBlob.size) {
-        throw new Error(isRussian ? "ElevenLabs вернул пустой аудио-ответ." : "ElevenLabs returned an empty audio response.");
-      }
-
-      if (!isMountedRef.current || controller.signal.aborted) {
-        return;
-      }
-
-      const audioUrl = URL.createObjectURL(audioBlob);
-      if (audioObjectUrlRef.current) {
-        URL.revokeObjectURL(audioObjectUrlRef.current);
-      }
-      audioObjectUrlRef.current = audioUrl;
-
-      const audio = new Audio(audioUrl);
-      audioElementRef.current = audio;
-      audio.onended = () => {
-        stopAudioPlayback();
-      };
-      audio.onerror = () => {
-        stopAudioPlayback();
-        setVoiceError(isRussian ? "Не удалось воспроизвести аудио-ответ." : "Failed to play the audio reply.");
-      };
-
-      await audio.play();
-    } catch (error) {
-      if (controller.signal.aborted || !isMountedRef.current) {
-        return;
-      }
-
-      stopAudioPlayback();
-      const fallbackError = isRussian
-        ? "Не удалось озвучить ответ. Проверьте настройки ElevenLabs."
-        : "Failed to speak the reply. Check ElevenLabs settings.";
-      const errorMessage = error instanceof Error ? normalizeDisplayMessage(error.message || "") : "";
-      setVoiceError(errorMessage || fallbackError);
-    } finally {
-      if (ttsAbortControllerRef.current === controller) {
-        ttsAbortControllerRef.current = null;
-      }
+    const sequence = speechSequenceRef.current + 1;
+    speechSequenceRef.current = sequence;
+    const chunks = splitSpeechIntoChunks(text);
+    if (!chunks.length) {
+      setIsSpeaking(false);
+      return;
     }
+
+    const synthesis = window.speechSynthesis;
+    const preferredVoice = await resolvePreferredSpeechVoice(isRussian);
+    if (!isMountedRef.current || sequence !== speechSequenceRef.current) {
+      return;
+    }
+
+    const language = preferredVoice?.lang || (isRussian ? "ru-RU" : "en-US");
+    const rate = isRussian ? 0.95 : 0.97;
+    const pitch = 1.03;
+
+    const speakChunk = (chunkIndex: number): void => {
+      if (sequence !== speechSequenceRef.current || !isMountedRef.current) {
+        return;
+      }
+
+      if (chunkIndex >= chunks.length) {
+        setIsSpeaking(false);
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(chunks[chunkIndex]);
+      utterance.lang = language;
+      utterance.rate = rate;
+      utterance.pitch = pitch;
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
+      }
+      utterance.onend = () => {
+        speakChunk(chunkIndex + 1);
+      };
+      utterance.onerror = () => {
+        if (sequence !== speechSequenceRef.current || !isMountedRef.current) {
+          return;
+        }
+        setIsSpeaking(false);
+        setVoiceError(isRussian ? "Не удалось озвучить ответ браузером." : "Failed to speak with the browser voice.");
+      };
+
+      try {
+        synthesis.speak(utterance);
+      } catch {
+        if (sequence !== speechSequenceRef.current || !isMountedRef.current) {
+          return;
+        }
+        setIsSpeaking(false);
+        setVoiceError(isRussian ? "Не удалось запустить озвучку." : "Failed to start speech playback.");
+      }
+    };
+
+    speakChunk(0);
   }
 
   function speakText(rawText: string): void {

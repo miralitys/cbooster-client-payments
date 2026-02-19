@@ -11,8 +11,24 @@
   const CLIENT_OPEN_EVENT = "cb-assistant-open-client";
   const STORAGE_KEY = "cb_assistant_mode";
   const API_PATH = "/api/assistant/chat";
-  const API_TTS_PATH = "/api/assistant/tts";
   const MAX_TEXT_LENGTH = 2000;
+  const FEMALE_VOICE_HINTS = [
+    "female",
+    "woman",
+    "samantha",
+    "victoria",
+    "karen",
+    "olga",
+    "maria",
+    "anna",
+    "alena",
+    "alice",
+    "katya",
+    "zira",
+    "jenny",
+  ];
+  const MALE_VOICE_HINTS = ["male", "man", "alex", "david", "daniel", "george", "sergey", "pavel"];
+  const NATURAL_VOICE_HINTS = ["natural", "neural", "premium", "enhanced", "wavenet", "online"];
 
   const userLang = /^ru\b/i.test((navigator && navigator.language) || "") ? "ru" : "en";
   const dictionary = {
@@ -92,9 +108,7 @@
   let isListening = false;
   let isSpeaking = false;
   let mode = readMode();
-  let playbackAudio = null;
-  let playbackObjectUrl = "";
-  let playbackAbortController = null;
+  let speechSequence = 0;
 
   const state = {
     messages: [
@@ -233,33 +247,177 @@
     }
   }
 
-  function stopAudioPlayback(shouldRender) {
-    if (playbackAudio) {
-      playbackAudio.pause();
-      playbackAudio.onended = null;
-      playbackAudio.onerror = null;
-      playbackAudio.src = "";
-      playbackAudio = null;
+  function scoreSpeechVoice(voice, isRussian) {
+    const name = `${voice.name || ""} ${voice.voiceURI || ""}`.toLowerCase();
+    const lang = (voice.lang || "").toLowerCase();
+    let score = 0;
+
+    if (isRussian) {
+      if (lang.indexOf("ru") === 0) {
+        score += 100;
+      }
+      if (lang.indexOf("ru-ru") === 0) {
+        score += 16;
+      }
+    } else {
+      if (lang.indexOf("en") === 0) {
+        score += 100;
+      }
+      if (lang.indexOf("en-us") === 0) {
+        score += 16;
+      }
     }
 
-    if (playbackObjectUrl) {
-      URL.revokeObjectURL(playbackObjectUrl);
-      playbackObjectUrl = "";
+    if (FEMALE_VOICE_HINTS.some(function hasFemaleHint(hint) { return name.includes(hint); })) {
+      score += 42;
+    }
+    if (MALE_VOICE_HINTS.some(function hasMaleHint(hint) { return name.includes(hint); })) {
+      score -= 30;
+    }
+    if (NATURAL_VOICE_HINTS.some(function hasNaturalHint(hint) { return name.includes(hint); })) {
+      score += 18;
+    }
+    if (voice.localService === false) {
+      score += 8;
+    }
+    if (voice.default) {
+      score += 4;
     }
 
-    isSpeaking = false;
-    if (shouldRender !== false) {
-      renderActions();
+    return score;
+  }
+
+  function pickPreferredSpeechVoice(voices, isRussian) {
+    if (!Array.isArray(voices) || !voices.length) {
+      return null;
     }
+
+    let bestVoice = null;
+    let bestScore = -Infinity;
+    for (const voice of voices) {
+      const score = scoreSpeechVoice(voice, isRussian);
+      if (score > bestScore) {
+        bestScore = score;
+        bestVoice = voice;
+      }
+    }
+
+    return bestVoice;
+  }
+
+  function splitSpeechIntoChunks(rawText, maxLength) {
+    const limit = Number.isFinite(maxLength) && maxLength > 0 ? Math.floor(maxLength) : 220;
+    const normalized = (rawText || "").toString().replace(/\s+/g, " ").trim();
+    if (!normalized) {
+      return [];
+    }
+
+    const sentenceCandidates = normalized
+      .replace(/([.!?;:])\s+/g, "$1\n")
+      .split(/\n+/)
+      .map(function trimChunk(item) { return item.trim(); })
+      .filter(Boolean);
+
+    const chunks = [];
+    let current = "";
+
+    function pushValue(value) {
+      const text = (value || "").trim();
+      if (!text) {
+        return;
+      }
+
+      if (text.length <= limit) {
+        chunks.push(text);
+        return;
+      }
+
+      const commaParts = text
+        .split(/,\s+/)
+        .map(function trimPart(part) { return part.trim(); })
+        .filter(Boolean);
+
+      if (commaParts.length > 1) {
+        for (const part of commaParts) {
+          if (part.length <= limit) {
+            chunks.push(part);
+            continue;
+          }
+
+          const words = part.split(/\s+/);
+          let buffer = "";
+          for (const word of words) {
+            const candidate = buffer ? `${buffer} ${word}` : word;
+            if (candidate.length > limit) {
+              if (buffer) {
+                chunks.push(buffer);
+              }
+              buffer = word;
+            } else {
+              buffer = candidate;
+            }
+          }
+          if (buffer) {
+            chunks.push(buffer);
+          }
+        }
+        return;
+      }
+
+      chunks.push(text);
+    }
+
+    for (const sentence of sentenceCandidates) {
+      const candidate = current ? `${current} ${sentence}` : sentence;
+      if (candidate.length > limit) {
+        if (current) {
+          pushValue(current);
+        }
+        current = sentence;
+      } else {
+        current = candidate;
+      }
+    }
+
+    if (current) {
+      pushValue(current);
+    }
+
+    return chunks;
+  }
+
+  function resolvePreferredSpeechVoice(isRussian) {
+    if (!("speechSynthesis" in window)) {
+      return Promise.resolve(null);
+    }
+
+    const synthesis = window.speechSynthesis;
+    const immediate = pickPreferredSpeechVoice(synthesis.getVoices(), isRussian);
+    if (immediate) {
+      return Promise.resolve(immediate);
+    }
+
+    return new Promise(function waitForVoices(resolve) {
+      let settled = false;
+      function settle() {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        synthesis.removeEventListener("voiceschanged", handleVoicesChanged);
+        window.clearTimeout(timeoutId);
+        resolve(pickPreferredSpeechVoice(synthesis.getVoices(), isRussian));
+      }
+      function handleVoicesChanged() {
+        settle();
+      }
+      const timeoutId = window.setTimeout(settle, 1200);
+      synthesis.addEventListener("voiceschanged", handleVoicesChanged);
+    });
   }
 
   function stopSpeaking(shouldRender) {
-    if (playbackAbortController) {
-      playbackAbortController.abort();
-      playbackAbortController = null;
-    }
-
-    stopAudioPlayback(false);
+    speechSequence += 1;
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
@@ -276,97 +434,90 @@
       return;
     }
 
+    if (!("speechSynthesis" in window)) {
+      state.voiceError = userLang === "ru"
+        ? "Ваш браузер не поддерживает голосовой синтез."
+        : "Your browser does not support speech synthesis.";
+      renderComposerOnly();
+      return;
+    }
+
     stopSpeaking(false);
     state.voiceError = "";
     renderComposerOnly();
 
-    const controller = new AbortController();
-    playbackAbortController = controller;
+    const sequence = speechSequence + 1;
+    speechSequence = sequence;
     isSpeaking = true;
     renderActions();
 
-    try {
-      const response = await fetch(API_TTS_PATH, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "audio/mpeg",
-        },
-        body: JSON.stringify({ text }),
-        signal: controller.signal,
-      });
+    const chunks = splitSpeechIntoChunks(text, 220);
+    if (!chunks.length) {
+      isSpeaking = false;
+      renderActions();
+      return;
+    }
 
-      if (!response.ok) {
-        let errorMessage = "";
-        const contentType = (response.headers.get("content-type") || "").toLowerCase();
-        if (contentType.includes("application/json")) {
-          const payload = await response.json().catch(function parseErrorJson() {
-            return null;
-          });
-          if (payload && typeof payload.error === "string") {
-            errorMessage = normalizeText(payload.error);
-          }
-        } else {
-          errorMessage = normalizeText(await response.text().catch(function parseErrorText() {
-            return "";
-          }));
-        }
-        if (!errorMessage) {
-          errorMessage = userLang === "ru"
-            ? `Ошибка озвучки (HTTP ${response.status}).`
-            : `TTS request failed (HTTP ${response.status}).`;
-        }
-        throw new Error(errorMessage);
-      }
+    const synthesis = window.speechSynthesis;
+    const preferredVoice = await resolvePreferredSpeechVoice(userLang === "ru");
+    if (sequence !== speechSequence) {
+      return;
+    }
 
-      const audioBlob = await response.blob();
-      if (!audioBlob || !audioBlob.size) {
-        throw new Error(userLang === "ru"
-          ? "ElevenLabs вернул пустой аудио-ответ."
-          : "ElevenLabs returned an empty audio response.");
-      }
+    const speechLang = (preferredVoice && preferredVoice.lang) || (userLang === "ru" ? "ru-RU" : "en-US");
+    const rate = userLang === "ru" ? 0.95 : 0.97;
+    const pitch = 1.03;
 
-      if (controller.signal.aborted) {
+    function speakChunk(index) {
+      if (sequence !== speechSequence) {
         return;
       }
 
-      const audioUrl = URL.createObjectURL(audioBlob);
-      if (playbackObjectUrl) {
-        URL.revokeObjectURL(playbackObjectUrl);
+      if (index >= chunks.length) {
+        isSpeaking = false;
+        renderActions();
+        return;
       }
-      playbackObjectUrl = audioUrl;
 
-      playbackAudio = new Audio(audioUrl);
-      playbackAudio.onended = function onEnded() {
-        stopAudioPlayback();
+      const utterance = new SpeechSynthesisUtterance(chunks[index]);
+      utterance.lang = speechLang;
+      utterance.rate = rate;
+      utterance.pitch = pitch;
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
+      }
+
+      utterance.onend = function onSpeechEnd() {
+        speakChunk(index + 1);
       };
-      playbackAudio.onerror = function onAudioError() {
-        stopAudioPlayback();
+      utterance.onerror = function onSpeechError() {
+        if (sequence !== speechSequence) {
+          return;
+        }
+        isSpeaking = false;
         state.voiceError = userLang === "ru"
-          ? "Не удалось воспроизвести аудио-ответ."
-          : "Failed to play the audio reply.";
+          ? "Не удалось озвучить ответ браузером."
+          : "Failed to speak with the browser voice.";
+        renderActions();
         renderComposerOnly();
       };
 
-      await playbackAudio.play();
-    } catch (error) {
-      if (controller.signal.aborted) {
-        return;
-      }
-
-      stopAudioPlayback();
-      const fallbackError = userLang === "ru"
-        ? "Не удалось озвучить ответ. Проверьте настройки ElevenLabs."
-        : "Failed to speak the reply. Check ElevenLabs settings.";
-      const errorMessage = error && typeof error.message === "string" ? normalizeText(error.message) : "";
-      state.voiceError = errorMessage || fallbackError;
-      renderComposerOnly();
-    } finally {
-      if (playbackAbortController === controller) {
-        playbackAbortController = null;
+      try {
+        synthesis.speak(utterance);
+      } catch {
+        if (sequence !== speechSequence) {
+          return;
+        }
+        isSpeaking = false;
+        state.voiceError = userLang === "ru"
+          ? "Не удалось запустить озвучку."
+          : "Failed to start speech playback.";
+        renderActions();
+        renderComposerOnly();
       }
     }
+
+    speakChunk(0);
   }
 
   function appendMessage(role, text, mentions) {
