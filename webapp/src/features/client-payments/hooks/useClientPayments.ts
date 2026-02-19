@@ -11,6 +11,7 @@ import {
   filterRecords,
   formatDateTime,
   getClosedByOptions,
+  normalizeDateForStorage,
   normalizeFormRecord,
   normalizeRecords,
   sortRecords,
@@ -18,7 +19,10 @@ import {
   type SortState,
 } from "@/features/client-payments/domain/calculations";
 import {
+  FIELD_DEFINITIONS,
   REMOTE_SYNC_DEBOUNCE_MS,
+  REMOTE_SYNC_MAX_RETRIES,
+  REMOTE_SYNC_MAX_RETRY_DELAY_MS,
   REMOTE_SYNC_RETRY_MS,
   STATUS_FILTER_ALL,
   type OverviewPeriodKey,
@@ -33,6 +37,7 @@ interface ModalState {
   mode: "view" | "edit" | "create";
   recordId: string;
   draft: ClientRecord;
+  dirty: boolean;
 }
 
 const INITIAL_FILTERS: ClientPaymentsFilters = {
@@ -51,6 +56,7 @@ const INITIAL_MODAL_STATE: ModalState = {
   mode: "view",
   recordId: "",
   draft: createEmptyRecord(),
+  dirty: false,
 };
 
 export function useClientPayments() {
@@ -75,8 +81,11 @@ export function useClientPayments() {
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [saveRetryCount, setSaveRetryCount] = useState(0);
+  const [saveRetryGiveUp, setSaveRetryGiveUp] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState("");
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
 
   const recordsRef = useRef<ClientRecord[]>([]);
   const baselineRef = useRef("");
@@ -85,6 +94,7 @@ export function useClientPayments() {
   const pendingSaveRef = useRef(false);
   const debounceTimerRef = useRef<number | null>(null);
   const retryTimerRef = useRef<number | null>(null);
+  const retryAttemptRef = useRef(0);
 
   const canManage = Boolean(session?.permissions?.manage_client_payments);
 
@@ -128,6 +138,8 @@ export function useClientPayments() {
     const serialized = serializeRecords(snapshot);
     if (serialized === baselineRef.current) {
       setHasUnsavedChanges(false);
+      setSaveError("");
+      resetSaveRetryState(retryAttemptRef, setSaveRetryCount, setSaveRetryGiveUp);
       return;
     }
 
@@ -145,11 +157,22 @@ export function useClientPayments() {
       setSaveError("");
       setHasUnsavedChanges(false);
       setLastSyncedAt(new Date().toISOString());
+      resetSaveRetryState(retryAttemptRef, setSaveRetryCount, setSaveRetryGiveUp);
       clearRetryTimer(retryTimerRef);
     } catch (error) {
       const message = extractErrorMessage(error, "Failed to save records.");
-      setSaveError(message);
-      scheduleRetry(flushSave, retryTimerRef);
+      const nextRetryCount = retryAttemptRef.current + 1;
+      if (nextRetryCount > REMOTE_SYNC_MAX_RETRIES) {
+        setSaveRetryCount(REMOTE_SYNC_MAX_RETRIES);
+        setSaveRetryGiveUp(true);
+        setSaveError(`${message} Give up after ${REMOTE_SYNC_MAX_RETRIES} retries.`);
+      } else {
+        retryAttemptRef.current = nextRetryCount;
+        setSaveRetryCount(nextRetryCount);
+        setSaveRetryGiveUp(false);
+        setSaveError(message);
+        scheduleRetry(flushSave, retryTimerRef, getRetryDelayMs(nextRetryCount));
+      }
     } finally {
       saveInFlightRef.current = false;
       setIsSaving(false);
@@ -274,20 +297,24 @@ export function useClientPayments() {
   }, []);
 
   const openCreateModal = useCallback(() => {
+    setIsDiscardConfirmOpen(false);
     setModalState({
       open: true,
       mode: "create",
       recordId: "",
       draft: createEmptyRecord(),
+      dirty: false,
     });
   }, []);
 
   const openRecordModal = useCallback((record: ClientRecord) => {
+    setIsDiscardConfirmOpen(false);
     setModalState({
       open: true,
       mode: "view",
       recordId: record.id,
       draft: { ...record },
+      dirty: false,
     });
   }, []);
 
@@ -300,12 +327,35 @@ export function useClientPayments() {
       ...prev,
       mode: "edit",
       draft: { ...activeRecord },
+      dirty: false,
     }));
   }, [activeRecord, canManage]);
 
-  const closeModal = useCallback(() => {
+  const closeModalNow = useCallback(() => {
+    setIsDiscardConfirmOpen(false);
     setModalState(INITIAL_MODAL_STATE);
   }, []);
+
+  const requestCloseModal = useCallback(() => {
+    if (!modalState.open) {
+      return;
+    }
+
+    if (modalState.dirty) {
+      setIsDiscardConfirmOpen(true);
+      return;
+    }
+
+    closeModalNow();
+  }, [closeModalNow, modalState.dirty, modalState.open]);
+
+  const cancelDiscardModalClose = useCallback(() => {
+    setIsDiscardConfirmOpen(false);
+  }, []);
+
+  const discardDraftAndCloseModal = useCallback(() => {
+    closeModalNow();
+  }, [closeModalNow]);
 
   const updateDraftField = useCallback((key: keyof ClientRecord, value: string) => {
     setModalState((prev) => ({
@@ -314,16 +364,19 @@ export function useClientPayments() {
         ...prev.draft,
         [key]: value,
       },
+      dirty: prev.dirty || (prev.draft[key] || "") !== (value || ""),
     }));
   }, []);
 
   const saveDraft = useCallback(() => {
-    const normalized = normalizeFormRecord(modalState.draft);
-
-    if (!normalized.clientName) {
-      setSaveError("Client Name is required.");
+    const validationError = validateDraftAgainstLegacyRules(modalState.draft);
+    if (validationError) {
+      setSaveError(validationError);
       return;
     }
+
+    const normalized = normalizeFormRecord(modalState.draft);
+    setSaveError("");
 
     setRecords((prev) => {
       if (modalState.mode === "create") {
@@ -333,11 +386,13 @@ export function useClientPayments() {
       return prev.map((record) => (record.id === modalState.recordId ? { ...normalized, id: record.id, createdAt: record.createdAt } : record));
     });
 
-    setModalState(INITIAL_MODAL_STATE);
-  }, [modalState.draft, modalState.mode, modalState.recordId]);
+    closeModalNow();
+  }, [closeModalNow, modalState.draft, modalState.mode, modalState.recordId]);
 
   const retrySave = useCallback(() => {
     clearRetryTimer(retryTimerRef);
+    resetSaveRetryState(retryAttemptRef, setSaveRetryCount, setSaveRetryGiveUp);
+    setSaveError("");
     void flushSave();
   }, [flushSave]);
 
@@ -376,9 +431,13 @@ export function useClientPayments() {
     filtersCollapsed,
     isSaving,
     saveError,
+    saveRetryCount,
+    saveRetryMax: REMOTE_SYNC_MAX_RETRIES,
+    saveRetryGiveUp,
     hasUnsavedChanges,
     lastSyncedAt: formatDateTime(lastSyncedAt),
     modalState,
+    isDiscardConfirmOpen,
     activeRecord,
     updateFilter,
     setDateRange,
@@ -389,7 +448,9 @@ export function useClientPayments() {
     openCreateModal,
     openRecordModal,
     startEditRecord,
-    closeModal,
+    requestCloseModal,
+    cancelDiscardModalClose,
+    discardDraftAndCloseModal,
     updateDraftField,
     saveDraft,
     retrySave,
@@ -421,6 +482,7 @@ function clearDebounceTimer(timerRef: MutableRefObject<number | null>): void {
 function scheduleRetry(
   callback: () => void,
   timerRef: MutableRefObject<number | null>,
+  delayMs: number,
 ): void {
   if (timerRef.current !== null) {
     return;
@@ -429,7 +491,7 @@ function scheduleRetry(
   timerRef.current = window.setTimeout(() => {
     timerRef.current = null;
     callback();
-  }, REMOTE_SYNC_RETRY_MS);
+  }, delayMs);
 }
 
 function clearRetryTimer(timerRef: MutableRefObject<number | null>): void {
@@ -445,4 +507,43 @@ function extractErrorMessage(error: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function getRetryDelayMs(retryCount: number): number {
+  const exponent = Math.max(0, retryCount - 1);
+  const delay = REMOTE_SYNC_RETRY_MS * Math.pow(2, exponent);
+  return Math.min(delay, REMOTE_SYNC_MAX_RETRY_DELAY_MS);
+}
+
+function resetSaveRetryState(
+  retryAttemptRef: MutableRefObject<number>,
+  setSaveRetryCount: (value: number) => void,
+  setSaveRetryGiveUp: (value: boolean) => void,
+): void {
+  retryAttemptRef.current = 0;
+  setSaveRetryCount(0);
+  setSaveRetryGiveUp(false);
+}
+
+function validateDraftAgainstLegacyRules(record: ClientRecord): string {
+  for (const field of FIELD_DEFINITIONS) {
+    if (field.computed) {
+      continue;
+    }
+
+    const value = (record[field.key] || "").toString().trim();
+
+    if (field.required && !value) {
+      return `Field "${field.label}" is required.`;
+    }
+
+    if (field.type === "date" && value) {
+      const normalizedDate = normalizeDateForStorage(value);
+      if (normalizedDate === null) {
+        return `Field "${field.label}" must be in MM/DD/YYYY format.`;
+      }
+    }
+  }
+
+  return "";
 }

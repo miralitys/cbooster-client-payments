@@ -24,6 +24,7 @@ import type { ClientRecord } from "@/shared/types/records";
 import {
   Badge,
   Button,
+  DateInput,
   EmptyState,
   ErrorState,
   Input,
@@ -70,9 +71,13 @@ export default function ClientPaymentsPage() {
     filtersCollapsed,
     isSaving,
     saveError,
+    saveRetryCount,
+    saveRetryMax,
+    saveRetryGiveUp,
     hasUnsavedChanges,
     lastSyncedAt,
     modalState,
+    isDiscardConfirmOpen,
     activeRecord,
     updateFilter,
     setDateRange,
@@ -83,7 +88,9 @@ export default function ClientPaymentsPage() {
     openCreateModal,
     openRecordModal,
     startEditRecord,
-    closeModal,
+    requestCloseModal,
+    cancelDiscardModalClose,
+    discardDraftAndCloseModal,
     updateDraftField,
     saveDraft,
     retrySave,
@@ -140,30 +147,46 @@ export default function ClientPaymentsPage() {
   return (
     <div className="dashboard-home">
       <section className="section page-stats-bar" aria-live="polite">
-        <div className="page-header__stats">
-          <span className="stat-chip">
-            <span className="stat-chip__label">Clients:</span>
-            <span className="stat-chip__value">{counters.totalCount}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Filtered:</span>
-            <span className="stat-chip__value">{counters.filteredCount}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Written Off:</span>
-            <span className="stat-chip__value">{counters.writtenOffCount}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Fully Paid:</span>
-            <span className="stat-chip__value">{counters.fullyPaidCount}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Overdue:</span>
-            <span className="stat-chip__value">{counters.overdueCount}</span>
-          </span>
+        <div className="page-stats-bar__row">
+          <div className="page-header__stats">
+            <span className="stat-chip">
+              <span className="stat-chip__label">Clients:</span>
+              <span className="stat-chip__value">{counters.totalCount}</span>
+            </span>
+            <span className="stat-chip">
+              <span className="stat-chip__label">Filtered:</span>
+              <span className="stat-chip__value">{counters.filteredCount}</span>
+            </span>
+            <span className="stat-chip">
+              <span className="stat-chip__label">Written Off:</span>
+              <span className="stat-chip__value">{counters.writtenOffCount}</span>
+            </span>
+            <span className="stat-chip">
+              <span className="stat-chip__label">Fully Paid:</span>
+              <span className="stat-chip__value">{counters.fullyPaidCount}</span>
+            </span>
+            <span className="stat-chip">
+              <span className="stat-chip__label">Overdue:</span>
+              <span className="stat-chip__value">{counters.overdueCount}</span>
+            </span>
+          </div>
+          <p className="table-panel-updated-at">Last sync: {lastSyncedAt}</p>
         </div>
-        <p className="table-panel-updated-at">Last sync: {lastSyncedAt}</p>
-        {saveError ? <Toast kind="error" message={saveError} onClose={retrySave} /> : null}
+        {saveError ? (
+          <div className="save-error-stack">
+            <Toast kind="error" message={saveError} />
+            {saveRetryGiveUp ? (
+              <Button type="button" variant="secondary" size="sm" onClick={retrySave}>
+                Retry Save
+              </Button>
+            ) : null}
+            {!saveRetryGiveUp && saveRetryCount > 0 ? (
+              <span className="react-user-footnote">
+                Retry {saveRetryCount}/{saveRetryMax}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {!saveError && hasUnsavedChanges ? <Toast kind="info" message="Unsaved changes are syncing..." /> : null}
         {!hasUnsavedChanges && !saveError && isSaving ? <Toast kind="info" message="Saving changes..." /> : null}
       </section>
@@ -205,37 +228,37 @@ export default function ClientPaymentsPage() {
               <div className="filters-grid-react">
                 <div className="filter-field">
                   <label htmlFor="created-from-input">New Client From</label>
-                  <Input
+                  <DateInput
                     id="created-from-input"
                     value={filters.createdAtRange.from}
-                    onChange={(event) => setDateRange("createdAtRange", "from", event.target.value)}
+                    onChange={(nextValue) => setDateRange("createdAtRange", "from", nextValue)}
                     placeholder="MM/DD/YYYY"
                   />
                 </div>
                 <div className="filter-field">
                   <label htmlFor="created-to-input">To</label>
-                  <Input
+                  <DateInput
                     id="created-to-input"
                     value={filters.createdAtRange.to}
-                    onChange={(event) => setDateRange("createdAtRange", "to", event.target.value)}
+                    onChange={(nextValue) => setDateRange("createdAtRange", "to", nextValue)}
                     placeholder="MM/DD/YYYY"
                   />
                 </div>
                 <div className="filter-field">
                   <label htmlFor="payments-from-input">Payments From</label>
-                  <Input
+                  <DateInput
                     id="payments-from-input"
                     value={filters.paymentDateRange.from}
-                    onChange={(event) => setDateRange("paymentDateRange", "from", event.target.value)}
+                    onChange={(nextValue) => setDateRange("paymentDateRange", "from", nextValue)}
                     placeholder="MM/DD/YYYY"
                   />
                 </div>
                 <div className="filter-field">
                   <label htmlFor="payments-to-input">To</label>
-                  <Input
+                  <DateInput
                     id="payments-to-input"
                     value={filters.paymentDateRange.to}
-                    onChange={(event) => setDateRange("paymentDateRange", "to", event.target.value)}
+                    onChange={(nextValue) => setDateRange("paymentDateRange", "to", nextValue)}
                     placeholder="MM/DD/YYYY"
                   />
                 </div>
@@ -274,19 +297,19 @@ export default function ClientPaymentsPage() {
                 <div className="written-off-date-filter-react">
                   <div className="filter-field">
                     <label htmlFor="written-off-from-input">Written Off Date From</label>
-                    <Input
+                    <DateInput
                       id="written-off-from-input"
                       value={filters.writtenOffDateRange.from}
-                      onChange={(event) => setDateRange("writtenOffDateRange", "from", event.target.value)}
+                      onChange={(nextValue) => setDateRange("writtenOffDateRange", "from", nextValue)}
                       placeholder="MM/DD/YYYY"
                     />
                   </div>
                   <div className="filter-field">
                     <label htmlFor="written-off-to-input">To</label>
-                    <Input
+                    <DateInput
                       id="written-off-to-input"
                       value={filters.writtenOffDateRange.to}
-                      onChange={(event) => setDateRange("writtenOffDateRange", "to", event.target.value)}
+                      onChange={(nextValue) => setDateRange("writtenOffDateRange", "to", nextValue)}
                       placeholder="MM/DD/YYYY"
                     />
                   </div>
@@ -297,19 +320,19 @@ export default function ClientPaymentsPage() {
                 <div className="written-off-date-filter-react">
                   <div className="filter-field">
                     <label htmlFor="fully-paid-from-input">Fully Paid Date From</label>
-                    <Input
+                    <DateInput
                       id="fully-paid-from-input"
                       value={filters.fullyPaidDateRange.from}
-                      onChange={(event) => setDateRange("fullyPaidDateRange", "from", event.target.value)}
+                      onChange={(nextValue) => setDateRange("fullyPaidDateRange", "from", nextValue)}
                       placeholder="MM/DD/YYYY"
                     />
                   </div>
                   <div className="filter-field">
                     <label htmlFor="fully-paid-to-input">To</label>
-                    <Input
+                    <DateInput
                       id="fully-paid-to-input"
                       value={filters.fullyPaidDateRange.to}
-                      onChange={(event) => setDateRange("fullyPaidDateRange", "to", event.target.value)}
+                      onChange={(nextValue) => setDateRange("fullyPaidDateRange", "to", nextValue)}
                       placeholder="MM/DD/YYYY"
                     />
                   </div>
@@ -468,10 +491,10 @@ export default function ClientPaymentsPage() {
               ? "Edit Client"
               : activeRecord?.clientName || "Client Details"
         }
-        onClose={closeModal}
+        onClose={requestCloseModal}
         footer={
           <div className="client-payments__modal-actions">
-            <Button variant="secondary" size="sm" onClick={closeModal}>
+            <Button variant="secondary" size="sm" onClick={requestCloseModal}>
               Close
             </Button>
             {isViewMode && canManage ? (
@@ -489,6 +512,24 @@ export default function ClientPaymentsPage() {
       >
         {isViewMode && activeRecord ? <RecordDetails record={activeRecord} /> : null}
         {!isViewMode ? <RecordEditorForm draft={modalState.draft} onChange={updateDraftField} /> : null}
+      </Modal>
+
+      <Modal
+        open={isDiscardConfirmOpen}
+        title="Discard Changes?"
+        onClose={cancelDiscardModalClose}
+        footer={
+          <div className="client-payments__modal-actions">
+            <Button type="button" variant="secondary" size="sm" onClick={cancelDiscardModalClose}>
+              Cancel
+            </Button>
+            <Button type="button" variant="danger" size="sm" onClick={discardDraftAndCloseModal}>
+              Discard
+            </Button>
+          </div>
+        }
+      >
+        <p>You have unsaved changes. Discard?</p>
       </Modal>
 
       {hasUnsavedChanges ? <Badge tone="warning">Unsaved changes pending sync</Badge> : null}

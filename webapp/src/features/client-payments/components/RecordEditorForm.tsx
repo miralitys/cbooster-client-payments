@@ -1,7 +1,7 @@
 import type { ChangeEvent } from "react";
 
 import { FIELD_DEFINITIONS } from "@/features/client-payments/domain/constants";
-import { Field, Input, Textarea } from "@/shared/ui";
+import { DateInput, Field, Input, Textarea } from "@/shared/ui";
 import type { ClientRecord } from "@/shared/types/records";
 
 interface RecordEditorFormProps {
@@ -55,16 +55,31 @@ export function RecordEditorForm({ draft, onChange }: RecordEditorFormProps) {
           );
         }
 
+        if (field.type === "date") {
+          return (
+            <Field key={field.key} label={field.label} htmlFor={`field-${field.key}`}>
+              <DateInput
+                id={`field-${field.key}`}
+                name={field.key}
+                value={value}
+                onChange={(nextValue) => onChange(field.key, nextValue)}
+                readOnly={Boolean(field.computed)}
+                placeholder="MM/DD/YYYY"
+              />
+            </Field>
+          );
+        }
+
         return (
           <Field key={field.key} label={field.label} htmlFor={`field-${field.key}`}>
             <Input
               id={`field-${field.key}`}
               name={field.key}
-              type={field.type === "date" ? "text" : "text"}
+              type="text"
               value={value}
               onChange={(event) => onInputChange(field.key, event)}
               readOnly={Boolean(field.computed)}
-              placeholder={field.type === "date" ? "MM/DD/YYYY" : ""}
+              placeholder=""
             />
           </Field>
         );

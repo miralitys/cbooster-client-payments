@@ -5,6 +5,8 @@ export const ZERO_TOLERANCE = 0.005;
 
 export const REMOTE_SYNC_DEBOUNCE_MS = 900;
 export const REMOTE_SYNC_RETRY_MS = 5000;
+export const REMOTE_SYNC_MAX_RETRIES = 5;
+export const REMOTE_SYNC_MAX_RETRY_DELAY_MS = 30_000;
 
 export const STATUS_FILTER_ALL = "all";
 export const STATUS_FILTER_WRITTEN_OFF = "written-off";

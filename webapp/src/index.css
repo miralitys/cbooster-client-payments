@@ -167,6 +167,13 @@ a {
   margin-bottom: var(--space-4);
 }
 
+.page-stats-bar__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
 .account-menu {
   position: relative;
   flex-shrink: 0;
@@ -655,6 +662,60 @@ a {
   min-height: 38px;
 }
 
+.date-input-shell {
+  position: relative;
+}
+
+.date-input-shell > .cb-input {
+  padding-left: 42px;
+}
+
+.date-picker-trigger {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.16s ease, color 0.16s ease;
+}
+
+.date-picker-trigger:hover:not(:disabled) {
+  color: var(--color-text);
+  background: var(--color-secondary-hover);
+}
+
+.date-picker-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.date-picker-trigger svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.date-picker-proxy {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
 .cb-textarea {
   min-height: 88px;
   resize: vertical;
@@ -665,6 +726,7 @@ a {
 .cb-textarea:focus-visible,
 .cb-button:focus-visible,
 .account-menu__toggle:focus-visible,
+.date-picker-trigger:focus-visible,
 .filters-toggle-btn:focus-visible,
 .th-sort-btn:focus-visible {
   outline: 2px solid var(--color-focus-ring);
@@ -802,6 +864,13 @@ a {
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
+}
+
+.save-error-stack {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .cb-empty-state,
@@ -945,6 +1014,7 @@ a {
   font-size: 12px;
   line-height: 1.3;
   color: #64748b;
+  white-space: nowrap;
 }
 
 .cb-card {
@@ -1039,6 +1109,11 @@ a {
   .filters-grid-react,
   .written-off-date-filter-react {
     grid-template-columns: 1fr;
+  }
+
+  .page-stats-bar__row {
+    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 
   .table-panel__header {
