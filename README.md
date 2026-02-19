@@ -43,6 +43,11 @@ npm start
    - `QUICKBOOKS_REALM_ID` = QuickBooks Company Realm ID;
    - `QUICKBOOKS_REDIRECT_URI` = Redirect URI (опционально, но рекомендовано хранить рядом с OAuth-настройками);
    - `QUICKBOOKS_API_BASE_URL` = API base URL (по умолчанию `https://quickbooks.api.intuit.com`);
+   - `OPENAI_API_KEY` = API key для LLM-ответов онлайн-помощника (опционально; без ключа работает rule-based fallback);
+   - `OPENAI_MODEL` = модель OpenAI для ассистента (по умолчанию `gpt-4.1-mini`);
+   - `OPENAI_API_BASE_URL` = base URL OpenAI API (по умолчанию `https://api.openai.com`);
+   - `OPENAI_ASSISTANT_TIMEOUT_MS` = timeout запроса к OpenAI в ms (по умолчанию `15000`);
+   - `OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS` = лимит токенов ответа (по умолчанию `420`);
    - `DATABASE_URL` = строка подключения Supabase;
    - `DB_TABLE_NAME` = `client_records_state`;
    - `DB_MODERATION_TABLE_NAME` = `mini_client_submissions`;
@@ -64,6 +69,7 @@ npm start
 - `GET /api/health`
 - `GET /api/records`
 - `PUT /api/records`
+- `POST /api/assistant/chat`
 - `POST /api/mini/access`
 - `POST /api/mini/clients`
 - `GET /api/moderation/submissions`
