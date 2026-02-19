@@ -16,6 +16,7 @@ export function AppRouter() {
         <Route index element={<Navigate to="client-payments" replace />} />
         <Route path="client-payments" element={<ClientPaymentsPage />} />
         <Route path="client-score" element={<ClientScorePage />} />
+        <Route path="payment-probability" element={<ClientScorePage />} />
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="quickbooks" element={<QuickBooksPage />} />
         <Route path="quickbooks-payments" element={<QuickBooksPage />} />

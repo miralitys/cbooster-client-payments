@@ -7,7 +7,7 @@ import { ModalStackProvider, ToastHost } from "@/shared/ui";
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
-  { to: "/client-score", label: "Client Score" },
+  { to: "/payment-probability", label: "Client Payment Probability" },
   { to: "/quickbooks", label: "QuickBooks" },
   { to: "/client-managers", label: "Client Managers" },
   { to: "/ghl-contracts", label: "GHL Documents" },
@@ -33,8 +33,8 @@ function resolvePageTitle(pathname: string): string {
     return "Client - Manager Test";
   }
 
-  if (pathname.startsWith("/client-score")) {
-    return "Client Score";
+  if (pathname.startsWith("/payment-probability") || pathname.startsWith("/client-score")) {
+    return "Client Payment Probability";
   }
 
   if (pathname.startsWith("/ghl-contracts")) {
