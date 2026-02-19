@@ -237,6 +237,8 @@ export default function ClientPaymentsPage() {
         ) : (
           <span className="th-sort-label">{headerLabel}</span>
         ),
+        headerClassName: column === "clientName" ? "client-name-column" : undefined,
+        className: column === "clientName" ? "client-name-column" : undefined,
         align: getColumnAlign(column),
         cell: (row) => {
           const record = row.record;
@@ -252,10 +254,10 @@ export default function ClientPaymentsPage() {
           switch (column) {
             case "clientName":
               return (
-                <>
-                  <strong>{record.clientName || "Unnamed"}</strong>
+                <div className="client-name-cell">
+                  <strong className="client-name-cell__name">{record.clientName || "Unnamed"}</strong>
                   <StatusBadges record={record} />
-                </>
+                </div>
               );
             case "closedBy":
               return record.closedBy || "-";
