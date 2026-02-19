@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import { AssistantWidget } from "@/features/assistant/AssistantWidget";
+
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
@@ -115,6 +117,7 @@ export function Layout() {
 
         <Outlet />
       </div>
+      <AssistantWidget />
     </main>
   );
 }
