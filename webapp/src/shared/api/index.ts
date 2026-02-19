@@ -11,4 +11,5 @@ export {
 export { getQuickBooksPayments } from "@/shared/api/quickbooks";
 export { getClientManagers } from "@/shared/api/clientManagers";
 export { getGhlClientDocuments } from "@/shared/api/ghlDocuments";
+export { getGhlClientBasicNote } from "@/shared/api/ghlNotes";
 export { createAccessUser, getAccessModel, listAccessUsers, updateAccessUser } from "@/shared/api/accessControl";
