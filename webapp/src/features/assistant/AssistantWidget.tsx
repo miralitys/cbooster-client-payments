@@ -79,6 +79,7 @@ const DEFAULT_SUGGESTIONS_RU = [
   "Сколько просроченных клиентов?",
   "Покажи клиента John Smith",
 ];
+const ASSISTANT_TTS_API_PATH = "/api/assistant/tts";
 
 function resolveSpeechRecognitionConstructor(): SpeechRecognitionConstructorLike | null {
   if (typeof window === "undefined") {
@@ -251,6 +252,9 @@ export function AssistantWidget() {
   const isMountedRef = useRef(true);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const ttsAbortControllerRef = useRef<AbortController | null>(null);
+  const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  const audioObjectUrlRef = useRef("");
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const hasSendableText = normalizeOutgoingMessage(draft).length > 0;
@@ -273,7 +277,9 @@ export function AssistantWidget() {
     return () => {
       isMountedRef.current = false;
       abortControllerRef.current?.abort();
+      ttsAbortControllerRef.current?.abort();
       recognitionRef.current?.abort();
+      stopAudioPlayback();
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
@@ -315,13 +321,39 @@ export function AssistantWidget() {
     );
   }
 
-  function speakText(rawText: string): void {
+  function stopAudioPlayback(resetSpeaking = true): void {
+    const currentAudio = audioElementRef.current;
+    if (currentAudio) {
+      currentAudio.pause();
+      currentAudio.onended = null;
+      currentAudio.onerror = null;
+      currentAudio.src = "";
+      audioElementRef.current = null;
+    }
+
+    if (audioObjectUrlRef.current) {
+      URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = "";
+    }
+
+    if (resetSpeaking && isMountedRef.current) {
+      setIsSpeaking(false);
+    }
+  }
+
+  function speakTextWithBrowserSynthesis(rawText: string): void {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      if (isMountedRef.current) {
+        setIsSpeaking(false);
+      }
       return;
     }
 
     const text = normalizeDisplayMessage(rawText);
     if (!text) {
+      if (isMountedRef.current) {
+        setIsSpeaking(false);
+      }
       return;
     }
 
@@ -347,6 +379,84 @@ export function AssistantWidget() {
     };
 
     window.speechSynthesis.speak(utterance);
+  }
+
+  async function speakTextAsync(rawText: string): Promise<void> {
+    const text = normalizeDisplayMessage(rawText);
+    if (!text) {
+      return;
+    }
+
+    ttsAbortControllerRef.current?.abort();
+    stopAudioPlayback(false);
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    const controller = new AbortController();
+    ttsAbortControllerRef.current = controller;
+    if (isMountedRef.current) {
+      setIsSpeaking(true);
+    }
+
+    try {
+      const response = await fetch(ASSISTANT_TTS_API_PATH, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "audio/mpeg",
+        },
+        body: JSON.stringify({ text }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`TTS request failed with status ${response.status}`);
+      }
+
+      const audioBlob = await response.blob();
+      if (!audioBlob.size) {
+        throw new Error("TTS response is empty.");
+      }
+
+      if (!isMountedRef.current || controller.signal.aborted) {
+        return;
+      }
+
+      const audioUrl = URL.createObjectURL(audioBlob);
+      if (audioObjectUrlRef.current) {
+        URL.revokeObjectURL(audioObjectUrlRef.current);
+      }
+      audioObjectUrlRef.current = audioUrl;
+
+      const audio = new Audio(audioUrl);
+      audioElementRef.current = audio;
+      audio.onended = () => {
+        stopAudioPlayback();
+      };
+      audio.onerror = () => {
+        stopAudioPlayback();
+        speakTextWithBrowserSynthesis(text);
+      };
+
+      await audio.play();
+    } catch {
+      if (controller.signal.aborted || !isMountedRef.current) {
+        return;
+      }
+
+      stopAudioPlayback();
+      speakTextWithBrowserSynthesis(text);
+    } finally {
+      if (ttsAbortControllerRef.current === controller) {
+        ttsAbortControllerRef.current = null;
+      }
+    }
+  }
+
+  function speakText(rawText: string): void {
+    void speakTextAsync(rawText);
   }
 
   function stopListening(): void {

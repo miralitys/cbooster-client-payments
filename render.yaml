@@ -31,6 +31,28 @@ services:
         sync: false
       - key: QUICKBOOKS_API_BASE_URL
         value: https://quickbooks.api.intuit.com
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_API_BASE_URL
+        value: https://api.openai.com
+      - key: OPENAI_ASSISTANT_TIMEOUT_MS
+        value: "15000"
+      - key: OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS
+        value: "420"
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        value: ARyC2bwXA7I797b7vxmB
+      - key: ELEVENLABS_MODEL_ID
+        value: eleven_multilingual_v2
+      - key: ELEVENLABS_API_BASE_URL
+        value: https://api.elevenlabs.io
+      - key: ELEVENLABS_OUTPUT_FORMAT
+        value: mp3_44100_128
+      - key: ELEVENLABS_TTS_TIMEOUT_MS
+        value: "15000"
       - key: DATABASE_URL
         sync: false
       - key: DB_TABLE_NAME

@@ -48,6 +48,12 @@ npm start
    - `OPENAI_API_BASE_URL` = base URL OpenAI API (по умолчанию `https://api.openai.com`);
    - `OPENAI_ASSISTANT_TIMEOUT_MS` = timeout запроса к OpenAI в ms (по умолчанию `15000`);
    - `OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS` = лимит токенов ответа (по умолчанию `420`);
+   - `ELEVENLABS_API_KEY` = API key ElevenLabs для озвучки ответов ассистента голосом;
+   - `ELEVENLABS_VOICE_ID` = voice id в ElevenLabs (по умолчанию `ARyC2bwXA7I797b7vxmB`);
+   - `ELEVENLABS_MODEL_ID` = модель ElevenLabs для TTS (по умолчанию `eleven_multilingual_v2`);
+   - `ELEVENLABS_API_BASE_URL` = base URL ElevenLabs API (по умолчанию `https://api.elevenlabs.io`);
+   - `ELEVENLABS_OUTPUT_FORMAT` = формат аудио ответа (по умолчанию `mp3_44100_128`);
+   - `ELEVENLABS_TTS_TIMEOUT_MS` = timeout TTS-запроса к ElevenLabs в ms (по умолчанию `15000`);
    - `DATABASE_URL` = строка подключения Supabase;
    - `DB_TABLE_NAME` = `client_records_state`;
    - `DB_MODERATION_TABLE_NAME` = `mini_client_submissions`;
@@ -70,6 +76,7 @@ npm start
 - `GET /api/records`
 - `PUT /api/records`
 - `POST /api/assistant/chat`
+- `POST /api/assistant/tts`
 - `POST /api/mini/access`
 - `POST /api/mini/clients`
 - `GET /api/moderation/submissions`
