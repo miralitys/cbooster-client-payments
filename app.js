@@ -9,6 +9,7 @@ const FILTERS_PANEL_COLLAPSED_KEY = "cbooster_filters_panel_collapsed_v1";
 const AUTH_SESSION_ENDPOINT = "/api/auth/session";
 const AUTH_LOGOUT_PATH = "/logout";
 const AUTH_LOGIN_PATH = "/login";
+const PERMISSION_MANAGE_CLIENT_PAYMENTS = "manage_client_payments";
 const STATUS_FILTER_ALL = "all";
 const STATUS_FILTER_WRITTEN_OFF = "written-off";
 const STATUS_FILTER_FULLY_PAID = "fully-paid";
@@ -287,6 +288,7 @@ let lastFocusedElementBeforeModal = null;
 let currentAuthUser = "";
 let currentAuthLabel = "";
 let currentAuthIsOwner = false;
+let currentAuthPermissions = Object.create(null);
 let isRemoteSyncEnabled = IS_HTTP_CONTEXT;
 let hasCompletedInitialRemoteSync = false;
 let remoteSyncTimeoutId = null;
@@ -326,6 +328,11 @@ void hydrateRecordsFromRemote();
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   clearMessage();
+
+  if (!hasCurrentPermission(PERMISSION_MANAGE_CLIENT_PAYMENTS)) {
+    showMessage("Access denied. You cannot create or edit clients.", "error");
+    return;
+  }
 
   const formData = new FormData(form);
   const nextRecord = {};
@@ -500,6 +507,11 @@ if (editClientForm) {
     event.preventDefault();
     clearEditMessage();
 
+    if (!hasCurrentPermission(PERMISSION_MANAGE_CLIENT_PAYMENTS)) {
+      showEditMessage("Access denied. You cannot edit clients.", "error");
+      return;
+    }
+
     if (!isCardEditMode) {
       return;
     }
@@ -574,6 +586,11 @@ if (editClientForm) {
 
 if (enableEditModeButton) {
   enableEditModeButton.addEventListener("click", () => {
+    if (!hasCurrentPermission(PERMISSION_MANAGE_CLIENT_PAYMENTS)) {
+      showEditMessage("Access denied. You cannot edit clients.", "error");
+      return;
+    }
+
     const currentRecord = getEditingRecord();
     if (!currentRecord) {
       return;
@@ -3266,6 +3283,7 @@ function initializeAuthSession() {
   currentAuthUser = "";
   currentAuthLabel = "";
   currentAuthIsOwner = false;
+  currentAuthPermissions = Object.create(null);
   syncAuthUi();
   void hydrateAuthSessionFromServer();
 }
@@ -3307,11 +3325,44 @@ function syncAuthUi() {
   }
 
   syncOwnerOnlyMenuItems(currentAuthIsOwner);
+  syncClientPaymentsAccessUi();
 }
 
 function syncOwnerOnlyMenuItems(isOwner) {
   for (const item of ownerOnlyMenuItems) {
     item.hidden = !isOwner;
+  }
+}
+
+function hasCurrentPermission(permissionKey) {
+  return Boolean(currentAuthPermissions?.[permissionKey]);
+}
+
+function syncClientPaymentsAccessUi() {
+  const canManage = hasCurrentPermission(PERMISSION_MANAGE_CLIENT_PAYMENTS);
+
+  if (!canManage && isCardEditMode) {
+    setCardEditMode(false);
+  }
+
+  if (!canManage) {
+    setClientFormVisibility(false);
+  }
+
+  if (toggleClientFormButton) {
+    toggleClientFormButton.hidden = !canManage;
+  }
+
+  if (enableEditModeButton) {
+    enableEditModeButton.hidden = !canManage || isCardEditMode;
+  }
+
+  if (saveEditChangesButton) {
+    saveEditChangesButton.hidden = !canManage || !isCardEditMode;
+  }
+
+  if (cancelEditModeButton) {
+    cancelEditModeButton.hidden = !canManage || !isCardEditMode;
   }
 }
 
@@ -3337,6 +3388,8 @@ async function hydrateAuthSessionFromServer() {
     const roleName = (payload?.user?.roleName || "").toString().trim();
     const departmentName = (payload?.user?.departmentName || "").toString().trim();
     const isOwner = Boolean(payload?.user?.isOwner);
+    currentAuthPermissions =
+      payload?.permissions && typeof payload.permissions === "object" ? payload.permissions : Object.create(null);
     currentAuthUser = username || "";
     currentAuthLabel = buildAuthLabel(roleName, departmentName);
     currentAuthIsOwner = isOwner;

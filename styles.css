@@ -1879,6 +1879,10 @@ tbody tr.row-tone-active:hover td {
   gap: 6px;
 }
 
+.user-registration-field--wide {
+  grid-column: 1 / -1;
+}
+
 .user-registration-field span {
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
