@@ -109,6 +109,7 @@ npm start
 - Для текущей структуры также автоматически добавляются пользователи без обязательного email/password:
   - `Client Service Department`: `Nataly Regush` (`Department Head`), `Anastasiia Lopatina`, `Arslan Utiaganov`, `Liudmyla Sydachenko`, `Dmitrii Kabanov`, `Arina Alekhina` (`Manager`).
   - `Accounting Department`: `Alla Havrysh` (`Department Head`).
+  - `Sales Department`: `Maryna Shuliatytska` (`Department Head`, username: `garbarmarina13@gmail.com`).
 - Новый пользователь добавляется в текущую runtime-директорию авторизации и доступен сразу после создания.
 - Правила доступа к клиентам:
   - `Accounting Department`: `Department Head` и `Manager` видят всех клиентов и могут редактировать/создавать.
