@@ -3622,6 +3622,8 @@ function normalizeNameForLookup(rawValue) {
 function buildContactCandidateName(contact) {
   const variants = [
     contact?.name,
+    contact?.fullName,
+    contact?.full_name,
     [contact?.firstName, contact?.lastName].filter(Boolean).join(" "),
     [contact?.first_name, contact?.last_name].filter(Boolean).join(" "),
     [contact?.contactNameFirst, contact?.contactNameLast].filter(Boolean).join(" "),
@@ -3630,6 +3632,30 @@ function buildContactCandidateName(contact) {
     .filter(Boolean);
 
   return variants[0] || "";
+}
+
+function areNamesEquivalentTokens(expectedToken, candidateToken) {
+  const expected = sanitizeTextValue(expectedToken, 80).toLowerCase();
+  const candidate = sanitizeTextValue(candidateToken, 80).toLowerCase();
+  if (!expected || !candidate) {
+    return false;
+  }
+
+  if (expected === candidate) {
+    return true;
+  }
+
+  if (expected.length >= 4 && candidate.length >= 4) {
+    if (expected.startsWith(candidate) || candidate.startsWith(expected)) {
+      return true;
+    }
+
+    if (expected.slice(0, 5) === candidate.slice(0, 5)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function areNamesEquivalent(expectedName, candidateName) {
@@ -3651,9 +3677,33 @@ function areNamesEquivalent(expectedName, candidateName) {
     const expectedLast = expectedParts[expectedParts.length - 1];
     const candidateFirst = candidateParts[0];
     const candidateLast = candidateParts[candidateParts.length - 1];
-    if (expectedFirst === candidateFirst && expectedLast === candidateLast) {
+    if (
+      areNamesEquivalentTokens(expectedFirst, candidateFirst) &&
+      areNamesEquivalentTokens(expectedLast, candidateLast)
+    ) {
       return true;
     }
+
+    const hasExpectedFirst = candidateParts.some((token) => areNamesEquivalentTokens(expectedFirst, token));
+    const hasExpectedLast = candidateParts.some((token) => areNamesEquivalentTokens(expectedLast, token));
+    if (hasExpectedFirst && hasExpectedLast) {
+      return true;
+    }
+  }
+
+  let matchedExpectedTokens = 0;
+  for (const expectedToken of expectedParts) {
+    if (candidateParts.some((candidateToken) => areNamesEquivalentTokens(expectedToken, candidateToken))) {
+      matchedExpectedTokens += 1;
+    }
+  }
+
+  if (expectedParts.length === 1 && matchedExpectedTokens >= 1) {
+    return true;
+  }
+
+  if (expectedParts.length >= 2 && matchedExpectedTokens >= 2) {
+    return true;
   }
 
   return false;
