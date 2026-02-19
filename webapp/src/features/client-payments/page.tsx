@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
 import {
@@ -8,6 +8,7 @@ import {
   getRecordStatusFlags,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
+import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
 import {
   PAYMENT_DATE_FIELDS,
   OVERDUE_RANGE_OPTIONS,
@@ -25,6 +26,7 @@ import { useClientPayments } from "@/features/client-payments/hooks/useClientPay
 import type { ClientRecord } from "@/shared/types/records";
 import {
   Button,
+  Badge,
   DateInput,
   EmptyState,
   ErrorState,
@@ -38,6 +40,21 @@ import {
   Table,
 } from "@/shared/ui";
 import type { TableAlign, TableColumn } from "@/shared/ui/Table";
+
+type ScoreFilter = "all" | "0-30" | "30-60" | "60-99" | "100";
+
+interface ScoredClientRecord {
+  record: ClientRecord;
+  score: ClientScoreResult;
+}
+
+const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
+  { key: "all", label: "All" },
+  { key: "0-30", label: "0-30" },
+  { key: "30-60", label: "30-60" },
+  { key: "60-99", label: "60-99" },
+  { key: "100", label: "100" },
+];
 
 const COLUMN_LABELS: Record<string, string> = {
   clientName: "Client Name",
@@ -129,6 +146,14 @@ export default function ClientPaymentsPage() {
     retrySave,
   } = useClientPayments();
 
+  const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("all");
+  const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
+
+  const tableColumnKeys = useMemo<Array<keyof ClientRecord | "score">>(
+    () => ["clientName", "score", ...TABLE_COLUMNS.filter((column) => column !== "clientName")],
+    [],
+  );
+
   const sortableColumns = useMemo(
     () =>
       new Set<keyof ClientRecord>(
@@ -137,6 +162,28 @@ export default function ClientPaymentsPage() {
     [],
   );
 
+  const scoreByRecordId = useMemo(() => {
+    const asOfDate = new Date();
+    const scoredMap = new Map<string, ClientScoreResult>();
+
+    for (const record of records) {
+      scoredMap.set(record.id, evaluateClientScore(record, asOfDate));
+    }
+
+    return scoredMap;
+  }, [records]);
+
+  const scoredVisibleRecords = useMemo<ScoredClientRecord[]>(() => {
+    return visibleRecords
+      .map((record) => ({
+        record,
+        score: scoreByRecordId.get(record.id) || evaluateClientScore(record),
+      }))
+      .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter));
+  }, [scoreByRecordId, scoreFilter, visibleRecords]);
+
+  const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
+
   const isViewMode = modalState.mode === "view";
 
   const counters = useMemo(() => {
@@ -144,7 +191,7 @@ export default function ClientPaymentsPage() {
     let fullyPaidCount = 0;
     let overdueCount = 0;
 
-    for (const record of visibleRecords) {
+    for (const record of filteredRecords) {
       const status = getRecordStatusFlags(record);
       if (status.isWrittenOff) {
         writtenOffCount += 1;
@@ -159,17 +206,18 @@ export default function ClientPaymentsPage() {
 
     return {
       totalCount: records.length,
-      filteredCount: visibleRecords.length,
+      filteredCount: filteredRecords.length,
       writtenOffCount,
       fullyPaidCount,
       overdueCount,
     };
-  }, [records.length, visibleRecords]);
+  }, [filteredRecords, records.length]);
 
-  const tableColumns = useMemo<TableColumn<ClientRecord>[]>(() => {
-    return TABLE_COLUMNS.map((column) => {
-      const isSortable = sortableColumns.has(column);
-      const isActive = sortState.key === column;
+  const tableColumns = useMemo<TableColumn<ScoredClientRecord>[]>(() => {
+    return tableColumnKeys.map((column) => {
+      const isSortable = column === "score" ? false : sortableColumns.has(column);
+      const isActive = column === "score" ? false : sortState.key === column;
+      const headerLabel = column === "score" ? "Score" : COLUMN_LABELS[column] || column;
 
       return {
         key: column,
@@ -177,16 +225,30 @@ export default function ClientPaymentsPage() {
           <button
             type="button"
             className={`th-sort-btn ${isActive ? "is-active" : ""}`.trim()}
-            onClick={() => toggleSort(column)}
+            onClick={() => {
+              if (column !== "score") {
+                toggleSort(column);
+              }
+            }}
           >
-            <span className="th-sort-label">{COLUMN_LABELS[column] || column}</span>
+            <span className="th-sort-label">{headerLabel}</span>
             {isActive ? <span className="th-sort-indicator">{sortState.direction === "asc" ? "↑" : "↓"}</span> : null}
           </button>
         ) : (
-          <span className="th-sort-label">{COLUMN_LABELS[column] || column}</span>
+          <span className="th-sort-label">{headerLabel}</span>
         ),
         align: getColumnAlign(column),
-        cell: (record) => {
+        cell: (row) => {
+          const record = row.record;
+
+          if (column === "score") {
+            if (row.score.displayScore === null) {
+              return <Badge tone="neutral">N/A</Badge>;
+            }
+
+            return <Badge tone={row.score.tone}>{row.score.displayScore}</Badge>;
+          }
+
           switch (column) {
             case "clientName":
               return (
@@ -237,7 +299,7 @@ export default function ClientPaymentsPage() {
         },
       };
     });
-  }, [sortState.direction, sortState.key, sortableColumns, toggleSort]);
+  }, [sortState.direction, sortState.key, sortableColumns, tableColumnKeys, toggleSort]);
 
   useEffect(() => {
     if (!saveError) {
@@ -286,6 +348,8 @@ export default function ClientPaymentsPage() {
     setDateRange("writtenOffDateRange", "to", "");
     setDateRange("fullyPaidDateRange", "from", "");
     setDateRange("fullyPaidDateRange", "to", "");
+    setScoreFilter("all");
+    setIsScoreFilterOpen(false);
   }
 
   return (
@@ -450,6 +514,27 @@ export default function ClientPaymentsPage() {
                 />
               ) : null}
 
+              <div className="score-filter-block">
+                <div className="score-filter-block__header">
+                  <p className="search-label">Score</p>
+                  <Button
+                    type="button"
+                    variant={isScoreFilterOpen ? "primary" : "secondary"}
+                    size="sm"
+                    onClick={() => setIsScoreFilterOpen((prev) => !prev)}
+                  >
+                    Score
+                  </Button>
+                </div>
+                {isScoreFilterOpen ? (
+                  <SegmentedControl
+                    value={scoreFilter}
+                    options={SCORE_FILTER_OPTIONS}
+                    onChange={(value) => setScoreFilter(value as ScoreFilter)}
+                  />
+                ) : null}
+              </div>
+
               {filters.status === "written-off" ? (
                 <div className="written-off-date-filter-react">
                   <div className="filter-field">
@@ -537,16 +622,16 @@ export default function ClientPaymentsPage() {
               <Button variant="secondary" size="sm" onClick={() => void forceRefresh()} isLoading={isLoading}>
                 Refresh
               </Button>
-              <Button variant="secondary" size="sm" onClick={() => exportRecordsToXls(visibleRecords)}>
+              <Button variant="secondary" size="sm" onClick={() => exportRecordsToXls(filteredRecords)}>
                 Export XLS
               </Button>
-              <Button variant="secondary" size="sm" onClick={() => exportRecordsToPdf(visibleRecords)}>
+              <Button variant="secondary" size="sm" onClick={() => exportRecordsToPdf(filteredRecords)}>
                 Export PDF
               </Button>
             </div>
           }
         >
-          {isLoading ? <TableLoadingSkeleton /> : null}
+          {isLoading ? <TableLoadingSkeleton columnCount={tableColumnKeys.length} /> : null}
           {!isLoading && loadError ? (
             <ErrorState
               title="Failed to load records"
@@ -555,21 +640,21 @@ export default function ClientPaymentsPage() {
               onAction={() => void forceRefresh()}
             />
           ) : null}
-          {!isLoading && !loadError && !visibleRecords.length ? (
+          {!isLoading && !loadError && !scoredVisibleRecords.length ? (
             <EmptyState title="No records found" description="Adjust filters or add a new client." />
           ) : null}
 
-          {!isLoading && !loadError && visibleRecords.length ? (
+          {!isLoading && !loadError && scoredVisibleRecords.length ? (
             <Table
               className="table-wrap"
               columns={tableColumns}
-              rows={visibleRecords}
-              rowKey={(record) => record.id}
+              rows={scoredVisibleRecords}
+              rowKey={(row) => row.record.id}
               density="compact"
-              onRowActivate={(record) => openRecordModal(record)}
+              onRowActivate={(row) => openRecordModal(row.record)}
               footer={
                 <tr>
-                  {TABLE_COLUMNS.map((column) => {
+                  {tableColumnKeys.map((column) => {
                     if (column === "clientName") {
                       return (
                         <td key={column}>
@@ -578,12 +663,16 @@ export default function ClientPaymentsPage() {
                       );
                     }
 
+                    if (column === "score") {
+                      return <td key={column}>-</td>;
+                    }
+
                     if (column === "closedBy") {
-                      return <td key={column}>{`${visibleRecords.length} clients`}</td>;
+                      return <td key={column}>{`${filteredRecords.length} clients`}</td>;
                     }
 
                     if (SUMMABLE_TABLE_COLUMNS.has(column)) {
-                      const sum = sumFieldValues(visibleRecords, column);
+                      const sum = sumFieldValues(filteredRecords, column);
                       return (
                         <td key={column} className={getColumnAlign(column) === "right" ? "cb-table__cell--align-right" : undefined}>
                           {sum === null ? "-" : formatMoney(sum)}
@@ -655,7 +744,35 @@ export default function ClientPaymentsPage() {
   );
 }
 
-function getColumnAlign(column: keyof ClientRecord): TableAlign {
+function matchesScoreFilter(displayScore: number | null, filter: ScoreFilter): boolean {
+  if (filter === "all") {
+    return true;
+  }
+
+  if (displayScore === null) {
+    return false;
+  }
+
+  if (filter === "0-30") {
+    return displayScore >= 0 && displayScore <= 30;
+  }
+
+  if (filter === "30-60") {
+    return displayScore > 30 && displayScore <= 60;
+  }
+
+  if (filter === "60-99") {
+    return displayScore > 60 && displayScore < 100;
+  }
+
+  return displayScore === 100;
+}
+
+function getColumnAlign(column: keyof ClientRecord | "score"): TableAlign {
+  if (column === "score") {
+    return "center";
+  }
+
   if (
     column === "createdAt" ||
     column === "dateOfCollection" ||
@@ -712,9 +829,7 @@ function sumFieldValues(records: ClientRecord[], key: keyof ClientRecord): numbe
   return hasAnyValue ? sum : null;
 }
 
-function TableLoadingSkeleton() {
-  const columnCount = TABLE_COLUMNS.length;
-
+function TableLoadingSkeleton({ columnCount }: { columnCount: number }) {
   return (
     <div className="table-wrap table-wrap--loading">
       <table className="cb-table cb-table--compact">
