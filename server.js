@@ -303,6 +303,8 @@ const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", 
 const GHL_REQUIRED_CONTRACT_KEYWORD_PATTERN = /\bcontracts?\b/;
 const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
 const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
+const GHL_BASIC_NOTE_KEYWORD_PATTERN = /\bbasic\b/i;
+const GHL_CONTACT_NOTES_LIMIT = 100;
 const GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS, 5 * 60 * 1000), 10 * 1000),
   60 * 60 * 1000,
@@ -4006,6 +4008,314 @@ async function searchGhlContactsByClientName(clientName) {
   }
 
   return [...contactsById.values()];
+}
+
+function extractGhlNotesFromPayload(payload) {
+  const candidates = [
+    payload?.notes,
+    payload?.data?.notes,
+    payload?.data?.items,
+    payload?.items,
+    payload?.data,
+    payload?.result?.notes,
+    payload?.result?.items,
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+    return candidate.filter((item) => item && typeof item === "object");
+  }
+
+  if (payload?.note && typeof payload.note === "object") {
+    return [payload.note];
+  }
+
+  return [];
+}
+
+function normalizeGhlNoteBody(rawValue, maxLength = 12000) {
+  const raw = sanitizeTextValue(rawValue, maxLength * 3);
+  if (!raw) {
+    return "";
+  }
+
+  const normalized = raw
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return sanitizeTextValue(normalized, maxLength);
+}
+
+function parseGhlNoteTimestamp(rawValue) {
+  if (typeof rawValue === "number" && Number.isFinite(rawValue) && rawValue > 0) {
+    return rawValue > 2_000_000_000 ? Math.trunc(rawValue) : Math.trunc(rawValue * 1000);
+  }
+
+  const textValue = sanitizeTextValue(rawValue, 120);
+  if (!textValue) {
+    return 0;
+  }
+
+  if (/^\d+$/.test(textValue)) {
+    const numeric = Number.parseInt(textValue, 10);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric > 2_000_000_000 ? numeric : numeric * 1000;
+    }
+  }
+
+  const parsed = Date.parse(textValue);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function buildGhlNoteRecord(note, source = "contacts.notes") {
+  if (!note || typeof note !== "object") {
+    return null;
+  }
+
+  const id = sanitizeTextValue(note.id || note._id || note.noteId || note.note_id, 180);
+  const title = sanitizeTextValue(
+    note.title || note.subject || note.name || note.type || note.noteTitle || note.note_title,
+    300,
+  );
+  const body = normalizeGhlNoteBody(
+    note.body ||
+      note.note ||
+      note.description ||
+      note.content ||
+      note.text ||
+      note.message ||
+      note.html ||
+      note.noteBody ||
+      note.note_body,
+    12000,
+  );
+  const createdAtRaw =
+    note.createdAt ||
+    note.created_at ||
+    note.dateAdded ||
+    note.date_added ||
+    note.updatedAt ||
+    note.updated_at ||
+    note.timestamp;
+  const timestamp = parseGhlNoteTimestamp(createdAtRaw);
+  const createdAt = timestamp > 0 ? new Date(timestamp).toISOString() : "";
+
+  if (!body && !title) {
+    return null;
+  }
+
+  return {
+    id,
+    title,
+    body,
+    createdAt,
+    timestamp,
+    source: sanitizeTextValue(source, 120) || "contacts.notes",
+  };
+}
+
+function dedupeGhlNoteRecords(notes) {
+  const deduped = [];
+  const seen = new Set();
+  const source = Array.isArray(notes) ? notes : [];
+
+  for (const note of source) {
+    if (!note || typeof note !== "object") {
+      continue;
+    }
+
+    const key = sanitizeTextValue(note.id, 180) || `${sanitizeTextValue(note.title, 300)}::${sanitizeTextValue(note.body, 2000)}`;
+    if (!key || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(note);
+  }
+
+  deduped.sort((left, right) => {
+    const leftTime = Number.isFinite(left.timestamp) ? left.timestamp : 0;
+    const rightTime = Number.isFinite(right.timestamp) ? right.timestamp : 0;
+    return rightTime - leftTime;
+  });
+
+  return deduped;
+}
+
+async function listGhlNotesForContact(contactId) {
+  const normalizedContactId = sanitizeTextValue(contactId, 160);
+  if (!normalizedContactId) {
+    return [];
+  }
+
+  const encodedContactId = encodeURIComponent(normalizedContactId);
+  const attempts = [
+    {
+      source: "contacts.notes",
+      request: () =>
+        requestGhlApi(`/contacts/${encodedContactId}/notes`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            limit: GHL_CONTACT_NOTES_LIMIT,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contacts.notes.trailing_slash",
+      request: () =>
+        requestGhlApi(`/contacts/${encodedContactId}/notes/`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            limit: GHL_CONTACT_NOTES_LIMIT,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+  ];
+
+  const noteCandidates = [];
+  let successfulRequests = 0;
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt.request();
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    successfulRequests += 1;
+    const notes = extractGhlNotesFromPayload(response.body);
+    for (const note of notes) {
+      const parsedNote = buildGhlNoteRecord(note, attempt.source);
+      if (!parsedNote) {
+        continue;
+      }
+      noteCandidates.push(parsedNote);
+    }
+  }
+
+  if (!successfulRequests && lastError) {
+    throw lastError;
+  }
+
+  return dedupeGhlNoteRecords(noteCandidates);
+}
+
+function pickGhlBasicNote(noteCandidates) {
+  const notes = Array.isArray(noteCandidates) ? noteCandidates : [];
+  for (const note of notes) {
+    const haystack = `${sanitizeTextValue(note.title, 300)}\n${sanitizeTextValue(note.body, 12000)}`;
+    if (GHL_BASIC_NOTE_KEYWORD_PATTERN.test(haystack)) {
+      return note;
+    }
+  }
+  return null;
+}
+
+async function findGhlBasicNoteByClientName(clientName) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return {
+      status: "not_found",
+      contactName: "",
+      contactId: "",
+      noteTitle: "",
+      noteBody: "",
+      noteCreatedAt: "",
+      source: "gohighlevel",
+      matchedContacts: 0,
+      inspectedContacts: 0,
+    };
+  }
+
+  const contacts = await searchGhlContactsByClientName(normalizedClientName);
+  if (!contacts.length) {
+    return {
+      status: "not_found",
+      contactName: "",
+      contactId: "",
+      noteTitle: "",
+      noteBody: "",
+      noteCreatedAt: "",
+      source: "gohighlevel",
+      matchedContacts: 0,
+      inspectedContacts: 0,
+    };
+  }
+
+  const contactsToInspect = contacts.slice(0, 10);
+  let inspectedContacts = 0;
+  let successfulContactLookups = 0;
+  let lastLookupError = null;
+
+  for (const rawContact of contactsToInspect) {
+    const contactId = sanitizeTextValue(rawContact?.id || rawContact?._id || rawContact?.contactId, 160);
+    if (!contactId) {
+      continue;
+    }
+
+    inspectedContacts += 1;
+    const contactName = sanitizeTextValue(buildContactCandidateName(rawContact), 300) || normalizedClientName;
+
+    let notes = [];
+    try {
+      notes = await listGhlNotesForContact(contactId);
+      successfulContactLookups += 1;
+    } catch (error) {
+      lastLookupError = error;
+      continue;
+    }
+
+    const basicNote = pickGhlBasicNote(notes);
+    if (!basicNote) {
+      continue;
+    }
+
+    return {
+      status: "found",
+      contactName,
+      contactId,
+      noteTitle: sanitizeTextValue(basicNote.title, 300),
+      noteBody: sanitizeTextValue(basicNote.body, 12000),
+      noteCreatedAt: sanitizeTextValue(basicNote.createdAt, 80),
+      source: sanitizeTextValue(basicNote.source, 120) || "contacts.notes",
+      matchedContacts: contacts.length,
+      inspectedContacts,
+    };
+  }
+
+  if (!successfulContactLookups && inspectedContacts > 0 && lastLookupError) {
+    throw lastLookupError;
+  }
+
+  return {
+    status: "not_found",
+    contactName: "",
+    contactId: "",
+    noteTitle: "",
+    noteBody: "",
+    noteCreatedAt: "",
+    source: "gohighlevel",
+    matchedContacts: contacts.length,
+    inspectedContacts,
+  };
 }
 
 function getUniqueClientNamesFromRecords(records) {
@@ -8886,6 +9196,37 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
     console.error("GET /api/ghl/client-contracts failed:", error);
     res.status(error.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 500) || "Failed to load client contracts from GHL.",
+    });
+  }
+});
+
+app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  const clientName = sanitizeTextValue(req.query.clientName, 300);
+  if (!clientName) {
+    res.status(400).json({
+      error: "Query parameter `clientName` is required.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  try {
+    const lookup = await findGhlBasicNoteByClientName(clientName);
+    res.json({
+      ok: true,
+      clientName,
+      ...lookup,
+    });
+  } catch (error) {
+    console.error("GET /api/ghl/client-basic-note failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load GoHighLevel BASIC note.",
     });
   }
 });
