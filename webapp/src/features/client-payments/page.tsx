@@ -46,19 +46,41 @@ const COLUMN_LABELS: Record<string, string> = {
   serviceType: "Service",
   contractTotals: "Contract",
   totalPayments: "Paid",
+  payment1: "Payment 1",
   payment1Date: "Payment 1 Date",
+  payment2: "Payment 2",
   payment2Date: "Payment 2 Date",
+  payment3: "Payment 3",
   payment3Date: "Payment 3 Date",
+  payment4: "Payment 4",
   payment4Date: "Payment 4 Date",
+  payment5: "Payment 5",
   payment5Date: "Payment 5 Date",
+  payment6: "Payment 6",
   payment6Date: "Payment 6 Date",
+  payment7: "Payment 7",
   payment7Date: "Payment 7 Date",
   futurePayments: "Balance",
   afterResult: "After Result",
-  writtenOff: "Written Off",
-  dateWhenFullyPaid: "Fully Paid Date",
-  createdAt: "Created",
+  notes: "Notes",
+  collection: "COLLECTION",
+  dateOfCollection: "Date of collection",
+  dateWhenWrittenOff: "Date when written off",
 };
+
+const SUMMABLE_TABLE_COLUMNS = new Set<keyof ClientRecord>([
+  "contractTotals",
+  "totalPayments",
+  "payment1",
+  "payment2",
+  "payment3",
+  "payment4",
+  "payment5",
+  "payment6",
+  "payment7",
+  "futurePayments",
+  "collection",
+]);
 
 function getOverviewContextLabel(period: OverviewPeriodKey): string {
   const found = OVERVIEW_PERIOD_OPTIONS.find((option) => option.key === period);
@@ -77,7 +99,6 @@ export default function ClientPaymentsPage() {
     sortState,
     overviewPeriod,
     overviewMetrics,
-    tableTotals,
     closedByOptions,
     filtersCollapsed,
     isSaving,
@@ -145,18 +166,6 @@ export default function ClientPaymentsPage() {
     };
   }, [records.length, visibleRecords]);
 
-  const totalsFooterLayout = useMemo(() => {
-    const contractIndex = TABLE_COLUMNS.indexOf("contractTotals");
-    const paidIndex = TABLE_COLUMNS.indexOf("totalPayments");
-    const balanceIndex = TABLE_COLUMNS.indexOf("futurePayments");
-
-    return {
-      leadingSpan: Math.max(1, contractIndex),
-      middleSpan: Math.max(0, balanceIndex - paidIndex - 1),
-      trailingSpan: Math.max(1, TABLE_COLUMNS.length - balanceIndex - 1),
-    };
-  }, []);
-
   const tableColumns = useMemo<TableColumn<ClientRecord>[]>(() => {
     return TABLE_COLUMNS.map((column) => {
       const isSortable = sortableColumns.has(column);
@@ -178,10 +187,6 @@ export default function ClientPaymentsPage() {
         ),
         align: getColumnAlign(column),
         cell: (record) => {
-          const contractValue = parseMoneyValue(record.contractTotals) || 0;
-          const paidValue = parseMoneyValue(record.totalPayments) || 0;
-          const balanceValue = parseMoneyValue(record.futurePayments) || 0;
-
           switch (column) {
             case "clientName":
               return (
@@ -197,9 +202,17 @@ export default function ClientPaymentsPage() {
             case "serviceType":
               return record.serviceType || "-";
             case "contractTotals":
-              return formatMoney(contractValue);
+              return formatMoneyCell(record.contractTotals);
             case "totalPayments":
-              return formatMoney(paidValue);
+              return formatMoneyCell(record.totalPayments);
+            case "payment1":
+            case "payment2":
+            case "payment3":
+            case "payment4":
+            case "payment5":
+            case "payment6":
+            case "payment7":
+              return formatMoneyCell(record[column]);
             case "payment1Date":
             case "payment2Date":
             case "payment3Date":
@@ -207,17 +220,17 @@ export default function ClientPaymentsPage() {
             case "payment5Date":
             case "payment6Date":
             case "payment7Date":
+            case "dateOfCollection":
+            case "dateWhenWrittenOff":
               return formatDate((record[column] || "").toString());
             case "futurePayments":
-              return formatMoney(balanceValue);
+              return formatMoneyCell(record.futurePayments);
             case "afterResult":
               return record.afterResult ? "Yes" : "No";
-            case "writtenOff":
-              return record.writtenOff ? "Yes" : "No";
-            case "dateWhenFullyPaid":
-              return formatDate(record.dateWhenFullyPaid);
-            case "createdAt":
-              return formatDate(record.createdAt);
+            case "notes":
+              return record.notes || "-";
+            case "collection":
+              return formatMoneyCell(record.collection);
             default:
               return "";
           }
@@ -558,14 +571,30 @@ export default function ClientPaymentsPage() {
               onRowActivate={(record) => openRecordModal(record)}
               footer={
                 <tr>
-                  <td colSpan={totalsFooterLayout.leadingSpan}>
-                    <strong>Totals</strong>
-                  </td>
-                  <td className="cb-table__cell--align-right">{formatMoney(tableTotals.contractTotals)}</td>
-                  <td className="cb-table__cell--align-right">{formatMoney(tableTotals.totalPayments)}</td>
-                  {totalsFooterLayout.middleSpan > 0 ? <td colSpan={totalsFooterLayout.middleSpan} /> : null}
-                  <td className="cb-table__cell--align-right">{formatMoney(tableTotals.futurePayments)}</td>
-                  <td colSpan={totalsFooterLayout.trailingSpan}>{formatMoney(tableTotals.collection)} collection</td>
+                  {TABLE_COLUMNS.map((column) => {
+                    if (column === "clientName") {
+                      return (
+                        <td key={column}>
+                          <strong>Totals</strong>
+                        </td>
+                      );
+                    }
+
+                    if (column === "closedBy") {
+                      return <td key={column}>{`${visibleRecords.length} clients`}</td>;
+                    }
+
+                    if (SUMMABLE_TABLE_COLUMNS.has(column)) {
+                      const sum = sumFieldValues(visibleRecords, column);
+                      return (
+                        <td key={column} className={getColumnAlign(column) === "right" ? "cb-table__cell--align-right" : undefined}>
+                          {sum === null ? "-" : formatMoney(sum)}
+                        </td>
+                      );
+                    }
+
+                    return <td key={column}>-</td>;
+                  })}
                 </tr>
               }
             />
@@ -631,6 +660,8 @@ export default function ClientPaymentsPage() {
 function getColumnAlign(column: keyof ClientRecord): TableAlign {
   if (
     column === "createdAt" ||
+    column === "dateOfCollection" ||
+    column === "dateWhenWrittenOff" ||
     column === "dateWhenFullyPaid" ||
     column === "afterResult" ||
     column === "writtenOff" ||
@@ -639,11 +670,48 @@ function getColumnAlign(column: keyof ClientRecord): TableAlign {
     return "center";
   }
 
-  if (column === "contractTotals" || column === "totalPayments" || column === "futurePayments") {
+  if (
+    column === "contractTotals" ||
+    column === "totalPayments" ||
+    column === "futurePayments" ||
+    column === "collection" ||
+    column === "payment1" ||
+    column === "payment2" ||
+    column === "payment3" ||
+    column === "payment4" ||
+    column === "payment5" ||
+    column === "payment6" ||
+    column === "payment7"
+  ) {
     return "right";
   }
 
   return "left";
+}
+
+function formatMoneyCell(rawValue: string): string {
+  const amount = parseMoneyValue(rawValue);
+  if (amount === null) {
+    return "-";
+  }
+  return formatMoney(amount);
+}
+
+function sumFieldValues(records: ClientRecord[], key: keyof ClientRecord): number | null {
+  let hasAnyValue = false;
+  let sum = 0;
+
+  for (const record of records) {
+    const amount = parseMoneyValue(record[key]);
+    if (amount === null) {
+      continue;
+    }
+
+    hasAnyValue = true;
+    sum += amount;
+  }
+
+  return hasAnyValue ? sum : null;
 }
 
 function TableLoadingSkeleton() {
