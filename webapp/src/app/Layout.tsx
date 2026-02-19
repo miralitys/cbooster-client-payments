@@ -8,6 +8,9 @@ const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
   { to: "/quickbooks", label: "QuickBooks" },
+  { to: "/client-managers", label: "Client Managers" },
+  { to: "/ghl-contracts", label: "GHL Documents" },
+  { to: "/access-control", label: "Access Control" },
   { to: "/legacy/client-payments", label: "Legacy Client Payments", external: true },
   { to: "/legacy/dashboard", label: "Legacy Dashboard", external: true },
 ];
@@ -19,6 +22,18 @@ function resolvePageTitle(pathname: string): string {
 
   if (pathname.startsWith("/quickbooks")) {
     return "QuickBooks";
+  }
+
+  if (pathname.startsWith("/client-managers")) {
+    return "Client - Manager Test";
+  }
+
+  if (pathname.startsWith("/ghl-contracts")) {
+    return "GHL Documents Test";
+  }
+
+  if (pathname.startsWith("/access-control")) {
+    return "Access Control";
   }
 
   return "Client Payments Dashboard";

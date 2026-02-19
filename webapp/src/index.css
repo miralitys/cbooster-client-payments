@@ -1718,6 +1718,264 @@ a {
   line-height: 1.35;
 }
 
+.dashboard-message {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+}
+
+.dashboard-message.error {
+  color: #991b1b;
+}
+
+.subsection-heading {
+  margin: 0;
+  font-size: var(--font-size-md);
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.client-managers-react-page .table-panel,
+.ghl-documents-react-page .table-panel,
+.access-control-react-page .table-panel {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+.client-managers-toolbar-react {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.client-managers-no-manager-only {
+  width: auto;
+  min-height: 34px;
+  white-space: nowrap;
+}
+
+.client-managers-status {
+  margin: 0;
+}
+
+.client-managers-react-table-wrap {
+  min-height: 280px;
+  height: auto;
+  max-height: 72vh;
+  resize: vertical;
+}
+
+.ghl-documents-status {
+  margin: 0;
+}
+
+.ghl-documents-react-table-wrap {
+  min-height: 280px;
+  height: auto;
+  max-height: 72vh;
+  resize: vertical;
+}
+
+.ghl-documents-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.ghl-documents-list__item {
+  display: grid;
+  gap: 2px;
+}
+
+.ghl-documents-link {
+  width: fit-content;
+  color: var(--color-primary);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ghl-documents-link:hover,
+.ghl-documents-link:focus-visible {
+  color: var(--color-primary-hover);
+}
+
+.ghl-documents-link--plain {
+  text-decoration: none;
+  cursor: default;
+}
+
+.ghl-documents-meta {
+  font-size: var(--font-size-xxs);
+  color: var(--color-text-muted);
+}
+
+.access-control-react-page {
+  display: grid;
+  gap: var(--layout-block-gap);
+}
+
+.access-control-status-react {
+  margin: 0;
+}
+
+.access-control-current-grid-react {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.access-control-current-row-react {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.access-control-current-label-react {
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.access-control-current-value-react {
+  color: var(--color-text);
+}
+
+.access-control-form-react {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.access-control-form-actions-react {
+  grid-column: 1 / -1;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.access-control-form-actions-react--end {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.access-control-users-table-wrap-react {
+  min-height: 280px;
+  height: auto;
+  max-height: 72vh;
+  resize: vertical;
+}
+
+.access-control-user-link {
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.access-control-user-link:hover,
+.access-control-user-link:focus-visible {
+  color: var(--color-primary-hover);
+}
+
+.access-control-departments-grid-react {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.access-control-department-card-react {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-3);
+}
+
+.access-control-department-card-react__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.access-control-department-card-react__table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.access-control-department-card-react__table th,
+.access-control-department-card-react__table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+.access-control-department-card-react__table th {
+  background: #f3f4f6;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+
+.access-control-department-card-react__table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.access-control-role-pill-react {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  background: #eef2f7;
+  color: #3f4e66;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.access-control-members-cell-react {
+  min-width: 220px;
+}
+
+.access-control-members-list-react {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.access-control-member-chip-react {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  padding: 3px 8px;
+  font-size: var(--font-size-xs);
+}
+
+.access-control-members-empty-react {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
 @media (max-width: 1180px) {
   .filters-panel,
   .period-dashboard-shell-react,
@@ -1763,6 +2021,10 @@ a {
 
   .record-details-grid,
   .record-editor-form {
+    grid-template-columns: 1fr;
+  }
+
+  .access-control-departments-grid-react {
     grid-template-columns: 1fr;
   }
 }
@@ -1828,6 +2090,15 @@ a {
 
   .quickbooks-refund-filter {
     width: 100%;
+  }
+
+  .access-control-current-row-react {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .access-control-form-react {
+    grid-template-columns: 1fr;
   }
 
   .submission-file-row {

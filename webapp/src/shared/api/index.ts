@@ -9,3 +9,6 @@ export {
   rejectModerationSubmission,
 } from "@/shared/api/moderation";
 export { getQuickBooksPayments } from "@/shared/api/quickbooks";
+export { getClientManagers } from "@/shared/api/clientManagers";
+export { getGhlClientDocuments } from "@/shared/api/ghlDocuments";
+export { createAccessUser, getAccessModel, listAccessUsers, updateAccessUser } from "@/shared/api/accessControl";
