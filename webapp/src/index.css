@@ -501,6 +501,29 @@ a {
   border-top: 1px solid var(--color-border);
 }
 
+.score-filter-block {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: calc(var(--space-2) * 0.8);
+  border-top: 1px solid var(--color-border);
+}
+
+.score-filter-block__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.score-filter-block__header .search-label {
+  margin: 0;
+}
+
+.score-filter-block .cb-segmented {
+  border-top: 0;
+  padding-top: 0;
+}
+
 .period-dashboard-shell__header {
   width: 100%;
   border: 0;
