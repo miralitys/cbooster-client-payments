@@ -1,6 +1,7 @@
 export { Button } from "@/shared/ui/Button";
 export { Field } from "@/shared/ui/Field";
 export { Input } from "@/shared/ui/Input";
+export { DateInput } from "@/shared/ui/DateInput";
 export { Select } from "@/shared/ui/Select";
 export { Textarea } from "@/shared/ui/Textarea";
 export { Card } from "@/shared/ui/Card";
