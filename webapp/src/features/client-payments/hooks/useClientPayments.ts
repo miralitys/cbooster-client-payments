@@ -80,7 +80,6 @@ export function useClientPayments() {
     uiState.selectedPeriod as OverviewPeriodKey,
   );
   const [filtersCollapsed, setFiltersCollapsed] = useState(uiState.filtersCollapsed);
-  const [tableDensity, setTableDensity] = useState<"compact" | "comfortable">(uiState.tableDensity || "compact");
 
   const [modalState, setModalState] = useState<ModalState>(INITIAL_MODAL_STATE);
 
@@ -134,9 +133,8 @@ export function useClientPayments() {
       selectedPeriod: overviewPeriod,
       sortKey: sortState.key,
       sortDirection: sortState.direction,
-      tableDensity,
     });
-  }, [filtersCollapsed, overviewPeriod, sortState.direction, sortState.key, tableDensity]);
+  }, [filtersCollapsed, overviewPeriod, sortState.direction, sortState.key]);
 
   const flushSave = useCallback(async () => {
     if (!initializedRef.current) {
@@ -480,8 +478,6 @@ export function useClientPayments() {
     setDateRange,
     setOverviewPeriod,
     setFiltersCollapsed,
-    tableDensity,
-    setTableDensity,
     toggleSort,
     forceRefresh,
     openCreateModal,

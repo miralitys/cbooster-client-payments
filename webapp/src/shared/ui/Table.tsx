@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 import { cx } from "@/shared/lib/cx";
 
-export type TableDensity = "compact" | "comfortable";
+export type TableDensity = "compact";
 export type TableAlign = "left" | "center" | "right";
 
 export interface TableColumn<RowType> {
