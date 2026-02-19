@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Access Control</title>
-    <link rel="stylesheet" href="/styles.css?v=20260219-access-fix" />
-    <script src="/access-control.js?v=20260219-owner-registration" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260219-access-integrated-user-reg" />
+    <script src="/access-control.js?v=20260219-access-integrated-user-reg" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -19,7 +19,10 @@
             </p>
           </div>
 
-          <div class="page-header__right">
+          <div class="page-header__right access-control-page-header__actions">
+            <button id="access-control-add-user-button" type="button" class="btn btn-primary" hidden>
+              Add New User
+            </button>
             <div id="account-menu" class="account-menu">
               <button
                 id="account-menu-toggle"
@@ -41,9 +44,6 @@
                 <a href="/Client_Payments" class="account-menu__item" role="menuitem">Client Payment</a>
                 <a href="/client-managers" class="account-menu__item" role="menuitem">Client - Manager Test</a>
                 <a href="/access-control" class="account-menu__item" role="menuitem">Access Control</a>
-                <a href="/user-registration" class="account-menu__item" role="menuitem" data-owner-only="true" hidden>
-                  User Registration
-                </a>
                 <div class="account-menu__divider" aria-hidden="true"></div>
                 <p id="account-menu-user" class="account-menu__user">User: -</p>
                 <button id="account-logout-action" type="button" class="account-menu__item" role="menuitem">
@@ -58,6 +58,95 @@
           <h2 class="section-heading">Current Access</h2>
           <p id="access-control-status" class="dashboard-message access-control-status">Loading access model...</p>
           <div id="access-control-current-user" class="access-control-current-user"></div>
+        </section>
+
+        <section
+          id="access-control-registration-panel"
+          class="section access-control-registration-panel user-registration-form-panel"
+          aria-live="polite"
+          hidden
+        >
+          <div class="access-control-registration-panel__header">
+            <h2 class="section-heading">User Registration</h2>
+            <button id="access-control-close-user-form-button" type="button" class="btn btn-secondary">Close</button>
+          </div>
+
+          <p id="access-control-registration-status" class="dashboard-message user-registration-status">
+            Fill out the form to create a new user.
+          </p>
+
+          <form id="access-control-registration-form" class="user-registration-form" novalidate>
+            <label class="user-registration-field">
+              <span>Username (Email)</span>
+              <input id="access-control-new-user-username" name="username" type="email" autocomplete="off" required />
+            </label>
+
+            <label class="user-registration-field">
+              <span>Password</span>
+              <input
+                id="access-control-new-user-password"
+                name="password"
+                type="password"
+                autocomplete="new-password"
+                minlength="8"
+                required
+              />
+            </label>
+
+            <label class="user-registration-field">
+              <span>Display Name</span>
+              <input
+                id="access-control-new-user-display-name"
+                name="displayName"
+                type="text"
+                maxlength="140"
+                autocomplete="off"
+              />
+            </label>
+
+            <label class="user-registration-field">
+              <span>Department</span>
+              <select id="access-control-new-user-department" name="departmentId" required>
+                <option value="accounting">Accounting Department</option>
+                <option value="client_service">Client Service Department</option>
+                <option value="sales">Sales Department</option>
+                <option value="collection">Collection Department</option>
+              </select>
+            </label>
+
+            <label class="user-registration-field">
+              <span>Role</span>
+              <select id="access-control-new-user-role" name="roleId" required></select>
+            </label>
+
+            <label
+              class="user-registration-field user-registration-field--wide"
+              id="access-control-new-user-team-field"
+              hidden
+            >
+              <span>Team Usernames (comma separated, for Middle Manager)</span>
+              <input id="access-control-new-user-team" name="teamUsernames" type="text" autocomplete="off" />
+            </label>
+
+            <button id="access-control-create-user-button" type="submit" class="btn btn-primary">Create User</button>
+          </form>
+
+          <h3 class="subsection-heading">Current Users</h3>
+
+          <div class="table-wrap user-registration-users-wrap">
+            <table class="user-registration-users-table">
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Display Name</th>
+                  <th>Role</th>
+                  <th>Department</th>
+                  <th>Owner</th>
+                </tr>
+              </thead>
+              <tbody id="access-control-users-body"></tbody>
+            </table>
+          </div>
         </section>
 
         <section class="section access-control-departments-panel" aria-live="polite">

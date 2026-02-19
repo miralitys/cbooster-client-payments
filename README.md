@@ -84,8 +84,7 @@ npm start
   - главная страница `/` (Dashboard: overview + таблица заявок на модерацию);
   - страница полной таблицы клиентов `/Client_Payments`;
   - отдельная тестовая страница QuickBooks `/quickbooks-payments`.
-  - страница модели прав `/access-control`.
-  - страница регистрации новых пользователей `/user-registration` (только Owner).
+  - страница модели прав `/access-control` (включая регистрацию пользователей для Owner через кнопку `Add New User`).
 - Выход: `/logout`.
 - Mini App маршруты (`/mini`, `/api/mini/*`) защищаются подписью Telegram `initData`.
 
@@ -104,7 +103,7 @@ npm start
   - `Sales Department`: `Department Head`, `Manager`
   - `Collection Department`: `Department Head`, `Manager`
 - Страница `/access-control` показывает текущую модель доступа, роли и назначенных пользователей.
-- Страница `/user-registration` (Owner only) позволяет создать нового пользователя и назначить ему департамент/роль.
+- На странице `/access-control` (Owner only) доступна кнопка `Add New User` для создания нового пользователя и назначения департамента/роли.
 - Новый пользователь добавляется в текущую runtime-директорию авторизации и доступен сразу после создания.
 - Правила доступа к клиентам:
   - `Accounting Department`: `Department Head` и `Manager` видят всех клиентов и могут редактировать/создавать.
