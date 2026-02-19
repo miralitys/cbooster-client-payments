@@ -290,7 +290,6 @@ const WEB_AUTH_USERS_DIRECTORY = resolveWebAuthUsersDirectory({
   legacyPassword: WEB_AUTH_PASSWORD,
   rawUsersJson: WEB_AUTH_USERS_JSON,
 });
-const WEB_AUTH_USERS = WEB_AUTH_USERS_DIRECTORY.users;
 const WEB_AUTH_USERS_BY_USERNAME = WEB_AUTH_USERS_DIRECTORY.usersByUsername;
 
 const app = express();
@@ -1152,6 +1151,22 @@ function getWebAuthUserByUsername(rawUsername) {
   return WEB_AUTH_USERS_BY_USERNAME.get(username) || null;
 }
 
+function listWebAuthUsers() {
+  return [...WEB_AUTH_USERS_BY_USERNAME.values()].sort((left, right) =>
+    left.username.localeCompare(right.username, "en-US", { sensitivity: "base" }),
+  );
+}
+
+function upsertWebAuthUserInDirectory(rawUser) {
+  const finalized = finalizeWebAuthDirectoryUser(rawUser, WEB_AUTH_OWNER_USERNAME);
+  if (!finalized.username || !finalized.password) {
+    throw createHttpError("Invalid user payload.", 400);
+  }
+
+  WEB_AUTH_USERS_BY_USERNAME.set(finalized.username, finalized);
+  return finalized;
+}
+
 function authenticateWebAuthCredentials(rawUsername, rawPassword) {
   const username = normalizeWebAuthUsername(rawUsername);
   const password = normalizeWebAuthConfigValue(rawPassword);
@@ -1204,8 +1219,49 @@ function buildWebAuthPublicUser(userProfile) {
   };
 }
 
+function normalizeWebAuthRegistrationPayload(rawBody) {
+  const payload = rawBody && typeof rawBody === "object" ? rawBody : {};
+  const username = normalizeWebAuthUsername(payload.username || payload.email);
+  if (!username) {
+    throw createHttpError("Username is required.", 400);
+  }
+
+  if (username === WEB_AUTH_OWNER_USERNAME) {
+    throw createHttpError("Owner account cannot be created from this page.", 400);
+  }
+
+  const password = normalizeWebAuthConfigValue(payload.password);
+  if (!password || password.length < 8) {
+    throw createHttpError("Password is required and must be at least 8 characters.", 400);
+  }
+
+  const departmentId = normalizeWebAuthDepartmentId(payload.departmentId || payload.department);
+  if (!departmentId) {
+    throw createHttpError("Department is required.", 400);
+  }
+
+  const roleId = normalizeWebAuthRoleId(payload.roleId || payload.role, departmentId);
+  if (!roleId || roleId === WEB_AUTH_ROLE_OWNER) {
+    throw createHttpError("Role is required.", 400);
+  }
+
+  if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
+    throw createHttpError("Selected role is not allowed for this department.", 400);
+  }
+
+  const displayName = sanitizeTextValue(payload.displayName || payload.name, 140) || username;
+  return {
+    username,
+    password,
+    displayName,
+    isOwner: false,
+    departmentId,
+    roleId,
+  };
+}
+
 function buildWebAuthAccessModel() {
-  const users = WEB_AUTH_USERS.map((item) => buildWebAuthPublicUser(item));
+  const users = listWebAuthUsers().map((item) => buildWebAuthPublicUser(item));
   const usersByDepartmentRole = new Map();
 
   for (const user of users) {
@@ -4773,6 +4829,47 @@ app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_
   });
 });
 
+app.get("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
+  const items = listWebAuthUsers().map((item) => buildWebAuthPublicUser(item));
+  res.json({
+    ok: true,
+    count: items.length,
+    items,
+  });
+});
+
+app.post("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (req, res) => {
+  let normalizedPayload;
+  try {
+    normalizedPayload = normalizeWebAuthRegistrationPayload(req.body);
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 260) || "Invalid user payload.",
+    });
+    return;
+  }
+
+  const existingUser = getWebAuthUserByUsername(normalizedPayload.username);
+  if (existingUser) {
+    res.status(409).json({
+      error: "User with this username already exists.",
+    });
+    return;
+  }
+
+  try {
+    const createdUser = upsertWebAuthUserInDirectory(normalizedPayload);
+    res.status(201).json({
+      ok: true,
+      item: buildWebAuthPublicUser(createdUser),
+    });
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 260) || "Failed to create user.",
+    });
+  }
+});
+
 app.all("/api/quickbooks/*", (req, res, next) => {
   if (req.method === "GET") {
     next();
@@ -5326,6 +5423,10 @@ app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_
   res.sendFile(path.join(staticRoot, "access-control.html"));
 });
 
+app.get("/user-registration", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "user-registration.html"));
+});
+
 app.use("/api", (_req, res) => {
   res.status(404).json({
     error: "API route not found",
@@ -5339,7 +5440,7 @@ app.get("*", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, re
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log("Web auth is enabled. Sign in at /login.");
-  console.log(`Web auth users loaded: ${WEB_AUTH_USERS.length}. Owner: ${WEB_AUTH_OWNER_USERNAME}.`);
+  console.log(`Web auth users loaded: ${listWebAuthUsers().length}. Owner: ${WEB_AUTH_OWNER_USERNAME}.`);
   if (
     !WEB_AUTH_USERS_JSON &&
     WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME &&

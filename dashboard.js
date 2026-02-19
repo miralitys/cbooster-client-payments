@@ -27,6 +27,7 @@ const accountMenuToggleButton = document.querySelector("#account-menu-toggle");
 const accountMenuPanel = document.querySelector("#account-menu-panel");
 const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
+const ownerOnlyMenuItems = [...document.querySelectorAll('[data-owner-only="true"]')];
 const refreshSubmissionsButton = document.querySelector("#refresh-submissions-button");
 const dashboardMessage = document.querySelector("#dashboard-message");
 
@@ -69,6 +70,7 @@ let cachedOverviewRecords = [];
 let activeSubmissionFilesRequestId = 0;
 let currentAuthUser = "";
 let currentAuthLabel = "";
+let currentAuthIsOwner = false;
 
 initializeMenu();
 initializeAuthSession();
@@ -124,6 +126,7 @@ function initializeMenu() {
 function initializeAuthSession() {
   currentAuthUser = "";
   currentAuthLabel = "";
+  currentAuthIsOwner = false;
   syncAuthUi();
   void hydrateAuthSessionFromServer();
 }
@@ -153,6 +156,14 @@ function syncAuthUi() {
         : `User: ${currentAuthUser}`;
     }
   }
+
+  syncOwnerOnlyMenuItems(currentAuthIsOwner);
+}
+
+function syncOwnerOnlyMenuItems(isOwner) {
+  for (const item of ownerOnlyMenuItems) {
+    item.hidden = !isOwner;
+  }
 }
 
 async function hydrateAuthSessionFromServer() {
@@ -176,8 +187,10 @@ async function hydrateAuthSessionFromServer() {
     const username = (payload?.user?.username || "").toString().trim();
     const roleName = (payload?.user?.roleName || "").toString().trim();
     const departmentName = (payload?.user?.departmentName || "").toString().trim();
+    const isOwner = Boolean(payload?.user?.isOwner);
     currentAuthUser = username || "";
     currentAuthLabel = buildAuthLabel(roleName, departmentName);
+    currentAuthIsOwner = isOwner;
     syncAuthUi();
   } catch {
     // Keep default placeholder.

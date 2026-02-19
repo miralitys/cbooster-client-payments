@@ -194,6 +194,7 @@ const accountMenuPanel = document.querySelector("#account-menu-panel");
 const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLoginActionButton = document.querySelector("#account-login-action");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
+const ownerOnlyMenuItems = [...document.querySelectorAll('[data-owner-only="true"]')];
 const dashboardGrid = document.querySelector(".dashboard-grid");
 const filtersPanel = document.querySelector(".filters-panel");
 const searchInput = document.querySelector("#search-input");
@@ -285,6 +286,7 @@ let isCardEditMode = false;
 let lastFocusedElementBeforeModal = null;
 let currentAuthUser = "";
 let currentAuthLabel = "";
+let currentAuthIsOwner = false;
 let isRemoteSyncEnabled = IS_HTTP_CONTEXT;
 let hasCompletedInitialRemoteSync = false;
 let remoteSyncTimeoutId = null;
@@ -3263,6 +3265,7 @@ function initializeAuthGate() {}
 function initializeAuthSession() {
   currentAuthUser = "";
   currentAuthLabel = "";
+  currentAuthIsOwner = false;
   syncAuthUi();
   void hydrateAuthSessionFromServer();
 }
@@ -3302,6 +3305,14 @@ function syncAuthUi() {
   if (accountLogoutActionButton) {
     accountLogoutActionButton.hidden = !isSignedIn;
   }
+
+  syncOwnerOnlyMenuItems(currentAuthIsOwner);
+}
+
+function syncOwnerOnlyMenuItems(isOwner) {
+  for (const item of ownerOnlyMenuItems) {
+    item.hidden = !isOwner;
+  }
 }
 
 async function hydrateAuthSessionFromServer() {
@@ -3325,8 +3336,10 @@ async function hydrateAuthSessionFromServer() {
     const username = (payload?.user?.username || "").toString().trim();
     const roleName = (payload?.user?.roleName || "").toString().trim();
     const departmentName = (payload?.user?.departmentName || "").toString().trim();
+    const isOwner = Boolean(payload?.user?.isOwner);
     currentAuthUser = username || "";
     currentAuthLabel = buildAuthLabel(roleName, departmentName);
+    currentAuthIsOwner = isOwner;
     syncAuthUi();
   } catch {
     // Keep optimistic menu state.

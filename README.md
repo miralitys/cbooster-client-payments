@@ -58,6 +58,8 @@ npm start
 Сервис поднимает API:
 - `GET /api/auth/session`
 - `GET /api/auth/access-model`
+- `GET /api/auth/users`
+- `POST /api/auth/users`
 - `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD[&sync=1][&fullSync=1]`
 - `GET /api/health`
 - `GET /api/records`
@@ -83,6 +85,7 @@ npm start
   - страница полной таблицы клиентов `/Client_Payments`;
   - отдельная тестовая страница QuickBooks `/quickbooks-payments`.
   - страница модели прав `/access-control`.
+  - страница регистрации новых пользователей `/user-registration` (только Owner).
 - Выход: `/logout`.
 - Mini App маршруты (`/mini`, `/api/mini/*`) защищаются подписью Telegram `initData`.
 
@@ -100,6 +103,8 @@ npm start
   - `Sales Department`: `Department Head`, `Manager`
   - `Collection Department`: `Department Head`, `Manager`
 - Страница `/access-control` показывает текущую модель доступа, роли и назначенных пользователей.
+- Страница `/user-registration` (Owner only) позволяет создать нового пользователя и назначить ему департамент/роль.
+- Новый пользователь добавляется в текущую runtime-директорию авторизации и доступен сразу после создания.
 
 ## QuickBooks тест (отдельно)
 

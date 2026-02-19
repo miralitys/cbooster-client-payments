@@ -1844,6 +1844,60 @@ tbody tr.row-tone-active:hover td {
   color: var(--color-text-muted);
 }
 
+.user-registration-page {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.user-registration-page-header {
+  align-items: flex-end;
+}
+
+.user-registration-subtitle {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.user-registration-status {
+  margin: 0;
+}
+
+.user-registration-status.error {
+  color: var(--color-error-text);
+}
+
+.user-registration-form {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+}
+
+.user-registration-field {
+  display: grid;
+  gap: 6px;
+}
+
+.user-registration-field span {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-semibold);
+}
+
+.user-registration-users-wrap {
+  min-height: 220px;
+}
+
+.user-registration-users-table {
+  min-width: 840px;
+}
+
+.user-registration-users-table__empty-cell {
+  text-align: center;
+  color: var(--color-text-muted);
+}
+
 .client-manager-table-wrap {
   min-height: 280px;
   height: auto;
@@ -2347,6 +2401,10 @@ body.modal-open {
   .access-control-current-user__row {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .user-registration-form {
+    grid-template-columns: 1fr;
   }
 
   th,
