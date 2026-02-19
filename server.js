@@ -120,6 +120,7 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
   },
   {
     displayName: "Alla Havrysh",
+    username: "allah@urbansa.us",
     departmentId: WEB_AUTH_DEPARTMENT_ACCOUNTING,
     roleId: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
   },
