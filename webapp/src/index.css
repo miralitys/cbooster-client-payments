@@ -323,7 +323,7 @@ a {
   min-height: 142px;
 }
 
-.dashboard-grid-react.is-filters-collapsed .section-heading {
+.dashboard-grid-react.is-filters-collapsed .filters-panel .section-heading {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
 }
@@ -1076,7 +1076,7 @@ a {
     min-height: 0;
   }
 
-  .dashboard-grid-react.is-filters-collapsed .section-heading {
+  .dashboard-grid-react.is-filters-collapsed .filters-panel .section-heading {
     writing-mode: initial;
     transform: none;
   }
