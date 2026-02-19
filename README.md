@@ -32,6 +32,8 @@ npm start
 4. В переменных Render добавьте:
    - `WEB_AUTH_USERNAME` = логин для входа на веб-сайт;
    - `WEB_AUTH_PASSWORD` = пароль для входа на веб-сайт;
+   - `WEB_AUTH_OWNER_USERNAME` = username владельца с полными правами (по умолчанию `ramisi@creditbooster.com`);
+   - `WEB_AUTH_USERS_JSON` = JSON-массив пользователей с ролями/департаментами (опционально);
    - `WEB_AUTH_SESSION_SECRET` = длинный случайный секрет для подписи cookie-сессии;
    - `WEB_AUTH_SESSION_TTL_SEC` = TTL сессии в секундах (по умолчанию `43200` = 12 часов);
    - `WEB_AUTH_COOKIE_SECURE` = `true`/`false` (опционально, принудительный secure-флаг cookie);
@@ -55,6 +57,7 @@ npm start
 
 Сервис поднимает API:
 - `GET /api/auth/session`
+- `GET /api/auth/access-model`
 - `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD[&sync=1][&fullSync=1]`
 - `GET /api/health`
 - `GET /api/records`
@@ -79,8 +82,24 @@ npm start
   - главная страница `/` (Dashboard: overview + таблица заявок на модерацию);
   - страница полной таблицы клиентов `/Client_Payments`;
   - отдельная тестовая страница QuickBooks `/quickbooks-payments`.
+  - страница модели прав `/access-control`.
 - Выход: `/logout`.
 - Mini App маршруты (`/mini`, `/api/mini/*`) защищаются подписью Telegram `initData`.
+
+## Global Access Control (RBAC)
+
+- Главный аккаунт (`Owner`) задается через `WEB_AUTH_OWNER_USERNAME` и имеет полный доступ ко всем разделам.
+- Дополнительные аккаунты можно задать через `WEB_AUTH_USERS_JSON`:
+  - `username`, `password`, `displayName` (опционально),
+  - `department` (`accounting`, `client_service`, `sales`, `collection`),
+  - `role` (`department_head`, `middle_manager`, `manager`),
+  - `isOwner` (`true/false`, опционально).
+- Департаменты и роли (на английском):
+  - `Accounting Department`: `Department Head`, `Manager`
+  - `Client Service Department`: `Department Head`, `Middle Manager`, `Manager`
+  - `Sales Department`: `Department Head`, `Manager`
+  - `Collection Department`: `Department Head`, `Manager`
+- Страница `/access-control` показывает текущую модель доступа, роли и назначенных пользователей.
 
 ## QuickBooks тест (отдельно)
 

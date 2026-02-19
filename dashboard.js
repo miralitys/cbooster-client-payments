@@ -68,6 +68,7 @@ let activeOverviewPeriod = OVERVIEW_PERIOD_DEFAULT;
 let cachedOverviewRecords = [];
 let activeSubmissionFilesRequestId = 0;
 let currentAuthUser = "";
+let currentAuthLabel = "";
 
 initializeMenu();
 initializeAuthSession();
@@ -122,6 +123,7 @@ function initializeMenu() {
 
 function initializeAuthSession() {
   currentAuthUser = "";
+  currentAuthLabel = "";
   syncAuthUi();
   void hydrateAuthSessionFromServer();
 }
@@ -143,7 +145,13 @@ function signOutCurrentUser() {
 
 function syncAuthUi() {
   if (accountMenuUser) {
-    accountMenuUser.textContent = currentAuthUser ? `User: ${currentAuthUser}` : "User: -";
+    if (!currentAuthUser) {
+      accountMenuUser.textContent = "User: -";
+    } else {
+      accountMenuUser.textContent = currentAuthLabel
+        ? `User: ${currentAuthUser} (${currentAuthLabel})`
+        : `User: ${currentAuthUser}`;
+    }
   }
 }
 
@@ -166,11 +174,23 @@ async function hydrateAuthSessionFromServer() {
 
     const payload = await response.json().catch(() => null);
     const username = (payload?.user?.username || "").toString().trim();
+    const roleName = (payload?.user?.roleName || "").toString().trim();
+    const departmentName = (payload?.user?.departmentName || "").toString().trim();
     currentAuthUser = username || "";
+    currentAuthLabel = buildAuthLabel(roleName, departmentName);
     syncAuthUi();
   } catch {
     // Keep default placeholder.
   }
+}
+
+function buildAuthLabel(roleName, departmentName) {
+  const normalizedRoleName = roleName.toString().trim();
+  const normalizedDepartmentName = departmentName.toString().trim();
+  if (normalizedRoleName && normalizedDepartmentName) {
+    return `${normalizedRoleName} | ${normalizedDepartmentName}`;
+  }
+  return normalizedRoleName || normalizedDepartmentName || "";
 }
 
 function initializeOverviewPeriodButtons() {

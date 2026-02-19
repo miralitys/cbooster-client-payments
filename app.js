@@ -284,6 +284,7 @@ let editingRecordId = "";
 let isCardEditMode = false;
 let lastFocusedElementBeforeModal = null;
 let currentAuthUser = "";
+let currentAuthLabel = "";
 let isRemoteSyncEnabled = IS_HTTP_CONTEXT;
 let hasCompletedInitialRemoteSync = false;
 let remoteSyncTimeoutId = null;
@@ -3261,6 +3262,7 @@ function initializeAuthGate() {}
 
 function initializeAuthSession() {
   currentAuthUser = "";
+  currentAuthLabel = "";
   syncAuthUi();
   void hydrateAuthSessionFromServer();
 }
@@ -3284,7 +3286,13 @@ function syncAuthUi() {
   const isSignedIn = Boolean(currentAuthUser);
 
   if (accountMenuUser) {
-    accountMenuUser.textContent = isSignedIn ? `User: ${currentAuthUser}` : "User: -";
+    if (!isSignedIn) {
+      accountMenuUser.textContent = "User: -";
+    } else {
+      accountMenuUser.textContent = currentAuthLabel
+        ? `User: ${currentAuthUser} (${currentAuthLabel})`
+        : `User: ${currentAuthUser}`;
+    }
   }
 
   if (accountLoginActionButton) {
@@ -3315,11 +3323,23 @@ async function hydrateAuthSessionFromServer() {
 
     const payload = await response.json().catch(() => null);
     const username = (payload?.user?.username || "").toString().trim();
+    const roleName = (payload?.user?.roleName || "").toString().trim();
+    const departmentName = (payload?.user?.departmentName || "").toString().trim();
     currentAuthUser = username || "";
+    currentAuthLabel = buildAuthLabel(roleName, departmentName);
     syncAuthUi();
   } catch {
     // Keep optimistic menu state.
   }
+}
+
+function buildAuthLabel(roleName, departmentName) {
+  const normalizedRoleName = roleName.toString().trim();
+  const normalizedDepartmentName = departmentName.toString().trim();
+  if (normalizedRoleName && normalizedDepartmentName) {
+    return `${normalizedRoleName} | ${normalizedDepartmentName}`;
+  }
+  return normalizedRoleName || normalizedDepartmentName || "";
 }
 
 function redirectToLoginPage() {
