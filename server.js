@@ -135,6 +135,12 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
     departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     roleId: WEB_AUTH_ROLE_MIDDLE_MANAGER,
   },
+  {
+    displayName: "Alina Yavlovskaya",
+    username: "alinay@creditbooster.com",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
 ];
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
