@@ -104,6 +104,11 @@ npm start
   - `Collection Department`: `Department Head`, `Manager`
 - Страница `/access-control` показывает текущую модель доступа, роли и назначенных пользователей.
 - На странице `/access-control` (Owner only) доступна кнопка `Add New User` для создания нового пользователя и назначения департамента/роли.
+- В форме создания пользователя на `/access-control` поля `Username` и `Password` необязательны: можно завести сотрудника только по `Display Name + Department + Role`.
+- Если `Username/Password` не переданы, система создаст временные технические credentials автоматически (только для внутренней записи пользователя).
+- Для текущей структуры также автоматически добавляются пользователи без обязательного email/password:
+  - `Client Service Department`: `Nataly Regush` (`Department Head`), `Anastasiia Lopatina`, `Arslan Utiaganov`, `Liudmyla Sydachenko`, `Dmitrii Kabanov`, `Arina Alekhina` (`Manager`).
+  - `Accounting Department`: `Alla Havrysh` (`Department Head`).
 - Новый пользователь добавляется в текущую runtime-директорию авторизации и доступен сразу после создания.
 - Правила доступа к клиентам:
   - `Accounting Department`: `Department Head` и `Manager` видят всех клиентов и могут редактировать/создавать.

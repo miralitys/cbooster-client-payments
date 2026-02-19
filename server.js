@@ -87,6 +87,43 @@ const WEB_AUTH_DEPARTMENT_DEFINITIONS = [
     roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
   },
 ];
+const WEB_AUTH_BOOTSTRAP_USERS = [
+  {
+    displayName: "Nataly Regush",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
+  },
+  {
+    displayName: "Anastasiia Lopatina",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Arslan Utiaganov",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Liudmyla Sydachenko",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Dmitrii Kabanov",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Arina Alekhina",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Alla Havrysh",
+    departmentId: WEB_AUTH_DEPARTMENT_ACCOUNTING,
+    roleId: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
+  },
+];
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
 const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
@@ -291,6 +328,7 @@ const WEB_AUTH_USERS_DIRECTORY = resolveWebAuthUsersDirectory({
   rawUsersJson: WEB_AUTH_USERS_JSON,
 });
 const WEB_AUTH_USERS_BY_USERNAME = WEB_AUTH_USERS_DIRECTORY.usersByUsername;
+seedWebAuthBootstrapUsers();
 
 const app = express();
 app.set("trust proxy", 1);
@@ -838,6 +876,100 @@ function resolveSafeNextPath(rawValue) {
 
 function normalizeWebAuthUsername(rawValue) {
   return normalizeWebAuthConfigValue(rawValue).toLowerCase();
+}
+
+function normalizeWebAuthUsernameSeed(rawValue) {
+  return sanitizeTextValue(rawValue, 140)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ".")
+    .replace(/\.{2,}/g, ".")
+    .replace(/^\./, "")
+    .replace(/\.$/, "")
+    .slice(0, 80);
+}
+
+function generateWebAuthUsernameFromDisplayName(displayName) {
+  const normalizedDisplayName = sanitizeTextValue(displayName, 140);
+  const baseSeed = normalizeWebAuthUsernameSeed(normalizedDisplayName) || "user";
+  let counter = 1;
+
+  while (counter <= 10_000) {
+    const suffix = counter === 1 ? "" : `.${counter}`;
+    const candidate = `pending.${baseSeed}${suffix}`.slice(0, 120);
+    if (candidate && !WEB_AUTH_USERS_BY_USERNAME.has(candidate) && candidate !== WEB_AUTH_OWNER_USERNAME) {
+      return candidate;
+    }
+    counter += 1;
+  }
+
+  return `pending.user.${Date.now().toString(36)}`.slice(0, 120);
+}
+
+function generateWebAuthTemporaryPassword() {
+  const randomChunk = Math.random().toString(36).slice(2, 12);
+  const tsChunk = Date.now().toString(36).slice(-6);
+  return `Temp!${randomChunk}${tsChunk}`;
+}
+
+function buildWebAuthBootstrapUserPassword(username) {
+  const normalizedUsername = normalizeWebAuthUsername(username);
+  const digest = crypto
+    .createHash("sha256")
+    .update(`bootstrap-user:${normalizedUsername}:${WEB_AUTH_SESSION_SECRET}`)
+    .digest("hex");
+  return `Temp!${digest.slice(0, 14)}`;
+}
+
+function hasWebAuthUserWithDisplayName(displayName) {
+  const normalizedDisplayName = sanitizeTextValue(displayName, 140).toLowerCase();
+  if (!normalizedDisplayName) {
+    return false;
+  }
+
+  for (const user of WEB_AUTH_USERS_BY_USERNAME.values()) {
+    if (sanitizeTextValue(user?.displayName, 140).toLowerCase() === normalizedDisplayName) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function seedWebAuthBootstrapUsers() {
+  for (const bootstrapUser of WEB_AUTH_BOOTSTRAP_USERS) {
+    const displayName = sanitizeTextValue(bootstrapUser?.displayName, 140);
+    const departmentId = normalizeWebAuthDepartmentId(bootstrapUser?.departmentId);
+    const roleId = normalizeWebAuthRoleId(bootstrapUser?.roleId, departmentId);
+
+    if (!displayName || !departmentId || !roleId || !isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
+      continue;
+    }
+
+    if (hasWebAuthUserWithDisplayName(displayName)) {
+      continue;
+    }
+
+    const username = generateWebAuthUsernameFromDisplayName(displayName);
+    const password = buildWebAuthBootstrapUserPassword(username);
+    const finalized = finalizeWebAuthDirectoryUser(
+      {
+        username,
+        password,
+        displayName,
+        isOwner: false,
+        departmentId,
+        roleId,
+        teamUsernames: [],
+      },
+      WEB_AUTH_OWNER_USERNAME,
+    );
+
+    if (!finalized.username || !finalized.password) {
+      continue;
+    }
+
+    WEB_AUTH_USERS_BY_USERNAME.set(finalized.username, finalized);
+  }
 }
 
 function normalizeWebAuthDepartmentId(rawValue) {
@@ -1404,18 +1536,25 @@ function buildWebAuthPublicUser(userProfile) {
 
 function normalizeWebAuthRegistrationPayload(rawBody) {
   const payload = rawBody && typeof rawBody === "object" ? rawBody : {};
-  const username = normalizeWebAuthUsername(payload.username || payload.email);
+  const displayName = sanitizeTextValue(payload.displayName || payload.name, 140);
+  let username = normalizeWebAuthUsername(payload.username || payload.email);
+  if (!username && !displayName) {
+    throw createHttpError("Display Name is required when Username is empty.", 400);
+  }
   if (!username) {
-    throw createHttpError("Username is required.", 400);
+    username = generateWebAuthUsernameFromDisplayName(displayName);
   }
 
   if (username === WEB_AUTH_OWNER_USERNAME) {
     throw createHttpError("Owner account cannot be created from this page.", 400);
   }
 
-  const password = normalizeWebAuthConfigValue(payload.password);
-  if (!password || password.length < 8) {
-    throw createHttpError("Password is required and must be at least 8 characters.", 400);
+  let password = normalizeWebAuthConfigValue(payload.password);
+  if (password && password.length < 8) {
+    throw createHttpError("Password must be at least 8 characters.", 400);
+  }
+  if (!password) {
+    password = generateWebAuthTemporaryPassword();
   }
 
   const departmentId = normalizeWebAuthDepartmentId(payload.departmentId || payload.department);
@@ -1433,11 +1572,11 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
   }
 
   const teamUsernames = normalizeWebAuthTeamUsernames(payload.teamUsernames || payload.team);
-  const displayName = sanitizeTextValue(payload.displayName || payload.name, 140) || username;
+  const normalizedDisplayName = displayName || username;
   return {
     username,
     password,
-    displayName,
+    displayName: normalizedDisplayName,
     isOwner: false,
     departmentId,
     roleId,

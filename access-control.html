@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Access Control</title>
-    <link rel="stylesheet" href="/styles.css?v=20260219-access-integrated-user-reg" />
-    <script src="/access-control.js?v=20260219-access-integrated-user-reg" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20260219-access-integrated-user-reg-optional-credentials" />
+    <script src="/access-control.js?v=20260219-access-integrated-user-reg-optional-credentials" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -72,24 +72,29 @@
           </div>
 
           <p id="access-control-registration-status" class="dashboard-message user-registration-status">
-            Fill out the form to create a new user.
+            Fill out the form to create a new user. Username and password are optional.
           </p>
 
           <form id="access-control-registration-form" class="user-registration-form" novalidate>
             <label class="user-registration-field">
-              <span>Username (Email)</span>
-              <input id="access-control-new-user-username" name="username" type="email" autocomplete="off" required />
+              <span>Username / Email (optional)</span>
+              <input
+                id="access-control-new-user-username"
+                name="username"
+                type="text"
+                autocomplete="off"
+                placeholder="Optional: user email or login"
+              />
             </label>
 
             <label class="user-registration-field">
-              <span>Password</span>
+              <span>Password (optional)</span>
               <input
                 id="access-control-new-user-password"
                 name="password"
                 type="password"
                 autocomplete="new-password"
-                minlength="8"
-                required
+                placeholder="Optional: at least 8 characters"
               />
             </label>
 
@@ -101,6 +106,8 @@
                 type="text"
                 maxlength="140"
                 autocomplete="off"
+                required
+                placeholder="Required"
               />
             </label>
 
