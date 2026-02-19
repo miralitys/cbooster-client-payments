@@ -40,4 +40,17 @@ describe("evaluateClientScore", () => {
     expect(result.displayScore).toBeNull();
     expect(result.explanation).toContain("After Result");
   });
+
+  it("returns no score for fully paid clients", () => {
+    const result = evaluateClientScore(
+      makeRecord({
+        payment1: "1000",
+      }),
+      new Date("2026-02-19T12:00:00Z"),
+    );
+
+    expect(result.score).toBeNull();
+    expect(result.displayScore).toBeNull();
+    expect(result.explanation).toContain("Fully Paid");
+  });
 });
