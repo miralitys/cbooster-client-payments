@@ -516,27 +516,6 @@ export default function ClientPaymentsPage() {
                 />
               ) : null}
 
-              <div className="score-filter-block">
-                <div className="score-filter-block__header">
-                  <p className="search-label">Score</p>
-                  <Button
-                    type="button"
-                    variant={isScoreFilterOpen ? "primary" : "secondary"}
-                    size="sm"
-                    onClick={() => setIsScoreFilterOpen((prev) => !prev)}
-                  >
-                    Score
-                  </Button>
-                </div>
-                {isScoreFilterOpen ? (
-                  <SegmentedControl
-                    value={scoreFilter}
-                    options={SCORE_FILTER_OPTIONS}
-                    onChange={(value) => setScoreFilter(value as ScoreFilter)}
-                  />
-                ) : null}
-              </div>
-
               {filters.status === "written-off" ? (
                 <div className="written-off-date-filter-react">
                   <div className="filter-field">
@@ -582,6 +561,27 @@ export default function ClientPaymentsPage() {
                   </div>
                 </div>
               ) : null}
+
+              <div className="score-filter-block">
+                <div className="score-filter-block__header">
+                  <p className="search-label">Score</p>
+                  <Button
+                    type="button"
+                    variant={isScoreFilterOpen ? "primary" : "secondary"}
+                    size="sm"
+                    onClick={() => setIsScoreFilterOpen((prev) => !prev)}
+                  >
+                    Score
+                  </Button>
+                </div>
+                {isScoreFilterOpen ? (
+                  <SegmentedControl
+                    value={scoreFilter}
+                    options={SCORE_FILTER_OPTIONS}
+                    onChange={(value) => setScoreFilter(value as ScoreFilter)}
+                  />
+                ) : null}
+              </div>
             </div>
           ) : null}
         </Panel>
