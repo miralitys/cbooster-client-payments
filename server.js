@@ -159,6 +159,16 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
     roleId: WEB_AUTH_ROLE_MANAGER,
   },
   {
+    displayName: "Vlad Burnis",
+    departmentId: WEB_AUTH_DEPARTMENT_SALES,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Yurii Kis",
+    departmentId: WEB_AUTH_DEPARTMENT_SALES,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
     displayName: "Dmitriy Polanski",
     departmentId: WEB_AUTH_DEPARTMENT_COLLECTION,
     roleId: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
