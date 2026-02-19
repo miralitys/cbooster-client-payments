@@ -293,7 +293,7 @@ const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MA
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
 const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", "error"]);
-const GHL_REQUIRED_CONTRACT_TITLE_PREFIXES = ["creditier contract", "credit booster"];
+const GHL_REQUIRED_CONTRACT_KEYWORD_PATTERN = /\bcontracts?\b/;
 const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
 const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
@@ -4104,17 +4104,11 @@ function extractGhlFileNameFromUrl(rawUrl) {
 }
 
 function hasGhlRequiredContractPrefix(candidate) {
-  const expectedPrefixes = GHL_REQUIRED_CONTRACT_TITLE_PREFIXES.map((value) => normalizeGhlContractComparableText(value)).filter(
-    Boolean,
-  );
-  if (!expectedPrefixes.length) {
-    return false;
-  }
-
   const possibleTitles = [
     candidate?.title,
     extractGhlFileNameFromUrl(candidate?.url),
     candidate?.snippet,
+    candidate?.url,
   ];
 
   for (const rawTitle of possibleTitles) {
@@ -4123,11 +4117,7 @@ function hasGhlRequiredContractPrefix(candidate) {
       continue;
     }
 
-    if (expectedPrefixes.some((prefix) => normalizedTitle.startsWith(prefix))) {
-      return true;
-    }
-
-    if (normalizedTitle.includes("credit booster") && /\b(contract|agreement)\b/.test(normalizedTitle)) {
+    if (GHL_REQUIRED_CONTRACT_KEYWORD_PATTERN.test(normalizedTitle)) {
       return true;
     }
   }
