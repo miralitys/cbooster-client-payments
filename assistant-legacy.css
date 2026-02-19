@@ -201,6 +201,24 @@
   color: #475569;
 }
 
+.legacy-assistant__client-link {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: inline;
+  background: transparent;
+  color: #1d4ed8;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.legacy-assistant__message--user .legacy-assistant__client-link {
+  color: inherit;
+}
+
 .legacy-assistant__suggestions {
   border-top: 1px solid #d6dde6;
   padding: 8px 10px;

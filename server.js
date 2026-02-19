@@ -2472,6 +2472,51 @@ function normalizeAssistantReplyForDisplay(rawValue) {
   return sanitizeTextValue(lines.join("\n"), 8000);
 }
 
+function buildAssistantClientMentions(replyText, records, limit = 20) {
+  const normalizedReply = normalizeAssistantComparableText(replyText, 10000);
+  if (!normalizedReply) {
+    return [];
+  }
+
+  const mentionCandidates = [];
+  const seenComparableNames = new Set();
+
+  for (const record of Array.isArray(records) ? records : []) {
+    const clientName = sanitizeTextValue(record?.clientName, 220);
+    if (!clientName) {
+      continue;
+    }
+
+    const comparableName = normalizeAssistantComparableText(clientName, 220);
+    if (!comparableName || seenComparableNames.has(comparableName)) {
+      continue;
+    }
+
+    seenComparableNames.add(comparableName);
+    mentionCandidates.push({
+      originalName: clientName,
+      comparableName,
+    });
+  }
+
+  mentionCandidates.sort((left, right) => right.comparableName.length - left.comparableName.length);
+
+  const mentions = [];
+  for (const candidate of mentionCandidates) {
+    if (mentions.length >= limit) {
+      break;
+    }
+
+    if (!normalizedReply.includes(candidate.comparableName)) {
+      continue;
+    }
+
+    mentions.push(candidate.originalName);
+  }
+
+  return mentions;
+}
+
 async function requestOpenAiAssistantReply(message, mode, records, updatedAt) {
   if (!isOpenAiAssistantConfigured()) {
     return null;
@@ -7748,6 +7793,8 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
       }
     }
 
+    const clientMentions = buildAssistantClientMentions(finalReply, filteredRecords, 24);
+
     console.info(
       `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length}`,
     );
@@ -7755,6 +7802,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     res.json({
       ok: true,
       reply: normalizeAssistantReplyForDisplay(finalReply),
+      clientMentions,
       suggestions: Array.isArray(fallbackPayload.suggestions) ? fallbackPayload.suggestions.slice(0, 8) : [],
       source: {
         recordsUsed: filteredRecords.length,

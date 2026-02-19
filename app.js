@@ -311,6 +311,7 @@ initializeOverviewPeriodButtons();
 initializeOverviewPanelToggle();
 initializeExportDropdown();
 initializeEditModal();
+initializeAssistantClientOpenBridge();
 initializeAccountMenu();
 initializeAuthGate();
 initializeAuthSession();
@@ -658,6 +659,60 @@ function openEditModal(recordId) {
   if (closeButton instanceof HTMLButtonElement) {
     closeButton.focus();
   }
+}
+
+function initializeAssistantClientOpenBridge() {
+  window.addEventListener("cb-assistant-open-client", (event) => {
+    const clientName = (event?.detail?.clientName || "").toString();
+    const match = findRecordByClientName(clientName);
+    if (!match) {
+      return;
+    }
+
+    openEditModal(match.id);
+  });
+}
+
+function findRecordByClientName(rawClientName) {
+  const requestedName = normalizeClientName(rawClientName);
+  if (!requestedName) {
+    return null;
+  }
+
+  let exactMatch = null;
+  let exactTimestamp = 0;
+  let fuzzyMatch = null;
+  let fuzzyTimestamp = 0;
+
+  for (const record of records) {
+    const candidateName = normalizeClientName(record?.clientName);
+    if (!candidateName) {
+      continue;
+    }
+
+    const createdAtTimestamp = parseRecordCreatedAtTimestamp(record);
+    if (candidateName === requestedName) {
+      if (!exactMatch || createdAtTimestamp > exactTimestamp) {
+        exactMatch = record;
+        exactTimestamp = createdAtTimestamp;
+      }
+      continue;
+    }
+
+    if (candidateName.includes(requestedName) || requestedName.includes(candidateName)) {
+      if (!fuzzyMatch || createdAtTimestamp > fuzzyTimestamp) {
+        fuzzyMatch = record;
+        fuzzyTimestamp = createdAtTimestamp;
+      }
+    }
+  }
+
+  return exactMatch || fuzzyMatch;
+}
+
+function parseRecordCreatedAtTimestamp(record) {
+  const timestamp = Date.parse((record?.createdAt || "").toString());
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function fillEditForm(record) {

@@ -8,6 +8,7 @@
   const ROOT_CLASS = "legacy-assistant";
   const LAUNCHER_CLASS = "legacy-assistant__launcher";
   const PANEL_CLASS = "legacy-assistant__panel";
+  const CLIENT_OPEN_EVENT = "cb-assistant-open-client";
   const STORAGE_KEY = "cb_assistant_mode";
   const API_PATH = "/api/assistant/chat";
   const MAX_TEXT_LENGTH = 2000;
@@ -95,6 +96,7 @@
         id: createId(),
         role: "assistant",
         text: t.greeting,
+        mentions: [],
       },
     ],
     suggestions: t.defaultSuggestions.slice(),
@@ -114,6 +116,95 @@
 
   function normalizeText(value) {
     return (value || "").toString().replace(/\s+/g, " ").trim();
+  }
+
+  function normalizeMentionList(rawMentions) {
+    if (!Array.isArray(rawMentions)) {
+      return [];
+    }
+
+    const seen = new Set();
+    const mentions = [];
+
+    for (const item of rawMentions) {
+      const mention = normalizeText(item);
+      if (!mention) {
+        continue;
+      }
+
+      const key = mention.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      mentions.push(mention);
+    }
+
+    return mentions.sort(function sortByLength(left, right) {
+      return right.length - left.length;
+    });
+  }
+
+  function splitMessageByMentions(text, mentions) {
+    const normalizedText = (text || "").toString();
+    const mentionList = normalizeMentionList(mentions);
+    if (!mentionList.length) {
+      return [{ type: "text", text: normalizedText }];
+    }
+
+    const lowerText = normalizedText.toLowerCase();
+    const parts = [];
+    let cursor = 0;
+
+    while (cursor < normalizedText.length) {
+      let bestStart = -1;
+      let bestMention = "";
+
+      for (const mention of mentionList) {
+        const start = lowerText.indexOf(mention.toLowerCase(), cursor);
+        if (start === -1) {
+          continue;
+        }
+
+        if (bestStart === -1 || start < bestStart || (start === bestStart && mention.length > bestMention.length)) {
+          bestStart = start;
+          bestMention = mention;
+        }
+      }
+
+      if (bestStart === -1) {
+        parts.push({ type: "text", text: normalizedText.slice(cursor) });
+        break;
+      }
+
+      if (bestStart > cursor) {
+        parts.push({ type: "text", text: normalizedText.slice(cursor, bestStart) });
+      }
+
+      const mentionText = normalizedText.slice(bestStart, bestStart + bestMention.length);
+      parts.push({ type: "mention", text: mentionText, mention: mentionText });
+      cursor = bestStart + bestMention.length;
+    }
+
+    return parts.filter(function onlyNonEmpty(part) {
+      return Boolean(part && part.text);
+    });
+  }
+
+  function dispatchOpenClientEvent(clientName) {
+    const normalizedClientName = normalizeText(clientName);
+    if (!normalizedClientName) {
+      return;
+    }
+
+    window.dispatchEvent(
+      new CustomEvent(CLIENT_OPEN_EVENT, {
+        detail: {
+          clientName: normalizedClientName,
+        },
+      }),
+    );
   }
 
   function readMode() {
@@ -166,16 +257,19 @@
     window.speechSynthesis.speak(utterance);
   }
 
-  function appendMessage(role, text) {
+  function appendMessage(role, text, mentions) {
     const normalized = normalizeText(text);
     if (!normalized) {
       return;
     }
 
+    const normalizedMentions = role === "assistant" ? normalizeMentionList(mentions) : [];
+
     state.messages.push({
       id: createId(),
       role,
       text: normalized,
+      mentions: normalizedMentions,
     });
 
     renderMessages();
@@ -303,7 +397,26 @@
       article.className = `legacy-assistant__message legacy-assistant__message--${message.role}`;
 
       const p = document.createElement("p");
-      p.textContent = message.text;
+      const parts = message.role === "assistant" ? splitMessageByMentions(message.text, message.mentions) : [{ type: "text", text: message.text }];
+      parts.forEach(function eachPart(part, partIndex) {
+        if (part.type === "mention" && part.mention) {
+          const mentionButton = document.createElement("button");
+          mentionButton.type = "button";
+          mentionButton.className = "legacy-assistant__client-link";
+          mentionButton.textContent = part.text;
+          mentionButton.title = userLang === "ru" ? "Открыть карточку клиента" : "Open client card";
+          mentionButton.addEventListener("click", function onMentionClick() {
+            dispatchOpenClientEvent(part.mention || part.text);
+          });
+          p.appendChild(mentionButton);
+          return;
+        }
+
+        const span = document.createElement("span");
+        span.textContent = part.text;
+        span.setAttribute("data-part-index", String(partIndex));
+        p.appendChild(span);
+      });
       article.appendChild(p);
 
       container.appendChild(article);
@@ -627,8 +740,9 @@
       }
 
       const reply = normalizeText(payload && payload.reply ? payload.reply : "");
+      const mentions = normalizeMentionList(payload && Array.isArray(payload.clientMentions) ? payload.clientMentions : []);
       if (reply) {
-        appendMessage("assistant", reply);
+        appendMessage("assistant", reply, mentions);
         if (mode === "voice") {
           speakText(reply);
         }

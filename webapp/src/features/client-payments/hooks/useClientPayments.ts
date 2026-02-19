@@ -40,6 +40,10 @@ interface ModalState {
   dirty: boolean;
 }
 
+interface AssistantOpenClientEventDetail {
+  clientName?: string;
+}
+
 const INITIAL_FILTERS: ClientPaymentsFilters = {
   search: "",
   status: STATUS_FILTER_ALL,
@@ -318,6 +322,28 @@ export function useClientPayments() {
     });
   }, []);
 
+  useEffect(() => {
+    function onAssistantOpenClient(event: Event) {
+      const detail = (event as CustomEvent<AssistantOpenClientEventDetail>).detail;
+      const requestedName = normalizeComparableClientName(detail?.clientName || "");
+      if (!requestedName || !records.length) {
+        return;
+      }
+
+      const bestRecord = findRecordByComparableClientName(records, requestedName);
+      if (!bestRecord) {
+        return;
+      }
+
+      openRecordModal(bestRecord);
+    }
+
+    window.addEventListener("cb-assistant-open-client", onAssistantOpenClient as EventListener);
+    return () => {
+      window.removeEventListener("cb-assistant-open-client", onAssistantOpenClient as EventListener);
+    };
+  }, [openRecordModal, records]);
+
   const startEditRecord = useCallback(() => {
     if (!canManage || !activeRecord) {
       return;
@@ -523,6 +549,53 @@ function resetSaveRetryState(
   retryAttemptRef.current = 0;
   setSaveRetryCount(0);
   setSaveRetryGiveUp(false);
+}
+
+function findRecordByComparableClientName(records: ClientRecord[], requestedName: string): ClientRecord | null {
+  let exactMatch: ClientRecord | null = null;
+  let exactTimestamp = 0;
+  let fuzzyMatch: ClientRecord | null = null;
+  let fuzzyTimestamp = 0;
+
+  for (const record of records) {
+    const comparableName = normalizeComparableClientName(record.clientName);
+    if (!comparableName) {
+      continue;
+    }
+
+    const createdAtTimestamp = parseCreatedAtTimestamp(record.createdAt);
+    if (comparableName === requestedName) {
+      if (!exactMatch || createdAtTimestamp > exactTimestamp) {
+        exactMatch = record;
+        exactTimestamp = createdAtTimestamp;
+      }
+      continue;
+    }
+
+    if (comparableName.includes(requestedName) || requestedName.includes(comparableName)) {
+      if (!fuzzyMatch || createdAtTimestamp > fuzzyTimestamp) {
+        fuzzyMatch = record;
+        fuzzyTimestamp = createdAtTimestamp;
+      }
+    }
+  }
+
+  return exactMatch || fuzzyMatch;
+}
+
+function normalizeComparableClientName(rawValue: string): string {
+  return (rawValue || "")
+    .toString()
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseCreatedAtTimestamp(rawValue: string): number {
+  const timestamp = Date.parse(rawValue || "");
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function validateDraftAgainstLegacyRules(record: ClientRecord): string {
