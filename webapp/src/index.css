@@ -721,6 +721,28 @@ a {
   padding-bottom: 12px;
 }
 
+.client-payments-react-page .cb-table th.client-name-column,
+.client-payments-react-page .cb-table td.client-name-column {
+  min-width: 320px;
+  width: max-content;
+}
+
+.client-name-cell {
+  display: grid;
+  gap: 6px;
+  min-width: max-content;
+}
+
+.client-name-cell__name {
+  display: block;
+}
+
+.client-name-cell .client-payments__badges {
+  margin-top: 0;
+  display: flex;
+  flex-wrap: wrap;
+}
+
 .th-sort-btn {
   width: 100%;
   border: 0;
