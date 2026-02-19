@@ -4125,21 +4125,166 @@ function isGhlContractCandidateRelatedToContact(candidate, contactName, contactI
   if (normalizedContactId && signalText.includes(normalizedContactId)) {
     return true;
   }
-  if (normalizedContactName && signalText.includes(normalizedContactName)) {
-    return true;
+  if (normalizedContactName) {
+    if (signalText.includes(normalizedContactName)) {
+      return true;
+    }
+
+    const nameTokens = normalizedContactName.split(" ").filter((token) => token.length >= 3);
+    if (nameTokens.length) {
+      let matchedTokens = 0;
+      for (const token of nameTokens) {
+        if (signalText.includes(token)) {
+          matchedTokens += 1;
+        }
+      }
+
+      if (matchedTokens >= Math.min(2, nameTokens.length)) {
+        return true;
+      }
+
+      const strongToken = nameTokens.find((token) => token.length >= 6 && signalText.includes(token));
+      if (strongToken) {
+        return true;
+      }
+    }
   }
 
   return false;
 }
 
-function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, depth = 0) {
+function deriveGhlContactLinkFromEntity(entity) {
+  if (!entity || typeof entity !== "object") {
+    return {
+      contactName: "",
+      contactId: "",
+    };
+  }
+
+  const contactName = sanitizeTextValue(
+    entity.contactName ||
+      entity.contact_name ||
+      entity.recipientName ||
+      entity.recipient_name ||
+      entity.customerName ||
+      entity.customer_name ||
+      entity.clientName ||
+      entity.client_name ||
+      entity.fullName ||
+      entity.full_name ||
+      entity.name ||
+      [entity.firstName, entity.lastName].filter(Boolean).join(" ") ||
+      [entity.first_name, entity.last_name].filter(Boolean).join(" "),
+    300,
+  );
+  const contactId = sanitizeTextValue(
+    entity.contactId ||
+      entity.contact_id ||
+      entity.recipientId ||
+      entity.recipient_id ||
+      entity.customerId ||
+      entity.customer_id ||
+      entity.clientId ||
+      entity.client_id ||
+      entity.id,
+    160,
+  );
+
+  return {
+    contactName,
+    contactId,
+  };
+}
+
+function mergeGhlContactLinks(baseLink, candidateLink) {
+  const base = baseLink && typeof baseLink === "object" ? baseLink : {};
+  const candidate = candidateLink && typeof candidateLink === "object" ? candidateLink : {};
+  return {
+    contactName: sanitizeTextValue(candidate.contactName || base.contactName, 300),
+    contactId: sanitizeTextValue(candidate.contactId || base.contactId, 160),
+  };
+}
+
+function extractGhlContactLinkFromObject(object, inheritedLink = null) {
+  const inherited = inheritedLink && typeof inheritedLink === "object" ? inheritedLink : {};
+  let result = {
+    contactName: sanitizeTextValue(inherited.contactName, 300),
+    contactId: sanitizeTextValue(inherited.contactId, 160),
+  };
+
+  result = mergeGhlContactLinks(result, deriveGhlContactLinkFromEntity(object));
+
+  const relatedObjects = [
+    object.contact,
+    object.recipient,
+    object.customer,
+    object.client,
+    object.signer,
+    object.owner,
+  ];
+  for (const relatedObject of relatedObjects) {
+    if (!relatedObject || typeof relatedObject !== "object") {
+      continue;
+    }
+    result = mergeGhlContactLinks(result, deriveGhlContactLinkFromEntity(relatedObject));
+  }
+
+  const relatedArrays = [
+    object.contacts,
+    object.recipients,
+    object.customers,
+    object.clients,
+    object.signers,
+    object.participants,
+  ];
+  for (const relatedArray of relatedArrays) {
+    if (!Array.isArray(relatedArray)) {
+      continue;
+    }
+    for (const item of relatedArray.slice(0, 5)) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      result = mergeGhlContactLinks(result, deriveGhlContactLinkFromEntity(item));
+    }
+  }
+
+  const relatedIdArrays = [
+    object.contactIds,
+    object.contact_ids,
+    object.recipientIds,
+    object.recipient_ids,
+    object.customerIds,
+    object.customer_ids,
+    object.clientIds,
+    object.client_ids,
+  ];
+  for (const relatedIdArray of relatedIdArrays) {
+    if (!Array.isArray(relatedIdArray)) {
+      continue;
+    }
+    for (const rawId of relatedIdArray) {
+      const id = sanitizeTextValue(rawId, 160);
+      if (id) {
+        result = mergeGhlContactLinks(result, {
+          contactName: "",
+          contactId: id,
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
+function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, depth = 0, inheritedLink = null) {
   if (!target || !(target instanceof Array) || depth > 6 || node === null || node === undefined) {
     return;
   }
 
   if (Array.isArray(node)) {
     for (const item of node.slice(0, 150)) {
-      collectGhlContractCandidatesFromPayloadNode(item, target, sourceLabel, depth + 1);
+      collectGhlContractCandidatesFromPayloadNode(item, target, sourceLabel, depth + 1, inheritedLink);
     }
     return;
   }
@@ -4151,6 +4296,8 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
         url,
         snippet: "",
         source: sourceLabel,
+        contactName: sanitizeTextValue(inheritedLink?.contactName, 300),
+        contactId: sanitizeTextValue(inheritedLink?.contactId, 160),
       });
     }
     return;
@@ -4161,6 +4308,7 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
   }
 
   const object = node;
+  const objectContactLink = extractGhlContactLinkFromObject(object, inheritedLink);
   const title = sanitizeTextValue(
     object.title ||
       object.name ||
@@ -4194,7 +4342,8 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
       object.customerName ||
       object.customer_name ||
       object.clientName ||
-      object.client_name,
+      object.client_name ||
+      objectContactLink.contactName,
     300,
   );
   const candidateContactId = sanitizeTextValue(
@@ -4205,7 +4354,8 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
       object.customerId ||
       object.customer_id ||
       object.clientId ||
-      object.client_id,
+      object.client_id ||
+      objectContactLink.contactId,
     160,
   );
   const urlCandidates = [
@@ -4254,13 +4404,19 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
   }
 
   for (const value of Object.values(object)) {
-    collectGhlContractCandidatesFromPayloadNode(value, target, sourceLabel, depth + 1);
+    collectGhlContractCandidatesFromPayloadNode(value, target, sourceLabel, depth + 1, objectContactLink);
   }
 }
 
 function extractGhlContractCandidatesFromPayload(payload, sourceLabel = "payload") {
   const rawCandidates = [];
-  collectGhlContractCandidatesFromPayloadNode(payload, rawCandidates, sanitizeTextValue(sourceLabel, 120) || "payload", 0);
+  collectGhlContractCandidatesFromPayloadNode(
+    payload,
+    rawCandidates,
+    sanitizeTextValue(sourceLabel, 120) || "payload",
+    0,
+    null,
+  );
   return dedupeGhlContractCandidates(rawCandidates);
 }
 
