@@ -10,12 +10,14 @@ const accountMenuToggleButton = document.querySelector("#account-menu-toggle");
 const accountMenuPanel = document.querySelector("#account-menu-panel");
 const accountMenuUser = document.querySelector("#account-menu-user");
 const accountLogoutActionButton = document.querySelector("#account-logout-action");
+const ownerOnlyMenuItems = [...document.querySelectorAll('[data-owner-only="true"]')];
 const statusElement = document.querySelector("#access-control-status");
 const currentUserElement = document.querySelector("#access-control-current-user");
 const departmentsElement = document.querySelector("#access-control-departments");
 
 let currentAuthUser = "";
 let currentAuthLabel = "";
+let currentAuthIsOwner = false;
 
 initializeAccountMenu();
 initializeAuthSession();
@@ -57,6 +59,7 @@ function initializeAccountMenu() {
 function initializeAuthSession() {
   currentAuthUser = "";
   currentAuthLabel = "";
+  currentAuthIsOwner = false;
   syncAuthUi();
   void hydrateAuthSessionFromServer();
 }
@@ -89,6 +92,14 @@ function syncAuthUi() {
   accountMenuUser.textContent = currentAuthLabel
     ? `User: ${currentAuthUser} (${currentAuthLabel})`
     : `User: ${currentAuthUser}`;
+
+  syncOwnerOnlyMenuItems(currentAuthIsOwner);
+}
+
+function syncOwnerOnlyMenuItems(isOwner) {
+  for (const item of ownerOnlyMenuItems) {
+    item.hidden = !isOwner;
+  }
 }
 
 async function hydrateAuthSessionFromServer() {
@@ -112,8 +123,10 @@ async function hydrateAuthSessionFromServer() {
     const username = (payload?.user?.username || "").toString().trim();
     const roleName = (payload?.user?.roleName || "").toString().trim();
     const departmentName = (payload?.user?.departmentName || "").toString().trim();
+    const isOwner = Boolean(payload?.user?.isOwner);
     currentAuthUser = username || "";
     currentAuthLabel = buildUserLabel(roleName, departmentName);
+    currentAuthIsOwner = isOwner;
     syncAuthUi();
   } catch {
     // Keep default placeholder.
