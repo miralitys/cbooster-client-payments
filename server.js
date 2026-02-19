@@ -142,6 +142,11 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
     roleId: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
   },
   {
+    displayName: "Nataliia Poliakova",
+    departmentId: WEB_AUTH_DEPARTMENT_ACCOUNTING,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
     displayName: "Maryna Shuliatytska",
     username: "garbarmarina13@gmail.com",
     departmentId: WEB_AUTH_DEPARTMENT_SALES,
