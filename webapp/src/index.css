@@ -272,6 +272,10 @@ a {
   gap: var(--space-3);
 }
 
+.cb-page-header-panel__top--actions-only {
+  justify-content: flex-end;
+}
+
 .cb-page-header-panel__title-wrap {
   display: grid;
   gap: 2px;

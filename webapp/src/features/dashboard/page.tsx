@@ -376,8 +376,6 @@ export default function DashboardPage() {
   return (
     <PageShell className="dashboard-react-page">
       <PageHeader
-        title="Dashboard"
-        subtitle="Moderation and daily payment flow"
         actions={
           <Button
             type="button"

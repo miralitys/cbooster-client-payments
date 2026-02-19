@@ -36,7 +36,11 @@ function resolvePageTitle(pathname: string): string {
     return "Access Control";
   }
 
-  return "Client Payments Dashboard";
+  if (pathname.startsWith("/client-payments")) {
+    return "Client Payments";
+  }
+
+  return "Client Payments";
 }
 
 export function Layout() {

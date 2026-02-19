@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getGhlClientDocuments } from "@/shared/api";
 import type { GhlClientDocument, GhlClientDocumentsRow } from "@/shared/types/ghlDocuments";
-import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
+import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const DEFAULT_LIMIT = 10;
@@ -73,11 +73,6 @@ export default function GhlContractsPage() {
 
   return (
     <PageShell className="ghl-documents-react-page">
-      <PageHeader
-        title="GHL Documents Test"
-        subtitle="Separate test page. First 10 clients from your database with read-only GoHighLevel lookup and all found documents."
-      />
-
       <Panel
         className="table-panel ghl-documents-react-table-panel"
         title="Client - Documents Table"

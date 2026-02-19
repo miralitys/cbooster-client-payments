@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getClientManagers, getSession } from "@/shared/api";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
-import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
+import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 type RefreshMode = "none" | "incremental" | "full";
@@ -139,11 +139,6 @@ export default function ClientManagersPage() {
 
   return (
     <PageShell className="client-managers-react-page">
-      <PageHeader
-        title="Client - Manager Test"
-        subtitle="Separate test page. Managers are not written to the main client database."
-      />
-
       <Panel
         className="table-panel client-managers-react-table-panel"
         title="Client - Manager Table"

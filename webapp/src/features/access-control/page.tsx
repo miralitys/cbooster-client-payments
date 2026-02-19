@@ -300,8 +300,6 @@ export default function AccessControlPage() {
   return (
     <PageShell className="access-control-react-page">
       <PageHeader
-        title="Access Control"
-        subtitle="Global authorization model with departments, roles, and permissions."
         actions={
           canManageAccess ? (
             <Button
