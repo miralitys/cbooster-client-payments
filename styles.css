@@ -2422,6 +2422,24 @@ tbody tr.row-tone-active:hover td {
   gap: 4px;
 }
 
+.client-contract-documents-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.client-contract-document-item {
+  display: grid;
+  gap: 2px;
+}
+
+.client-contract-document-label {
+  color: var(--color-text);
+  font-weight: var(--font-weight-semibold);
+}
+
 .client-contract-link {
   width: fit-content;
   color: var(--color-primary);

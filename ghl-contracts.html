@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GHL Contract Lookup</title>
-    <link rel="stylesheet" href="/styles.css?v=20260219-ghl-contracts-v1" />
-    <script src="/ghl-contracts.js?v=20260219-ghl-contracts-v1" defer></script>
+    <title>GHL Document Lookup</title>
+    <link rel="stylesheet" href="/styles.css?v=20260220-ghl-documents-v2" />
+    <script src="/ghl-contracts.js?v=20260220-ghl-documents-v2" defer></script>
   </head>
   <body>
     <main class="page-shell" aria-busy="false">
@@ -13,9 +13,9 @@
         <header class="section page-header client-contract-page-header">
           <div class="page-header__title">
             <p class="eyebrow">Credit Booster</p>
-            <h1>GHL Contract Test</h1>
+            <h1>GHL Documents Test</h1>
             <p class="client-contract-subtitle">
-              Separate test page. First 10 clients from your database with read-only contract lookup in GoHighLevel.
+              Separate test page. First 10 clients from your database with read-only GoHighLevel lookup and all found documents.
             </p>
           </div>
           <div class="page-header__right">
@@ -39,8 +39,17 @@
                 <a href="/quickbooks-payments" class="account-menu__item" role="menuitem">Quick Book Payment</a>
                 <a href="/Client_Payments" class="account-menu__item" role="menuitem">Client Payment</a>
                 <a href="/client-managers" class="account-menu__item" role="menuitem">Client - Manager Test</a>
-                <a href="/ghl-contracts" class="account-menu__item" role="menuitem">GHL Contract Test</a>
+                <a href="/ghl-contracts" class="account-menu__item" role="menuitem">GHL Documents Test</a>
                 <a href="/access-control" class="account-menu__item" role="menuitem">Access Control</a>
+                <a href="/app/dashboard" class="account-menu__item" role="menuitem" data-owner-only="true" hidden>
+                  New (Beta): Dashboard
+                </a>
+                <a href="/app/client-payments" class="account-menu__item" role="menuitem" data-owner-only="true" hidden>
+                  New (Beta): Client Payments
+                </a>
+                <a href="/app/quickbooks" class="account-menu__item" role="menuitem" data-owner-only="true" hidden>
+                  New (Beta): QuickBooks
+                </a>
                 <div class="account-menu__divider" aria-hidden="true"></div>
                 <p id="account-menu-user" class="account-menu__user">User: -</p>
                 <button id="account-logout-action" type="button" class="account-menu__item" role="menuitem">
@@ -60,7 +69,7 @@
           </header>
 
           <p id="client-contract-status" class="dashboard-message client-contract-status">
-            Loading first 10 clients from database and contract data from GoHighLevel...
+            Loading first 10 clients from database and all documents from GoHighLevel...
           </p>
 
           <div class="table-wrap client-contract-table-wrap">
@@ -69,7 +78,7 @@
                 <tr>
                   <th>Client Name</th>
                   <th>Matched Contact</th>
-                  <th>Contract</th>
+                  <th>Documents</th>
                   <th>Status</th>
                 </tr>
               </thead>
