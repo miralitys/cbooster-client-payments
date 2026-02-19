@@ -9,7 +9,17 @@ export interface GhlClientBasicNotePayload {
   noteTitle: string;
   noteBody: string;
   noteCreatedAt: string;
+  memoTitle: string;
+  memoBody: string;
+  memoCreatedAt: string;
   source: string;
   matchedContacts: number;
   inspectedContacts: number;
+  updatedAt?: string | null;
+  nextRefreshAt?: string | null;
+  isWrittenOff?: boolean;
+  refreshPolicy?: string;
+  cached?: boolean;
+  stale?: boolean;
+  error?: string;
 }
