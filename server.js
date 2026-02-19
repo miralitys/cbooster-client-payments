@@ -7848,6 +7848,34 @@ async function ensureDatabaseReady() {
         CREATE INDEX IF NOT EXISTS ${GHL_BASIC_NOTE_CACHE_TABLE_NAME}_updated_at_idx
         ON ${GHL_BASIC_NOTE_CACHE_TABLE} (updated_at DESC)
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE} (
+          id BIGSERIAL PRIMARY KEY,
+          asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          asked_by_username TEXT NOT NULL DEFAULT '',
+          asked_by_display_name TEXT NOT NULL DEFAULT '',
+          mode TEXT NOT NULL DEFAULT 'text',
+          question TEXT NOT NULL,
+          assistant_reply TEXT NOT NULL DEFAULT '',
+          provider TEXT NOT NULL DEFAULT 'rules',
+          records_used INTEGER NOT NULL DEFAULT 0,
+          corrected_reply TEXT NOT NULL DEFAULT '',
+          correction_note TEXT NOT NULL DEFAULT '',
+          corrected_by TEXT NOT NULL DEFAULT '',
+          corrected_at TIMESTAMPTZ
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE_NAME}_asked_at_idx
+        ON ${ASSISTANT_REVIEW_TABLE} (asked_at DESC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE_NAME}_corrected_at_idx
+        ON ${ASSISTANT_REVIEW_TABLE} (corrected_at DESC NULLS LAST)
+      `);
     })().catch((error) => {
       dbReadyPromise = null;
       throw error;
@@ -8667,6 +8695,179 @@ function getReviewerIdentity(req) {
   }
 
   return "moderator";
+}
+
+function normalizeAssistantChatMode(rawMode) {
+  return sanitizeTextValue(rawMode, 20).toLowerCase() === "voice" ? "voice" : "text";
+}
+
+function mapAssistantReviewRow(row) {
+  const idValue = Number.parseInt(row?.id, 10);
+  const recordsUsedValue = Number.parseInt(row?.records_used, 10);
+
+  return {
+    id: Number.isFinite(idValue) ? idValue : 0,
+    askedAt: row?.asked_at ? new Date(row.asked_at).toISOString() : null,
+    askedByUsername: sanitizeTextValue(row?.asked_by_username, 200),
+    askedByDisplayName: sanitizeTextValue(row?.asked_by_display_name, 220),
+    mode: normalizeAssistantChatMode(row?.mode),
+    question: sanitizeTextValue(row?.question, ASSISTANT_MAX_MESSAGE_LENGTH),
+    assistantReply: sanitizeTextValue(row?.assistant_reply, ASSISTANT_REVIEW_MAX_TEXT_LENGTH),
+    provider: sanitizeTextValue(row?.provider, 40),
+    recordsUsed: Number.isFinite(recordsUsedValue) && recordsUsedValue >= 0 ? recordsUsedValue : 0,
+    correctedReply: sanitizeTextValue(row?.corrected_reply, ASSISTANT_REVIEW_MAX_TEXT_LENGTH),
+    correctionNote: sanitizeTextValue(row?.correction_note, ASSISTANT_REVIEW_MAX_COMMENT_LENGTH),
+    correctedBy: sanitizeTextValue(row?.corrected_by, 220),
+    correctedAt: row?.corrected_at ? new Date(row.corrected_at).toISOString() : null,
+  };
+}
+
+function normalizeAssistantReviewLimit(rawLimit) {
+  const parsed = Number.parseInt(sanitizeTextValue(rawLimit, 20), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return ASSISTANT_REVIEW_DEFAULT_LIMIT;
+  }
+  return Math.min(Math.max(parsed, 1), ASSISTANT_REVIEW_MAX_LIMIT);
+}
+
+function normalizeAssistantReviewOffset(rawOffset) {
+  const parsed = Number.parseInt(sanitizeTextValue(rawOffset, 20), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return Math.min(parsed, 5000);
+}
+
+async function logAssistantReviewQuestion(entry) {
+  await ensureDatabaseReady();
+
+  const question = sanitizeTextValue(entry?.question, ASSISTANT_MAX_MESSAGE_LENGTH);
+  if (!question) {
+    return null;
+  }
+
+  const assistantReply = sanitizeTextValue(entry?.assistantReply, ASSISTANT_REVIEW_MAX_TEXT_LENGTH);
+  const askedByUsername = sanitizeTextValue(entry?.askedByUsername, 200);
+  const askedByDisplayName = sanitizeTextValue(entry?.askedByDisplayName, 220);
+  const mode = normalizeAssistantChatMode(entry?.mode);
+  const provider = sanitizeTextValue(entry?.provider, 40) || "rules";
+  const recordsUsedValue = Number.parseInt(entry?.recordsUsed, 10);
+  const recordsUsed = Number.isFinite(recordsUsedValue) && recordsUsedValue >= 0 ? recordsUsedValue : 0;
+
+  const result = await pool.query(
+    `
+      INSERT INTO ${ASSISTANT_REVIEW_TABLE}
+        (asked_by_username, asked_by_display_name, mode, question, assistant_reply, provider, records_used)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING
+        id,
+        asked_at,
+        asked_by_username,
+        asked_by_display_name,
+        mode,
+        question,
+        assistant_reply,
+        provider,
+        records_used,
+        corrected_reply,
+        correction_note,
+        corrected_by,
+        corrected_at
+    `,
+    [askedByUsername, askedByDisplayName, mode, question, assistantReply, provider, recordsUsed],
+  );
+
+  return result.rows[0] ? mapAssistantReviewRow(result.rows[0]) : null;
+}
+
+async function listAssistantReviewQuestions(options = {}) {
+  await ensureDatabaseReady();
+
+  const limit = normalizeAssistantReviewLimit(options.limit);
+  const offset = normalizeAssistantReviewOffset(options.offset);
+
+  const [countResult, listResult] = await Promise.all([
+    pool.query(`SELECT COUNT(*)::BIGINT AS total FROM ${ASSISTANT_REVIEW_TABLE}`),
+    pool.query(
+      `
+        SELECT
+          id,
+          asked_at,
+          asked_by_username,
+          asked_by_display_name,
+          mode,
+          question,
+          assistant_reply,
+          provider,
+          records_used,
+          corrected_reply,
+          correction_note,
+          corrected_by,
+          corrected_at
+        FROM ${ASSISTANT_REVIEW_TABLE}
+        ORDER BY asked_at DESC, id DESC
+        LIMIT $1
+        OFFSET $2
+      `,
+      [limit, offset],
+    ),
+  ]);
+
+  const total = Number.parseInt(countResult.rows[0]?.total, 10);
+  const items = listResult.rows.map(mapAssistantReviewRow).filter((item) => item.id > 0);
+
+  return {
+    total: Number.isFinite(total) && total >= 0 ? total : 0,
+    limit,
+    offset,
+    items,
+  };
+}
+
+async function saveAssistantReviewCorrection(reviewId, payload, correctedBy) {
+  await ensureDatabaseReady();
+
+  const normalizedId = Number.parseInt(sanitizeTextValue(reviewId, 30), 10);
+  if (!Number.isFinite(normalizedId) || normalizedId <= 0) {
+    throw createHttpError("Invalid review id.", 400);
+  }
+
+  const correctedReply = sanitizeTextValue(payload?.correctedReply, ASSISTANT_REVIEW_MAX_TEXT_LENGTH);
+  const correctionNote = sanitizeTextValue(payload?.correctionNote, ASSISTANT_REVIEW_MAX_COMMENT_LENGTH);
+  const normalizedCorrectedBy = sanitizeTextValue(correctedBy, 220) || "owner";
+  const hasCorrection = Boolean(correctedReply || correctionNote);
+
+  const result = await pool.query(
+    `
+      UPDATE ${ASSISTANT_REVIEW_TABLE}
+      SET corrected_reply = $2,
+          correction_note = $3,
+          corrected_by = CASE WHEN $5 THEN $4 ELSE '' END,
+          corrected_at = CASE WHEN $5 THEN NOW() ELSE NULL END
+      WHERE id = $1
+      RETURNING
+        id,
+        asked_at,
+        asked_by_username,
+        asked_by_display_name,
+        mode,
+        question,
+        assistant_reply,
+        provider,
+        records_used,
+        corrected_reply,
+        correction_note,
+        corrected_by,
+        corrected_at
+    `,
+    [normalizedId, correctedReply, correctionNote, normalizedCorrectedBy, hasCorrection],
+  );
+
+  if (!result.rows.length) {
+    throw createHttpError("Assistant review item not found.", 404);
+  }
+
+  return mapAssistantReviewRow(result.rows[0]);
 }
 
 async function queueClientSubmission(record, submittedBy, miniData = {}, attachments = []) {
@@ -9663,6 +9864,69 @@ app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_
   });
 });
 
+app.get("/api/assistant/reviews", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), async (req, res) => {
+  if (!req.webAuthProfile?.isOwner) {
+    res.status(403).json({
+      error: "Access denied. Owner role is required.",
+    });
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  try {
+    const reviews = await listAssistantReviewQuestions({
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    res.json({
+      ok: true,
+      total: reviews.total,
+      count: reviews.items.length,
+      limit: reviews.limit,
+      offset: reviews.offset,
+      items: reviews.items,
+    });
+  } catch (error) {
+    console.error("GET /api/assistant/reviews failed:", error);
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load assistant reviews"));
+  }
+});
+
+app.put("/api/assistant/reviews/:id", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), async (req, res) => {
+  if (!req.webAuthProfile?.isOwner) {
+    res.status(403).json({
+      error: "Access denied. Owner role is required.",
+    });
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  try {
+    const updatedItem = await saveAssistantReviewCorrection(req.params.id, req.body, getReviewerIdentity(req));
+    res.json({
+      ok: true,
+      item: updatedItem,
+    });
+  } catch (error) {
+    console.error("PUT /api/assistant/reviews/:id failed:", error);
+    res
+      .status(error.httpStatus || resolveDbHttpStatus(error))
+      .json(buildPublicErrorPayload(error, "Failed to save assistant review correction"));
+  }
+});
+
 app.get("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
   const items = listWebAuthUsers().map((item) => buildWebAuthPublicUser(item));
   res.json({
@@ -9883,7 +10147,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     return;
   }
 
-  const mode = sanitizeTextValue(req.body?.mode, 20).toLowerCase() === "voice" ? "voice" : "text";
+  const mode = normalizeAssistantChatMode(req.body?.mode);
 
   try {
     const state = await getStoredRecords();
@@ -9906,7 +10170,24 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
       }
     }
 
-    const clientMentions = buildAssistantClientMentions(finalReply, filteredRecords, 24);
+    const normalizedReply = normalizeAssistantReplyForDisplay(finalReply);
+    const clientMentions = buildAssistantClientMentions(normalizedReply, filteredRecords, 24);
+
+    try {
+      await logAssistantReviewQuestion({
+        question: message,
+        assistantReply: normalizedReply,
+        mode,
+        provider,
+        recordsUsed: filteredRecords.length,
+        askedByUsername: req.webAuthUser,
+        askedByDisplayName: req.webAuthProfile?.displayName || req.webAuthUser,
+      });
+    } catch (reviewLogError) {
+      console.warn(
+        `[assistant] review-log skipped: ${sanitizeTextValue(reviewLogError?.message, 260) || "unknown error"}`,
+      );
+    }
 
     console.info(
       `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length}`,
@@ -9914,7 +10195,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 
     res.json({
       ok: true,
-      reply: normalizeAssistantReplyForDisplay(finalReply),
+      reply: normalizedReply,
       clientMentions,
       suggestions: Array.isArray(fallbackPayload.suggestions) ? fallbackPayload.suggestions.slice(0, 8) : [],
       source: {
