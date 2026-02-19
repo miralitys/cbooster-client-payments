@@ -112,6 +112,7 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
   },
   {
     displayName: "Dmitrii Kabanov",
+    username: "dmitriik@creditbooster.com",
     departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     roleId: WEB_AUTH_ROLE_MANAGER,
   },
