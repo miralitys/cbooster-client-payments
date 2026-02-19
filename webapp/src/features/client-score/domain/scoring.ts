@@ -46,6 +46,7 @@ interface MilestoneEval {
 
 export interface ClientScoreResult {
   score: number | null;
+  displayScore: number | null;
   tone: "neutral" | "success" | "info" | "warning" | "danger";
   penaltyPoints: number;
   bonusPoints: number;
@@ -91,6 +92,7 @@ export function evaluateClientScore(record: ClientRecord, asOfDate = new Date())
   const recoveryPoints = penaltyPoints > 0 && recentMilestonesOnTime && hasOlderDelay ? RECOVERY_POINTS : 0;
   const rawScore = SCORE_START - penaltyPoints + bonusPoints + recoveryPoints;
   const score = clampNumber(Math.round(rawScore), SCORE_MIN, SCORE_MAX);
+  const displayScore = clampNumber(score, SCORE_MIN, SCORE_START);
 
   const explanation = buildExplanation({
     consideredMilestones: consideredMilestones.length,
@@ -104,7 +106,8 @@ export function evaluateClientScore(record: ClientRecord, asOfDate = new Date())
 
   return {
     score,
-    tone: resolveScoreTone(score),
+    displayScore,
+    tone: resolveScoreTone(displayScore),
     penaltyPoints,
     bonusPoints,
     recoveryPoints,
@@ -280,6 +283,7 @@ function buildExplanation(params: {
 function unavailableScore(reason: string): ClientScoreResult {
   return {
     score: null,
+    displayScore: null,
     tone: "neutral",
     penaltyPoints: 0,
     bonusPoints: 0,
