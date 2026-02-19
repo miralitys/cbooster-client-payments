@@ -107,7 +107,7 @@ npm start
 - В форме создания пользователя на `/access-control` поля `Username` и `Password` необязательны: можно завести сотрудника только по `Display Name + Department + Role`.
 - Если `Username/Password` не переданы, система создаст временные технические credentials автоматически (только для внутренней записи пользователя).
 - Для текущей структуры также автоматически добавляются пользователи без обязательного email/password:
-  - `Client Service Department`: `Nataly Regush` (`Department Head`), `Maryna Urvantseva` (`Middle Manager`, username: `marynau@creditbooster.com`), `Anastasiia Lopatina` (`Manager`, username: `anastasiial@creditbooster.com`), `Arslan Utiaganov` (`Manager`, username: `arslanu@creditbooster.com`), `Liudmyla Sydachenko`, `Dmitrii Kabanov` (`Manager`, username: `dmitriik@creditbooster.com`), `Arina Alekhina`, `Alina Yavlovskaya` (`Manager`, username: `alinay@creditbooster.com`).
+  - `Client Service Department`: `Nataly Regush` (`Department Head`), `Maryna Urvantseva` (`Middle Manager`, username: `marynau@creditbooster.com`), managers: `Anastasiia Lopatina` (username: `anastasiial@creditbooster.com`), `Vadim Kozorezov`, `Liudmyla Sidachenko`, `Ihor Syrovatka`, `Arina Alekhina`, `Arslan Utiaganov` (username: `arslanu@creditbooster.com`), `Ruanna Ordukhanova-Aslanyan`, `Kristina Troinova`.
   - `Accounting Department`: `Alla Havrysh` (`Department Head`, username: `allah@urbansa.us`).
   - `Sales Department`: `Maryna Shuliatytska` (`Department Head`, username: `garbarmarina13@gmail.com`), `Kateryna Shuliatytska` (`Manager`, username: `katyash957@gmail.com`).
 - Новый пользователь добавляется в текущую runtime-директорию авторизации и доступен сразу после создания.

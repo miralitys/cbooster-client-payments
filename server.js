@@ -100,24 +100,38 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
     roleId: WEB_AUTH_ROLE_MANAGER,
   },
   {
+    displayName: "Vadim Kozorezov",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Liudmyla Sidachenko",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Ihor Syrovatka",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
+    displayName: "Arina Alekhina",
+    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    roleId: WEB_AUTH_ROLE_MANAGER,
+  },
+  {
     displayName: "Arslan Utiaganov",
     username: "arslanu@creditbooster.com",
     departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     roleId: WEB_AUTH_ROLE_MANAGER,
   },
   {
-    displayName: "Liudmyla Sydachenko",
+    displayName: "Ruanna Ordukhanova-Aslanyan",
     departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     roleId: WEB_AUTH_ROLE_MANAGER,
   },
   {
-    displayName: "Dmitrii Kabanov",
-    username: "dmitriik@creditbooster.com",
-    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
-    roleId: WEB_AUTH_ROLE_MANAGER,
-  },
-  {
-    displayName: "Arina Alekhina",
+    displayName: "Kristina Troinova",
     departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     roleId: WEB_AUTH_ROLE_MANAGER,
   },
@@ -144,12 +158,6 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
     username: "marynau@creditbooster.com",
     departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     roleId: WEB_AUTH_ROLE_MIDDLE_MANAGER,
-  },
-  {
-    displayName: "Alina Yavlovskaya",
-    username: "alinay@creditbooster.com",
-    departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
-    roleId: WEB_AUTH_ROLE_MANAGER,
   },
 ];
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
