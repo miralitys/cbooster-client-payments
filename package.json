@@ -5,7 +5,10 @@
   "description": "Credit Booster client payments dashboard with Render + Supabase storage",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "webapp:dev": "npm --prefix webapp run dev",
+    "webapp:build": "npm --prefix webapp run build",
+    "webapp:lint": "npm --prefix webapp run lint"
   },
   "engines": {
     "node": ">=20"

@@ -3,7 +3,7 @@ services:
     name: cbooster-client-payments
     runtime: node
     plan: starter
-    buildCommand: npm install
+    buildCommand: npm install && npm --prefix webapp install && npm --prefix webapp run build
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
