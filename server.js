@@ -278,6 +278,11 @@ const QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME,
   DEFAULT_QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME,
 );
+const DEFAULT_QUICKBOOKS_AUTH_STATE_TABLE_NAME = "quickbooks_auth_state";
+const QUICKBOOKS_AUTH_STATE_TABLE_NAME = resolveTableName(
+  process.env.DB_QUICKBOOKS_AUTH_STATE_TABLE_NAME,
+  DEFAULT_QUICKBOOKS_AUTH_STATE_TABLE_NAME,
+);
 const DEFAULT_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME = "ghl_client_manager_cache";
 const GHL_CLIENT_MANAGER_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME,
@@ -289,7 +294,9 @@ const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
 const MODERATION_FILES_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_FILES_TABLE_NAME);
 const QUICKBOOKS_TRANSACTIONS_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_TRANSACTIONS_TABLE_NAME);
 const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME);
+const QUICKBOOKS_AUTH_STATE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_AUTH_STATE_TABLE_NAME);
 const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
+const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
 const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", "error"]);
@@ -576,6 +583,7 @@ let quickBooksSyncQueue = Promise.resolve();
 let quickBooksAutoSyncIntervalId = null;
 let quickBooksAutoSyncInFlightSlotKey = "";
 let quickBooksAutoSyncLastCompletedSlotKey = "";
+let quickBooksRuntimeRefreshToken = QUICKBOOKS_REFRESH_TOKEN;
 let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
   items: [],
@@ -3455,11 +3463,20 @@ function requireWebAuth(req, res, next) {
   res.redirect(302, `/login?next=${encodeURIComponent(nextPath)}`);
 }
 
+function getActiveQuickBooksRefreshToken() {
+  const runtimeToken = sanitizeTextValue(quickBooksRuntimeRefreshToken, 6000);
+  if (runtimeToken) {
+    return runtimeToken;
+  }
+
+  return sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000);
+}
+
 function isQuickBooksConfigured() {
   return Boolean(
     QUICKBOOKS_CLIENT_ID &&
       QUICKBOOKS_CLIENT_SECRET &&
-      QUICKBOOKS_REFRESH_TOKEN &&
+      getActiveQuickBooksRefreshToken() &&
       QUICKBOOKS_REALM_ID,
   );
 }
@@ -5779,13 +5796,67 @@ function sleepMilliseconds(milliseconds) {
   });
 }
 
+function parseQuickBooksTokenLifetimeSeconds(rawValue) {
+  const parsed = Number.parseInt(sanitizeTextValue(rawValue, 40), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function toIsoTimestampFromNow(secondsFromNow) {
+  if (!Number.isFinite(secondsFromNow) || secondsFromNow <= 0) {
+    return "";
+  }
+
+  return new Date(Date.now() + secondsFromNow * 1000).toISOString();
+}
+
+async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIso = "") {
+  if (!pool) {
+    return;
+  }
+
+  const normalizedToken = sanitizeTextValue(tokenValue, 6000);
+  if (!normalizedToken) {
+    return;
+  }
+
+  const normalizedRefreshTokenExpiresAt = sanitizeTextValue(refreshTokenExpiresAtIso, 80) || null;
+
+  await ensureDatabaseReady();
+  await pool.query(
+    `
+      INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (
+        id,
+        refresh_token,
+        refresh_token_expires_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3::timestamptz, NOW())
+      ON CONFLICT (id)
+      DO UPDATE SET
+        refresh_token = EXCLUDED.refresh_token,
+        refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
+        updated_at = NOW()
+    `,
+    [QUICKBOOKS_AUTH_STATE_ROW_ID, normalizedToken, normalizedRefreshTokenExpiresAt],
+  );
+}
+
 async function fetchQuickBooksAccessToken() {
+  const activeRefreshToken = getActiveQuickBooksRefreshToken();
+  if (!activeRefreshToken) {
+    throw createHttpError("QuickBooks auth failed. Refresh token is missing.", 503);
+  }
+
   const basicCredentials = Buffer.from(`${QUICKBOOKS_CLIENT_ID}:${QUICKBOOKS_CLIENT_SECRET}`, "utf8").toString(
     "base64",
   );
   const payload = new URLSearchParams({
     grant_type: "refresh_token",
-    refresh_token: QUICKBOOKS_REFRESH_TOKEN,
+    refresh_token: activeRefreshToken,
   });
 
   if (QUICKBOOKS_REDIRECT_URI) {
@@ -5823,6 +5894,18 @@ async function fetchQuickBooksAccessToken() {
   const accessToken = sanitizeTextValue(body?.access_token, 5000);
   if (!accessToken) {
     throw createHttpError("QuickBooks auth failed. Empty access token.", 502);
+  }
+
+  const rotatedRefreshToken = sanitizeTextValue(body?.refresh_token, 6000);
+  const nextRefreshToken = rotatedRefreshToken || activeRefreshToken;
+  quickBooksRuntimeRefreshToken = nextRefreshToken;
+
+  const refreshTokenLifetimeSec = parseQuickBooksTokenLifetimeSeconds(body?.x_refresh_token_expires_in);
+  const refreshTokenExpiresAtIso = toIsoTimestampFromNow(refreshTokenLifetimeSec || 0);
+  try {
+    await persistQuickBooksRefreshToken(nextRefreshToken, refreshTokenExpiresAtIso);
+  } catch (error) {
+    console.warn("QuickBooks token refresh state was not persisted:", sanitizeTextValue(error?.message, 220) || "Unknown error.");
   }
 
   return accessToken;
@@ -6533,6 +6616,54 @@ async function ensureDatabaseReady() {
         CREATE INDEX IF NOT EXISTS ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME}_updated_at_idx
         ON ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE} (updated_at DESC)
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_AUTH_STATE_TABLE} (
+          id BIGINT PRIMARY KEY,
+          refresh_token TEXT NOT NULL DEFAULT '',
+          refresh_token_expires_at TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(
+        `
+          INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (
+            id,
+            refresh_token
+          )
+          VALUES ($1, $2)
+          ON CONFLICT (id) DO NOTHING
+        `,
+        [QUICKBOOKS_AUTH_STATE_ROW_ID, sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)],
+      );
+
+      if (sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)) {
+        await pool.query(
+          `
+            UPDATE ${QUICKBOOKS_AUTH_STATE_TABLE}
+            SET refresh_token = $2,
+                updated_at = NOW()
+            WHERE id = $1
+              AND COALESCE(refresh_token, '') = ''
+          `,
+          [QUICKBOOKS_AUTH_STATE_ROW_ID, sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)],
+        );
+      }
+
+      const quickBooksAuthStateResult = await pool.query(
+        `
+          SELECT refresh_token
+          FROM ${QUICKBOOKS_AUTH_STATE_TABLE}
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [QUICKBOOKS_AUTH_STATE_ROW_ID],
+      );
+      const storedQuickBooksRefreshToken = sanitizeTextValue(quickBooksAuthStateResult.rows[0]?.refresh_token, 6000);
+      if (storedQuickBooksRefreshToken) {
+        quickBooksRuntimeRefreshToken = storedQuickBooksRefreshToken;
+      }
 
       await pool.query(`
         CREATE TABLE IF NOT EXISTS ${GHL_CLIENT_MANAGER_CACHE_TABLE} (
