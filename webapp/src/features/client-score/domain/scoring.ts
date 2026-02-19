@@ -92,7 +92,7 @@ export function evaluateClientScore(record: ClientRecord, asOfDate = new Date())
   const recoveryPoints = penaltyPoints > 0 && recentMilestonesOnTime && hasOlderDelay ? RECOVERY_POINTS : 0;
   const rawScore = SCORE_START - penaltyPoints + bonusPoints + recoveryPoints;
   const score = clampNumber(Math.round(rawScore), SCORE_MIN, SCORE_MAX);
-  const displayScore = clampNumber(score, SCORE_MIN, SCORE_START);
+  const displayScore = toExternalDisplayScore(score);
 
   const explanation = buildExplanation({
     consideredMilestones: consideredMilestones.length,
@@ -333,6 +333,14 @@ function shiftUtcMonths(baseUtc: number, deltaMonths: number, pinnedDay?: number
 
 function clampNumber(value: number, minValue: number, maxValue: number): number {
   return Math.min(maxValue, Math.max(minValue, value));
+}
+
+function toExternalDisplayScore(internalScore: number): number {
+  const capped = clampNumber(internalScore, SCORE_MIN, SCORE_START);
+  if (capped <= 0) {
+    return 0;
+  }
+  return Math.ceil(capped / 10) * 10;
 }
 
 export function formatScoreAsOfDate(value: Date): string {
