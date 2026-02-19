@@ -105,6 +105,7 @@ function initializeAuthSession() {
 function initializeRegistrationForm() {
   renderRoleOptions(departmentSelect?.value || "accounting");
   syncTeamFieldVisibility();
+  setRegistrationPanelOpen(false);
 
   departmentSelect?.addEventListener("change", () => {
     renderRoleOptions(departmentSelect?.value || "");
@@ -115,7 +116,8 @@ function initializeRegistrationForm() {
   });
 
   addUserButton?.addEventListener("click", () => {
-    setRegistrationPanelOpen(true);
+    const isCurrentlyHidden = registrationPanel?.hidden !== false;
+    setRegistrationPanelOpen(isCurrentlyHidden);
   });
 
   closeUserFormButton?.addEventListener("click", () => {
@@ -181,6 +183,10 @@ function setRegistrationPanelOpen(isOpen) {
 
   const shouldOpen = Boolean(isOpen) && currentAuthCanManageAccess;
   registrationPanel.hidden = !shouldOpen;
+  if (addUserButton) {
+    addUserButton.textContent = shouldOpen ? "Hide User Registration" : "Add New User";
+    addUserButton.setAttribute("aria-expanded", String(shouldOpen));
+  }
 
   if (shouldOpen) {
     usernameInput?.focus();
@@ -311,7 +317,7 @@ async function createUser() {
 
     setRegistrationStatus(`User "${payload?.item?.username || username}" created.`, false);
     await loadAccessModel();
-    setRegistrationPanelOpen(true);
+    setRegistrationPanelOpen(false);
   } catch (error) {
     setRegistrationStatus(error.message || "Failed to create user.", true);
   } finally {
