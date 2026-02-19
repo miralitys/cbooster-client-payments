@@ -283,6 +283,7 @@ const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MA
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
 const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", "error"]);
+const GHL_REQUIRED_CONTRACT_TITLE_PREFIX = "creditier contract";
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
@@ -3908,6 +3909,51 @@ function buildGhlContractSignalText(candidate) {
     .trim();
 }
 
+function normalizeGhlContractComparableText(rawValue) {
+  return sanitizeTextValue(rawValue, 1000)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractGhlFileNameFromUrl(rawUrl) {
+  const url = sanitizeTextValue(rawUrl, 2000);
+  if (!url) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(url);
+    const fileName = decodeURIComponent(path.basename(parsed.pathname || ""));
+    return sanitizeTextValue(fileName, 400);
+  } catch {
+    return "";
+  }
+}
+
+function hasGhlRequiredContractPrefix(candidate) {
+  const expectedPrefix = normalizeGhlContractComparableText(GHL_REQUIRED_CONTRACT_TITLE_PREFIX);
+  if (!expectedPrefix) {
+    return false;
+  }
+
+  const possibleTitles = [
+    candidate?.title,
+    extractGhlFileNameFromUrl(candidate?.url),
+    candidate?.snippet,
+  ];
+
+  for (const rawTitle of possibleTitles) {
+    const normalizedTitle = normalizeGhlContractComparableText(rawTitle);
+    if (normalizedTitle && normalizedTitle.startsWith(expectedPrefix)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function analyzeGhlContractCandidate(candidate) {
   const signal = buildGhlContractSignalText(candidate);
   if (!signal) {
@@ -3917,9 +3963,17 @@ function analyzeGhlContractCandidate(candidate) {
     };
   }
 
-  const isContractMatch = /\b(contract|agreement)\b/.test(signal);
+  const hasRequiredPrefix = hasGhlRequiredContractPrefix(candidate);
+  if (!hasRequiredPrefix) {
+    return {
+      score: 0,
+      isContractMatch: false,
+    };
+  }
+
+  const isContractMatch = true;
   const hasDocumentHints = /\b(document|proposal|file|pdf|signed|signature)\b/.test(signal);
-  let score = 0;
+  let score = 100;
 
   if (candidate?.url) {
     score += 3;
@@ -4296,6 +4350,10 @@ function pickBestGhlContractCandidate(candidates) {
   let bestIsContractMatch = false;
   for (const candidate of normalizedCandidates) {
     const analysis = analyzeGhlContractCandidate(candidate);
+    if (!analysis.isContractMatch || analysis.score <= 0) {
+      continue;
+    }
+
     const tieBreaker = candidate.url ? 1 : 0;
     const totalScore = analysis.score * 10 + tieBreaker;
     if (totalScore > bestScore) {
@@ -4312,7 +4370,7 @@ function pickBestGhlContractCandidate(candidates) {
   return {
     ...best,
     isContractMatch: bestIsContractMatch,
-    status: bestIsContractMatch ? "found" : "possible",
+    status: "found",
   };
 }
 
