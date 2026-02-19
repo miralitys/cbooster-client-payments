@@ -8431,6 +8431,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
+      matcherVersion: "ghl-contracts-v2026-02-19-1",
     });
   } catch (error) {
     console.error("GET /api/ghl/client-contracts failed:", error);
