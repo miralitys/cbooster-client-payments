@@ -3,7 +3,28 @@
 const LOGIN_PATH = "/login";
 const AUTH_SESSION_ENDPOINT = "/api/auth/session";
 const AUTH_ACCESS_MODEL_ENDPOINT = "/api/auth/access-model";
+const AUTH_CREATE_USER_ENDPOINT = "/api/auth/users";
 const AUTH_LOGOUT_PATH = "/logout";
+
+const ROLE_OPTIONS_BY_DEPARTMENT = {
+  accounting: [
+    { id: "department_head", name: "Department Head" },
+    { id: "manager", name: "Manager" },
+  ],
+  client_service: [
+    { id: "department_head", name: "Department Head" },
+    { id: "middle_manager", name: "Middle Manager" },
+    { id: "manager", name: "Manager" },
+  ],
+  sales: [
+    { id: "department_head", name: "Department Head" },
+    { id: "manager", name: "Manager" },
+  ],
+  collection: [
+    { id: "department_head", name: "Department Head" },
+    { id: "manager", name: "Manager" },
+  ],
+};
 
 const accountMenu = document.querySelector("#account-menu");
 const accountMenuToggleButton = document.querySelector("#account-menu-toggle");
@@ -14,13 +35,29 @@ const ownerOnlyMenuItems = [...document.querySelectorAll('[data-owner-only="true
 const statusElement = document.querySelector("#access-control-status");
 const currentUserElement = document.querySelector("#access-control-current-user");
 const departmentsElement = document.querySelector("#access-control-departments");
+const addUserButton = document.querySelector("#access-control-add-user-button");
+const registrationPanel = document.querySelector("#access-control-registration-panel");
+const closeUserFormButton = document.querySelector("#access-control-close-user-form-button");
+const registrationStatusElement = document.querySelector("#access-control-registration-status");
+const registrationFormElement = document.querySelector("#access-control-registration-form");
+const usernameInput = document.querySelector("#access-control-new-user-username");
+const passwordInput = document.querySelector("#access-control-new-user-password");
+const displayNameInput = document.querySelector("#access-control-new-user-display-name");
+const departmentSelect = document.querySelector("#access-control-new-user-department");
+const roleSelect = document.querySelector("#access-control-new-user-role");
+const teamField = document.querySelector("#access-control-new-user-team-field");
+const teamInput = document.querySelector("#access-control-new-user-team");
+const createUserButton = document.querySelector("#access-control-create-user-button");
+const usersTableBody = document.querySelector("#access-control-users-body");
 
 let currentAuthUser = "";
 let currentAuthLabel = "";
 let currentAuthIsOwner = false;
+let currentAuthCanManageAccess = false;
 
 initializeAccountMenu();
 initializeAuthSession();
+initializeRegistrationForm();
 void loadAccessModel();
 
 function initializeAccountMenu() {
@@ -60,8 +97,35 @@ function initializeAuthSession() {
   currentAuthUser = "";
   currentAuthLabel = "";
   currentAuthIsOwner = false;
+  currentAuthCanManageAccess = false;
   syncAuthUi();
   void hydrateAuthSessionFromServer();
+}
+
+function initializeRegistrationForm() {
+  renderRoleOptions(departmentSelect?.value || "accounting");
+  syncTeamFieldVisibility();
+
+  departmentSelect?.addEventListener("change", () => {
+    renderRoleOptions(departmentSelect?.value || "");
+  });
+
+  roleSelect?.addEventListener("change", () => {
+    syncTeamFieldVisibility();
+  });
+
+  addUserButton?.addEventListener("click", () => {
+    setRegistrationPanelOpen(true);
+  });
+
+  closeUserFormButton?.addEventListener("click", () => {
+    setRegistrationPanelOpen(false);
+  });
+
+  registrationFormElement?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await createUser();
+  });
 }
 
 function setAccountMenuOpen(isOpen) {
@@ -80,25 +144,46 @@ function signOutCurrentUser() {
 }
 
 function syncAuthUi() {
-  if (!accountMenuUser) {
-    return;
+  if (accountMenuUser) {
+    if (!currentAuthUser) {
+      accountMenuUser.textContent = "User: -";
+    } else {
+      accountMenuUser.textContent = currentAuthLabel
+        ? `User: ${currentAuthUser} (${currentAuthLabel})`
+        : `User: ${currentAuthUser}`;
+    }
   }
-
-  if (!currentAuthUser) {
-    accountMenuUser.textContent = "User: -";
-    return;
-  }
-
-  accountMenuUser.textContent = currentAuthLabel
-    ? `User: ${currentAuthUser} (${currentAuthLabel})`
-    : `User: ${currentAuthUser}`;
 
   syncOwnerOnlyMenuItems(currentAuthIsOwner);
+  syncRegistrationAvailability();
 }
 
 function syncOwnerOnlyMenuItems(isOwner) {
   for (const item of ownerOnlyMenuItems) {
     item.hidden = !isOwner;
+  }
+}
+
+function syncRegistrationAvailability() {
+  if (addUserButton) {
+    addUserButton.hidden = !currentAuthCanManageAccess;
+  }
+
+  if (!currentAuthCanManageAccess) {
+    setRegistrationPanelOpen(false);
+  }
+}
+
+function setRegistrationPanelOpen(isOpen) {
+  if (!registrationPanel) {
+    return;
+  }
+
+  const shouldOpen = Boolean(isOpen) && currentAuthCanManageAccess;
+  registrationPanel.hidden = !shouldOpen;
+
+  if (shouldOpen) {
+    usernameInput?.focus();
   }
 }
 
@@ -124,9 +209,11 @@ async function hydrateAuthSessionFromServer() {
     const roleName = (payload?.user?.roleName || "").toString().trim();
     const departmentName = (payload?.user?.departmentName || "").toString().trim();
     const isOwner = Boolean(payload?.user?.isOwner);
+    const canManageAccess = Boolean(payload?.permissions?.manage_access_control) || isOwner;
     currentAuthUser = username || "";
     currentAuthLabel = buildUserLabel(roleName, departmentName);
     currentAuthIsOwner = isOwner;
+    currentAuthCanManageAccess = canManageAccess;
     syncAuthUi();
   } catch {
     // Keep default placeholder.
@@ -153,13 +240,82 @@ async function loadAccessModel() {
       throw new Error(payload.error || `Failed to load access model (${response.status})`);
     }
 
+    currentAuthCanManageAccess = Boolean(payload?.permissions?.manage_access_control) || Boolean(payload?.user?.isOwner);
+    syncAuthUi();
     renderCurrentUserCard(payload.user, payload.permissions);
     renderDepartments(payload?.accessModel?.departments);
+    renderUsers(payload?.accessModel?.users);
     setStatus("Access model loaded.", false);
   } catch (error) {
     renderCurrentUserCard(null, null);
     renderDepartments([]);
+    renderUsers([]);
     setStatus(error.message || "Failed to load access model.", true);
+  }
+}
+
+async function createUser() {
+  const username = (usernameInput?.value || "").toString().trim();
+  const password = (passwordInput?.value || "").toString();
+  const displayName = (displayNameInput?.value || "").toString().trim();
+  const departmentId = (departmentSelect?.value || "").toString().trim();
+  const roleId = (roleSelect?.value || "").toString().trim();
+  const teamUsernames = (teamInput?.value || "")
+    .toString()
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  setLoadingState(true);
+  setRegistrationStatus("Creating user...", false);
+
+  try {
+    const response = await fetch(AUTH_CREATE_USER_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        username,
+        password,
+        displayName,
+        departmentId,
+        roleId,
+        teamUsernames,
+      }),
+    });
+
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Failed to create user (${response.status})`);
+    }
+
+    if (passwordInput) {
+      passwordInput.value = "";
+    }
+    if (usernameInput) {
+      usernameInput.value = "";
+    }
+    if (displayNameInput) {
+      displayNameInput.value = "";
+    }
+    if (teamInput) {
+      teamInput.value = "";
+    }
+
+    setRegistrationStatus(`User "${payload?.item?.username || username}" created.`, false);
+    await loadAccessModel();
+    setRegistrationPanelOpen(true);
+  } catch (error) {
+    setRegistrationStatus(error.message || "Failed to create user.", true);
+  } finally {
+    setLoadingState(false);
   }
 }
 
@@ -173,9 +329,8 @@ function renderCurrentUserCard(user, permissions) {
   const roleName = (user?.roleName || "").toString().trim() || "-";
   const departmentName = (user?.departmentName || "").toString().trim() || "-";
   const isOwner = Boolean(user?.isOwner);
-  const permissionsCount = permissions && typeof permissions === "object"
-    ? Object.values(permissions).filter((value) => Boolean(value)).length
-    : 0;
+  const permissionsCount =
+    permissions && typeof permissions === "object" ? Object.values(permissions).filter((value) => Boolean(value)).length : 0;
 
   const lines = [
     { label: "Username", value: username || "-" },
@@ -278,13 +433,105 @@ function renderDepartments(departments) {
   departmentsElement.replaceChildren(fragment);
 }
 
-function buildUserLabel(roleName, departmentName) {
-  const normalizedRoleName = roleName.toString().trim();
-  const normalizedDepartmentName = departmentName.toString().trim();
-  if (normalizedRoleName && normalizedDepartmentName) {
-    return `${normalizedRoleName} | ${normalizedDepartmentName}`;
+function renderUsers(users) {
+  if (!usersTableBody) {
+    return;
   }
-  return normalizedRoleName || normalizedDepartmentName || "";
+
+  if (!currentAuthCanManageAccess) {
+    usersTableBody.replaceChildren();
+    return;
+  }
+
+  const items = Array.isArray(users) ? users : [];
+  if (!items.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.className = "user-registration-users-table__empty-cell";
+    cell.textContent = "No users found.";
+    row.append(cell);
+    usersTableBody.replaceChildren(row);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of items) {
+    const row = document.createElement("tr");
+    appendCell(row, (item?.username || "-").toString());
+    appendCell(row, (item?.displayName || "-").toString());
+    appendCell(row, (item?.roleName || "-").toString());
+    appendCell(row, (item?.departmentName || "-").toString());
+    appendCell(row, item?.isOwner ? "Yes" : "No");
+    fragment.append(row);
+  }
+
+  usersTableBody.replaceChildren(fragment);
+}
+
+function renderRoleOptions(departmentId) {
+  if (!roleSelect) {
+    return;
+  }
+
+  const options = ROLE_OPTIONS_BY_DEPARTMENT[departmentId] || ROLE_OPTIONS_BY_DEPARTMENT.accounting;
+  const previousValue = (roleSelect.value || "").toString();
+  const fragment = document.createDocumentFragment();
+
+  for (const option of options) {
+    const element = document.createElement("option");
+    element.value = option.id;
+    element.textContent = option.name;
+    fragment.append(element);
+  }
+
+  roleSelect.replaceChildren(fragment);
+  if (options.some((option) => option.id === previousValue)) {
+    roleSelect.value = previousValue;
+  }
+
+  syncTeamFieldVisibility();
+}
+
+function syncTeamFieldVisibility() {
+  const isMiddleManager = (roleSelect?.value || "").toString().trim() === "middle_manager";
+  if (teamField) {
+    teamField.hidden = !isMiddleManager;
+  }
+
+  if (!isMiddleManager && teamInput) {
+    teamInput.value = "";
+  }
+}
+
+function appendCell(row, value) {
+  const cell = document.createElement("td");
+  cell.textContent = value;
+  row.append(cell);
+}
+
+function setLoadingState(isLoading) {
+  if (createUserButton) {
+    createUserButton.disabled = isLoading;
+  }
+  if (usernameInput) {
+    usernameInput.disabled = isLoading;
+  }
+  if (passwordInput) {
+    passwordInput.disabled = isLoading;
+  }
+  if (displayNameInput) {
+    displayNameInput.disabled = isLoading;
+  }
+  if (departmentSelect) {
+    departmentSelect.disabled = isLoading;
+  }
+  if (roleSelect) {
+    roleSelect.disabled = isLoading;
+  }
+  if (teamInput) {
+    teamInput.disabled = isLoading;
+  }
 }
 
 function setStatus(message, isError) {
@@ -294,6 +541,24 @@ function setStatus(message, isError) {
 
   statusElement.textContent = message || "";
   statusElement.classList.toggle("error", Boolean(isError));
+}
+
+function setRegistrationStatus(message, isError) {
+  if (!registrationStatusElement) {
+    return;
+  }
+
+  registrationStatusElement.textContent = message || "";
+  registrationStatusElement.classList.toggle("error", Boolean(isError));
+}
+
+function buildUserLabel(roleName, departmentName) {
+  const normalizedRoleName = roleName.toString().trim();
+  const normalizedDepartmentName = departmentName.toString().trim();
+  if (normalizedRoleName && normalizedDepartmentName) {
+    return `${normalizedRoleName} | ${normalizedDepartmentName}`;
+  }
+  return normalizedRoleName || normalizedDepartmentName || "";
 }
 
 function redirectToLogin() {

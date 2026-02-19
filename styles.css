@@ -1757,6 +1757,12 @@ tbody tr.row-tone-active:hover td {
   align-items: flex-end;
 }
 
+.access-control-page-header__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .access-control-subtitle {
   margin: 0;
   font-size: var(--font-size-xs);
@@ -1854,6 +1860,30 @@ tbody tr.row-tone-active:hover td {
 .access-control-empty {
   margin: 0;
   color: var(--color-text-muted);
+}
+
+.access-control-registration-panel {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.access-control-registration-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.access-control-registration-panel .user-registration-users-table {
+  width: 100%;
+  min-width: 840px;
+  table-layout: fixed;
+}
+
+.access-control-registration-panel .user-registration-users-table th,
+.access-control-registration-panel .user-registration-users-table td {
+  white-space: normal;
+  word-break: break-word;
 }
 
 .user-registration-page {
@@ -2303,6 +2333,10 @@ body.modal-open {
   }
 
   .dashboard-page-header .btn {
+    width: auto;
+  }
+
+  .access-control-page-header .btn {
     width: auto;
   }
 

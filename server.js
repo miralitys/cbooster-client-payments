@@ -5609,8 +5609,8 @@ app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_
   res.sendFile(path.join(staticRoot, "access-control.html"));
 });
 
-app.get("/user-registration", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "user-registration.html"));
+app.get("/user-registration", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
+  res.redirect(302, "/access-control");
 });
 
 app.use("/api", (_req, res) => {
