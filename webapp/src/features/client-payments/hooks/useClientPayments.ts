@@ -80,6 +80,7 @@ export function useClientPayments() {
     uiState.selectedPeriod as OverviewPeriodKey,
   );
   const [filtersCollapsed, setFiltersCollapsed] = useState(uiState.filtersCollapsed);
+  const [tableDensity, setTableDensity] = useState<"compact" | "comfortable">(uiState.tableDensity || "compact");
 
   const [modalState, setModalState] = useState<ModalState>(INITIAL_MODAL_STATE);
 
@@ -87,6 +88,7 @@ export function useClientPayments() {
   const [saveError, setSaveError] = useState("");
   const [saveRetryCount, setSaveRetryCount] = useState(0);
   const [saveRetryGiveUp, setSaveRetryGiveUp] = useState(false);
+  const [saveSuccessNotice, setSaveSuccessNotice] = useState("");
   const [lastSyncedAt, setLastSyncedAt] = useState("");
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
@@ -99,6 +101,8 @@ export function useClientPayments() {
   const debounceTimerRef = useRef<number | null>(null);
   const retryTimerRef = useRef<number | null>(null);
   const retryAttemptRef = useRef(0);
+  const saveSuccessTimerRef = useRef<number | null>(null);
+  const lastSaveSuccessAtRef = useRef(0);
 
   const canManage = Boolean(session?.permissions?.manage_client_payments);
 
@@ -130,8 +134,9 @@ export function useClientPayments() {
       selectedPeriod: overviewPeriod,
       sortKey: sortState.key,
       sortDirection: sortState.direction,
+      tableDensity,
     });
-  }, [filtersCollapsed, overviewPeriod, sortState.direction, sortState.key]);
+  }, [filtersCollapsed, overviewPeriod, sortState.direction, sortState.key, tableDensity]);
 
   const flushSave = useCallback(async () => {
     if (!initializedRef.current) {
@@ -161,10 +166,12 @@ export function useClientPayments() {
       setSaveError("");
       setHasUnsavedChanges(false);
       setLastSyncedAt(new Date().toISOString());
+      maybeShowSaveSuccess(setSaveSuccessNotice, saveSuccessTimerRef, lastSaveSuccessAtRef);
       resetSaveRetryState(retryAttemptRef, setSaveRetryCount, setSaveRetryGiveUp);
       clearRetryTimer(retryTimerRef);
     } catch (error) {
       const message = extractErrorMessage(error, "Failed to save records.");
+      setSaveSuccessNotice("");
       const nextRetryCount = retryAttemptRef.current + 1;
       if (nextRetryCount > REMOTE_SYNC_MAX_RETRIES) {
         setSaveRetryCount(REMOTE_SYNC_MAX_RETRIES);
@@ -197,6 +204,7 @@ export function useClientPayments() {
     setHasUnsavedChanges(isDirty);
 
     if (isDirty) {
+      setSaveSuccessNotice("");
       scheduleDebouncedSave(flushSave, debounceTimerRef, REMOTE_SYNC_DEBOUNCE_MS);
     }
   }, [flushSave, records]);
@@ -221,6 +229,7 @@ export function useClientPayments() {
     return () => {
       clearDebounceTimer(debounceTimerRef);
       clearRetryTimer(retryTimerRef);
+      clearSaveSuccessTimer(saveSuccessTimerRef);
     };
   }, []);
 
@@ -434,6 +443,7 @@ export function useClientPayments() {
       setLastSyncedAt(new Date().toISOString());
       setHasUnsavedChanges(false);
       setSaveError("");
+      setSaveSuccessNotice("");
     } catch (error) {
       setLoadError(extractErrorMessage(error, "Failed to refresh records."));
     } finally {
@@ -460,6 +470,7 @@ export function useClientPayments() {
     saveRetryCount,
     saveRetryMax: REMOTE_SYNC_MAX_RETRIES,
     saveRetryGiveUp,
+    saveSuccessNotice,
     hasUnsavedChanges,
     lastSyncedAt: formatDateTime(lastSyncedAt),
     modalState,
@@ -469,6 +480,8 @@ export function useClientPayments() {
     setDateRange,
     setOverviewPeriod,
     setFiltersCollapsed,
+    tableDensity,
+    setTableDensity,
     toggleSort,
     forceRefresh,
     openCreateModal,
@@ -549,6 +562,32 @@ function resetSaveRetryState(
   retryAttemptRef.current = 0;
   setSaveRetryCount(0);
   setSaveRetryGiveUp(false);
+}
+
+function maybeShowSaveSuccess(
+  setSaveSuccessNotice: (value: string) => void,
+  timerRef: MutableRefObject<number | null>,
+  lastShownAtRef: MutableRefObject<number>,
+): void {
+  const now = Date.now();
+  if (now - lastShownAtRef.current < 2800) {
+    return;
+  }
+
+  lastShownAtRef.current = now;
+  setSaveSuccessNotice("Changes saved.");
+  clearSaveSuccessTimer(timerRef);
+  timerRef.current = window.setTimeout(() => {
+    setSaveSuccessNotice("");
+    timerRef.current = null;
+  }, 1600);
+}
+
+function clearSaveSuccessTimer(timerRef: MutableRefObject<number | null>): void {
+  if (timerRef.current !== null) {
+    window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+  }
 }
 
 function findRecordByComparableClientName(records: ClientRecord[], requestedName: string): ClientRecord | null {

@@ -3,6 +3,7 @@ export interface ClientPaymentsUiState {
   selectedPeriod: string;
   sortKey: string;
   sortDirection: "asc" | "desc";
+  tableDensity: "compact" | "comfortable";
 }
 
 const UI_STATE_KEY = "cbooster_react_ui_state_v1";
@@ -12,6 +13,7 @@ const DEFAULT_UI_STATE: ClientPaymentsUiState = {
   selectedPeriod: "currentWeek",
   sortKey: "createdAt",
   sortDirection: "desc",
+  tableDensity: "compact",
 };
 
 export function readClientPaymentsUiState(): ClientPaymentsUiState {
@@ -31,6 +33,7 @@ export function readClientPaymentsUiState(): ClientPaymentsUiState {
       selectedPeriod: normalizePeriod(parsed.selectedPeriod),
       sortKey: typeof parsed.sortKey === "string" ? parsed.sortKey : DEFAULT_UI_STATE.sortKey,
       sortDirection: parsed.sortDirection === "asc" ? "asc" : "desc",
+      tableDensity: normalizeDensity(parsed.tableDensity),
     };
   } catch {
     return DEFAULT_UI_STATE;
@@ -49,6 +52,7 @@ export function writeClientPaymentsUiState(nextState: ClientPaymentsUiState): vo
       selectedPeriod: normalizePeriod(nextState.selectedPeriod),
       sortKey: nextState.sortKey,
       sortDirection: nextState.sortDirection,
+      tableDensity: normalizeDensity(nextState.tableDensity),
     }),
   );
 }
@@ -64,4 +68,8 @@ function normalizePeriod(value: unknown): string {
   }
 
   return DEFAULT_UI_STATE.selectedPeriod;
+}
+
+function normalizeDensity(value: unknown): "compact" | "comfortable" {
+  return value === "comfortable" ? "comfortable" : "compact";
 }
