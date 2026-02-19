@@ -31,6 +31,10 @@ a {
   -webkit-tap-highlight-color: transparent;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .page-header {
   display: flex;
   align-items: flex-end;
