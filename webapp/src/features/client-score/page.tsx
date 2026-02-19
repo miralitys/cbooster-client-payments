@@ -78,7 +78,7 @@ export default function ClientScorePage() {
         align: "center",
         cell: (row) => (
           <Badge tone={row.score.tone}>
-            {row.score.score === null ? "Score N/A" : `Score ${row.score.score}`}
+            {row.score.displayScore === null ? "Score N/A" : `Score ${row.score.displayScore}`}
           </Badge>
         ),
       },
