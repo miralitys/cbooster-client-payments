@@ -5845,10 +5845,27 @@ async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIs
   );
 }
 
-async function fetchQuickBooksAccessToken() {
-  const activeRefreshToken = getActiveQuickBooksRefreshToken();
-  if (!activeRefreshToken) {
-    throw createHttpError("QuickBooks auth failed. Refresh token is missing.", 503);
+function isQuickBooksInvalidRefreshTokenDetails(detailsText) {
+  const normalized = sanitizeTextValue(detailsText, 600).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized.includes("invalid refresh token") ||
+    normalized.includes("incorrect or invalid refresh token") ||
+    normalized.includes("invalid_grant")
+  );
+}
+
+async function requestQuickBooksAccessTokenWithRefreshToken(refreshTokenValue) {
+  const normalizedRefreshToken = sanitizeTextValue(refreshTokenValue, 6000);
+  if (!normalizedRefreshToken) {
+    return {
+      ok: false,
+      message: "Refresh token is missing.",
+      invalidRefreshToken: false,
+    };
   }
 
   const basicCredentials = Buffer.from(`${QUICKBOOKS_CLIENT_ID}:${QUICKBOOKS_CLIENT_SECRET}`, "utf8").toString(
@@ -5856,7 +5873,7 @@ async function fetchQuickBooksAccessToken() {
   );
   const payload = new URLSearchParams({
     grant_type: "refresh_token",
-    refresh_token: activeRefreshToken,
+    refresh_token: normalizedRefreshToken,
   });
 
   if (QUICKBOOKS_REDIRECT_URI) {
@@ -5875,7 +5892,12 @@ async function fetchQuickBooksAccessToken() {
       body: payload.toString(),
     });
   } catch (error) {
-    throw createHttpError(`QuickBooks token request failed: ${sanitizeTextValue(error?.message, 300)}`, 503);
+    return {
+      ok: false,
+      message: `QuickBooks token request failed: ${sanitizeTextValue(error?.message, 300)}`,
+      invalidRefreshToken: false,
+      httpStatus: 503,
+    };
   }
 
   const responseText = await response.text();
@@ -5888,27 +5910,74 @@ async function fetchQuickBooksAccessToken() {
 
   if (!response.ok) {
     const details = sanitizeTextValue(body?.error_description || body?.error || responseText, 400);
-    throw createHttpError(`QuickBooks auth failed. ${details || "Unable to refresh access token."}`, 502);
+    return {
+      ok: false,
+      message: `QuickBooks auth failed. ${details || "Unable to refresh access token."}`,
+      invalidRefreshToken: isQuickBooksInvalidRefreshTokenDetails(details),
+      httpStatus: 502,
+    };
   }
 
   const accessToken = sanitizeTextValue(body?.access_token, 5000);
   if (!accessToken) {
-    throw createHttpError("QuickBooks auth failed. Empty access token.", 502);
+    return {
+      ok: false,
+      message: "QuickBooks auth failed. Empty access token.",
+      invalidRefreshToken: false,
+      httpStatus: 502,
+    };
   }
 
-  const rotatedRefreshToken = sanitizeTextValue(body?.refresh_token, 6000);
-  const nextRefreshToken = rotatedRefreshToken || activeRefreshToken;
-  quickBooksRuntimeRefreshToken = nextRefreshToken;
-
+  const rotatedRefreshToken = sanitizeTextValue(body?.refresh_token, 6000) || normalizedRefreshToken;
   const refreshTokenLifetimeSec = parseQuickBooksTokenLifetimeSeconds(body?.x_refresh_token_expires_in);
   const refreshTokenExpiresAtIso = toIsoTimestampFromNow(refreshTokenLifetimeSec || 0);
+
+  return {
+    ok: true,
+    accessToken,
+    refreshToken: rotatedRefreshToken,
+    refreshTokenExpiresAtIso,
+  };
+}
+
+async function fetchQuickBooksAccessToken() {
+  const activeRefreshToken = getActiveQuickBooksRefreshToken();
+  const envRefreshToken = sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000);
+  const attemptedTokens = new Set();
+
+  let authResult = null;
+  if (activeRefreshToken) {
+    attemptedTokens.add(activeRefreshToken);
+    authResult = await requestQuickBooksAccessTokenWithRefreshToken(activeRefreshToken);
+  }
+
+  if (
+    authResult &&
+    !authResult.ok &&
+    authResult.invalidRefreshToken &&
+    envRefreshToken &&
+    !attemptedTokens.has(envRefreshToken)
+  ) {
+    attemptedTokens.add(envRefreshToken);
+    authResult = await requestQuickBooksAccessTokenWithRefreshToken(envRefreshToken);
+  }
+
+  if (!authResult) {
+    throw createHttpError("QuickBooks auth failed. Refresh token is missing.", 503);
+  }
+
+  if (!authResult.ok) {
+    throw createHttpError(authResult.message || "QuickBooks auth failed.", authResult.httpStatus || 502);
+  }
+
+  quickBooksRuntimeRefreshToken = authResult.refreshToken;
   try {
-    await persistQuickBooksRefreshToken(nextRefreshToken, refreshTokenExpiresAtIso);
+    await persistQuickBooksRefreshToken(authResult.refreshToken, authResult.refreshTokenExpiresAtIso);
   } catch (error) {
     console.warn("QuickBooks token refresh state was not persisted:", sanitizeTextValue(error?.message, 220) || "Unknown error.");
   }
 
-  return accessToken;
+  return authResult.accessToken;
 }
 
 async function fetchQuickBooksEntityInRange(accessToken, entityName, fromDate, toDate, requestLabel) {
