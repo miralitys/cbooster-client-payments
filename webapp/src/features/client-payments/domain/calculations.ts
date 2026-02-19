@@ -295,7 +295,7 @@ export function filterRecords(records: ClientRecord[], filters: ClientPaymentsFi
 
       return record.closedBy.trim().toLowerCase() === selectedClosedBy;
     })
-    .filter((record) => isDateWithinRange(record.createdAt, createdRange.from, createdRange.to))
+    .filter((record) => isDateWithinRange(record.payment1Date, createdRange.from, createdRange.to))
     .filter((record) => {
       if (!hasDateRangeValues(paymentRange)) {
         return true;
