@@ -10,12 +10,32 @@ interface RecordDetailsProps {
   record: ClientRecord;
 }
 
+const HEADER_FIELD_KEYS = new Set<keyof ClientRecord>([
+  "clientName",
+  "contractTotals",
+  "totalPayments",
+  "futurePayments",
+  "companyName",
+]);
+
+const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
+
 export function RecordDetails({ record }: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
   const [isLoadingGhlBasicNote, setIsLoadingGhlBasicNote] = useState(false);
   const [ghlBasicNoteError, setGhlBasicNoteError] = useState("");
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
+  const contractDisplay = useMemo(() => formatMoneyCell(record.contractTotals), [record.contractTotals]);
+  const paidDisplay = useMemo(() => formatMoneyCell(record.totalPayments), [record.totalPayments]);
+  const debtDisplay = useMemo(() => formatMoneyCell(record.futurePayments), [record.futurePayments]);
+  const companyDisplay = useMemo(() => (record.companyName || "").trim() || "-", [record.companyName]);
+
+  const detailsFields = useMemo(
+    () => FIELD_DEFINITIONS.filter((field) => !HEADER_FIELD_KEYS.has(field.key)),
+    [],
+  );
 
   useEffect(() => {
     if (!normalizedClientName) {
@@ -60,27 +80,53 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       isActive = false;
       abortController.abort();
     };
-  }, [normalizedClientName]);
+  }, [normalizedClientName, record]);
+
+  const contactInfo = useMemo(() => resolveContactInfo(record, ghlBasicNote), [ghlBasicNote, record]);
 
   return (
     <div className="record-details-stack">
-      <div className="record-details-grid">
-        {FIELD_DEFINITIONS.map((field) => {
-          const value = record[field.key] || "";
-          if (!value && field.type !== "checkbox") {
+      <section className="record-profile-header">
+        <h4 className="record-profile-header__name">{normalizedClientName || "Unnamed client"}</h4>
+        <p className="record-profile-header__contract">
+          Contract: <strong>{contractDisplay}</strong>
+        </p>
+
+        <div className="record-profile-header__money-row">
+          <div className="record-profile-header__money-item">
+            <span className="record-profile-header__money-label">Paid</span>
+            <strong className="record-profile-header__money-value">{paidDisplay}</strong>
+          </div>
+          <div className="record-profile-header__money-item">
+            <span className="record-profile-header__money-label">Debt</span>
+            <strong className="record-profile-header__money-value">{debtDisplay}</strong>
+          </div>
+        </div>
+
+        <div className="record-profile-header__contact-row">
+          <div className="record-profile-header__contact-item">
+            <span className="record-profile-header__contact-label">Phone</span>
+            <strong className="record-profile-header__contact-value">{contactInfo.phone || "-"}</strong>
+          </div>
+          <div className="record-profile-header__contact-item">
+            <span className="record-profile-header__contact-label">Email</span>
+            <strong className="record-profile-header__contact-value">{contactInfo.email || "-"}</strong>
+          </div>
+          <div className="record-profile-header__contact-item">
+            <span className="record-profile-header__contact-label">Company</span>
+            <strong className="record-profile-header__contact-value">{companyDisplay}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="record-details-grid">
+        {detailsFields.map((field) => {
+          const rawValue = record[field.key] || "";
+          if (!rawValue && field.type !== "checkbox") {
             return null;
           }
 
-          let displayValue = value;
-          if (field.type === "checkbox") {
-            displayValue = value ? "Yes" : "No";
-          } else if (field.type === "date") {
-            displayValue = formatDate(value);
-          } else if (field.key === "contractTotals" || field.key === "totalPayments" || field.key === "futurePayments") {
-            const amount = parseMoneyValue(value);
-            displayValue = amount === null ? value : formatMoney(amount);
-          }
-
+          const displayValue = formatFieldValue(field.key, field.type, rawValue);
           return (
             <div key={field.key} className="record-details-grid__item">
               <span className="record-details-grid__label">{field.label}</span>
@@ -88,7 +134,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
             </div>
           );
         })}
-      </div>
+      </section>
 
       <section className="record-details-ghl-note" aria-live="polite">
         <div className="record-details-ghl-note__header">
@@ -141,6 +187,66 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       </section>
     </div>
   );
+}
+
+function formatMoneyCell(rawValue: string): string {
+  const amount = parseMoneyValue(rawValue);
+  if (amount === null) {
+    return rawValue || "-";
+  }
+  return formatMoney(amount);
+}
+
+function formatFieldValue(
+  key: keyof ClientRecord,
+  type: "text" | "textarea" | "checkbox" | "date",
+  rawValue: string,
+): string {
+  if (type === "checkbox") {
+    return rawValue ? "Yes" : "No";
+  }
+
+  if (type === "date") {
+    return formatDate(rawValue);
+  }
+
+  if (key === "contractTotals" || key === "totalPayments" || key === "futurePayments") {
+    return formatMoneyCell(rawValue);
+  }
+
+  return rawValue;
+}
+
+function resolveContactInfo(record: ClientRecord, ghlBasicNote: GhlClientBasicNotePayload | null): {
+  phone: string;
+  email: string;
+} {
+  const noteText = [ghlBasicNote?.noteBody || "", ghlBasicNote?.memoBody || ""].filter(Boolean).join("\n");
+
+  const phoneFromRecord =
+    getOptionalRecordText(record, "clientPhoneNumber") || getOptionalRecordText(record, "clientPhone") || getOptionalRecordText(record, "phone");
+  const emailFromRecord =
+    getOptionalRecordText(record, "clientEmailAddress") || getOptionalRecordText(record, "clientEmail") || getOptionalRecordText(record, "email");
+
+  return {
+    phone: phoneFromRecord || extractFirstMatch(noteText, PHONE_PATTERN),
+    email: emailFromRecord || extractFirstMatch(noteText, EMAIL_PATTERN),
+  };
+}
+
+function getOptionalRecordText(record: ClientRecord, key: string): string {
+  const rawValue = (record as unknown as Record<string, unknown>)[key];
+  return (rawValue || "").toString().trim();
+}
+
+function extractFirstMatch(value: string, pattern: RegExp): string {
+  const text = (value || "").toString();
+  if (!text) {
+    return "";
+  }
+
+  const match = text.match(pattern);
+  return (match?.[0] || "").trim();
 }
 
 function isWrittenOffRecord(record: ClientRecord): boolean {
