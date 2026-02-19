@@ -11,6 +11,7 @@
   const CLIENT_OPEN_EVENT = "cb-assistant-open-client";
   const STORAGE_KEY = "cb_assistant_mode";
   const API_PATH = "/api/assistant/chat";
+  const API_TTS_PATH = "/api/assistant/tts";
   const MAX_TEXT_LENGTH = 2000;
 
   const userLang = /^ru\b/i.test((navigator && navigator.language) || "") ? "ru" : "en";
@@ -89,6 +90,9 @@
   let isListening = false;
   let isSpeaking = false;
   let mode = readMode();
+  let playbackAudio = null;
+  let playbackObjectUrl = "";
+  let playbackAbortController = null;
 
   const state = {
     messages: [
@@ -227,13 +231,37 @@
     }
   }
 
-  function speakText(rawText) {
+  function stopAudioPlayback(shouldRender) {
+    if (playbackAudio) {
+      playbackAudio.pause();
+      playbackAudio.onended = null;
+      playbackAudio.onerror = null;
+      playbackAudio.src = "";
+      playbackAudio = null;
+    }
+
+    if (playbackObjectUrl) {
+      URL.revokeObjectURL(playbackObjectUrl);
+      playbackObjectUrl = "";
+    }
+
+    isSpeaking = false;
+    if (shouldRender !== false) {
+      renderActions();
+    }
+  }
+
+  function speakTextWithBrowserSynthesis(rawText) {
     if (!("speechSynthesis" in window)) {
+      isSpeaking = false;
+      renderActions();
       return;
     }
 
     const text = normalizeText(rawText);
     if (!text) {
+      isSpeaking = false;
+      renderActions();
       return;
     }
 
@@ -255,6 +283,82 @@
       renderActions();
     };
     window.speechSynthesis.speak(utterance);
+  }
+
+  async function speakText(rawText) {
+    const text = normalizeText(rawText);
+    if (!text) {
+      return;
+    }
+
+    if (playbackAbortController) {
+      playbackAbortController.abort();
+      playbackAbortController = null;
+    }
+
+    stopAudioPlayback(false);
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    const controller = new AbortController();
+    playbackAbortController = controller;
+    isSpeaking = true;
+    renderActions();
+
+    try {
+      const response = await fetch(API_TTS_PATH, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "audio/mpeg",
+        },
+        body: JSON.stringify({ text }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`TTS request failed with status ${response.status}`);
+      }
+
+      const audioBlob = await response.blob();
+      if (!audioBlob || !audioBlob.size) {
+        throw new Error("TTS response is empty.");
+      }
+
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      const audioUrl = URL.createObjectURL(audioBlob);
+      if (playbackObjectUrl) {
+        URL.revokeObjectURL(playbackObjectUrl);
+      }
+      playbackObjectUrl = audioUrl;
+
+      playbackAudio = new Audio(audioUrl);
+      playbackAudio.onended = function onEnded() {
+        stopAudioPlayback();
+      };
+      playbackAudio.onerror = function onAudioError() {
+        stopAudioPlayback();
+        speakTextWithBrowserSynthesis(text);
+      };
+
+      await playbackAudio.play();
+    } catch (_error) {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      stopAudioPlayback();
+      speakTextWithBrowserSynthesis(text);
+    } finally {
+      if (playbackAbortController === controller) {
+        playbackAbortController = null;
+      }
+    }
   }
 
   function appendMessage(role, text, mentions) {
@@ -337,6 +441,10 @@
     closeBtn.addEventListener("click", function closePanel() {
       isOpen = false;
       stopListening();
+      stopAudioPlayback(false);
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
       render();
     });
 

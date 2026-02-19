@@ -247,6 +247,16 @@ const OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS = Math.min(
   Math.max(parsePositiveInteger(process.env.OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS, 420), 120),
   1800,
 );
+const ELEVENLABS_API_KEY = (process.env.ELEVENLABS_API_KEY || "").toString().trim();
+const ELEVENLABS_VOICE_ID =
+  (process.env.ELEVENLABS_VOICE_ID || "ARyC2bwXA7I797b7vxmB").toString().trim() || "ARyC2bwXA7I797b7vxmB";
+const ELEVENLABS_MODEL_ID = (process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2").toString().trim() || "eleven_multilingual_v2";
+const ELEVENLABS_API_BASE_URL = ((process.env.ELEVENLABS_API_BASE_URL || "https://api.elevenlabs.io").toString().trim() || "https://api.elevenlabs.io").replace(/\/+$/, "");
+const ELEVENLABS_OUTPUT_FORMAT = (process.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128").toString().trim() || "mp3_44100_128";
+const ELEVENLABS_TTS_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.ELEVENLABS_TTS_TIMEOUT_MS, 15000), 3000),
+  60000,
+);
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
@@ -2247,6 +2257,10 @@ function isOpenAiAssistantConfigured() {
   return Boolean(OPENAI_API_KEY);
 }
 
+function isElevenLabsConfigured() {
+  return Boolean(ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID);
+}
+
 function roundAssistantAmount(value) {
   if (!Number.isFinite(value)) {
     return null;
@@ -2587,6 +2601,71 @@ async function requestOpenAiAssistantReply(message, mode, records, updatedAt) {
   }
 
   return normalizeAssistantReplyForDisplay(reply);
+}
+
+async function requestElevenLabsSpeech(rawText) {
+  if (!isElevenLabsConfigured()) {
+    return null;
+  }
+
+  const text = sanitizeTextValue(rawText, 2400);
+  if (!text) {
+    return null;
+  }
+
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    abortController.abort("timeout");
+  }, ELEVENLABS_TTS_TIMEOUT_MS);
+
+  const endpoint = `${ELEVENLABS_API_BASE_URL}/v1/text-to-speech/${encodeURIComponent(
+    ELEVENLABS_VOICE_ID,
+  )}?output_format=${encodeURIComponent(ELEVENLABS_OUTPUT_FORMAT)}`;
+
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: ELEVENLABS_MODEL_ID,
+      }),
+      signal: abortController.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (abortController.signal.aborted) {
+      throw createHttpError(`ElevenLabs request timed out after ${ELEVENLABS_TTS_TIMEOUT_MS}ms.`, 504);
+    }
+
+    throw createHttpError(
+      `ElevenLabs request failed: ${sanitizeTextValue(error?.message, 320) || "network error"}.`,
+      503,
+    );
+  }
+
+  clearTimeout(timeoutId);
+
+  if (!response.ok) {
+    const rawErrorText = await response.text().catch(() => "");
+    throw createHttpError(
+      `ElevenLabs request failed with status ${response.status}. ${sanitizeTextValue(rawErrorText, 600) || "No details."}`,
+      502,
+    );
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const audioBuffer = Buffer.from(arrayBuffer);
+  if (!audioBuffer.length) {
+    throw createHttpError("ElevenLabs returned empty audio.", 502);
+  }
+
+  return audioBuffer;
 }
 
 function parseWebAuthUsersJson(rawValue) {
@@ -7874,6 +7953,42 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
   }
 });
 
+app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  const text = sanitizeTextValue(req.body?.text, 2400);
+  if (!text) {
+    res.status(400).json({
+      error: "Payload must include non-empty `text`.",
+    });
+    return;
+  }
+
+  if (!isElevenLabsConfigured()) {
+    res.status(503).json({
+      error: "ElevenLabs TTS is not configured. Set ELEVENLABS_API_KEY.",
+    });
+    return;
+  }
+
+  try {
+    const audio = await requestElevenLabsSpeech(text);
+    if (!audio) {
+      res.status(502).json({
+        error: "ElevenLabs returned empty audio.",
+      });
+      return;
+    }
+
+    res.setHeader("Cache-Control", "no-store, private");
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.status(200).send(audio);
+  } catch (error) {
+    console.error("POST /api/assistant/tts failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to synthesize assistant audio.",
+    });
+  }
+});
+
 app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -8408,5 +8523,10 @@ app.listen(PORT, () => {
     console.log(`Assistant LLM is enabled via OpenAI model: ${OPENAI_MODEL}.`);
   } else {
     console.warn("Assistant LLM is disabled. Set OPENAI_API_KEY to enable OpenAI responses.");
+  }
+  if (isElevenLabsConfigured()) {
+    console.log(`Assistant voice is enabled via ElevenLabs voice: ${ELEVENLABS_VOICE_ID}.`);
+  } else {
+    console.warn("Assistant voice is running in browser fallback mode. Set ELEVENLABS_API_KEY to enable ElevenLabs TTS.");
   }
 });
