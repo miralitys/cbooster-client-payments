@@ -3751,6 +3751,39 @@ function isLooseNameMatch(expectedName, candidateName) {
   return candidate.includes(expected) || expected.includes(candidate);
 }
 
+function getGhlContactNameMatchScore(expectedName, candidateName) {
+  const expected = normalizeNameForLookup(expectedName);
+  const candidate = normalizeNameForLookup(candidateName);
+  if (!expected || !candidate) {
+    return 0;
+  }
+
+  if (expected === candidate) {
+    return 1000;
+  }
+  if (areNamesEquivalent(expected, candidate)) {
+    return 900;
+  }
+  if (isLooseNameMatch(expected, candidate)) {
+    return 700;
+  }
+
+  const expectedTokens = expected.split(" ").filter(Boolean);
+  const candidateTokens = candidate.split(" ").filter(Boolean);
+  let matchedTokens = 0;
+  for (const expectedToken of expectedTokens) {
+    if (candidateTokens.some((candidateToken) => areNamesEquivalentTokens(expectedToken, candidateToken))) {
+      matchedTokens += 1;
+    }
+  }
+
+  if (matchedTokens > 0) {
+    return 400 + matchedTokens * 40;
+  }
+
+  return 0;
+}
+
 function extractMemoNoteFromContactObject(contact, contactName, contactId) {
   if (!contact || typeof contact !== "object") {
     return null;
@@ -4176,10 +4209,6 @@ async function searchGhlContactsByClientName(clientName) {
     const contacts = extractGhlContactsFromPayload(response.body);
     for (const contact of contacts) {
       const candidateName = buildContactCandidateName(contact);
-      if (!areNamesEquivalent(normalizedClientName, candidateName) && !isLooseNameMatch(normalizedClientName, candidateName)) {
-        continue;
-      }
-
       const contactId = sanitizeTextValue(contact?.id || contact?._id || contact?.contactId, 160);
       if (contactId) {
         contactsById.set(contactId, contact);
@@ -4203,10 +4232,10 @@ async function searchGhlContactsByClientName(clientName) {
   orderedContacts.sort((left, right) => {
     const leftName = buildContactCandidateName(left);
     const rightName = buildContactCandidateName(right);
-    const leftExact = areNamesEquivalent(normalizedClientName, leftName) ? 1 : 0;
-    const rightExact = areNamesEquivalent(normalizedClientName, rightName) ? 1 : 0;
-    if (leftExact !== rightExact) {
-      return rightExact - leftExact;
+    const leftScore = getGhlContactNameMatchScore(normalizedClientName, leftName);
+    const rightScore = getGhlContactNameMatchScore(normalizedClientName, rightName);
+    if (leftScore !== rightScore) {
+      return rightScore - leftScore;
     }
 
     const leftUpdated = parseGhlContactTimestamp(left);
@@ -4481,7 +4510,7 @@ async function findGhlBasicNoteByClientName(clientName) {
     };
   }
 
-  const contactsToInspect = contacts.slice(0, 25);
+  const contactsToInspect = contacts.slice(0, 80);
   let inspectedContacts = 0;
   let successfulContactLookups = 0;
   let lastLookupError = null;
