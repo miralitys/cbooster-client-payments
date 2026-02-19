@@ -9018,6 +9018,10 @@ app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_
   res.redirect(302, "/app/access-control");
 });
 
+app.get("/client-score", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
+  res.redirect(302, "/app/client-score");
+});
+
 app.get("/legacy/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (_req, res) => {
   res.sendFile(path.join(staticRoot, "quickbooks-payments.html"));
 });
