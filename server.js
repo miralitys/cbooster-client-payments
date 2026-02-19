@@ -310,10 +310,20 @@ const GHL_REQUIRED_CONTRACT_KEYWORD_PATTERN = /\bcontracts?\b/;
 const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
 const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
 const GHL_BASIC_NOTE_KEYWORD_PATTERN = /\bbasic\b/i;
-const GHL_BASIC_NOTE_REFRESH_INTERVAL_MS = Math.min(
-  Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_REFRESH_INTERVAL_MS, 7 * 24 * 60 * 60 * 1000), 60 * 60 * 1000),
-  90 * 24 * 60 * 60 * 1000,
-);
+const GHL_MEMO_NOTE_KEYWORD_PATTERN = /\bmemo\b/i;
+const GHL_BASIC_NOTE_SYNC_TIME_ZONE = "America/Chicago";
+const GHL_BASIC_NOTE_SYNC_HOUR = 2;
+const GHL_BASIC_NOTE_SYNC_MINUTE = 15;
+const GHL_BASIC_NOTE_WRITTEN_OFF_REFRESH_DAYS = new Set([1, 15]);
+const GHL_BASIC_NOTE_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: GHL_BASIC_NOTE_SYNC_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 const GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED = resolveOptionalBoolean(process.env.GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED) !== false;
 const GHL_BASIC_NOTE_AUTO_REFRESH_TICK_INTERVAL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_AUTO_REFRESH_TICK_INTERVAL_MS, 60 * 60 * 1000), 15 * 60 * 1000),
@@ -4245,6 +4255,18 @@ function pickGhlBasicNote(noteCandidates) {
   return null;
 }
 
+function pickGhlMemoNote(noteCandidates) {
+  const notes = Array.isArray(noteCandidates) ? noteCandidates : [];
+  for (const note of notes) {
+    const haystack = `${sanitizeTextValue(note.title, 300)}\n${sanitizeTextValue(note.body, 12000)}`;
+    if (GHL_MEMO_NOTE_KEYWORD_PATTERN.test(haystack)) {
+      return note;
+    }
+  }
+
+  return notes[0] || null;
+}
+
 async function findGhlBasicNoteByClientName(clientName) {
   const normalizedClientName = sanitizeTextValue(clientName, 300);
   if (!normalizedClientName) {
@@ -4255,6 +4277,9 @@ async function findGhlBasicNoteByClientName(clientName) {
       noteTitle: "",
       noteBody: "",
       noteCreatedAt: "",
+      memoTitle: "",
+      memoBody: "",
+      memoCreatedAt: "",
       source: "gohighlevel",
       matchedContacts: 0,
       inspectedContacts: 0,
@@ -4270,6 +4295,9 @@ async function findGhlBasicNoteByClientName(clientName) {
       noteTitle: "",
       noteBody: "",
       noteCreatedAt: "",
+      memoTitle: "",
+      memoBody: "",
+      memoCreatedAt: "",
       source: "gohighlevel",
       matchedContacts: 0,
       inspectedContacts: 0,
@@ -4280,6 +4308,10 @@ async function findGhlBasicNoteByClientName(clientName) {
   let inspectedContacts = 0;
   let successfulContactLookups = 0;
   let lastLookupError = null;
+  let fallbackContactName = "";
+  let fallbackContactId = "";
+  let basicMatch = null;
+  let memoMatch = null;
 
   for (const rawContact of contactsToInspect) {
     const contactId = sanitizeTextValue(rawContact?.id || rawContact?._id || rawContact?.contactId, 160);
@@ -4289,6 +4321,10 @@ async function findGhlBasicNoteByClientName(clientName) {
 
     inspectedContacts += 1;
     const contactName = sanitizeTextValue(buildContactCandidateName(rawContact), 300) || normalizedClientName;
+    if (!fallbackContactName) {
+      fallbackContactName = contactName;
+      fallbackContactId = contactId;
+    }
 
     let notes = [];
     try {
@@ -4299,36 +4335,51 @@ async function findGhlBasicNoteByClientName(clientName) {
       continue;
     }
 
-    const basicNote = pickGhlBasicNote(notes);
-    if (!basicNote) {
-      continue;
+    if (!basicMatch) {
+      const basicNote = pickGhlBasicNote(notes);
+      if (basicNote) {
+        basicMatch = {
+          contactName,
+          contactId,
+          note: basicNote,
+        };
+      }
     }
 
-    return {
-      status: "found",
-      contactName,
-      contactId,
-      noteTitle: sanitizeTextValue(basicNote.title, 300),
-      noteBody: sanitizeTextValue(basicNote.body, 12000),
-      noteCreatedAt: sanitizeTextValue(basicNote.createdAt, 80),
-      source: sanitizeTextValue(basicNote.source, 120) || "contacts.notes",
-      matchedContacts: contacts.length,
-      inspectedContacts,
-    };
+    if (!memoMatch) {
+      const memoNote = pickGhlMemoNote(notes);
+      if (memoNote) {
+        memoMatch = {
+          contactName,
+          contactId,
+          note: memoNote,
+        };
+      }
+    }
+
+    if (basicMatch && memoMatch) {
+      break;
+    }
   }
 
   if (!successfulContactLookups && inspectedContacts > 0 && lastLookupError) {
     throw lastLookupError;
   }
 
+  const source =
+    sanitizeTextValue(basicMatch?.note?.source || memoMatch?.note?.source, 120) || "gohighlevel";
+
   return {
-    status: "not_found",
-    contactName: "",
-    contactId: "",
-    noteTitle: "",
-    noteBody: "",
-    noteCreatedAt: "",
-    source: "gohighlevel",
+    status: basicMatch ? "found" : "not_found",
+    contactName: sanitizeTextValue(basicMatch?.contactName || memoMatch?.contactName || fallbackContactName, 300),
+    contactId: sanitizeTextValue(basicMatch?.contactId || memoMatch?.contactId || fallbackContactId, 160),
+    noteTitle: sanitizeTextValue(basicMatch?.note?.title, 300),
+    noteBody: sanitizeTextValue(basicMatch?.note?.body, 12000),
+    noteCreatedAt: sanitizeTextValue(basicMatch?.note?.createdAt, 80),
+    memoTitle: sanitizeTextValue(memoMatch?.note?.title, 300),
+    memoBody: sanitizeTextValue(memoMatch?.note?.body, 12000),
+    memoCreatedAt: sanitizeTextValue(memoMatch?.note?.createdAt, 80),
+    source,
     matchedContacts: contacts.length,
     inspectedContacts,
   };
@@ -4354,11 +4405,154 @@ function normalizeIsoTimestampOrNull(rawValue) {
   return new Date(timestamp).toISOString();
 }
 
+function getGhlBasicNoteClockParts(dateValue = new Date()) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const values = {};
+  for (const part of GHL_BASIC_NOTE_DATE_TIME_FORMATTER.formatToParts(date)) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+
+  const fallbackIsoDate = formatQuickBooksDateUtc(date);
+  const [fallbackYear, fallbackMonth, fallbackDay] = fallbackIsoDate.split("-");
+  const rawHour = Number.parseInt(values.hour || "0", 10);
+  const rawMinute = Number.parseInt(values.minute || "0", 10);
+  const normalizedHour = Number.isFinite(rawHour) ? ((rawHour % 24) + 24) % 24 : 0;
+  const normalizedMinute = Number.isFinite(rawMinute) ? Math.max(0, Math.min(rawMinute, 59)) : 0;
+
+  return {
+    year: values.year || fallbackYear,
+    month: values.month || fallbackMonth,
+    day: values.day || fallbackDay,
+    hour: normalizedHour,
+    minute: normalizedMinute,
+  };
+}
+
+function getTimeZoneOffsetMinutes(timeZone, dateValue) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    timeZoneName: "shortOffset",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const offsetPart = parts.find((part) => part.type === "timeZoneName");
+  const value = sanitizeTextValue(offsetPart?.value, 32);
+
+  const match = value.match(/^GMT([+-]\d{1,2})(?::?(\d{2}))?$/i);
+  if (!match) {
+    return 0;
+  }
+
+  const hours = Number.parseInt(match[1], 10);
+  const minutes = Number.parseInt(match[2] || "0", 10);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) {
+    return 0;
+  }
+
+  return hours * 60 + (hours >= 0 ? minutes : -minutes);
+}
+
+function buildUtcDateFromTimeZoneLocalParts(timeZone, year, month, day, hour, minute) {
+  let utcTimestamp = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const offsetMinutes = getTimeZoneOffsetMinutes(timeZone, new Date(utcTimestamp));
+    const candidateTimestamp = Date.UTC(year, month - 1, day, hour, minute, 0, 0) - offsetMinutes * 60 * 1000;
+    if (candidateTimestamp === utcTimestamp) {
+      break;
+    }
+    utcTimestamp = candidateTimestamp;
+  }
+
+  return new Date(utcTimestamp);
+}
+
+function addDaysToCalendarDate(year, month, day, dayOffset) {
+  const date = new Date(Date.UTC(year, month - 1, day + dayOffset, 12, 0, 0, 0));
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+  };
+}
+
+function addMonthsToCalendarMonth(year, month, monthOffset) {
+  const totalMonths = year * 12 + (month - 1) + monthOffset;
+  const nextYear = Math.floor(totalMonths / 12);
+  const nextMonth = (totalMonths % 12) + 1;
+  return {
+    year: nextYear,
+    month: nextMonth,
+  };
+}
+
 function buildNextGhlBasicNoteRefreshTimestamp(isWrittenOff, nowMs = Date.now()) {
-  if (isWrittenOff) {
+  const now = nowMs instanceof Date ? nowMs : new Date(nowMs);
+  const nowTimestamp = now.getTime();
+  const localNow = getGhlBasicNoteClockParts(now);
+  const year = Number.parseInt(localNow.year, 10);
+  const month = Number.parseInt(localNow.month, 10);
+  const day = Number.parseInt(localNow.day, 10);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
     return null;
   }
-  return new Date(nowMs + GHL_BASIC_NOTE_REFRESH_INTERVAL_MS).toISOString();
+
+  if (!isWrittenOff) {
+    const todayRun = buildUtcDateFromTimeZoneLocalParts(
+      GHL_BASIC_NOTE_SYNC_TIME_ZONE,
+      year,
+      month,
+      day,
+      GHL_BASIC_NOTE_SYNC_HOUR,
+      GHL_BASIC_NOTE_SYNC_MINUTE,
+    );
+    if (todayRun.getTime() > nowTimestamp) {
+      return todayRun.toISOString();
+    }
+
+    const tomorrow = addDaysToCalendarDate(year, month, day, 1);
+    return buildUtcDateFromTimeZoneLocalParts(
+      GHL_BASIC_NOTE_SYNC_TIME_ZONE,
+      tomorrow.year,
+      tomorrow.month,
+      tomorrow.day,
+      GHL_BASIC_NOTE_SYNC_HOUR,
+      GHL_BASIC_NOTE_SYNC_MINUTE,
+    ).toISOString();
+  }
+
+  const candidates = [];
+  for (let monthOffset = 0; monthOffset <= 6; monthOffset += 1) {
+    const targetMonth = addMonthsToCalendarMonth(year, month, monthOffset);
+    for (const refreshDay of GHL_BASIC_NOTE_WRITTEN_OFF_REFRESH_DAYS) {
+      const candidateDate = buildUtcDateFromTimeZoneLocalParts(
+        GHL_BASIC_NOTE_SYNC_TIME_ZONE,
+        targetMonth.year,
+        targetMonth.month,
+        refreshDay,
+        GHL_BASIC_NOTE_SYNC_HOUR,
+        GHL_BASIC_NOTE_SYNC_MINUTE,
+      );
+      if (candidateDate.getTime() > nowTimestamp) {
+        candidates.push(candidateDate);
+      }
+    }
+    if (candidates.length) {
+      break;
+    }
+  }
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  candidates.sort((left, right) => left.getTime() - right.getTime());
+  return candidates[0].toISOString();
 }
 
 function mapGhlBasicNoteCacheRow(row) {
@@ -4377,12 +4571,14 @@ function mapGhlBasicNoteCacheRow(row) {
     noteTitle: sanitizeTextValue(row?.note_title, 300),
     noteBody: sanitizeTextValue(row?.note_body, 12000),
     noteCreatedAt: row?.note_created_at ? new Date(row.note_created_at).toISOString() : "",
+    memoTitle: sanitizeTextValue(row?.memo_title, 300),
+    memoBody: sanitizeTextValue(row?.memo_body, 12000),
+    memoCreatedAt: row?.memo_created_at ? new Date(row.memo_created_at).toISOString() : "",
     source: sanitizeTextValue(row?.source, 120) || "gohighlevel",
     matchedContacts: Number.isFinite(matchedContacts) && matchedContacts >= 0 ? matchedContacts : 0,
     inspectedContacts: Number.isFinite(inspectedContacts) && inspectedContacts >= 0 ? inspectedContacts : 0,
     lastError: sanitizeTextValue(row?.last_error, 600),
     isWrittenOff: row?.is_written_off === true,
-    refreshLocked: row?.refresh_locked === true,
     updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
     nextRefreshAt: row?.next_refresh_at ? new Date(row.next_refresh_at).toISOString() : null,
   };
@@ -4401,13 +4597,16 @@ function buildGhlBasicNoteApiPayloadFromCacheRow(row, options = {}) {
     noteTitle: cachedRow?.noteTitle || "",
     noteBody: cachedRow?.noteBody || "",
     noteCreatedAt: cachedRow?.noteCreatedAt || "",
+    memoTitle: cachedRow?.memoTitle || "",
+    memoBody: cachedRow?.memoBody || "",
+    memoCreatedAt: cachedRow?.memoCreatedAt || "",
     source: cachedRow?.source || "gohighlevel",
     matchedContacts: cachedRow?.matchedContacts || 0,
     inspectedContacts: cachedRow?.inspectedContacts || 0,
     updatedAt: cachedRow?.updatedAt || null,
     nextRefreshAt: cachedRow?.nextRefreshAt || null,
     isWrittenOff: cachedRow?.isWrittenOff === true,
-    refreshPolicy: cachedRow?.isWrittenOff === true ? "written_off_once" : "weekly",
+    refreshPolicy: cachedRow?.isWrittenOff === true ? "written_off_1_15" : "daily_night",
     cached: fromCache,
     stale,
     error: errorMessage || "",
@@ -4429,12 +4628,14 @@ function buildGhlBasicNoteCacheUpsertRow(clientName, lookup, isWrittenOff, nowMs
     noteTitle: sanitizeTextValue(payload.noteTitle, 300),
     noteBody: sanitizeTextValue(payload.noteBody, 12000),
     noteCreatedAt: normalizeIsoTimestampOrNull(payload.noteCreatedAt),
+    memoTitle: sanitizeTextValue(payload.memoTitle, 300),
+    memoBody: sanitizeTextValue(payload.memoBody, 12000),
+    memoCreatedAt: normalizeIsoTimestampOrNull(payload.memoCreatedAt),
     source: sanitizeTextValue(payload.source, 120) || "gohighlevel",
     matchedContacts: Number.isFinite(matchedContacts) && matchedContacts >= 0 ? matchedContacts : 0,
     inspectedContacts: Number.isFinite(inspectedContacts) && inspectedContacts >= 0 ? inspectedContacts : 0,
     lastError: "",
     isWrittenOff,
-    refreshLocked: isWrittenOff,
     nextRefreshAt: buildNextGhlBasicNoteRefreshTimestamp(isWrittenOff, nowMs),
   };
 }
@@ -4444,15 +4645,15 @@ function shouldRefreshGhlBasicNoteCache(cachedRow, isWrittenOff, nowMs = Date.no
     return true;
   }
 
-  if (isWrittenOff) {
-    return cachedRow.refreshLocked !== true;
+  let nextRefreshTimestamp = Date.parse(cachedRow.nextRefreshAt || "");
+  if (!Number.isFinite(nextRefreshTimestamp)) {
+    const updatedAtTimestamp = Date.parse(cachedRow.updatedAt || "");
+    if (Number.isFinite(updatedAtTimestamp)) {
+      const rebuiltNextRefreshAt = buildNextGhlBasicNoteRefreshTimestamp(isWrittenOff, updatedAtTimestamp);
+      nextRefreshTimestamp = Date.parse(rebuiltNextRefreshAt || "");
+    }
   }
 
-  if (!cachedRow.nextRefreshAt) {
-    return true;
-  }
-
-  const nextRefreshTimestamp = Date.parse(cachedRow.nextRefreshAt);
   if (!Number.isFinite(nextRefreshTimestamp)) {
     return true;
   }
@@ -4510,6 +4711,9 @@ async function getCachedGhlBasicNoteByClientName(clientName) {
         note_title,
         note_body,
         note_created_at,
+        memo_title,
+        memo_body,
+        memo_created_at,
         source,
         matched_contacts,
         inspected_contacts,
@@ -4552,6 +4756,9 @@ async function listCachedGhlBasicNoteRowsByClientNames(clientNames) {
         note_title,
         note_body,
         note_created_at,
+        memo_title,
+        memo_body,
+        memo_created_at,
         source,
         matched_contacts,
         inspected_contacts,
@@ -4590,6 +4797,9 @@ async function upsertGhlBasicNoteCacheRow(row) {
           note_title,
           note_body,
           note_created_at,
+          memo_title,
+          memo_body,
+          memo_created_at,
           source,
           matched_contacts,
           inspected_contacts,
@@ -4600,7 +4810,7 @@ async function upsertGhlBasicNoteCacheRow(row) {
           updated_at
         )
       VALUES
-        ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9, $10, $11, $12, $13, $14::timestamptz, NOW())
+        ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9, $10::timestamptz, $11, $12, $13, $14, $15, $16, $17::timestamptz, NOW())
       ON CONFLICT (client_name)
       DO UPDATE SET
         status = EXCLUDED.status,
@@ -4609,6 +4819,9 @@ async function upsertGhlBasicNoteCacheRow(row) {
         note_title = EXCLUDED.note_title,
         note_body = EXCLUDED.note_body,
         note_created_at = EXCLUDED.note_created_at,
+        memo_title = EXCLUDED.memo_title,
+        memo_body = EXCLUDED.memo_body,
+        memo_created_at = EXCLUDED.memo_created_at,
         source = EXCLUDED.source,
         matched_contacts = EXCLUDED.matched_contacts,
         inspected_contacts = EXCLUDED.inspected_contacts,
@@ -4626,6 +4839,9 @@ async function upsertGhlBasicNoteCacheRow(row) {
       sanitizeTextValue(normalizedRow.noteTitle, 300),
       sanitizeTextValue(normalizedRow.noteBody, 12000),
       normalizeIsoTimestampOrNull(normalizedRow.noteCreatedAt),
+      sanitizeTextValue(normalizedRow.memoTitle, 300),
+      sanitizeTextValue(normalizedRow.memoBody, 12000),
+      normalizeIsoTimestampOrNull(normalizedRow.memoCreatedAt),
       sanitizeTextValue(normalizedRow.source, 120) || "gohighlevel",
       Number.isFinite(normalizedRow.matchedContacts) && normalizedRow.matchedContacts >= 0
         ? Math.trunc(normalizedRow.matchedContacts)
@@ -4635,7 +4851,7 @@ async function upsertGhlBasicNoteCacheRow(row) {
         : 0,
       sanitizeTextValue(normalizedRow.lastError, 600),
       normalizedRow.isWrittenOff === true,
-      normalizedRow.refreshLocked === true,
+      false,
       normalizeIsoTimestampOrNull(normalizedRow.nextRefreshAt),
     ],
   );
@@ -7406,6 +7622,9 @@ async function ensureDatabaseReady() {
           note_title TEXT NOT NULL DEFAULT '',
           note_body TEXT NOT NULL DEFAULT '',
           note_created_at TIMESTAMPTZ,
+          memo_title TEXT NOT NULL DEFAULT '',
+          memo_body TEXT NOT NULL DEFAULT '',
+          memo_created_at TIMESTAMPTZ,
           source TEXT NOT NULL DEFAULT 'gohighlevel',
           matched_contacts INTEGER NOT NULL DEFAULT 0,
           inspected_contacts INTEGER NOT NULL DEFAULT 0,
@@ -7415,6 +7634,21 @@ async function ensureDatabaseReady() {
           next_refresh_at TIMESTAMPTZ,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS memo_title TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS memo_body TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS memo_created_at TIMESTAMPTZ
       `);
 
       await pool.query(`
@@ -10211,7 +10445,7 @@ app.listen(PORT, () => {
     console.warn("GHL BASIC note auto refresh is disabled because GHL credentials are missing.");
   } else if (startGhlBasicNoteAutoRefreshScheduler()) {
     console.log(
-      `GHL BASIC note auto refresh started: every ${Math.round(GHL_BASIC_NOTE_AUTO_REFRESH_TICK_INTERVAL_MS / (60 * 1000))} min, refresh window ${Math.round(GHL_BASIC_NOTE_REFRESH_INTERVAL_MS / (24 * 60 * 60 * 1000))} day(s), up to ${GHL_BASIC_NOTE_AUTO_REFRESH_MAX_CLIENTS_PER_TICK} clients per tick.`,
+      `GHL BASIC note auto refresh started: every ${Math.round(GHL_BASIC_NOTE_AUTO_REFRESH_TICK_INTERVAL_MS / (60 * 1000))} min, daily night ${String(GHL_BASIC_NOTE_SYNC_HOUR).padStart(2, "0")}:${String(GHL_BASIC_NOTE_SYNC_MINUTE).padStart(2, "0")} (${GHL_BASIC_NOTE_SYNC_TIME_ZONE}), written-off on days 1 and 15, up to ${GHL_BASIC_NOTE_AUTO_REFRESH_MAX_CLIENTS_PER_TICK} clients per tick.`,
     );
   }
   if (isOpenAiAssistantConfigured()) {

@@ -92,7 +92,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
 
       <section className="record-details-ghl-note" aria-live="polite">
         <div className="record-details-ghl-note__header">
-          <h4 className="record-details-ghl-note__title">GoHighLevel BASIC Note</h4>
+          <h4 className="record-details-ghl-note__title">Basic Info</h4>
           {ghlBasicNote?.contactName ? (
             <p className="react-user-footnote">
               Contact: {ghlBasicNote.contactName}
@@ -106,13 +106,35 @@ export function RecordDetails({ record }: RecordDetailsProps) {
           <p className="record-details-ghl-note__error">{ghlBasicNoteError}</p>
         ) : null}
         {!isLoadingGhlBasicNote && !ghlBasicNoteError && (!ghlBasicNote || ghlBasicNote.status !== "found") ? (
-          <p className="react-user-footnote">BASIC note was not found for this client in GoHighLevel.</p>
+          <p className="react-user-footnote">Basic info was not found for this client in GoHighLevel notes.</p>
         ) : null}
         {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.status === "found" ? (
           <>
             <pre className="record-details-ghl-note__body">{ghlBasicNote.noteBody}</pre>
             {ghlBasicNote.noteCreatedAt ? (
               <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.noteCreatedAt)}</p>
+            ) : null}
+          </>
+        ) : null}
+      </section>
+
+      <section className="record-details-ghl-note" aria-live="polite">
+        <div className="record-details-ghl-note__header">
+          <h4 className="record-details-ghl-note__title">MEMO</h4>
+        </div>
+
+        {isLoadingGhlBasicNote ? <p className="react-user-footnote">Loading memo...</p> : null}
+        {!isLoadingGhlBasicNote && ghlBasicNoteError ? (
+          <p className="record-details-ghl-note__error">{ghlBasicNoteError}</p>
+        ) : null}
+        {!isLoadingGhlBasicNote && !ghlBasicNoteError && !ghlBasicNote?.memoBody ? (
+          <p className="react-user-footnote">Memo not found in GoHighLevel notes for this client.</p>
+        ) : null}
+        {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.memoBody ? (
+          <>
+            <pre className="record-details-ghl-note__body">{ghlBasicNote.memoBody}</pre>
+            {ghlBasicNote.memoCreatedAt ? (
+              <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.memoCreatedAt)}</p>
             ) : null}
           </>
         ) : null}
