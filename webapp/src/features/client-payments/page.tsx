@@ -243,7 +243,7 @@ export default function ClientPaymentsPage() {
 
           if (column === "score") {
             if (row.score.displayScore === null) {
-              return <Badge tone="neutral">N/A</Badge>;
+              return "-";
             }
 
             return <Badge tone={row.score.tone}>{row.score.displayScore}</Badge>;

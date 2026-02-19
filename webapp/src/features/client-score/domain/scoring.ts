@@ -1,5 +1,6 @@
 import {
   formatDate,
+  getRecordStatusFlags,
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
@@ -59,6 +60,15 @@ export interface ClientScoreResult {
 }
 
 export function evaluateClientScore(record: ClientRecord, asOfDate = new Date()): ClientScoreResult {
+  const status = getRecordStatusFlags(record);
+  if (status.isWrittenOff) {
+    return unavailableScore("Written Off client.");
+  }
+
+  if (status.isAfterResult) {
+    return unavailableScore("After Result client.");
+  }
+
   const contractTotal = parseMoneyValue(record.contractTotals);
   if (contractTotal === null || contractTotal <= 0) {
     return unavailableScore("No contract amount.");
