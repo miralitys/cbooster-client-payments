@@ -1748,6 +1748,102 @@ tbody tr.row-tone-active:hover td {
   color: var(--color-error-text);
 }
 
+.access-control-page {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.access-control-page-header {
+  align-items: flex-end;
+}
+
+.access-control-subtitle {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.access-control-status {
+  margin: 0;
+}
+
+.access-control-status.error {
+  color: var(--color-error-text);
+}
+
+.access-control-current-user {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+.access-control-current-user__row {
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.access-control-current-user__label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-semibold);
+}
+
+.access-control-current-user__value {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.access-control-departments {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.access-control-department-card {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.access-control-department-card__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.access-control-department-card__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-xs);
+}
+
+.access-control-department-card__table th,
+.access-control-department-card__table td {
+  border: 1px solid var(--color-border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.access-control-department-card__table th {
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-semibold);
+}
+
+.access-control-empty {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
 .client-manager-table-wrap {
   min-height: 280px;
   height: auto;
@@ -2242,6 +2338,15 @@ body.modal-open {
   .moderation-modal-actions {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .access-control-departments {
+    grid-template-columns: 1fr;
+  }
+
+  .access-control-current-user__row {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 
   th,

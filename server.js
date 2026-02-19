@@ -14,13 +14,79 @@ const TELEGRAM_NOTIFY_CHAT_ID = (process.env.TELEGRAM_NOTIFY_CHAT_ID || "").toSt
 const TELEGRAM_NOTIFY_THREAD_ID = parseOptionalPositiveInteger(process.env.TELEGRAM_NOTIFY_THREAD_ID);
 const DEFAULT_WEB_AUTH_USERNAME = "ramisi@creditbooster.com";
 const DEFAULT_WEB_AUTH_PASSWORD = "Ringo@123Qwerty";
+const DEFAULT_WEB_AUTH_OWNER_USERNAME = "ramisi@creditbooster.com";
 const WEB_AUTH_USERNAME = normalizeWebAuthConfigValue(process.env.WEB_AUTH_USERNAME) || DEFAULT_WEB_AUTH_USERNAME;
 const WEB_AUTH_PASSWORD = normalizeWebAuthConfigValue(process.env.WEB_AUTH_PASSWORD) || DEFAULT_WEB_AUTH_PASSWORD;
+const WEB_AUTH_OWNER_USERNAME =
+  normalizeWebAuthUsername(process.env.WEB_AUTH_OWNER_USERNAME || DEFAULT_WEB_AUTH_OWNER_USERNAME) ||
+  normalizeWebAuthUsername(WEB_AUTH_USERNAME) ||
+  normalizeWebAuthUsername(DEFAULT_WEB_AUTH_OWNER_USERNAME);
+const WEB_AUTH_USERS_JSON = (process.env.WEB_AUTH_USERS_JSON || "").toString().trim();
 const WEB_AUTH_SESSION_COOKIE_NAME = "cbooster_auth_session";
 const WEB_AUTH_MOBILE_SESSION_HEADER = "x-cbooster-session";
 const WEB_AUTH_SESSION_TTL_SEC = parsePositiveInteger(process.env.WEB_AUTH_SESSION_TTL_SEC, 12 * 60 * 60);
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(process.env.WEB_AUTH_SESSION_SECRET);
+const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
+const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
+const WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS = "manage_client_payments";
+const WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS = "view_quickbooks";
+const WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS = "sync_quickbooks";
+const WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS = "view_client_managers";
+const WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS = "sync_client_managers";
+const WEB_AUTH_PERMISSION_VIEW_MODERATION = "view_moderation";
+const WEB_AUTH_PERMISSION_REVIEW_MODERATION = "review_moderation";
+const WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL = "view_access_control";
+const WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL = "manage_access_control";
+const WEB_AUTH_ALL_PERMISSION_KEYS = [
+  WEB_AUTH_PERMISSION_VIEW_DASHBOARD,
+  WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS,
+  WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS,
+  WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS,
+  WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS,
+  WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS,
+  WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS,
+  WEB_AUTH_PERMISSION_VIEW_MODERATION,
+  WEB_AUTH_PERMISSION_REVIEW_MODERATION,
+  WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL,
+  WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL,
+];
+const WEB_AUTH_ROLE_OWNER = "owner";
+const WEB_AUTH_ROLE_DEPARTMENT_HEAD = "department_head";
+const WEB_AUTH_ROLE_MIDDLE_MANAGER = "middle_manager";
+const WEB_AUTH_ROLE_MANAGER = "manager";
+const WEB_AUTH_DEPARTMENT_ACCOUNTING = "accounting";
+const WEB_AUTH_DEPARTMENT_CLIENT_SERVICE = "client_service";
+const WEB_AUTH_DEPARTMENT_SALES = "sales";
+const WEB_AUTH_DEPARTMENT_COLLECTION = "collection";
+const WEB_AUTH_ROLE_DEFINITIONS = [
+  { id: WEB_AUTH_ROLE_OWNER, name: "Owner" },
+  { id: WEB_AUTH_ROLE_DEPARTMENT_HEAD, name: "Department Head" },
+  { id: WEB_AUTH_ROLE_MIDDLE_MANAGER, name: "Middle Manager" },
+  { id: WEB_AUTH_ROLE_MANAGER, name: "Manager" },
+];
+const WEB_AUTH_DEPARTMENT_DEFINITIONS = [
+  {
+    id: WEB_AUTH_DEPARTMENT_ACCOUNTING,
+    name: "Accounting Department",
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
+  },
+  {
+    id: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
+    name: "Client Service Department",
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MIDDLE_MANAGER, WEB_AUTH_ROLE_MANAGER],
+  },
+  {
+    id: WEB_AUTH_DEPARTMENT_SALES,
+    name: "Sales Department",
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
+  },
+  {
+    id: WEB_AUTH_DEPARTMENT_COLLECTION,
+    name: "Collection Department",
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
+  },
+];
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
 const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
@@ -216,6 +282,16 @@ const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
   identityIq: "IdentityIQ",
   clientEmailAddress: "Client email address",
 };
+const WEB_AUTH_ROLE_DEFINITION_BY_ID = new Map(WEB_AUTH_ROLE_DEFINITIONS.map((entry) => [entry.id, entry]));
+const WEB_AUTH_DEPARTMENT_DEFINITION_BY_ID = new Map(WEB_AUTH_DEPARTMENT_DEFINITIONS.map((entry) => [entry.id, entry]));
+const WEB_AUTH_USERS_DIRECTORY = resolveWebAuthUsersDirectory({
+  ownerUsername: WEB_AUTH_OWNER_USERNAME,
+  legacyUsername: WEB_AUTH_USERNAME,
+  legacyPassword: WEB_AUTH_PASSWORD,
+  rawUsersJson: WEB_AUTH_USERS_JSON,
+});
+const WEB_AUTH_USERS = WEB_AUTH_USERS_DIRECTORY.users;
+const WEB_AUTH_USERS_BY_USERNAME = WEB_AUTH_USERS_DIRECTORY.usersByUsername;
 
 const app = express();
 app.set("trust proxy", 1);
@@ -761,12 +837,461 @@ function resolveSafeNextPath(rawValue) {
   return candidate;
 }
 
-function isValidWebAuthCredentials(rawUsername, rawPassword) {
-  const username = normalizeWebAuthConfigValue(rawUsername).toLowerCase();
+function normalizeWebAuthUsername(rawValue) {
+  return normalizeWebAuthConfigValue(rawValue).toLowerCase();
+}
+
+function normalizeWebAuthDepartmentId(rawValue) {
+  const normalized = normalizeWebAuthConfigValue(rawValue)
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "accounting" || normalized === "accounting_department") {
+    return WEB_AUTH_DEPARTMENT_ACCOUNTING;
+  }
+
+  if (
+    normalized === "client_service" ||
+    normalized === "clientservice" ||
+    normalized === "client_services" ||
+    normalized === "clientservice_department" ||
+    normalized === "client_service_department"
+  ) {
+    return WEB_AUTH_DEPARTMENT_CLIENT_SERVICE;
+  }
+
+  if (normalized === "sales" || normalized === "sales_department") {
+    return WEB_AUTH_DEPARTMENT_SALES;
+  }
+
+  if (
+    normalized === "collection" ||
+    normalized === "collections" ||
+    normalized === "collection_department" ||
+    normalized === "collections_department"
+  ) {
+    return WEB_AUTH_DEPARTMENT_COLLECTION;
+  }
+
+  return "";
+}
+
+function normalizeWebAuthRoleId(rawValue, departmentId = "") {
+  const normalized = normalizeWebAuthConfigValue(rawValue)
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "owner" || normalized === "admin" || normalized === "administrator") {
+    return WEB_AUTH_ROLE_OWNER;
+  }
+
+  if (
+    normalized === "department_head" ||
+    normalized === "head" ||
+    normalized === "lead" ||
+    normalized === "team_lead"
+  ) {
+    return WEB_AUTH_ROLE_DEPARTMENT_HEAD;
+  }
+
+  if (
+    normalized === "middle_manager" ||
+    normalized === "middlemanager" ||
+    normalized === "middle" ||
+    normalized === "assistant_manager"
+  ) {
+    return departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE ? WEB_AUTH_ROLE_MIDDLE_MANAGER : WEB_AUTH_ROLE_MANAGER;
+  }
+
+  if (normalized === "manager") {
+    return WEB_AUTH_ROLE_MANAGER;
+  }
+
+  return "";
+}
+
+function getWebAuthRoleName(roleId) {
+  return WEB_AUTH_ROLE_DEFINITION_BY_ID.get(roleId)?.name || "Unknown Role";
+}
+
+function getWebAuthDepartmentName(departmentId) {
+  return WEB_AUTH_DEPARTMENT_DEFINITION_BY_ID.get(departmentId)?.name || "";
+}
+
+function isWebAuthRoleSupportedByDepartment(roleId, departmentId) {
+  const department = WEB_AUTH_DEPARTMENT_DEFINITION_BY_ID.get(departmentId);
+  if (!department) {
+    return false;
+  }
+
+  return department.roles.includes(roleId);
+}
+
+function buildWebAuthPermissionsForUser(userProfile) {
+  const permissions = Object.fromEntries(WEB_AUTH_ALL_PERMISSION_KEYS.map((key) => [key, false]));
+  if (!userProfile || typeof userProfile !== "object") {
+    return permissions;
+  }
+
+  if (userProfile.isOwner) {
+    for (const key of WEB_AUTH_ALL_PERMISSION_KEYS) {
+      permissions[key] = true;
+    }
+    return permissions;
+  }
+
+  permissions[WEB_AUTH_PERMISSION_VIEW_DASHBOARD] = true;
+  permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS] = true;
+  permissions[WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL] = true;
+
+  const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
+  const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
+  const isDepartmentHead = roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD;
+  const isMiddleManager = roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER;
+
+  if (departmentId === WEB_AUTH_DEPARTMENT_ACCOUNTING) {
+    permissions[WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS] = true;
+    permissions[WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS] = isDepartmentHead;
+  } else if (departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
+    permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS] = true;
+    permissions[WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS] = isDepartmentHead || isMiddleManager;
+    permissions[WEB_AUTH_PERMISSION_VIEW_MODERATION] = true;
+    permissions[WEB_AUTH_PERMISSION_REVIEW_MODERATION] = isDepartmentHead || isMiddleManager;
+  } else if (departmentId === WEB_AUTH_DEPARTMENT_SALES) {
+    permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS] = isDepartmentHead;
+  } else if (departmentId === WEB_AUTH_DEPARTMENT_COLLECTION) {
+    permissions[WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS] = true;
+  }
+
+  return permissions;
+}
+
+function parseWebAuthUsersJson(rawValue) {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return [];
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    console.warn("WEB_AUTH_USERS_JSON is invalid JSON:", sanitizeTextValue(error?.message, 220));
+    return [];
+  }
+
+  if (!Array.isArray(parsed)) {
+    console.warn("WEB_AUTH_USERS_JSON must be a JSON array.");
+    return [];
+  }
+
+  return parsed.slice(0, 200);
+}
+
+function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
+  if (!rawUser || typeof rawUser !== "object" || Array.isArray(rawUser)) {
+    return null;
+  }
+
+  const username = normalizeWebAuthUsername(rawUser.username || rawUser.email || rawUser.login);
+  if (!username) {
+    return null;
+  }
+
+  const displayName = sanitizeTextValue(rawUser.displayName || rawUser.name, 140) || username;
+  const password = normalizeWebAuthConfigValue(rawUser.password);
+  const explicitOwner = resolveOptionalBoolean(rawUser.isOwner) === true;
+  let departmentId = normalizeWebAuthDepartmentId(rawUser.departmentId || rawUser.department);
+  let roleId = normalizeWebAuthRoleId(rawUser.roleId || rawUser.role, departmentId);
+  const isOwner = explicitOwner || roleId === WEB_AUTH_ROLE_OWNER || username === ownerUsername;
+
+  if (isOwner) {
+    roleId = WEB_AUTH_ROLE_OWNER;
+    departmentId = "";
+  } else {
+    if (!departmentId) {
+      departmentId = WEB_AUTH_DEPARTMENT_SALES;
+    }
+    if (!roleId || roleId === WEB_AUTH_ROLE_OWNER) {
+      roleId = WEB_AUTH_ROLE_MANAGER;
+    }
+    if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
+      roleId = WEB_AUTH_ROLE_MANAGER;
+    }
+  }
+
+  return {
+    username,
+    password,
+    displayName,
+    isOwner,
+    departmentId,
+    roleId,
+  };
+}
+
+function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
+  const username = normalizeWebAuthUsername(rawUser?.username);
+  const password = normalizeWebAuthConfigValue(rawUser?.password);
+  const displayName = sanitizeTextValue(rawUser?.displayName, 140) || username;
+  const isOwner = Boolean(rawUser?.isOwner) || username === ownerUsername;
+  let departmentId = isOwner ? "" : normalizeWebAuthDepartmentId(rawUser?.departmentId);
+  let roleId = isOwner ? WEB_AUTH_ROLE_OWNER : normalizeWebAuthRoleId(rawUser?.roleId, departmentId);
+
+  if (!isOwner) {
+    if (!departmentId) {
+      departmentId = WEB_AUTH_DEPARTMENT_SALES;
+    }
+    if (!roleId || roleId === WEB_AUTH_ROLE_OWNER) {
+      roleId = WEB_AUTH_ROLE_MANAGER;
+    }
+    if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
+      roleId = WEB_AUTH_ROLE_MANAGER;
+    }
+  }
+
+  const userProfile = {
+    username,
+    password,
+    displayName,
+    isOwner,
+    departmentId,
+    departmentName: getWebAuthDepartmentName(departmentId),
+    roleId,
+    roleName: getWebAuthRoleName(roleId),
+  };
+  userProfile.permissions = buildWebAuthPermissionsForUser(userProfile);
+  return userProfile;
+}
+
+function resolveWebAuthUsersDirectory(options = {}) {
+  const ownerUsername = normalizeWebAuthUsername(options.ownerUsername || DEFAULT_WEB_AUTH_OWNER_USERNAME);
+  const legacyUsername = normalizeWebAuthUsername(options.legacyUsername || DEFAULT_WEB_AUTH_USERNAME);
+  const legacyPassword = normalizeWebAuthConfigValue(options.legacyPassword || DEFAULT_WEB_AUTH_PASSWORD);
+  const usersByUsername = new Map();
+
+  const configuredUsers = parseWebAuthUsersJson(options.rawUsersJson);
+  for (const rawUser of configuredUsers) {
+    const normalized = normalizeWebAuthDirectoryUser(rawUser, ownerUsername);
+    if (!normalized) {
+      continue;
+    }
+    usersByUsername.set(normalized.username, normalized);
+  }
+
+  if (legacyUsername && legacyPassword) {
+    const existingLegacy = usersByUsername.get(legacyUsername);
+    if (existingLegacy) {
+      usersByUsername.set(legacyUsername, {
+        ...existingLegacy,
+        password: existingLegacy.password || legacyPassword,
+        isOwner: existingLegacy.isOwner || legacyUsername === ownerUsername,
+        roleId:
+          existingLegacy.isOwner || legacyUsername === ownerUsername
+            ? WEB_AUTH_ROLE_OWNER
+            : existingLegacy.roleId,
+        departmentId:
+          existingLegacy.isOwner || legacyUsername === ownerUsername
+            ? ""
+            : existingLegacy.departmentId,
+      });
+    } else {
+      usersByUsername.set(legacyUsername, {
+        username: legacyUsername,
+        password: legacyPassword,
+        displayName: legacyUsername,
+        isOwner: legacyUsername === ownerUsername,
+        departmentId: legacyUsername === ownerUsername ? "" : WEB_AUTH_DEPARTMENT_SALES,
+        roleId: legacyUsername === ownerUsername ? WEB_AUTH_ROLE_OWNER : WEB_AUTH_ROLE_MANAGER,
+      });
+    }
+  }
+
+  if (ownerUsername && legacyPassword && !usersByUsername.has(ownerUsername)) {
+    usersByUsername.set(ownerUsername, {
+      username: ownerUsername,
+      password: legacyPassword,
+      displayName: ownerUsername,
+      isOwner: true,
+      departmentId: "",
+      roleId: WEB_AUTH_ROLE_OWNER,
+    });
+  }
+
+  const finalizedByUsername = new Map();
+  for (const rawUser of usersByUsername.values()) {
+    const finalized = finalizeWebAuthDirectoryUser(rawUser, ownerUsername);
+    if (!finalized.username || !finalized.password) {
+      console.warn(`Skipping web auth user without credentials: ${finalized.username || "unknown"}`);
+      continue;
+    }
+    finalizedByUsername.set(finalized.username, finalized);
+  }
+
+  const users = [...finalizedByUsername.values()].sort((left, right) =>
+    left.username.localeCompare(right.username, "en-US", { sensitivity: "base" }),
+  );
+  return {
+    users,
+    usersByUsername: finalizedByUsername,
+  };
+}
+
+function getWebAuthUserByUsername(rawUsername) {
+  const username = normalizeWebAuthUsername(rawUsername);
+  if (!username) {
+    return null;
+  }
+
+  return WEB_AUTH_USERS_BY_USERNAME.get(username) || null;
+}
+
+function authenticateWebAuthCredentials(rawUsername, rawPassword) {
+  const username = normalizeWebAuthUsername(rawUsername);
   const password = normalizeWebAuthConfigValue(rawPassword);
-  const expectedUsername = normalizeWebAuthConfigValue(WEB_AUTH_USERNAME).toLowerCase();
-  const expectedPassword = normalizeWebAuthConfigValue(WEB_AUTH_PASSWORD);
-  return safeEqual(username, expectedUsername) && safeEqual(password, expectedPassword);
+  if (!username || !password) {
+    return null;
+  }
+
+  const user = getWebAuthUserByUsername(username);
+  if (!user || !user.password) {
+    return null;
+  }
+
+  return safeEqual(password, user.password) ? user : null;
+}
+
+function isValidWebAuthCredentials(rawUsername, rawPassword) {
+  return Boolean(authenticateWebAuthCredentials(rawUsername, rawPassword));
+}
+
+function hasWebAuthPermission(userProfile, permissionKey) {
+  const normalizedKey = sanitizeTextValue(permissionKey, 80);
+  if (!normalizedKey || !userProfile || typeof userProfile !== "object") {
+    return false;
+  }
+
+  return Boolean(userProfile.permissions?.[normalizedKey]);
+}
+
+function buildWebAuthPublicUser(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return {
+      username: "",
+      displayName: "",
+      roleId: "",
+      roleName: "",
+      departmentId: "",
+      departmentName: "",
+      isOwner: false,
+    };
+  }
+
+  return {
+    username: sanitizeTextValue(userProfile.username, 200),
+    displayName: sanitizeTextValue(userProfile.displayName, 200),
+    roleId: sanitizeTextValue(userProfile.roleId, 80),
+    roleName: sanitizeTextValue(userProfile.roleName, 140),
+    departmentId: sanitizeTextValue(userProfile.departmentId, 80),
+    departmentName: sanitizeTextValue(userProfile.departmentName, 140),
+    isOwner: Boolean(userProfile.isOwner),
+  };
+}
+
+function buildWebAuthAccessModel() {
+  const users = WEB_AUTH_USERS.map((item) => buildWebAuthPublicUser(item));
+  const usersByDepartmentRole = new Map();
+
+  for (const user of users) {
+    if (user.isOwner || !user.departmentId || !user.roleId) {
+      continue;
+    }
+    const key = `${user.departmentId}:${user.roleId}`;
+    if (!usersByDepartmentRole.has(key)) {
+      usersByDepartmentRole.set(key, []);
+    }
+    usersByDepartmentRole.get(key).push({
+      username: user.username,
+      displayName: user.displayName || user.username,
+      roleId: user.roleId,
+      roleName: user.roleName,
+    });
+  }
+
+  const departments = WEB_AUTH_DEPARTMENT_DEFINITIONS.map((department) => ({
+    id: department.id,
+    name: department.name,
+    roles: department.roles.map((roleId) => ({
+      id: roleId,
+      name: getWebAuthRoleName(roleId),
+      members: [...(usersByDepartmentRole.get(`${department.id}:${roleId}`) || [])]
+        .sort((left, right) =>
+          left.displayName.localeCompare(right.displayName, "en-US", { sensitivity: "base" }),
+        ),
+    })),
+  }));
+
+  return {
+    ownerUsername: WEB_AUTH_OWNER_USERNAME,
+    roles: WEB_AUTH_ROLE_DEFINITIONS.map((role) => ({ ...role })),
+    departments,
+    users,
+  };
+}
+
+function buildWebPermissionDeniedPageHtml(message) {
+  const safeMessage = escapeHtml(sanitizeTextValue(message, 260) || "Access denied.");
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Access Denied</title>
+    <style>
+      body { margin:0; min-height:100vh; display:grid; place-items:center; background:#f3f4f6; color:#0f172a; font-family:"Avenir Next","Segoe UI",sans-serif; padding:24px; }
+      .card { width:min(560px,100%); background:#fff; border:1px solid #d6dde6; border-radius:16px; padding:24px; box-shadow:0 14px 34px -24px rgba(15,23,42,.42); display:grid; gap:12px; }
+      h1 { margin:0; font-size:1.5rem; }
+      p { margin:0; color:#475569; }
+      a { color:#0f766e; text-decoration:none; font-weight:600; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Access denied</h1>
+      <p>${safeMessage}</p>
+      <p><a href="/">Go to Main</a></p>
+    </main>
+  </body>
+</html>`;
+}
+
+function denyWebPermission(req, res, message) {
+  const errorMessage = sanitizeTextValue(message, 260) || "Access denied.";
+  if ((req.path || "").startsWith("/api/")) {
+    res.status(403).json({
+      error: errorMessage,
+    });
+    return;
+  }
+
+  res.status(403).type("html").send(buildWebPermissionDeniedPageHtml(errorMessage));
+}
+
+function requireWebPermission(permissionKey, message = "Access denied.") {
+  return (req, res, next) => {
+    if (hasWebAuthPermission(req.webAuthProfile, permissionKey)) {
+      next();
+      return;
+    }
+
+    denyWebPermission(req, res, message);
+  };
 }
 
 function isPublicWebAuthPath(pathname) {
@@ -986,9 +1511,25 @@ function requireWebAuth(req, res, next) {
     return;
   }
 
-  const username = getRequestWebAuthUser(req);
-  if (username) {
-    req.webAuthUser = username;
+  const sessionUsername = getRequestWebAuthUser(req);
+  if (sessionUsername) {
+    const userProfile = getWebAuthUserByUsername(sessionUsername);
+    if (!userProfile) {
+      clearWebAuthSessionCookie(req, res);
+      if (pathname.startsWith("/api/")) {
+        res.status(401).json({
+          error: "Authentication required.",
+        });
+        return;
+      }
+
+      const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
+      res.redirect(302, `/login?next=${encodeURIComponent(nextPath)}`);
+      return;
+    }
+
+    req.webAuthUser = userProfile.username;
+    req.webAuthProfile = userProfile;
     next();
     return;
   }
@@ -4130,7 +4671,7 @@ function resolveDbHttpStatus(error, fallbackStatus = 500) {
 app.get("/login", (req, res) => {
   const nextPath = resolveSafeNextPath(req.query.next);
   const currentSessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
-  const currentUser = parseWebAuthSessionToken(currentSessionToken);
+  const currentUser = getWebAuthUserByUsername(parseWebAuthSessionToken(currentSessionToken));
   if (currentUser) {
     res.redirect(302, nextPath);
     return;
@@ -4153,22 +4694,24 @@ app.post("/login", (req, res) => {
   const username = req.body?.username;
   const password = req.body?.password;
   const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
+  const authUser = authenticateWebAuthCredentials(username, password);
 
-  if (!isValidWebAuthCredentials(username, password)) {
+  if (!authUser) {
     clearWebAuthSessionCookie(req, res);
     res.redirect(302, `/login?error=1&next=${encodeURIComponent(nextPath)}`);
     return;
   }
 
-  setWebAuthSessionCookie(req, res, WEB_AUTH_USERNAME);
+  setWebAuthSessionCookie(req, res, authUser.username);
   res.redirect(302, nextPath);
 });
 
 function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
   const password = req.body?.password;
+  const authUser = authenticateWebAuthCredentials(username, password);
 
-  if (!isValidWebAuthCredentials(username, password)) {
+  if (!authUser) {
     clearWebAuthSessionCookie(req, res);
     res.status(401).json({
       error: "Invalid login or password.",
@@ -4176,16 +4719,14 @@ function handleApiAuthLogin(req, res) {
     return;
   }
 
-  const authUsername = normalizeWebAuthConfigValue(WEB_AUTH_USERNAME);
-  const sessionToken = createWebAuthSessionToken(authUsername);
-  setWebAuthSessionCookie(req, res, authUsername, sessionToken);
+  const sessionToken = createWebAuthSessionToken(authUser.username);
+  setWebAuthSessionCookie(req, res, authUser.username, sessionToken);
   res.setHeader("Cache-Control", "no-store, private");
   res.json({
     ok: true,
     sessionToken,
-    user: {
-      username: authUsername,
-    },
+    user: buildWebAuthPublicUser(authUser),
+    permissions: authUser.permissions || {},
   });
 }
 
@@ -4214,11 +4755,21 @@ app.use(requireWebAuth);
 app.use(express.static(staticRoot));
 
 app.get("/api/auth/session", (req, res) => {
+  const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
   res.json({
     ok: true,
-    user: {
-      username: sanitizeTextValue(req.webAuthUser, 200),
-    },
+    user: buildWebAuthPublicUser(userProfile),
+    permissions: userProfile?.permissions || {},
+  });
+});
+
+app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (req, res) => {
+  const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
+  res.json({
+    ok: true,
+    user: buildWebAuthPublicUser(userProfile),
+    permissions: userProfile?.permissions || {},
+    accessModel: buildWebAuthAccessModel(),
   });
 });
 
@@ -4233,7 +4784,7 @@ app.all("/api/quickbooks/*", (req, res, next) => {
   });
 });
 
-app.get("/api/quickbooks/payments/recent", async (req, res) => {
+app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -4253,6 +4804,12 @@ app.get("/api/quickbooks/payments/recent", async (req, res) => {
 
   const shouldTotalRefresh = parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
   const shouldSync = parseQuickBooksSyncFlag(req.query.sync) || shouldTotalRefresh;
+  if (shouldSync && !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS)) {
+    res.status(403).json({
+      error: "Access denied. You do not have permission to refresh QuickBooks data.",
+    });
+    return;
+  }
   if (shouldSync && !isQuickBooksConfigured()) {
     res.status(503).json({
       error:
@@ -4361,7 +4918,7 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-app.get("/api/records", async (_req, res) => {
+app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (_req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -4381,7 +4938,7 @@ app.get("/api/records", async (_req, res) => {
   }
 });
 
-app.get("/api/ghl/client-managers", async (_req, res) => {
+app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -4389,7 +4946,13 @@ app.get("/api/ghl/client-managers", async (_req, res) => {
     return;
   }
 
-  const refreshMode = normalizeGhlRefreshMode(_req.query.refresh);
+  const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
+  if (refreshMode !== "none" && !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS)) {
+    res.status(403).json({
+      error: "Access denied. You do not have permission to refresh client-manager data.",
+    });
+    return;
+  }
 
   try {
     const state = await getStoredRecords();
@@ -4452,7 +5015,7 @@ app.get("/api/ghl/client-managers", async (_req, res) => {
   }
 });
 
-app.put("/api/records", async (req, res) => {
+app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS), async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -4581,7 +5144,7 @@ app.post("/api/mini/clients", async (req, res) => {
   }
 });
 
-app.get("/api/moderation/submissions", async (req, res) => {
+app.get("/api/moderation/submissions", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_MODERATION), async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -4614,7 +5177,7 @@ app.get("/api/moderation/submissions", async (req, res) => {
   }
 });
 
-app.get("/api/moderation/submissions/:id/files", async (req, res) => {
+app.get("/api/moderation/submissions/:id/files", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_MODERATION), async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -4652,7 +5215,7 @@ app.get("/api/moderation/submissions/:id/files", async (req, res) => {
   }
 });
 
-app.get("/api/moderation/submissions/:id/files/:fileId", async (req, res) => {
+app.get("/api/moderation/submissions/:id/files/:fileId", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_MODERATION), async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -4687,7 +5250,7 @@ app.get("/api/moderation/submissions/:id/files/:fileId", async (req, res) => {
   }
 });
 
-app.post("/api/moderation/submissions/:id/approve", async (req, res) => {
+app.post("/api/moderation/submissions/:id/approve", requireWebPermission(WEB_AUTH_PERMISSION_REVIEW_MODERATION), async (req, res) => {
   try {
     const result = await reviewClientSubmission(
       req.params.id,
@@ -4713,7 +5276,7 @@ app.post("/api/moderation/submissions/:id/approve", async (req, res) => {
   }
 });
 
-app.post("/api/moderation/submissions/:id/reject", async (req, res) => {
+app.post("/api/moderation/submissions/:id/reject", requireWebPermission(WEB_AUTH_PERMISSION_REVIEW_MODERATION), async (req, res) => {
   try {
     const result = await reviewClientSubmission(
       req.params.id,
@@ -4743,20 +5306,24 @@ app.get("/mini", (_req, res) => {
   res.sendFile(path.join(staticRoot, "mini.html"));
 });
 
-app.get("/quickbooks-payments", (_req, res) => {
+app.get("/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (_req, res) => {
   res.sendFile(path.join(staticRoot, "quickbooks-payments.html"));
 });
 
-app.get("/client-managers", (_req, res) => {
+app.get("/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
   res.sendFile(path.join(staticRoot, "client-managers.html"));
 });
 
-app.get("/Client_Payments", (_req, res) => {
+app.get("/Client_Payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
   res.sendFile(path.join(staticRoot, "client-payments.html"));
 });
 
 app.get("/moderation", (_req, res) => {
   res.redirect(302, "/");
+});
+
+app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "access-control.html"));
 });
 
 app.use("/api", (_req, res) => {
@@ -4765,14 +5332,19 @@ app.use("/api", (_req, res) => {
   });
 });
 
-app.get("*", (_req, res) => {
+app.get("*", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
   res.sendFile(path.join(staticRoot, "index.html"));
 });
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log("Web auth is enabled. Sign in at /login.");
-  if (WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME && WEB_AUTH_PASSWORD === DEFAULT_WEB_AUTH_PASSWORD) {
+  console.log(`Web auth users loaded: ${WEB_AUTH_USERS.length}. Owner: ${WEB_AUTH_OWNER_USERNAME}.`);
+  if (
+    !WEB_AUTH_USERS_JSON &&
+    WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME &&
+    WEB_AUTH_PASSWORD === DEFAULT_WEB_AUTH_PASSWORD
+  ) {
     console.warn("Using default web auth credentials. Set WEB_AUTH_USERNAME and WEB_AUTH_PASSWORD in environment.");
   }
   if (!pool) {
