@@ -291,8 +291,6 @@ export default function ClientPaymentsPage() {
   return (
     <PageShell className="client-payments-react-page">
       <PageHeader
-        title="Client Payments"
-        subtitle="Revenue tracking and collections"
         actions={
           canManage ? (
             <Button size="sm" onClick={openCreateModal}>

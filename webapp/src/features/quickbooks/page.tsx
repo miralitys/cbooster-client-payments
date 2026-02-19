@@ -166,8 +166,6 @@ export default function QuickBooksPage() {
   return (
     <PageShell className="quickbooks-react-page">
       <PageHeader
-        title="QuickBooks"
-        subtitle="Payments feed"
         actions={
           <div className="cb-page-header-toolbar">
             <Button
