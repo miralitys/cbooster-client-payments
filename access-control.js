@@ -411,20 +411,44 @@ function renderDepartments(departments) {
       const row = document.createElement("tr");
 
       const roleCell = document.createElement("td");
-      roleCell.textContent = (role?.name || "-").toString();
+      const rolePill = document.createElement("span");
+      rolePill.className = "access-control-role-pill";
+      const roleId = (role?.id || "").toString().trim();
+      if (roleId) {
+        rolePill.dataset.roleId = roleId;
+      }
+      rolePill.textContent = (role?.name || "-").toString();
+      roleCell.append(rolePill);
 
       const membersCell = document.createElement("td");
+      membersCell.className = "access-control-members-cell";
       const members = Array.isArray(role?.members) ? role.members : [];
       if (!members.length) {
-        membersCell.textContent = "Unassigned";
+        const emptyState = document.createElement("span");
+        emptyState.className = "access-control-members-empty";
+        emptyState.textContent = "Unassigned";
+        membersCell.append(emptyState);
       } else {
-        membersCell.textContent = members
-          .map((member) => {
-            const displayName = (member?.displayName || "").toString().trim();
-            const username = (member?.username || "").toString().trim();
-            return displayName || username || "-";
-          })
-          .join(", ");
+        const membersList = document.createElement("div");
+        membersList.className = "access-control-members-list";
+
+        for (const member of members) {
+          const chip = document.createElement("span");
+          chip.className = "access-control-member-chip";
+          const displayName = (member?.displayName || "").toString().trim();
+          const username = (member?.username || "").toString().trim();
+          chip.textContent = displayName || username || "-";
+          if (
+            displayName &&
+            username &&
+            displayName.toLowerCase().replace(/\s+/g, "") !== username.toLowerCase().replace(/\s+/g, "")
+          ) {
+            chip.title = username;
+          }
+          membersList.append(chip);
+        }
+
+        membersCell.append(membersList);
       }
 
       row.append(roleCell, membersCell);

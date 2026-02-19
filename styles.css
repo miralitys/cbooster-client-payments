@@ -1815,12 +1815,30 @@ tbody tr.row-tone-active:hover td {
 }
 
 .access-control-department-card {
+  position: relative;
+  overflow: hidden;
   display: grid;
-  gap: var(--space-2);
+  gap: var(--space-3);
   padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface);
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  box-shadow: var(--shadow-xs);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.access-control-department-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: linear-gradient(90deg, var(--color-primary), #1d4ed8);
+}
+
+.access-control-department-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-sm);
 }
 
 .access-control-department-card__title {
@@ -1832,10 +1850,14 @@ tbody tr.row-tone-active:hover td {
 .access-control-department-card__table {
   width: 100%;
   min-width: 0;
-  border-collapse: collapse;
+  border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--color-surface);
 }
 
 .access-control-page thead th {
@@ -1847,8 +1869,7 @@ tbody tr.row-tone-active:hover td {
 
 .access-control-department-card__table th,
 .access-control-department-card__table td {
-  border: 1px solid var(--color-border);
-  padding: 8px 10px;
+  padding: 11px 12px;
   text-align: left;
   vertical-align: top;
   white-space: normal;
@@ -1856,9 +1877,99 @@ tbody tr.row-tone-active:hover td {
 }
 
 .access-control-department-card__table th {
-  background: var(--color-surface-muted);
+  background: #eef3f8;
   color: var(--color-text-muted);
   font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.01em;
+  border-bottom: 1px solid var(--color-border-strong);
+}
+
+.access-control-department-card__table th + th,
+.access-control-department-card__table td + td {
+  border-left: 1px solid var(--color-border);
+}
+
+.access-control-department-card__table tbody td {
+  border-top: 1px solid var(--color-border);
+}
+
+.access-control-department-card__table tbody tr:first-child td {
+  border-top: 0;
+}
+
+.access-control-department-card__table tbody tr:nth-child(even) td {
+  background: #fbfdff;
+}
+
+.access-control-department-card__table tbody tr:hover td {
+  background: var(--color-row-hover);
+}
+
+.access-control-role-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(71, 85, 105, 0.28);
+  background: rgba(71, 85, 105, 0.1);
+  color: #334155;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.2;
+}
+
+.access-control-role-pill[data-role-id="department_head"] {
+  border-color: rgba(15, 118, 110, 0.38);
+  background: rgba(15, 118, 110, 0.14);
+  color: var(--color-primary-hover);
+}
+
+.access-control-role-pill[data-role-id="middle_manager"] {
+  border-color: rgba(29, 78, 216, 0.35);
+  background: rgba(29, 78, 216, 0.12);
+  color: var(--color-info);
+}
+
+.access-control-role-pill[data-role-id="manager"] {
+  border-color: rgba(71, 85, 105, 0.32);
+  background: rgba(71, 85, 105, 0.1);
+  color: #334155;
+}
+
+.access-control-members-cell {
+  min-height: 48px;
+}
+
+.access-control-members-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.access-control-member-chip {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  line-height: 1.35;
+}
+
+.access-control-members-empty {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px dashed var(--color-border-strong);
+  color: var(--color-text-muted);
+  background: #f8fafc;
+  font-size: var(--font-size-xs);
 }
 
 .access-control-empty {
