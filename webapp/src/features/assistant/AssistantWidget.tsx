@@ -102,10 +102,6 @@ function normalizeDisplayMessage(rawValue: string): string {
   return rawValue.trim();
 }
 
-function isRussianText(rawValue: string): boolean {
-  return /[а-яё]/i.test(rawValue);
-}
-
 function extractSpeechTranscript(results: SpeechRecognitionResultListLike): string {
   const chunks: string[] = [];
 
@@ -277,12 +273,8 @@ export function AssistantWidget() {
     return () => {
       isMountedRef.current = false;
       abortControllerRef.current?.abort();
-      ttsAbortControllerRef.current?.abort();
       recognitionRef.current?.abort();
-      stopAudioPlayback();
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
+      stopSpeaking(false);
     };
   }, []);
 
@@ -341,44 +333,16 @@ export function AssistantWidget() {
     }
   }
 
-  function speakTextWithBrowserSynthesis(rawText: string): void {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      if (isMountedRef.current) {
-        setIsSpeaking(false);
-      }
-      return;
+  function stopSpeaking(resetSpeaking = true): void {
+    ttsAbortControllerRef.current?.abort();
+    ttsAbortControllerRef.current = null;
+    stopAudioPlayback(false);
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
     }
-
-    const text = normalizeDisplayMessage(rawText);
-    if (!text) {
-      if (isMountedRef.current) {
-        setIsSpeaking(false);
-      }
-      return;
+    if (resetSpeaking && isMountedRef.current) {
+      setIsSpeaking(false);
     }
-
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = isRussianText(text) ? "ru-RU" : "en-US";
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    utterance.onstart = () => {
-      if (isMountedRef.current) {
-        setIsSpeaking(true);
-      }
-    };
-    utterance.onend = () => {
-      if (isMountedRef.current) {
-        setIsSpeaking(false);
-      }
-    };
-    utterance.onerror = () => {
-      if (isMountedRef.current) {
-        setIsSpeaking(false);
-      }
-    };
-
-    window.speechSynthesis.speak(utterance);
   }
 
   async function speakTextAsync(rawText: string): Promise<void> {
@@ -387,11 +351,8 @@ export function AssistantWidget() {
       return;
     }
 
-    ttsAbortControllerRef.current?.abort();
-    stopAudioPlayback(false);
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
+    stopSpeaking(false);
+    setVoiceError("");
 
     const controller = new AbortController();
     ttsAbortControllerRef.current = controller;
@@ -412,12 +373,25 @@ export function AssistantWidget() {
       });
 
       if (!response.ok) {
-        throw new Error(`TTS request failed with status ${response.status}`);
+        let errorMessage = "";
+        const contentType = (response.headers.get("content-type") || "").toLowerCase();
+        if (contentType.includes("application/json")) {
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          errorMessage = normalizeDisplayMessage(payload?.error || "");
+        } else {
+          errorMessage = normalizeDisplayMessage(await response.text().catch(() => ""));
+        }
+        if (!errorMessage) {
+          errorMessage = isRussian
+            ? `Ошибка озвучки (HTTP ${response.status}).`
+            : `TTS request failed (HTTP ${response.status}).`;
+        }
+        throw new Error(errorMessage);
       }
 
       const audioBlob = await response.blob();
       if (!audioBlob.size) {
-        throw new Error("TTS response is empty.");
+        throw new Error(isRussian ? "ElevenLabs вернул пустой аудио-ответ." : "ElevenLabs returned an empty audio response.");
       }
 
       if (!isMountedRef.current || controller.signal.aborted) {
@@ -437,17 +411,21 @@ export function AssistantWidget() {
       };
       audio.onerror = () => {
         stopAudioPlayback();
-        speakTextWithBrowserSynthesis(text);
+        setVoiceError(isRussian ? "Не удалось воспроизвести аудио-ответ." : "Failed to play the audio reply.");
       };
 
       await audio.play();
-    } catch {
+    } catch (error) {
       if (controller.signal.aborted || !isMountedRef.current) {
         return;
       }
 
       stopAudioPlayback();
-      speakTextWithBrowserSynthesis(text);
+      const fallbackError = isRussian
+        ? "Не удалось озвучить ответ. Проверьте настройки ElevenLabs."
+        : "Failed to speak the reply. Check ElevenLabs settings.";
+      const errorMessage = error instanceof Error ? normalizeDisplayMessage(error.message || "") : "";
+      setVoiceError(errorMessage || fallbackError);
     } finally {
       if (ttsAbortControllerRef.current === controller) {
         ttsAbortControllerRef.current = null;
@@ -601,6 +579,11 @@ export function AssistantWidget() {
   }
 
   function handleSpeakLastReply(): void {
+    if (isSpeaking) {
+      stopSpeaking();
+      return;
+    }
+
     const lastAssistantMessage = [...messages].reverse().find((message) => message.role === "assistant");
     if (!lastAssistantMessage) {
       return;
@@ -662,7 +645,12 @@ export function AssistantWidget() {
               type="button"
               className="assistant-widget__close-btn"
               aria-label={isRussian ? "Закрыть" : "Close"}
-              onClick={() => setIsOpen(false)}
+              onClick={() => {
+                setIsOpen(false);
+                stopListening();
+                stopSpeaking();
+                setVoiceError("");
+              }}
             >
               ×
             </button>
@@ -765,7 +753,13 @@ export function AssistantWidget() {
                   onClick={handleSpeakLastReply}
                   disabled={isSending}
                 >
-                  {isRussian ? "Озвучить ответ" : "Speak Reply"}
+                  {isSpeaking
+                    ? isRussian
+                      ? "Остановить"
+                      : "Stop"
+                    : isRussian
+                      ? "Озвучить ответ"
+                      : "Speak Reply"}
                 </button>
               ) : null}
 
