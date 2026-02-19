@@ -2182,9 +2182,37 @@ a {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
+  display: grid;
+  overflow: hidden;
+}
+
+.access-control-assistant-review-summary-react {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--color-border);
+  background: transparent;
+  display: grid;
+  gap: var(--space-1);
+  text-align: left;
   padding: var(--space-3);
+  cursor: pointer;
+}
+
+.access-control-assistant-review-summary-react:hover,
+.access-control-assistant-review-summary-react:focus-visible,
+.access-control-assistant-review-summary-react.is-expanded {
+  background: var(--color-surface-muted);
+}
+
+.access-control-assistant-review-summary-cell-react {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.access-control-assistant-review-expanded-react {
   display: grid;
   gap: var(--space-3);
+  padding: var(--space-3);
 }
 
 .access-control-assistant-review-meta-react {
