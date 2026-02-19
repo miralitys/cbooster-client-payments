@@ -4253,8 +4253,12 @@ function deriveGhlContactLinkFromEntity(entity) {
   const contactName = sanitizeTextValue(
     entity.contactName ||
       entity.contact_name ||
+      entity.contactFullName ||
+      entity.contact_full_name ||
       entity.recipientName ||
       entity.recipient_name ||
+      entity.recipientFullName ||
+      entity.recipient_full_name ||
       entity.customerName ||
       entity.customer_name ||
       entity.clientName ||
@@ -4269,12 +4273,16 @@ function deriveGhlContactLinkFromEntity(entity) {
   const contactId = sanitizeTextValue(
     entity.contactId ||
       entity.contact_id ||
+      entity.contactID ||
       entity.recipientId ||
       entity.recipient_id ||
+      entity.recipientID ||
       entity.customerId ||
       entity.customer_id ||
+      entity.customerID ||
       entity.clientId ||
       entity.client_id ||
+      entity.clientID ||
       entity.id,
     160,
   );
@@ -4367,7 +4375,7 @@ function extractGhlContactLinkFromObject(object, inheritedLink = null) {
 }
 
 function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, depth = 0, inheritedLink = null) {
-  if (!target || !(target instanceof Array) || depth > 6 || node === null || node === undefined) {
+  if (!target || !(target instanceof Array) || depth > 10 || node === null || node === undefined) {
     return;
   }
 
@@ -4403,6 +4411,15 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
       object.name ||
       object.documentName ||
       object.document_name ||
+      object.documentTitle ||
+      object.document_title ||
+      object.contractTitle ||
+      object.contract_title ||
+      object.templateName ||
+      object.template_name ||
+      object.displayName ||
+      object.display_name ||
+      object.subject ||
       object.fileName ||
       object.file_name ||
       object.filename ||
@@ -4413,6 +4430,10 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
     object.type ||
       object.documentType ||
       object.document_type ||
+      object.documentStatus ||
+      object.document_status ||
+      object.contractType ||
+      object.contract_type ||
       object.mimeType ||
       object.mime_type ||
       object.status ||
@@ -4426,24 +4447,35 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
   const candidateContactName = sanitizeTextValue(
     object.contactName ||
       object.contact_name ||
+      object.contactFullName ||
+      object.contact_full_name ||
       object.recipientName ||
       object.recipient_name ||
+      object.recipientFullName ||
+      object.recipient_full_name ||
       object.customerName ||
       object.customer_name ||
       object.clientName ||
       object.client_name ||
+      object.fullName ||
+      object.full_name ||
+      object.name ||
       objectContactLink.contactName,
     300,
   );
   const candidateContactId = sanitizeTextValue(
     object.contactId ||
       object.contact_id ||
+      object.contactID ||
       object.recipientId ||
       object.recipient_id ||
+      object.recipientID ||
       object.customerId ||
       object.customer_id ||
+      object.customerID ||
       object.clientId ||
       object.client_id ||
+      object.clientID ||
       objectContactLink.contactId,
     160,
   );
@@ -4457,8 +4489,12 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
     object.href,
     object.publicUrl,
     object.public_url,
+    object.previewUrl,
+    object.preview_url,
     object.signedUrl,
     object.signed_url,
+    object.signedDocumentUrl,
+    object.signed_document_url,
     object.documentUrl,
     object.document_url,
     object.attachmentUrl,
