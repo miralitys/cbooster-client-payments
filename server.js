@@ -296,6 +296,10 @@ const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", 
 const GHL_REQUIRED_CONTRACT_KEYWORD_PATTERN = /\bcontracts?\b/;
 const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
 const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
+const GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS, 5 * 60 * 1000), 10 * 1000),
+  60 * 60 * 1000,
+);
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
@@ -572,6 +576,10 @@ let quickBooksSyncQueue = Promise.resolve();
 let quickBooksAutoSyncIntervalId = null;
 let quickBooksAutoSyncInFlightSlotKey = "";
 let quickBooksAutoSyncLastCompletedSlotKey = "";
+let ghlLocationDocumentCandidatesCache = {
+  expiresAt: 0,
+  items: [],
+};
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
@@ -4959,7 +4967,89 @@ async function listGhlContractCandidatesForContact(contactId, options = {}) {
     }
   }
 
+  const locationWideCandidates = await listGhlLocationContractCandidates();
+  if (locationWideCandidates.length) {
+    for (const candidate of locationWideCandidates) {
+      candidates.push({
+        ...candidate,
+        source: sanitizeTextValue(candidate?.source, 120) || "proposals.document.location",
+      });
+    }
+  }
+
   return dedupeGhlContractCandidates(candidates);
+}
+
+async function listGhlLocationContractCandidates() {
+  const now = Date.now();
+  if (
+    ghlLocationDocumentCandidatesCache.expiresAt > now &&
+    Array.isArray(ghlLocationDocumentCandidatesCache.items) &&
+    ghlLocationDocumentCandidatesCache.items.length
+  ) {
+    return ghlLocationDocumentCandidatesCache.items;
+  }
+
+  const attempts = [
+    {
+      source: "proposals.document.location.contract",
+      query: {
+        locationId: GHL_LOCATION_ID,
+        status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
+        query: "contract",
+        skip: 0,
+        limit: 200,
+      },
+    },
+    {
+      source: "proposals.document.location.by_status",
+      query: {
+        locationId: GHL_LOCATION_ID,
+        status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
+        skip: 0,
+        limit: 200,
+      },
+    },
+    {
+      source: "proposals.document.location.no_status",
+      query: {
+        locationId: GHL_LOCATION_ID,
+        query: "contract",
+        skip: 0,
+        limit: 200,
+      },
+    },
+  ];
+
+  const candidates = [];
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await requestGhlApi("/proposals/document", {
+        method: "GET",
+        query: attempt.query,
+        tolerateNotFound: true,
+      });
+    } catch {
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const extracted = extractGhlContractCandidatesFromPayload(response.body, attempt.source);
+    if (extracted.length) {
+      candidates.push(...extracted);
+    }
+  }
+
+  const deduped = dedupeGhlContractCandidates(candidates);
+  ghlLocationDocumentCandidatesCache = {
+    expiresAt: now + GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS,
+    items: deduped,
+  };
+  return deduped;
 }
 
 async function buildGhlClientContractLookupRows(clientNames) {
