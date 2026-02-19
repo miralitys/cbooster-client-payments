@@ -1821,8 +1821,18 @@ tbody tr.row-tone-active:hover td {
 
 .access-control-department-card__table {
   width: 100%;
+  min-width: 0;
   border-collapse: collapse;
+  border-spacing: 0;
+  table-layout: fixed;
   font-size: var(--font-size-xs);
+}
+
+.access-control-page thead th {
+  position: static;
+  top: auto;
+  z-index: auto;
+  box-shadow: none;
 }
 
 .access-control-department-card__table th,
@@ -1831,6 +1841,8 @@ tbody tr.row-tone-active:hover td {
   padding: 8px 10px;
   text-align: left;
   vertical-align: top;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .access-control-department-card__table th {
