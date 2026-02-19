@@ -294,6 +294,7 @@ const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
 const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", "error"]);
 const GHL_REQUIRED_CONTRACT_TITLE_PREFIXES = ["creditier contract", "credit booster"];
+const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
@@ -3478,6 +3479,17 @@ function buildGhlUrl(pathname, query = {}) {
 
   const entries = Object.entries(query || {});
   for (const [key, rawValue] of entries) {
+    if (Array.isArray(rawValue)) {
+      for (const item of rawValue) {
+        const arrayValue = sanitizeTextValue(item, 1000);
+        if (!arrayValue) {
+          continue;
+        }
+        url.searchParams.append(key, arrayValue);
+      }
+      continue;
+    }
+
     const value = sanitizeTextValue(rawValue, 1000);
     if (!value) {
       continue;
@@ -4813,11 +4825,12 @@ function mergeGhlContactSnapshots(baseContact, detailedContact) {
   };
 }
 
-async function listGhlContractCandidatesForContact(contactId) {
+async function listGhlContractCandidatesForContact(contactId, options = {}) {
   const normalizedContactId = sanitizeTextValue(contactId, 160);
   if (!normalizedContactId) {
     return [];
   }
+  const normalizedContactName = sanitizeTextValue(options?.contactName, 300);
 
   const encodedContactId = encodeURIComponent(normalizedContactId);
   const attempts = [
@@ -4825,6 +4838,17 @@ async function listGhlContractCandidatesForContact(contactId) {
       source: "contacts.documents",
       request: () =>
         requestGhlApi(`/contacts/${encodedContactId}/documents`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contacts.documents.trailing_slash",
+      request: () =>
+        requestGhlApi(`/contacts/${encodedContactId}/documents/`, {
           method: "GET",
           query: {
             locationId: GHL_LOCATION_ID,
@@ -4855,6 +4879,17 @@ async function listGhlContractCandidatesForContact(contactId) {
         }),
     },
     {
+      source: "contacts.attachments.trailing_slash",
+      request: () =>
+        requestGhlApi(`/contacts/${encodedContactId}/attachments/`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
       source: "contacts.notes",
       request: () =>
         requestGhlApi(`/contacts/${encodedContactId}/notes`, {
@@ -4874,6 +4909,26 @@ async function listGhlContractCandidatesForContact(contactId) {
           query: {
             locationId: GHL_LOCATION_ID,
             contactId: normalizedContactId,
+            "status[]": GHL_PROPOSAL_STATUS_FILTERS,
+            query: normalizedContactName,
+            skip: 0,
+            limit: 100,
+            page: 1,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.document.contact_id",
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            contact_id: normalizedContactId,
+            "status[]": GHL_PROPOSAL_STATUS_FILTERS,
+            query: normalizedContactName,
+            skip: 0,
             limit: 100,
             page: 1,
           },
@@ -4888,6 +4943,9 @@ async function listGhlContractCandidatesForContact(contactId) {
           query: {
             locationId: GHL_LOCATION_ID,
             contactId: normalizedContactId,
+            "status[]": GHL_PROPOSAL_STATUS_FILTERS,
+            query: normalizedContactName,
+            skip: 0,
             limit: 100,
             page: 1,
           },
@@ -4983,7 +5041,9 @@ async function buildGhlClientContractLookupRows(clientNames) {
             continue;
           }
 
-          const fromApi = await listGhlContractCandidatesForContact(contactId);
+          const fromApi = await listGhlContractCandidatesForContact(contactId, {
+            contactName,
+          });
           for (const candidate of fromApi) {
             const source = sanitizeTextValue(candidate?.source, 120).toLowerCase();
             if (source.startsWith("proposals.") && !isGhlContractCandidateRelatedToContact(candidate, contactName, contactId)) {
