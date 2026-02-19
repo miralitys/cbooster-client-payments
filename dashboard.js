@@ -5,6 +5,8 @@ const ZERO_TOLERANCE = 0.005;
 const AUTH_LOGIN_PATH = "/login";
 const AUTH_SESSION_ENDPOINT = "/api/auth/session";
 const AUTH_LOGOUT_PATH = "/logout";
+const QUICKBOOKS_PAYMENTS_ENDPOINT = "/api/quickbooks/payments/recent";
+const QUICKBOOKS_DASHBOARD_TIME_ZONE = "America/Chicago";
 const PAYMENT_PAIRS = [
   ["payment1", "payment1Date"],
   ["payment2", "payment2Date"],
@@ -69,6 +71,12 @@ const paymentMoneyFormatter = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
+const chicagoDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: QUICKBOOKS_DASHBOARD_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
 
 let pendingSubmissions = [];
 let activeSubmission = null;
@@ -88,7 +96,7 @@ initializeModal();
 void reloadDashboard();
 
 async function reloadDashboard() {
-  await Promise.all([loadOverviewData(), loadPendingSubmissions()]);
+  await Promise.all([loadOverviewData(), loadPendingSubmissions(), loadTodayQuickBooksPayments()]);
 }
 
 function redirectToLoginPage() {
@@ -393,11 +401,9 @@ async function loadOverviewData() {
     const records = Array.isArray(body.records) ? body.records : [];
     cachedOverviewRecords = records;
     updatePeriodDashboard(records);
-    renderTodayPayments(records);
   } catch (error) {
     cachedOverviewRecords = [];
     updatePeriodDashboard([]);
-    renderTodayPayments([], error.message || "Failed to load today's payments.");
     showMessage(error.message || "Failed to load overview data.", "error");
   }
 }
@@ -487,11 +493,6 @@ function getCurrentUtcDayStart() {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
-function getCurrentLocalDayStartAsUtc() {
-  const now = new Date();
-  return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
-}
-
 function getCurrentWeekStartUtc(dayUtcStart) {
   const dayOfWeek = new Date(dayUtcStart).getUTCDay();
   const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
@@ -548,65 +549,62 @@ function calculatePeriodMetrics(recordsToMeasure, range) {
   };
 }
 
-function collectTodayPayments(recordsToMeasure) {
-  const items = [];
-  const records = Array.isArray(recordsToMeasure) ? recordsToMeasure : [];
-  const todayLocalStartAsUtc = getCurrentLocalDayStartAsUtc();
+async function loadTodayQuickBooksPayments() {
+  const todayIso = formatDateForApiInChicago(new Date());
 
-  for (const record of records) {
-    const clientName = (record?.clientName || "").toString().trim() || "Unnamed";
+  try {
+    const endpoint = `${QUICKBOOKS_PAYMENTS_ENDPOINT}?from=${encodeURIComponent(todayIso)}&to=${encodeURIComponent(todayIso)}`;
+    const response = await fetch(endpoint, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
 
-    for (let paymentIndex = 0; paymentIndex < PAYMENT_PAIRS.length; paymentIndex += 1) {
-      const [paymentFieldKey, paymentDateFieldKey] = PAYMENT_PAIRS[paymentIndex];
-      const paymentDate = parseDateValue(record?.[paymentDateFieldKey]);
-      if (paymentDate !== todayLocalStartAsUtc) {
-        continue;
-      }
-
-      const paymentAmount = parseMoneyValue(record?.[paymentFieldKey]);
-      if (paymentAmount === null || Math.abs(paymentAmount) < ZERO_TOLERANCE) {
-        continue;
-      }
-
-      items.push({
-        clientName,
-        paymentLabel: `Payment ${paymentIndex + 1}`,
-        paymentAmount,
-        paymentDateText:
-          (record?.[paymentDateFieldKey] || "").toString().trim() || new Date(paymentDate).toLocaleDateString(),
-      });
+    if (response.status === 401) {
+      redirectToLoginPage();
+      return;
     }
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Failed to load QuickBooks payments (${response.status})`);
+    }
+
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    renderTodayPayments(items);
+  } catch (error) {
+    renderTodayPayments([], error.message || "Failed to load today's QuickBooks payments.");
   }
-
-  items.sort((left, right) => {
-    const amountDiff = Math.abs(right.paymentAmount) - Math.abs(left.paymentAmount);
-    if (Math.abs(amountDiff) > ZERO_TOLERANCE) {
-      return amountDiff;
-    }
-    return left.clientName.localeCompare(right.clientName, "en-US", { sensitivity: "base" });
-  });
-
-  return items;
 }
 
-function renderTodayPayments(recordsToMeasure = [], errorText = "") {
+function renderTodayPayments(quickBooksItems = [], errorText = "") {
   if (!paymentsTodayTableBody) {
     return;
   }
 
-  const items = collectTodayPayments(recordsToMeasure);
+  const items = (Array.isArray(quickBooksItems) ? quickBooksItems : []).map((item) => {
+    const amount = Number(item?.paymentAmount);
+    const normalizedAmount = Number.isFinite(amount) ? amount : 0;
+    return {
+      clientName: (item?.clientName || "Unknown client").toString().trim() || "Unknown client",
+      paymentLabel: formatQuickBooksPaymentType(item),
+      paymentAmount: normalizedAmount,
+      paymentDateText: formatQuickBooksDateForCell(item?.paymentDate),
+    };
+  });
   const normalizedErrorText = (errorText || "").toString().trim();
+  const todayLabel = formatDateLabelInChicago(new Date());
 
   if (paymentsTodayMessage) {
     if (normalizedErrorText) {
       paymentsTodayMessage.textContent = normalizedErrorText;
       paymentsTodayMessage.className = "dashboard-message error";
     } else if (!items.length) {
-      paymentsTodayMessage.textContent = "No payments recorded today.";
+      paymentsTodayMessage.textContent = `No QuickBooks payments for ${todayLabel}.`;
       paymentsTodayMessage.className = "dashboard-message";
     } else {
       const totalAmount = items.reduce((sum, item) => sum + item.paymentAmount, 0);
-      paymentsTodayMessage.textContent = `Today: ${items.length} payment${items.length === 1 ? "" : "s"}, total ${paymentMoneyFormatter.format(totalAmount)}.`;
+      paymentsTodayMessage.textContent = `${todayLabel}: ${items.length} QuickBooks payment${items.length === 1 ? "" : "s"}, total ${paymentMoneyFormatter.format(totalAmount)}.`;
       paymentsTodayMessage.className = "dashboard-message";
     }
   }
@@ -616,7 +614,7 @@ function renderTodayPayments(recordsToMeasure = [], errorText = "") {
     const cell = document.createElement("td");
     cell.colSpan = 4;
     cell.className = "empty-state";
-    cell.textContent = normalizedErrorText || "No payments recorded for today.";
+    cell.textContent = normalizedErrorText || `No QuickBooks payments for ${todayLabel}.`;
     row.append(cell);
     paymentsTodayTableBody.replaceChildren(row);
     return;
@@ -638,6 +636,74 @@ function renderTodayPayments(recordsToMeasure = [], errorText = "") {
   }
 
   paymentsTodayTableBody.replaceChildren(fragment);
+}
+
+function formatQuickBooksPaymentType(item) {
+  const transactionType = (item?.transactionType || "").toString().trim().toLowerCase();
+  const amount = Number(item?.paymentAmount);
+  const normalizedAmount = Number.isFinite(amount) ? amount : 0;
+
+  if (transactionType === "refund") {
+    return "Refund";
+  }
+
+  if (transactionType === "payment" && normalizedAmount < 0) {
+    return "Write-off";
+  }
+
+  if (transactionType === "payment") {
+    return "Payment";
+  }
+
+  return transactionType ? transactionType.charAt(0).toUpperCase() + transactionType.slice(1) : "Payment";
+}
+
+function formatQuickBooksDateForCell(rawValue) {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return "-";
+  }
+
+  const plainDateMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (plainDateMatch) {
+    return `${plainDateMatch[2]}/${plainDateMatch[3]}/${plainDateMatch[1]}`;
+  }
+
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) {
+    return value;
+  }
+
+  return new Date(timestamp).toLocaleDateString("en-US");
+}
+
+function formatDateForApiInChicago(dateValue) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const parts = chicagoDateFormatter.formatToParts(date);
+  const values = {};
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+
+  const year = (values.year || "").toString().trim();
+  const month = (values.month || "").toString().trim().padStart(2, "0");
+  const day = (values.day || "").toString().trim().padStart(2, "0");
+  if (year && month && day) {
+    return `${year}-${month}-${day}`;
+  }
+
+  return new Date(date).toISOString().slice(0, 10);
+}
+
+function formatDateLabelInChicago(dateValue) {
+  const isoDate = formatDateForApiInChicago(dateValue);
+  const match = isoDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return "today";
+  }
+  return `${match[2]}/${match[3]}/${match[1]}`;
 }
 
 function calculateOverallDebt(recordsToMeasure) {
