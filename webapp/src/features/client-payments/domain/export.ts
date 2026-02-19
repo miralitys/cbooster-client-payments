@@ -1,4 +1,4 @@
-import { formatDate, formatMoney, getRecordStatusFlags } from "@/features/client-payments/domain/calculations";
+import { formatDate, formatMoney, getRecordStatusFlags, parseMoneyValue } from "@/features/client-payments/domain/calculations";
 import { TABLE_COLUMNS } from "@/features/client-payments/domain/constants";
 import type { ClientRecord } from "@/shared/types/records";
 
@@ -8,12 +8,27 @@ const COLUMN_LABELS: Record<string, string> = {
   companyName: "Company",
   serviceType: "Service",
   contractTotals: "Contract",
-  totalPayments: "Total Paid",
+  totalPayments: "Paid",
+  payment1: "Payment 1",
+  payment1Date: "Payment 1 Date",
+  payment2: "Payment 2",
+  payment2Date: "Payment 2 Date",
+  payment3: "Payment 3",
+  payment3Date: "Payment 3 Date",
+  payment4: "Payment 4",
+  payment4Date: "Payment 4 Date",
+  payment5: "Payment 5",
+  payment5Date: "Payment 5 Date",
+  payment6: "Payment 6",
+  payment6Date: "Payment 6 Date",
+  payment7: "Payment 7",
+  payment7Date: "Payment 7 Date",
   futurePayments: "Balance",
   afterResult: "After Result",
-  writtenOff: "Written Off",
-  dateWhenFullyPaid: "Fully Paid Date",
-  createdAt: "Created",
+  notes: "Notes",
+  collection: "COLLECTION",
+  dateOfCollection: "Date of collection",
+  dateWhenWrittenOff: "Date when written off",
 };
 
 export function exportRecordsToXls(records: ClientRecord[]): void {
@@ -75,13 +90,36 @@ function formatCell(record: ClientRecord, key: keyof ClientRecord): string {
     return formatDate(record[key]);
   }
 
-  if (key === "dateWhenFullyPaid") {
+  if (
+    key === "dateWhenFullyPaid" ||
+    key === "dateOfCollection" ||
+    key === "dateWhenWrittenOff" ||
+    key === "payment1Date" ||
+    key === "payment2Date" ||
+    key === "payment3Date" ||
+    key === "payment4Date" ||
+    key === "payment5Date" ||
+    key === "payment6Date" ||
+    key === "payment7Date"
+  ) {
     return formatDate(record[key]);
   }
 
-  if (key === "contractTotals" || key === "totalPayments" || key === "futurePayments") {
-    const amount = Number(record[key] || 0);
-    return Number.isFinite(amount) ? formatMoney(amount) : record[key];
+  if (
+    key === "contractTotals" ||
+    key === "totalPayments" ||
+    key === "futurePayments" ||
+    key === "collection" ||
+    key === "payment1" ||
+    key === "payment2" ||
+    key === "payment3" ||
+    key === "payment4" ||
+    key === "payment5" ||
+    key === "payment6" ||
+    key === "payment7"
+  ) {
+    const amount = parseMoneyValue(record[key]);
+    return amount === null ? "-" : formatMoney(amount);
   }
 
   if (key === "clientName") {
