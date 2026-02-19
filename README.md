@@ -108,7 +108,7 @@ npm start
 - Если `Username/Password` не переданы, система создаст временные технические credentials автоматически (только для внутренней записи пользователя).
 - Для текущей структуры также автоматически добавляются пользователи без обязательного email/password:
   - `Client Service Department`: `Nataly Regush` (`Department Head`), `Maryna Urvantseva` (`Middle Manager`, username: `marynau@creditbooster.com`), `Anastasiia Lopatina`, `Arslan Utiaganov`, `Liudmyla Sydachenko`, `Dmitrii Kabanov`, `Arina Alekhina`, `Alina Yavlovskaya` (`Manager`, username: `alinay@creditbooster.com`).
-  - `Accounting Department`: `Alla Havrysh` (`Department Head`).
+  - `Accounting Department`: `Alla Havrysh` (`Department Head`, username: `allah@urbansa.us`).
   - `Sales Department`: `Maryna Shuliatytska` (`Department Head`, username: `garbarmarina13@gmail.com`).
 - Новый пользователь добавляется в текущую runtime-директорию авторизации и доступен сразу после создания.
 - Правила доступа к клиентам:
