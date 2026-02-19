@@ -32,6 +32,7 @@
       startMic: "Включить микрофон",
       stopMic: "Остановить микрофон",
       speakReply: "Озвучить ответ",
+      stopSpeak: "Остановить",
       voiceUnsupported: "Ваш браузер не поддерживает голосовой ввод.",
       voiceNoSpeech: "Голос не распознан. Попробуйте еще раз.",
       voiceNotAllowed: "Доступ к микрофону запрещен браузером.",
@@ -63,6 +64,7 @@
       startMic: "Start Mic",
       stopMic: "Stop Mic",
       speakReply: "Speak Reply",
+      stopSpeak: "Stop",
       voiceUnsupported: "Your browser does not support voice input.",
       voiceNoSpeech: "No speech detected. Please try again.",
       voiceNotAllowed: "Microphone permission is blocked by the browser.",
@@ -251,46 +253,7 @@
     }
   }
 
-  function speakTextWithBrowserSynthesis(rawText) {
-    if (!("speechSynthesis" in window)) {
-      isSpeaking = false;
-      renderActions();
-      return;
-    }
-
-    const text = normalizeText(rawText);
-    if (!text) {
-      isSpeaking = false;
-      renderActions();
-      return;
-    }
-
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = /[а-яё]/i.test(text) ? "ru-RU" : "en-US";
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    utterance.onstart = function onStart() {
-      isSpeaking = true;
-      renderActions();
-    };
-    utterance.onend = function onEnd() {
-      isSpeaking = false;
-      renderActions();
-    };
-    utterance.onerror = function onError() {
-      isSpeaking = false;
-      renderActions();
-    };
-    window.speechSynthesis.speak(utterance);
-  }
-
-  async function speakText(rawText) {
-    const text = normalizeText(rawText);
-    if (!text) {
-      return;
-    }
-
+  function stopSpeaking(shouldRender) {
     if (playbackAbortController) {
       playbackAbortController.abort();
       playbackAbortController = null;
@@ -300,6 +263,22 @@
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
+
+    isSpeaking = false;
+    if (shouldRender !== false) {
+      renderActions();
+    }
+  }
+
+  async function speakText(rawText) {
+    const text = normalizeText(rawText);
+    if (!text) {
+      return;
+    }
+
+    stopSpeaking(false);
+    state.voiceError = "";
+    renderComposerOnly();
 
     const controller = new AbortController();
     playbackAbortController = controller;
@@ -319,12 +298,33 @@
       });
 
       if (!response.ok) {
-        throw new Error(`TTS request failed with status ${response.status}`);
+        let errorMessage = "";
+        const contentType = (response.headers.get("content-type") || "").toLowerCase();
+        if (contentType.includes("application/json")) {
+          const payload = await response.json().catch(function parseErrorJson() {
+            return null;
+          });
+          if (payload && typeof payload.error === "string") {
+            errorMessage = normalizeText(payload.error);
+          }
+        } else {
+          errorMessage = normalizeText(await response.text().catch(function parseErrorText() {
+            return "";
+          }));
+        }
+        if (!errorMessage) {
+          errorMessage = userLang === "ru"
+            ? `Ошибка озвучки (HTTP ${response.status}).`
+            : `TTS request failed (HTTP ${response.status}).`;
+        }
+        throw new Error(errorMessage);
       }
 
       const audioBlob = await response.blob();
       if (!audioBlob || !audioBlob.size) {
-        throw new Error("TTS response is empty.");
+        throw new Error(userLang === "ru"
+          ? "ElevenLabs вернул пустой аудио-ответ."
+          : "ElevenLabs returned an empty audio response.");
       }
 
       if (controller.signal.aborted) {
@@ -343,17 +343,25 @@
       };
       playbackAudio.onerror = function onAudioError() {
         stopAudioPlayback();
-        speakTextWithBrowserSynthesis(text);
+        state.voiceError = userLang === "ru"
+          ? "Не удалось воспроизвести аудио-ответ."
+          : "Failed to play the audio reply.";
+        renderComposerOnly();
       };
 
       await playbackAudio.play();
-    } catch (_error) {
+    } catch (error) {
       if (controller.signal.aborted) {
         return;
       }
 
       stopAudioPlayback();
-      speakTextWithBrowserSynthesis(text);
+      const fallbackError = userLang === "ru"
+        ? "Не удалось озвучить ответ. Проверьте настройки ElevenLabs."
+        : "Failed to speak the reply. Check ElevenLabs settings.";
+      const errorMessage = error && typeof error.message === "string" ? normalizeText(error.message) : "";
+      state.voiceError = errorMessage || fallbackError;
+      renderComposerOnly();
     } finally {
       if (playbackAbortController === controller) {
         playbackAbortController = null;
@@ -441,10 +449,7 @@
     closeBtn.addEventListener("click", function closePanel() {
       isOpen = false;
       stopListening();
-      stopAudioPlayback(false);
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
+      stopSpeaking(false);
       render();
     });
 
@@ -626,8 +631,13 @@
       speakBtn.type = "button";
       speakBtn.className = `legacy-assistant__action-btn${isSpeaking ? " is-active" : ""}`;
       speakBtn.disabled = isSending;
-      speakBtn.textContent = t.speakReply;
+      speakBtn.textContent = isSpeaking ? t.stopSpeak : t.speakReply;
       speakBtn.addEventListener("click", function onSpeakClick() {
+        if (isSpeaking) {
+          stopSpeaking();
+          return;
+        }
+
         const lastAssistantMessage = [...state.messages].reverse().find(function findAssistant(msg) {
           return msg.role === "assistant";
         });
