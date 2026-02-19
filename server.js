@@ -295,6 +295,7 @@ const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"])
 const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", "error"]);
 const GHL_REQUIRED_CONTRACT_TITLE_PREFIXES = ["creditier contract", "credit booster"];
 const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
+const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
@@ -4908,12 +4909,10 @@ async function listGhlContractCandidatesForContact(contactId, options = {}) {
           method: "GET",
           query: {
             locationId: GHL_LOCATION_ID,
-            contactId: normalizedContactId,
-            "status[]": GHL_PROPOSAL_STATUS_FILTERS,
+            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
             query: normalizedContactName,
             skip: 0,
             limit: 100,
-            page: 1,
           },
           tolerateNotFound: true,
         }),
@@ -4926,11 +4925,10 @@ async function listGhlContractCandidatesForContact(contactId, options = {}) {
           query: {
             locationId: GHL_LOCATION_ID,
             contact_id: normalizedContactId,
-            "status[]": GHL_PROPOSAL_STATUS_FILTERS,
+            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
             query: normalizedContactName,
             skip: 0,
             limit: 100,
-            page: 1,
           },
           tolerateNotFound: true,
         }),
@@ -4942,12 +4940,10 @@ async function listGhlContractCandidatesForContact(contactId, options = {}) {
           method: "GET",
           query: {
             locationId: GHL_LOCATION_ID,
-            contactId: normalizedContactId,
-            "status[]": GHL_PROPOSAL_STATUS_FILTERS,
+            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
             query: normalizedContactName,
             skip: 0,
             limit: 100,
-            page: 1,
           },
           tolerateNotFound: true,
         }),
