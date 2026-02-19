@@ -304,7 +304,6 @@ const GHL_REQUIRED_CONTRACT_KEYWORD_PATTERN = /\bcontracts?\b/;
 const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
 const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
 const GHL_BASIC_NOTE_KEYWORD_PATTERN = /\bbasic\b/i;
-const GHL_CONTACT_NOTES_LIMIT = 100;
 const GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS, 5 * 60 * 1000), 10 * 1000),
   60 * 60 * 1000,
@@ -4162,10 +4161,6 @@ async function listGhlNotesForContact(contactId) {
       request: () =>
         requestGhlApi(`/contacts/${encodedContactId}/notes`, {
           method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            limit: GHL_CONTACT_NOTES_LIMIT,
-          },
           tolerateNotFound: true,
         }),
     },
@@ -4174,10 +4169,6 @@ async function listGhlNotesForContact(contactId) {
       request: () =>
         requestGhlApi(`/contacts/${encodedContactId}/notes/`, {
           method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            limit: GHL_CONTACT_NOTES_LIMIT,
-          },
           tolerateNotFound: true,
         }),
     },
