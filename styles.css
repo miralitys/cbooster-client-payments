@@ -1231,7 +1231,7 @@ tbody tr.row-tone-written-off td {
 }
 
 tbody tr.row-tone-fully-paid td {
-  background: #f3faf6;
+  background: #f1f5fe;
 }
 
 tbody tr.row-tone-after-result td {
@@ -1251,7 +1251,7 @@ tbody tr.row-tone-written-off:hover td {
 }
 
 tbody tr.row-tone-fully-paid:hover td {
-  background: #e7f3eb;
+  background: #e5ecfb;
 }
 
 tbody tr.row-tone-after-result:hover td {
@@ -1982,8 +1982,8 @@ tbody tr.row-tone-active:hover td {
   width: fit-content;
   padding: 4px 10px;
   border-radius: var(--radius-pill);
-  border: 1px solid rgba(15, 118, 110, 0.24);
-  background: rgba(15, 118, 110, 0.1);
+  border: 1px solid rgba(16, 42, 86, 0.3);
+  background: rgba(16, 42, 86, 0.1);
   color: var(--color-primary-hover);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
@@ -2148,8 +2148,8 @@ tbody tr.row-tone-active:hover td {
 }
 
 .access-control-role-pill[data-role-id="department_head"] {
-  border-color: rgba(15, 118, 110, 0.38);
-  background: rgba(15, 118, 110, 0.14);
+  border-color: rgba(16, 42, 86, 0.38);
+  background: rgba(16, 42, 86, 0.14);
   color: var(--color-primary-hover);
 }
 
@@ -2209,7 +2209,7 @@ tbody tr.row-tone-active:hover td {
   padding: 0;
   text-align: left;
   text-decoration: underline;
-  text-decoration-color: rgba(15, 118, 110, 0.45);
+  text-decoration-color: rgba(16, 42, 86, 0.45);
   text-underline-offset: 2px;
   cursor: pointer;
 }

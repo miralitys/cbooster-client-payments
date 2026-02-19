@@ -1823,7 +1823,7 @@ function buildWebPermissionDeniedPageHtml(message) {
       .card { width:min(560px,100%); background:#fff; border:1px solid #d6dde6; border-radius:16px; padding:24px; box-shadow:0 14px 34px -24px rgba(15,23,42,.42); display:grid; gap:12px; }
       h1 { margin:0; font-size:1.5rem; }
       p { margin:0; color:#475569; }
-      a { color:#0f766e; text-decoration:none; font-weight:600; }
+      a { color:#102a56; text-decoration:none; font-weight:600; }
     </style>
   </head>
   <body>
@@ -1909,8 +1909,8 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
         --color-border-strong: #c1ccd8;
         --color-text: #0f172a;
         --color-text-muted: #475569;
-        --color-primary: #0f766e;
-        --color-primary-hover: #115e59;
+        --color-primary: #102a56;
+        --color-primary-hover: #0b1f45;
         --color-primary-contrast: #ffffff;
         --color-danger: #991b1b;
         --font-family-base: "Avenir Next", "Avenir", "Segoe UI", Helvetica, sans-serif;
@@ -1996,7 +1996,7 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
       input:focus {
         outline: none;
         border-color: var(--color-primary);
-        box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18);
+        box-shadow: 0 0 0 3px rgba(27, 63, 122, 0.2);
       }
 
       button {
