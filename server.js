@@ -1,5 +1,6 @@
 const path = require("path");
 const crypto = require("crypto");
+const fs = require("fs");
 const express = require("express");
 const multer = require("multer");
 const { Pool } = require("pg");
@@ -413,6 +414,9 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: false }));
 
 const staticRoot = __dirname;
+const webAppDistRoot = path.join(__dirname, "webapp", "dist");
+const webAppIndexFile = path.join(webAppDistRoot, "index.html");
+const webAppDistAvailable = fs.existsSync(webAppIndexFile);
 
 const pool = DATABASE_URL
   ? new Pool({
@@ -5505,6 +5509,9 @@ app.post("/logout", handleWebLogout);
 
 app.use(requireWebAuth);
 app.use(express.static(staticRoot));
+if (webAppDistAvailable) {
+  app.use("/app", express.static(webAppDistRoot, { index: false }));
+}
 
 app.get("/api/auth/session", (req, res) => {
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
@@ -6100,6 +6107,14 @@ app.get("/Client_Payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT
   res.sendFile(path.join(staticRoot, "client-payments.html"));
 });
 
+app.get("/legacy/client-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "client-payments.html"));
+});
+
+app.get("/legacy/dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "index.html"));
+});
+
 app.get("/moderation", (_req, res) => {
   res.redirect(302, "/");
 });
@@ -6118,6 +6133,20 @@ app.use("/api", (_req, res) => {
   });
 });
 
+app.get("/app/*", (_req, res) => {
+  if (!webAppDistAvailable) {
+    res
+      .status(503)
+      .type("html")
+      .send(
+        "<!doctype html><html><head><meta charset=\"utf-8\" /><title>Web App Not Built</title></head><body style=\"font-family:Arial,sans-serif;padding:24px;\"><h1>React web app is not built</h1><p>Run <code>npm --prefix webapp run build</code> and restart the server.</p></body></html>",
+      );
+    return;
+  }
+
+  res.sendFile(webAppIndexFile);
+});
+
 app.get("*", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
   res.sendFile(path.join(staticRoot, "index.html"));
 });
@@ -6126,6 +6155,11 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log("Web auth is enabled. Sign in at /login.");
   console.log(`Web auth users loaded: ${listWebAuthUsers().length}. Owner: ${WEB_AUTH_OWNER_USERNAME}.`);
+  if (webAppDistAvailable) {
+    console.log("React web app dist detected. SPA routes are served from /app/*.");
+  } else {
+    console.warn("React web app dist is missing. Build it with `npm --prefix webapp run build`.");
+  }
   if (
     !WEB_AUTH_USERS_JSON &&
     WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME &&
