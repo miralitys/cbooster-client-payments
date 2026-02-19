@@ -27,6 +27,7 @@ export default function QuickBooksPage() {
   const [allTransactions, setAllTransactions] = useState<QuickBooksViewRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [syncWarning, setSyncWarning] = useState("");
   const [statusText, setStatusText] = useState("Loading saved transactions...");
   const [rangeText, setRangeText] = useState("");
   const [lastLoadPrefix, setLastLoadPrefix] = useState("");
@@ -85,6 +86,7 @@ export default function QuickBooksPage() {
     const previousItems = [...transactionsRef.current];
     setIsLoading(true);
     setLoadError("");
+    setSyncWarning("");
 
     if (shouldTotalRefresh) {
       setStatusText("Running total refresh from QuickBooks...");
@@ -108,14 +110,19 @@ export default function QuickBooksPage() {
       );
       setRangeText(payload.range?.from && payload.range?.to ? `Range: ${payload.range.from} -> ${payload.range.to}` : "");
       setLastLoadPrefix(buildLoadPrefixFromPayload(payload, shouldSync, shouldTotalRefresh));
+      setSyncWarning("");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load transactions.";
-      setLoadError(message);
-      setStatusText(message);
       if (!previousItems.length) {
+        setLoadError(message);
+        setStatusText(message);
+        setSyncWarning("");
         setAllTransactions([]);
         setRangeText("");
       } else {
+        setLoadError("");
+        setSyncWarning(message);
+        setStatusText(`Saved data is shown. QuickBooks sync failed: ${message}`);
         setAllTransactions(previousItems);
       }
     } finally {
@@ -143,7 +150,7 @@ export default function QuickBooksPage() {
   }, [allTransactions.length, filteredTransactions.length, search, refundOnly, lastLoadPrefix]);
 
   useEffect(() => {
-    if (!loadError) {
+    if (!loadError || allTransactions.length > 0) {
       return;
     }
 
@@ -161,7 +168,7 @@ export default function QuickBooksPage() {
           }
         : undefined,
     });
-  }, [canSync, loadError, loadRecentQuickBooksPayments]);
+  }, [allTransactions.length, canSync, loadError, loadRecentQuickBooksPayments]);
 
   return (
     <PageShell className="quickbooks-react-page">
@@ -225,7 +232,9 @@ export default function QuickBooksPage() {
           </div>
         }
       >
-        {!loadError ? <p className="dashboard-message quickbooks-status">{statusText}</p> : null}
+        <p className={`dashboard-message quickbooks-status ${loadError || syncWarning ? "error" : ""}`.trim()}>
+          {syncWarning || statusText}
+        </p>
 
         {isLoading ? <LoadingSkeleton rows={7} /> : null}
         {!isLoading && loadError && !filteredTransactions.length ? (
