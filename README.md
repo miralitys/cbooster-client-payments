@@ -96,6 +96,7 @@ npm start
   - `username`, `password`, `displayName` (опционально),
   - `department` (`accounting`, `client_service`, `sales`, `collection`),
   - `role` (`department_head`, `middle_manager`, `manager`),
+  - `teamUsernames` (опционально, массив или строка через запятую; для `middle_manager` в `client_service`),
   - `isOwner` (`true/false`, опционально).
 - Департаменты и роли (на английском):
   - `Accounting Department`: `Department Head`, `Manager`
@@ -105,6 +106,11 @@ npm start
 - Страница `/access-control` показывает текущую модель доступа, роли и назначенных пользователей.
 - Страница `/user-registration` (Owner only) позволяет создать нового пользователя и назначить ему департамент/роль.
 - Новый пользователь добавляется в текущую runtime-директорию авторизации и доступен сразу после создания.
+- Правила доступа к клиентам:
+  - `Accounting Department`: `Department Head` и `Manager` видят всех клиентов и могут редактировать/создавать.
+  - `Client Service Department`: `Department Head` видит всех и может редактировать; `Middle Manager` видит только своих клиентов и клиентов своей команды (`teamUsernames`), редактировать не может; `Manager` видит только своих клиентов, редактировать не может.
+  - `Sales Department`: только просмотр клиентов, закрепленных за пользователем (`closedBy`), без редактирования.
+  - `Collection Department`: только просмотр всех клиентов, без редактирования.
 
 ## QuickBooks тест (отдельно)
 

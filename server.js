@@ -932,6 +932,27 @@ function isWebAuthRoleSupportedByDepartment(roleId, departmentId) {
   return department.roles.includes(roleId);
 }
 
+function normalizeWebAuthTeamUsernames(rawValue) {
+  const sourceValues = Array.isArray(rawValue)
+    ? rawValue
+    : typeof rawValue === "string"
+      ? rawValue.split(/[\n,;]+/)
+      : [];
+  const normalized = [];
+  const seen = new Set();
+
+  for (const rawItem of sourceValues) {
+    const username = normalizeWebAuthUsername(rawItem);
+    if (!username || seen.has(username)) {
+      continue;
+    }
+    seen.add(username);
+    normalized.push(username);
+  }
+
+  return normalized.slice(0, 80);
+}
+
 function buildWebAuthPermissionsForUser(userProfile) {
   const permissions = Object.fromEntries(WEB_AUTH_ALL_PERMISSION_KEYS.map((key) => [key, false]));
   if (!userProfile || typeof userProfile !== "object") {
@@ -956,19 +977,174 @@ function buildWebAuthPermissionsForUser(userProfile) {
 
   if (departmentId === WEB_AUTH_DEPARTMENT_ACCOUNTING) {
     permissions[WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS] = true;
-    permissions[WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS] = isDepartmentHead;
-  } else if (departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
+    permissions[WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS] = true;
+    permissions[WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS] = true;
+  }
+
+  if (departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
     permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS] = true;
-    permissions[WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS] = isDepartmentHead || isMiddleManager;
+    permissions[WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS] = isDepartmentHead;
     permissions[WEB_AUTH_PERMISSION_VIEW_MODERATION] = true;
-    permissions[WEB_AUTH_PERMISSION_REVIEW_MODERATION] = isDepartmentHead || isMiddleManager;
-  } else if (departmentId === WEB_AUTH_DEPARTMENT_SALES) {
+    permissions[WEB_AUTH_PERMISSION_REVIEW_MODERATION] = isDepartmentHead;
+
+    if (isDepartmentHead) {
+      permissions[WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS] = true;
+    }
+  }
+
+  if (departmentId === WEB_AUTH_DEPARTMENT_SALES) {
     permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS] = isDepartmentHead;
-  } else if (departmentId === WEB_AUTH_DEPARTMENT_COLLECTION) {
-    permissions[WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS] = true;
+  }
+
+  if (departmentId === WEB_AUTH_DEPARTMENT_COLLECTION) {
+    // Collection department has read-only access to all clients.
+    permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS] = true;
   }
 
   return permissions;
+}
+
+function normalizeWebAuthIdentityText(rawValue) {
+  return sanitizeTextValue(rawValue, 220).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function normalizeWebAuthComparableIdentityText(rawValue) {
+  return normalizeWebAuthIdentityText(rawValue).replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function buildWebAuthIdentityMatchSet(values) {
+  const set = new Set();
+  for (const rawValue of Array.isArray(values) ? values : []) {
+    const normalized = normalizeWebAuthIdentityText(rawValue);
+    if (normalized) {
+      set.add(normalized);
+    }
+
+    const comparable = normalizeWebAuthComparableIdentityText(rawValue);
+    if (comparable) {
+      set.add(comparable);
+    }
+  }
+  return set;
+}
+
+function getWebAuthPrincipalIdentityValues(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return [];
+  }
+
+  const username = sanitizeTextValue(userProfile.username, 200);
+  const displayName = sanitizeTextValue(userProfile.displayName, 200);
+  const localPart = username.includes("@") ? username.split("@")[0] : username;
+  const localPartWords = localPart.replace(/[._-]+/g, " ");
+  return [username, displayName, localPart, localPartWords];
+}
+
+function getWebAuthTeamIdentityValues(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return [];
+  }
+
+  const teamUsernames = normalizeWebAuthTeamUsernames(userProfile.teamUsernames);
+  const values = [];
+
+  for (const teamUsername of teamUsernames) {
+    const teammate = getWebAuthUserByUsername(teamUsername);
+    if (teammate) {
+      values.push(...getWebAuthPrincipalIdentityValues(teammate));
+      continue;
+    }
+
+    const fallbackLocalPart = teamUsername.includes("@") ? teamUsername.split("@")[0] : teamUsername;
+    values.push(teamUsername, fallbackLocalPart, fallbackLocalPart.replace(/[._-]+/g, " "));
+  }
+
+  return values;
+}
+
+function extractClientRecordOwnerValues(record) {
+  const closedByRaw = sanitizeTextValue(record?.closedBy, 220);
+  if (!closedByRaw) {
+    return [];
+  }
+
+  const parts = closedByRaw
+    .split(/[|,;/]+/)
+    .map((item) => sanitizeTextValue(item, 220))
+    .filter(Boolean);
+  return parts.length ? parts : [closedByRaw];
+}
+
+function isClientRecordAssignedToPrincipal(record, principalIdentityValues) {
+  const ownerValues = extractClientRecordOwnerValues(record);
+  if (!ownerValues.length) {
+    return false;
+  }
+
+  const principalSet = buildWebAuthIdentityMatchSet(principalIdentityValues);
+  if (!principalSet.size) {
+    return false;
+  }
+
+  for (const ownerValue of ownerValues) {
+    const normalized = normalizeWebAuthIdentityText(ownerValue);
+    if (normalized && principalSet.has(normalized)) {
+      return true;
+    }
+
+    const comparable = normalizeWebAuthComparableIdentityText(ownerValue);
+    if (comparable && principalSet.has(comparable)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function canWebAuthUserViewClientRecord(userProfile, record) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return false;
+  }
+
+  if (userProfile.isOwner) {
+    return true;
+  }
+
+  const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
+  const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
+  const ownIdentityValues = getWebAuthPrincipalIdentityValues(userProfile);
+
+  if (departmentId === WEB_AUTH_DEPARTMENT_ACCOUNTING) {
+    return true;
+  }
+
+  if (departmentId === WEB_AUTH_DEPARTMENT_COLLECTION) {
+    return true;
+  }
+
+  if (departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
+    if (roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD) {
+      return true;
+    }
+
+    if (roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER) {
+      const teamIdentityValues = getWebAuthTeamIdentityValues(userProfile);
+      return isClientRecordAssignedToPrincipal(record, [...ownIdentityValues, ...teamIdentityValues]);
+    }
+
+    return isClientRecordAssignedToPrincipal(record, ownIdentityValues);
+  }
+
+  if (departmentId === WEB_AUTH_DEPARTMENT_SALES) {
+    return isClientRecordAssignedToPrincipal(record, ownIdentityValues);
+  }
+
+  return false;
+}
+
+function filterClientRecordsForWebAuthUser(records, userProfile) {
+  const items = Array.isArray(records) ? records : [];
+  return items.filter((record) => canWebAuthUserViewClientRecord(userProfile, record));
 }
 
 function parseWebAuthUsersJson(rawValue) {
@@ -1008,6 +1184,7 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   const explicitOwner = resolveOptionalBoolean(rawUser.isOwner) === true;
   let departmentId = normalizeWebAuthDepartmentId(rawUser.departmentId || rawUser.department);
   let roleId = normalizeWebAuthRoleId(rawUser.roleId || rawUser.role, departmentId);
+  const teamUsernames = normalizeWebAuthTeamUsernames(rawUser.teamUsernames || rawUser.team);
   const isOwner = explicitOwner || roleId === WEB_AUTH_ROLE_OWNER || username === ownerUsername;
 
   if (isOwner) {
@@ -1032,6 +1209,7 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     isOwner,
     departmentId,
     roleId,
+    teamUsernames,
   };
 }
 
@@ -1042,6 +1220,8 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   const isOwner = Boolean(rawUser?.isOwner) || username === ownerUsername;
   let departmentId = isOwner ? "" : normalizeWebAuthDepartmentId(rawUser?.departmentId);
   let roleId = isOwner ? WEB_AUTH_ROLE_OWNER : normalizeWebAuthRoleId(rawUser?.roleId, departmentId);
+  const teamUsernames = normalizeWebAuthTeamUsernames(rawUser?.teamUsernames || rawUser?.team)
+    .filter((teamUsername) => teamUsername !== username);
 
   if (!isOwner) {
     if (!departmentId) {
@@ -1064,6 +1244,7 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     departmentName: getWebAuthDepartmentName(departmentId),
     roleId,
     roleName: getWebAuthRoleName(roleId),
+    teamUsernames: isOwner ? [] : teamUsernames,
   };
   userProfile.permissions = buildWebAuthPermissionsForUser(userProfile);
   return userProfile;
@@ -1205,6 +1386,7 @@ function buildWebAuthPublicUser(userProfile) {
       departmentId: "",
       departmentName: "",
       isOwner: false,
+      teamUsernames: [],
     };
   }
 
@@ -1216,6 +1398,7 @@ function buildWebAuthPublicUser(userProfile) {
     departmentId: sanitizeTextValue(userProfile.departmentId, 80),
     departmentName: sanitizeTextValue(userProfile.departmentName, 140),
     isOwner: Boolean(userProfile.isOwner),
+    teamUsernames: normalizeWebAuthTeamUsernames(userProfile.teamUsernames),
   };
 }
 
@@ -1249,6 +1432,7 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     throw createHttpError("Selected role is not allowed for this department.", 400);
   }
 
+  const teamUsernames = normalizeWebAuthTeamUsernames(payload.teamUsernames || payload.team);
   const displayName = sanitizeTextValue(payload.displayName || payload.name, 140) || username;
   return {
     username,
@@ -1257,6 +1441,7 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     isOwner: false,
     departmentId,
     roleId,
+    teamUsernames,
   };
 }
 
@@ -5015,7 +5200,7 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (_req, res) => {
+app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -5025,8 +5210,9 @@ app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAY
 
   try {
     const state = await getStoredRecords();
+    const filteredRecords = filterClientRecordsForWebAuthUser(state.records, req.webAuthProfile);
     res.json({
-      records: state.records,
+      records: filteredRecords,
       updatedAt: state.updatedAt,
     });
   } catch (error) {

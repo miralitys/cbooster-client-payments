@@ -40,6 +40,8 @@ const passwordInput = document.querySelector("#new-user-password");
 const displayNameInput = document.querySelector("#new-user-display-name");
 const departmentSelect = document.querySelector("#new-user-department");
 const roleSelect = document.querySelector("#new-user-role");
+const teamField = document.querySelector("#new-user-team-field");
+const teamInput = document.querySelector("#new-user-team");
 const createUserButton = document.querySelector("#create-user-button");
 const usersTableBody = document.querySelector("#user-registration-users-body");
 
@@ -95,9 +97,14 @@ function initializeAuthSession() {
 
 function initializeForm() {
   renderRoleOptions(departmentSelect?.value || "accounting");
+  syncTeamFieldVisibility();
 
   departmentSelect?.addEventListener("change", () => {
     renderRoleOptions(departmentSelect?.value || "");
+  });
+
+  roleSelect?.addEventListener("change", () => {
+    syncTeamFieldVisibility();
   });
 
   formElement?.addEventListener("submit", async (event) => {
@@ -207,6 +214,11 @@ async function createUser() {
   const displayName = (displayNameInput?.value || "").toString().trim();
   const departmentId = (departmentSelect?.value || "").toString().trim();
   const roleId = (roleSelect?.value || "").toString().trim();
+  const teamUsernames = (teamInput?.value || "")
+    .toString()
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 
   setLoadingState(true);
   setStatus("Creating user...", false);
@@ -224,6 +236,7 @@ async function createUser() {
         displayName,
         departmentId,
         roleId,
+        teamUsernames,
       }),
     });
 
@@ -245,6 +258,9 @@ async function createUser() {
     }
     if (displayNameInput) {
       displayNameInput.value = "";
+    }
+    if (teamInput) {
+      teamInput.value = "";
     }
 
     setStatus(`User "${payload?.item?.username || username}" created.`, false);
@@ -275,6 +291,19 @@ function renderRoleOptions(departmentId) {
   roleSelect.replaceChildren(fragment);
   if (options.some((option) => option.id === previousValue)) {
     roleSelect.value = previousValue;
+  }
+
+  syncTeamFieldVisibility();
+}
+
+function syncTeamFieldVisibility() {
+  const isMiddleManager = (roleSelect?.value || "").toString().trim() === "middle_manager";
+  if (teamField) {
+    teamField.hidden = !isMiddleManager;
+  }
+
+  if (!isMiddleManager && teamInput) {
+    teamInput.value = "";
   }
 }
 
@@ -333,6 +362,9 @@ function setLoadingState(isLoading) {
   }
   if (roleSelect) {
     roleSelect.disabled = isLoading;
+  }
+  if (teamInput) {
+    teamInput.disabled = isLoading;
   }
 }
 
