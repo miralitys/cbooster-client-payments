@@ -11,8 +11,12 @@ const NAV_ITEMS = [
   { to: "/client-managers", label: "Client Managers" },
   { to: "/ghl-contracts", label: "GHL Documents" },
   { to: "/access-control", label: "Access Control" },
-  { to: "/legacy/client-payments", label: "Legacy Client Payments", external: true },
-  { to: "/legacy/dashboard", label: "Legacy Dashboard", external: true },
+  { to: "/legacy/dashboard", label: "Dashboard (Old)", external: true },
+  { to: "/legacy/client-payments", label: "Client Payments (Old)", external: true },
+  { to: "/legacy/quickbooks-payments", label: "QuickBooks (Old)", external: true },
+  { to: "/legacy/client-managers", label: "Client Managers (Old)", external: true },
+  { to: "/legacy/ghl-contracts", label: "GHL Documents (Old)", external: true },
+  { to: "/legacy/access-control", label: "Access Control (Old)", external: true },
 ];
 
 function resolvePageTitle(pathname: string): string {

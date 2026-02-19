@@ -8991,19 +8991,47 @@ app.get("/mini", (_req, res) => {
 });
 
 app.get("/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "quickbooks-payments.html"));
+  res.redirect(302, "/app/quickbooks-payments");
 });
 
 app.get("/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "client-managers.html"));
+  res.redirect(302, "/app/client-managers");
 });
 
 app.get("/ghl-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "ghl-contracts.html"));
+  res.redirect(302, "/app/ghl-contracts");
 });
 
 app.get("/Client_Payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "client-payments.html"));
+  res.redirect(302, "/app/client-payments");
+});
+
+app.get("/client-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
+  res.redirect(302, "/app/client-payments");
+});
+
+app.get("/dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
+  res.redirect(302, "/app/dashboard");
+});
+
+app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
+  res.redirect(302, "/app/access-control");
+});
+
+app.get("/legacy/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "quickbooks-payments.html"));
+});
+
+app.get("/legacy/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "client-managers.html"));
+});
+
+app.get("/legacy/ghl-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "ghl-contracts.html"));
+});
+
+app.get("/legacy/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
+  res.sendFile(path.join(staticRoot, "access-control.html"));
 });
 
 app.get("/legacy/client-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
@@ -9015,15 +9043,11 @@ app.get("/legacy/dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHB
 });
 
 app.get("/moderation", (_req, res) => {
-  res.redirect(302, "/");
-});
-
-app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "access-control.html"));
+  res.redirect(302, "/app/dashboard");
 });
 
 app.get("/user-registration", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
-  res.redirect(302, "/access-control");
+  res.redirect(302, "/app/access-control");
 });
 
 app.use("/api", (_req, res) => {
@@ -9047,7 +9071,7 @@ app.get("/app/*", (_req, res) => {
 });
 
 app.get("*", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "index.html"));
+  res.redirect(302, "/app/dashboard");
 });
 
 app.listen(PORT, () => {
