@@ -288,6 +288,11 @@ const GHL_CLIENT_MANAGER_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME,
   DEFAULT_GHL_CLIENT_MANAGER_CACHE_TABLE_NAME,
 );
+const DEFAULT_GHL_BASIC_NOTE_CACHE_TABLE_NAME = "ghl_client_basic_note_cache";
+const GHL_BASIC_NOTE_CACHE_TABLE_NAME = resolveTableName(
+  process.env.DB_GHL_BASIC_NOTE_CACHE_TABLE_NAME,
+  DEFAULT_GHL_BASIC_NOTE_CACHE_TABLE_NAME,
+);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
@@ -296,6 +301,7 @@ const QUICKBOOKS_TRANSACTIONS_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_TRA
 const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME);
 const QUICKBOOKS_AUTH_STATE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_AUTH_STATE_TABLE_NAME);
 const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
+const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CACHE_TABLE_NAME);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
@@ -304,6 +310,23 @@ const GHL_REQUIRED_CONTRACT_KEYWORD_PATTERN = /\bcontracts?\b/;
 const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
 const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
 const GHL_BASIC_NOTE_KEYWORD_PATTERN = /\bbasic\b/i;
+const GHL_BASIC_NOTE_REFRESH_INTERVAL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_REFRESH_INTERVAL_MS, 7 * 24 * 60 * 60 * 1000), 60 * 60 * 1000),
+  90 * 24 * 60 * 60 * 1000,
+);
+const GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED = resolveOptionalBoolean(process.env.GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED) !== false;
+const GHL_BASIC_NOTE_AUTO_REFRESH_TICK_INTERVAL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_AUTO_REFRESH_TICK_INTERVAL_MS, 60 * 60 * 1000), 15 * 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
+const GHL_BASIC_NOTE_AUTO_REFRESH_MAX_CLIENTS_PER_TICK = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_AUTO_REFRESH_MAX_CLIENTS_PER_TICK, 40), 1),
+  300,
+);
+const GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY, 4), 1),
+  12,
+);
 const GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS, 5 * 60 * 1000), 10 * 1000),
   60 * 60 * 1000,
@@ -584,6 +607,8 @@ let quickBooksSyncQueue = Promise.resolve();
 let quickBooksAutoSyncIntervalId = null;
 let quickBooksAutoSyncInFlightSlotKey = "";
 let quickBooksAutoSyncLastCompletedSlotKey = "";
+let ghlBasicNoteAutoRefreshIntervalId = null;
+let ghlBasicNoteAutoRefreshInFlight = false;
 let quickBooksRuntimeRefreshToken = QUICKBOOKS_REFRESH_TOKEN;
 let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
@@ -4309,6 +4334,326 @@ async function findGhlBasicNoteByClientName(clientName) {
   };
 }
 
+function normalizeGhlBasicNoteCacheStatus(rawStatus, fallback = "not_found") {
+  const normalized = sanitizeTextValue(rawStatus, 40).toLowerCase();
+  if (normalized === "found" || normalized === "not_found" || normalized === "error") {
+    return normalized;
+  }
+  return fallback;
+}
+
+function normalizeIsoTimestampOrNull(rawValue) {
+  const value = sanitizeTextValue(rawValue, 120);
+  if (!value) {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+  return new Date(timestamp).toISOString();
+}
+
+function buildNextGhlBasicNoteRefreshTimestamp(isWrittenOff, nowMs = Date.now()) {
+  if (isWrittenOff) {
+    return null;
+  }
+  return new Date(nowMs + GHL_BASIC_NOTE_REFRESH_INTERVAL_MS).toISOString();
+}
+
+function mapGhlBasicNoteCacheRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  const matchedContacts = Number.parseInt(row?.matched_contacts, 10);
+  const inspectedContacts = Number.parseInt(row?.inspected_contacts, 10);
+
+  return {
+    clientName: sanitizeTextValue(row?.client_name, 300),
+    status: normalizeGhlBasicNoteCacheStatus(row?.status),
+    contactName: sanitizeTextValue(row?.contact_name, 300),
+    contactId: sanitizeTextValue(row?.contact_id, 200),
+    noteTitle: sanitizeTextValue(row?.note_title, 300),
+    noteBody: sanitizeTextValue(row?.note_body, 12000),
+    noteCreatedAt: row?.note_created_at ? new Date(row.note_created_at).toISOString() : "",
+    source: sanitizeTextValue(row?.source, 120) || "gohighlevel",
+    matchedContacts: Number.isFinite(matchedContacts) && matchedContacts >= 0 ? matchedContacts : 0,
+    inspectedContacts: Number.isFinite(inspectedContacts) && inspectedContacts >= 0 ? inspectedContacts : 0,
+    lastError: sanitizeTextValue(row?.last_error, 600),
+    isWrittenOff: row?.is_written_off === true,
+    refreshLocked: row?.refresh_locked === true,
+    updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
+    nextRefreshAt: row?.next_refresh_at ? new Date(row.next_refresh_at).toISOString() : null,
+  };
+}
+
+function buildGhlBasicNoteApiPayloadFromCacheRow(row, options = {}) {
+  const fromCache = options.fromCache !== false;
+  const stale = options.stale === true;
+  const errorMessage = sanitizeTextValue(options.errorMessage, 600);
+  const cachedRow = row || null;
+
+  return {
+    status: cachedRow?.status || "not_found",
+    contactName: cachedRow?.contactName || "",
+    contactId: cachedRow?.contactId || "",
+    noteTitle: cachedRow?.noteTitle || "",
+    noteBody: cachedRow?.noteBody || "",
+    noteCreatedAt: cachedRow?.noteCreatedAt || "",
+    source: cachedRow?.source || "gohighlevel",
+    matchedContacts: cachedRow?.matchedContacts || 0,
+    inspectedContacts: cachedRow?.inspectedContacts || 0,
+    updatedAt: cachedRow?.updatedAt || null,
+    nextRefreshAt: cachedRow?.nextRefreshAt || null,
+    isWrittenOff: cachedRow?.isWrittenOff === true,
+    refreshPolicy: cachedRow?.isWrittenOff === true ? "written_off_once" : "weekly",
+    cached: fromCache,
+    stale,
+    error: errorMessage || "",
+  };
+}
+
+function buildGhlBasicNoteCacheUpsertRow(clientName, lookup, isWrittenOff, nowMs = Date.now()) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  const payload = lookup && typeof lookup === "object" ? lookup : {};
+  const status = normalizeGhlBasicNoteCacheStatus(payload.status, "not_found");
+  const matchedContacts = Number.parseInt(payload.matchedContacts, 10);
+  const inspectedContacts = Number.parseInt(payload.inspectedContacts, 10);
+
+  return {
+    clientName: normalizedClientName,
+    status,
+    contactName: sanitizeTextValue(payload.contactName, 300),
+    contactId: sanitizeTextValue(payload.contactId, 200),
+    noteTitle: sanitizeTextValue(payload.noteTitle, 300),
+    noteBody: sanitizeTextValue(payload.noteBody, 12000),
+    noteCreatedAt: normalizeIsoTimestampOrNull(payload.noteCreatedAt),
+    source: sanitizeTextValue(payload.source, 120) || "gohighlevel",
+    matchedContacts: Number.isFinite(matchedContacts) && matchedContacts >= 0 ? matchedContacts : 0,
+    inspectedContacts: Number.isFinite(inspectedContacts) && inspectedContacts >= 0 ? inspectedContacts : 0,
+    lastError: "",
+    isWrittenOff,
+    refreshLocked: isWrittenOff,
+    nextRefreshAt: buildNextGhlBasicNoteRefreshTimestamp(isWrittenOff, nowMs),
+  };
+}
+
+function shouldRefreshGhlBasicNoteCache(cachedRow, isWrittenOff, nowMs = Date.now()) {
+  if (!cachedRow) {
+    return true;
+  }
+
+  if (isWrittenOff) {
+    return cachedRow.refreshLocked !== true;
+  }
+
+  if (!cachedRow.nextRefreshAt) {
+    return true;
+  }
+
+  const nextRefreshTimestamp = Date.parse(cachedRow.nextRefreshAt);
+  if (!Number.isFinite(nextRefreshTimestamp)) {
+    return true;
+  }
+
+  return nextRefreshTimestamp <= nowMs;
+}
+
+function resolveGhlBasicNoteWrittenOffStateFromRecords(clientName, records) {
+  const normalizedClientName = normalizeAssistantComparableText(clientName, 220);
+  if (!normalizedClientName) {
+    return false;
+  }
+
+  const source = Array.isArray(records) ? records : [];
+  let hasMatchingRecord = false;
+  let hasActiveRecord = false;
+  let hasWrittenOffRecord = false;
+
+  for (const record of source) {
+    if (normalizeAssistantComparableText(record?.clientName, 220) !== normalizedClientName) {
+      continue;
+    }
+
+    hasMatchingRecord = true;
+    const status = getAssistantRecordStatus(record);
+    if (status.isWrittenOff) {
+      hasWrittenOffRecord = true;
+    } else {
+      hasActiveRecord = true;
+    }
+  }
+
+  if (!hasMatchingRecord) {
+    return false;
+  }
+
+  return hasWrittenOffRecord && !hasActiveRecord;
+}
+
+async function getCachedGhlBasicNoteByClientName(clientName) {
+  await ensureDatabaseReady();
+
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return null;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT
+        client_name,
+        status,
+        contact_name,
+        contact_id,
+        note_title,
+        note_body,
+        note_created_at,
+        source,
+        matched_contacts,
+        inspected_contacts,
+        last_error,
+        is_written_off,
+        refresh_locked,
+        updated_at,
+        next_refresh_at
+      FROM ${GHL_BASIC_NOTE_CACHE_TABLE}
+      WHERE client_name = $1
+      LIMIT 1
+    `,
+    [normalizedClientName],
+  );
+
+  if (!result.rows.length) {
+    return null;
+  }
+
+  return mapGhlBasicNoteCacheRow(result.rows[0]);
+}
+
+async function listCachedGhlBasicNoteRowsByClientNames(clientNames) {
+  await ensureDatabaseReady();
+
+  const names = (Array.isArray(clientNames) ? clientNames : [])
+    .map((value) => sanitizeTextValue(value, 300))
+    .filter(Boolean);
+  if (!names.length) {
+    return [];
+  }
+
+  const result = await pool.query(
+    `
+      SELECT
+        client_name,
+        status,
+        contact_name,
+        contact_id,
+        note_title,
+        note_body,
+        note_created_at,
+        source,
+        matched_contacts,
+        inspected_contacts,
+        last_error,
+        is_written_off,
+        refresh_locked,
+        updated_at,
+        next_refresh_at
+      FROM ${GHL_BASIC_NOTE_CACHE_TABLE}
+      WHERE client_name = ANY($1::text[])
+      ORDER BY client_name ASC
+    `,
+    [names],
+  );
+
+  return result.rows.map(mapGhlBasicNoteCacheRow).filter((row) => row?.clientName);
+}
+
+async function upsertGhlBasicNoteCacheRow(row) {
+  await ensureDatabaseReady();
+
+  const normalizedRow = row && typeof row === "object" ? row : null;
+  const clientName = sanitizeTextValue(normalizedRow?.clientName, 300);
+  if (!clientName) {
+    return null;
+  }
+
+  await pool.query(
+    `
+      INSERT INTO ${GHL_BASIC_NOTE_CACHE_TABLE}
+        (
+          client_name,
+          status,
+          contact_name,
+          contact_id,
+          note_title,
+          note_body,
+          note_created_at,
+          source,
+          matched_contacts,
+          inspected_contacts,
+          last_error,
+          is_written_off,
+          refresh_locked,
+          next_refresh_at,
+          updated_at
+        )
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9, $10, $11, $12, $13, $14::timestamptz, NOW())
+      ON CONFLICT (client_name)
+      DO UPDATE SET
+        status = EXCLUDED.status,
+        contact_name = EXCLUDED.contact_name,
+        contact_id = EXCLUDED.contact_id,
+        note_title = EXCLUDED.note_title,
+        note_body = EXCLUDED.note_body,
+        note_created_at = EXCLUDED.note_created_at,
+        source = EXCLUDED.source,
+        matched_contacts = EXCLUDED.matched_contacts,
+        inspected_contacts = EXCLUDED.inspected_contacts,
+        last_error = EXCLUDED.last_error,
+        is_written_off = EXCLUDED.is_written_off,
+        refresh_locked = EXCLUDED.refresh_locked,
+        next_refresh_at = EXCLUDED.next_refresh_at,
+        updated_at = NOW()
+    `,
+    [
+      clientName,
+      normalizeGhlBasicNoteCacheStatus(normalizedRow.status),
+      sanitizeTextValue(normalizedRow.contactName, 300),
+      sanitizeTextValue(normalizedRow.contactId, 200),
+      sanitizeTextValue(normalizedRow.noteTitle, 300),
+      sanitizeTextValue(normalizedRow.noteBody, 12000),
+      normalizeIsoTimestampOrNull(normalizedRow.noteCreatedAt),
+      sanitizeTextValue(normalizedRow.source, 120) || "gohighlevel",
+      Number.isFinite(normalizedRow.matchedContacts) && normalizedRow.matchedContacts >= 0
+        ? Math.trunc(normalizedRow.matchedContacts)
+        : 0,
+      Number.isFinite(normalizedRow.inspectedContacts) && normalizedRow.inspectedContacts >= 0
+        ? Math.trunc(normalizedRow.inspectedContacts)
+        : 0,
+      sanitizeTextValue(normalizedRow.lastError, 600),
+      normalizedRow.isWrittenOff === true,
+      normalizedRow.refreshLocked === true,
+      normalizeIsoTimestampOrNull(normalizedRow.nextRefreshAt),
+    ],
+  );
+
+  return getCachedGhlBasicNoteByClientName(clientName);
+}
+
+async function refreshAndCacheGhlBasicNoteByClientName(clientName, isWrittenOff, nowMs = Date.now()) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return null;
+  }
+
+  const lookup = await findGhlBasicNoteByClientName(normalizedClientName);
+  const upsertRow = buildGhlBasicNoteCacheUpsertRow(normalizedClientName, lookup, isWrittenOff, nowMs);
+  return upsertGhlBasicNoteCacheRow(upsertRow);
+}
+
 function getUniqueClientNamesFromRecords(records) {
   const normalizedRecords = Array.isArray(records) ? records : [];
   const names = new Set();
@@ -7051,6 +7396,36 @@ async function ensureDatabaseReady() {
         CREATE INDEX IF NOT EXISTS ${GHL_CLIENT_MANAGER_CACHE_TABLE_NAME}_updated_at_idx
         ON ${GHL_CLIENT_MANAGER_CACHE_TABLE} (updated_at DESC)
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${GHL_BASIC_NOTE_CACHE_TABLE} (
+          client_name TEXT PRIMARY KEY,
+          status TEXT NOT NULL DEFAULT 'not_found',
+          contact_name TEXT NOT NULL DEFAULT '',
+          contact_id TEXT NOT NULL DEFAULT '',
+          note_title TEXT NOT NULL DEFAULT '',
+          note_body TEXT NOT NULL DEFAULT '',
+          note_created_at TIMESTAMPTZ,
+          source TEXT NOT NULL DEFAULT 'gohighlevel',
+          matched_contacts INTEGER NOT NULL DEFAULT 0,
+          inspected_contacts INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT '',
+          is_written_off BOOLEAN NOT NULL DEFAULT FALSE,
+          refresh_locked BOOLEAN NOT NULL DEFAULT FALSE,
+          next_refresh_at TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_BASIC_NOTE_CACHE_TABLE_NAME}_next_refresh_idx
+        ON ${GHL_BASIC_NOTE_CACHE_TABLE} (next_refresh_at ASC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_BASIC_NOTE_CACHE_TABLE_NAME}_updated_at_idx
+        ON ${GHL_BASIC_NOTE_CACHE_TABLE} (updated_at DESC)
+      `);
     })().catch((error) => {
       dbReadyPromise = null;
       throw error;
@@ -7721,6 +8096,98 @@ function startQuickBooksAutoSyncScheduler() {
     void runQuickBooksAutoSyncTick();
   }, QUICKBOOKS_AUTO_SYNC_TICK_INTERVAL_MS);
   void runQuickBooksAutoSyncTick();
+  return true;
+}
+
+async function runGhlBasicNoteAutoRefreshTick() {
+  if (!GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED || !pool || !isGhlConfigured()) {
+    return;
+  }
+  if (ghlBasicNoteAutoRefreshInFlight) {
+    return;
+  }
+
+  ghlBasicNoteAutoRefreshInFlight = true;
+  try {
+    const state = await getStoredRecords();
+    const clientNames = getUniqueClientNamesFromRecords(state.records);
+    if (!clientNames.length) {
+      return;
+    }
+
+    const cachedRows = await listCachedGhlBasicNoteRowsByClientNames(clientNames);
+    const cacheByClientName = new Map();
+    for (const row of cachedRows) {
+      if (!row?.clientName) {
+        continue;
+      }
+      cacheByClientName.set(row.clientName, row);
+    }
+
+    const nowMs = Date.now();
+    const dueItems = [];
+    for (const clientName of clientNames) {
+      const isWrittenOff = resolveGhlBasicNoteWrittenOffStateFromRecords(clientName, state.records);
+      const cachedRow = cacheByClientName.get(clientName) || null;
+      if (shouldRefreshGhlBasicNoteCache(cachedRow, isWrittenOff, nowMs)) {
+        dueItems.push({
+          clientName,
+          isWrittenOff,
+        });
+      }
+    }
+
+    if (!dueItems.length) {
+      return;
+    }
+
+    const batch = dueItems.slice(0, GHL_BASIC_NOTE_AUTO_REFRESH_MAX_CLIENTS_PER_TICK);
+    const workerCount = Math.min(GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY, batch.length);
+    let cursor = 0;
+    let refreshedCount = 0;
+    let failedCount = 0;
+
+    async function worker() {
+      while (cursor < batch.length) {
+        const currentIndex = cursor;
+        cursor += 1;
+        const item = batch[currentIndex];
+        try {
+          await refreshAndCacheGhlBasicNoteByClientName(item.clientName, item.isWrittenOff, nowMs);
+          refreshedCount += 1;
+        } catch (error) {
+          failedCount += 1;
+          console.error(
+            `[GHL BASIC Note Auto Refresh] ${item.clientName}:`,
+            sanitizeTextValue(error?.message, 500) || "Unknown error.",
+          );
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    console.log(
+      `[GHL BASIC Note Auto Refresh] processed ${batch.length}/${dueItems.length} due clients: refreshed=${refreshedCount}, failed=${failedCount}.`,
+    );
+  } catch (error) {
+    console.error("[GHL BASIC Note Auto Refresh] Tick failed:", error);
+  } finally {
+    ghlBasicNoteAutoRefreshInFlight = false;
+  }
+}
+
+function startGhlBasicNoteAutoRefreshScheduler() {
+  if (!GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED || !pool || !isGhlConfigured()) {
+    return false;
+  }
+  if (ghlBasicNoteAutoRefreshIntervalId) {
+    return true;
+  }
+
+  ghlBasicNoteAutoRefreshIntervalId = setInterval(() => {
+    void runGhlBasicNoteAutoRefreshTick();
+  }, GHL_BASIC_NOTE_AUTO_REFRESH_TICK_INTERVAL_MS);
+  void runGhlBasicNoteAutoRefreshTick();
   return true;
 }
 
@@ -9200,22 +9667,83 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
     return;
   }
 
-  if (!isGhlConfigured()) {
+  if (!pool) {
     res.status(503).json({
-      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
     });
     return;
   }
 
   try {
-    const lookup = await findGhlBasicNoteByClientName(clientName);
+    const state = await getStoredRecords();
+    const writtenOffQueryFlag = resolveOptionalBoolean(req.query.writtenOff);
+    const isWrittenOffInRecords = resolveGhlBasicNoteWrittenOffStateFromRecords(clientName, state.records);
+    const isWrittenOff = writtenOffQueryFlag === true || isWrittenOffInRecords;
+
+    const cachedRow = await getCachedGhlBasicNoteByClientName(clientName);
+    const shouldRefresh = shouldRefreshGhlBasicNoteCache(cachedRow, isWrittenOff);
+
+    if (!shouldRefresh && cachedRow) {
+      res.json({
+        ok: true,
+        clientName,
+        ...buildGhlBasicNoteApiPayloadFromCacheRow(cachedRow, {
+          fromCache: true,
+        }),
+      });
+      return;
+    }
+
+    if (!isGhlConfigured()) {
+      if (cachedRow) {
+        res.json({
+          ok: true,
+          clientName,
+          ...buildGhlBasicNoteApiPayloadFromCacheRow(cachedRow, {
+            fromCache: true,
+            stale: true,
+            errorMessage: "GHL integration is not configured. Serving cached BASIC note.",
+          }),
+        });
+        return;
+      }
+
+      res.status(503).json({
+        error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+      });
+      return;
+    }
+
+    const refreshedRow = await refreshAndCacheGhlBasicNoteByClientName(clientName, isWrittenOff);
+    const responseRow = refreshedRow || cachedRow || null;
+
     res.json({
       ok: true,
       clientName,
-      ...lookup,
+      ...buildGhlBasicNoteApiPayloadFromCacheRow(responseRow, {
+        fromCache: false,
+      }),
     });
   } catch (error) {
     console.error("GET /api/ghl/client-basic-note failed:", error);
+    try {
+      const cachedRow = await getCachedGhlBasicNoteByClientName(clientName);
+      if (cachedRow) {
+        res.json({
+          ok: true,
+          clientName,
+          ...buildGhlBasicNoteApiPayloadFromCacheRow(cachedRow, {
+            fromCache: true,
+            stale: true,
+            errorMessage: sanitizeTextValue(error?.message, 600) || "Failed to refresh BASIC note from GHL.",
+          }),
+        });
+        return;
+      }
+    } catch (cacheError) {
+      console.error("GET /api/ghl/client-basic-note cache fallback failed:", cacheError);
+    }
+
     res.status(error.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 600) || "Failed to load GoHighLevel BASIC note.",
     });
@@ -9671,8 +10199,20 @@ app.listen(PORT, () => {
       `QuickBooks auto sync scheduler started: hourly from ${String(QUICKBOOKS_AUTO_SYNC_START_HOUR).padStart(2, "0")}:00 to ${String(QUICKBOOKS_AUTO_SYNC_END_HOUR).padStart(2, "0")}:00 (${QUICKBOOKS_AUTO_SYNC_TIME_ZONE}).`,
     );
   }
-  if (!isGhlConfigured()) {
+  const ghlConfigured = isGhlConfigured();
+  if (!ghlConfigured) {
     console.warn("GHL client-manager lookup is disabled. Set GHL_API_KEY and GHL_LOCATION_ID.");
+  }
+  if (!GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED) {
+    console.warn("GHL BASIC note auto refresh is disabled (GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED=false).");
+  } else if (!pool) {
+    console.warn("GHL BASIC note auto refresh is disabled because DATABASE_URL is missing.");
+  } else if (!ghlConfigured) {
+    console.warn("GHL BASIC note auto refresh is disabled because GHL credentials are missing.");
+  } else if (startGhlBasicNoteAutoRefreshScheduler()) {
+    console.log(
+      `GHL BASIC note auto refresh started: every ${Math.round(GHL_BASIC_NOTE_AUTO_REFRESH_TICK_INTERVAL_MS / (60 * 1000))} min, refresh window ${Math.round(GHL_BASIC_NOTE_REFRESH_INTERVAL_MS / (24 * 60 * 60 * 1000))} day(s), up to ${GHL_BASIC_NOTE_AUTO_REFRESH_MAX_CLIENTS_PER_TICK} clients per tick.`,
+    );
   }
   if (isOpenAiAssistantConfigured()) {
     console.log(`Assistant LLM is enabled via OpenAI model: ${OPENAI_MODEL}.`);

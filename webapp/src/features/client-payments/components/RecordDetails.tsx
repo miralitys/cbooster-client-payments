@@ -35,6 +35,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       try {
         const payload = await getGhlClientBasicNote(normalizedClientName, {
           signal: abortController.signal,
+          writtenOff: isWrittenOffRecord(record),
         });
         if (!isActive) {
           return;
@@ -118,4 +119,9 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       </section>
     </div>
   );
+}
+
+function isWrittenOffRecord(record: ClientRecord): boolean {
+  const value = (record.writtenOff || "").toString().trim().toLowerCase();
+  return value === "yes" || value === "true" || value === "1" || value === "on";
 }
