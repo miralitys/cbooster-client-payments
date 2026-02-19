@@ -33,7 +33,7 @@ void loadClientContracts();
 
 async function loadClientContracts() {
   setLoadingState(true);
-  setStatus("Loading first 10 clients from database and contract data from GoHighLevel...", false);
+  setStatus("Loading first 10 clients from database and all documents from GoHighLevel...", false);
 
   try {
     const endpoint = buildClientContractsEndpoint();
@@ -57,16 +57,19 @@ async function loadClientContracts() {
     allItems = items;
     renderRows(allItems);
 
-    const foundCount = allItems.filter((item) => (item?.status || "").toString().toLowerCase() === "found").length;
-    const possibleCount = allItems.filter((item) => (item?.status || "").toString().toLowerCase() === "possible").length;
-    setStatus(
-      `Loaded ${allItems.length} clients. Contract found: ${foundCount}. Possible match: ${possibleCount}.`,
-      false,
-    );
+    const clientsWithDocuments = allItems.filter((item) => (item?.status || "").toString().toLowerCase() === "found").length;
+    const totalDocuments = allItems.reduce((total, item) => {
+      const documents = Array.isArray(item?.documents) ? item.documents.length : 0;
+      if (Number.isFinite(item?.documentsCount)) {
+        return total + Number(item.documentsCount);
+      }
+      return total + documents;
+    }, 0);
+    setStatus(`Loaded ${allItems.length} clients. Found ${totalDocuments} documents for ${clientsWithDocuments} clients.`, false);
   } catch (error) {
     allItems = [];
     renderRows([]);
-    setStatus(error.message || "Failed to load client contract table.", true);
+    setStatus(error.message || "Failed to load client document table.", true);
   } finally {
     setLoadingState(false);
   }
@@ -111,26 +114,60 @@ function renderRows(items) {
 
     const contractCell = document.createElement("td");
     contractCell.className = "client-contract-contract-cell";
-    const contractTitle = (item?.contractTitle || "-").toString();
-    const contractUrl = (item?.contractUrl || "").toString().trim();
-    if (contractUrl) {
-      const contractLink = document.createElement("a");
-      contractLink.href = contractUrl;
-      contractLink.target = "_blank";
-      contractLink.rel = "noopener noreferrer";
-      contractLink.className = "client-contract-link";
-      contractLink.textContent = contractTitle || "Open Contract";
-      contractCell.append(contractLink);
+    const documents = Array.isArray(item?.documents) ? item.documents : [];
+    if (!documents.length) {
+      contractCell.textContent = (item?.contractTitle || "-").toString() || "-";
     } else {
-      contractCell.textContent = contractTitle || "-";
-    }
+      const list = document.createElement("ul");
+      list.className = "client-contract-documents-list";
 
-    const sourceValue = (item?.source || "").toString().trim();
-    if (sourceValue) {
-      const sourceHint = document.createElement("span");
-      sourceHint.className = "client-contract-source";
-      sourceHint.textContent = sourceValue;
-      contractCell.append(sourceHint);
+      for (const documentItem of documents) {
+        const listItem = document.createElement("li");
+        listItem.className = "client-contract-document-item";
+
+        const documentTitle = (documentItem?.title || "Document").toString();
+        const documentUrl = (documentItem?.url || "").toString().trim();
+        if (documentUrl) {
+          const documentLink = document.createElement("a");
+          documentLink.href = documentUrl;
+          documentLink.target = "_blank";
+          documentLink.rel = "noopener noreferrer";
+          documentLink.className = "client-contract-link";
+          documentLink.textContent = documentTitle;
+          listItem.append(documentLink);
+        } else {
+          const documentLabel = document.createElement("span");
+          documentLabel.className = "client-contract-document-label";
+          documentLabel.textContent = documentTitle;
+          listItem.append(documentLabel);
+        }
+
+        const metaParts = [];
+        const sourceValue = (documentItem?.source || "").toString().trim();
+        if (sourceValue) {
+          metaParts.push(sourceValue);
+        }
+
+        if (documentItem?.isContractMatch) {
+          metaParts.push("contract");
+        }
+
+        const noteValue = (documentItem?.snippet || "").toString().trim();
+        if (noteValue) {
+          metaParts.push(noteValue);
+        }
+
+        if (metaParts.length) {
+          const sourceHint = document.createElement("span");
+          sourceHint.className = "client-contract-source";
+          sourceHint.textContent = metaParts.join(" | ");
+          listItem.append(sourceHint);
+        }
+
+        list.append(listItem);
+      }
+
+      contractCell.append(list);
     }
 
     const statusCell = document.createElement("td");
@@ -151,7 +188,7 @@ function renderRows(items) {
 
 function formatStatusLabel(statusValue) {
   if (statusValue === "found") {
-    return "Contract found";
+    return "Documents found";
   }
 
   if (statusValue === "possible") {
