@@ -30,9 +30,12 @@ const COLUMN_LABELS: Record<string, string> = {
   dateOfCollection: "Date of collection",
   dateWhenWrittenOff: "Date when written off",
 };
+const SPREADSHEET_FORMULA_PREFIX = /^[\u0009\u000a\u000d ]*[=+\-@]/;
 
 export function exportRecordsToXls(records: ClientRecord[]): void {
-  const html = buildExportHtml(records, "Client Payments Export");
+  const html = buildExportHtml(records, "Client Payments Export", {
+    spreadsheetSafe: true,
+  });
   const blob = new Blob([`\ufeff${html}`], {
     type: "application/vnd.ms-excel;charset=utf-8",
   });
@@ -48,7 +51,9 @@ export function exportRecordsToXls(records: ClientRecord[]): void {
 }
 
 export function exportRecordsToPdf(records: ClientRecord[]): void {
-  const html = buildExportHtml(records, "Client Payments Export");
+  const html = buildExportHtml(records, "Client Payments Export", {
+    spreadsheetSafe: false,
+  });
   const printWindow = window.open("", "_blank", "noopener,noreferrer");
   if (!printWindow) {
     return;
@@ -67,16 +72,26 @@ export function exportRecordsToPdf(records: ClientRecord[]): void {
   printWindow.print();
 }
 
-function buildExportHtml(records: ClientRecord[], title: string): string {
+function buildExportHtml(
+  records: ClientRecord[],
+  title: string,
+  options: {
+    spreadsheetSafe: boolean;
+  },
+): string {
   const headers = TABLE_COLUMNS.map((key) => COLUMN_LABELS[key] || key);
   const rows = records.map((record) => TABLE_COLUMNS.map((key) => formatCell(record, key)));
+  const renderCell = (value: string) => {
+    const text = options.spreadsheetSafe ? sanitizeSpreadsheetCell(value) : value;
+    return `<td>${escapeHtml(text)}</td>`;
+  };
 
   return [
     `<h1>${escapeHtml(title)}</h1>`,
     `<p>Exported: ${escapeHtml(new Date().toLocaleString("en-US"))}</p>`,
     "<table>",
     `<thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>`,
-    `<tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}</tbody>`,
+    `<tbody>${rows.map((row) => `<tr>${row.map(renderCell).join("")}</tr>`).join("")}</tbody>`,
     "</table>",
   ].join("");
 }
@@ -143,6 +158,19 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function sanitizeSpreadsheetCell(value: string): string {
+  const text = value || "";
+  if (!text) {
+    return "";
+  }
+
+  if (SPREADSHEET_FORMULA_PREFIX.test(text)) {
+    return `'${text}`;
+  }
+
+  return text;
 }
 
 function formatFileDate(value: Date): string {
