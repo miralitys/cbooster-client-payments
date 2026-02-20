@@ -2231,113 +2231,1545 @@ function buildAssistantClarifyReply(matches, isRussian) {
   return lines.join("\n");
 }
 
+function clampAssistantInteger(value, minValue, maxValue, fallbackValue) {
+  if (!Number.isFinite(value)) {
+    return fallbackValue;
+  }
+  return Math.min(maxValue, Math.max(minValue, Math.trunc(value)));
+}
+
+function parseAssistantNumericToken(rawValue) {
+  const value = sanitizeTextValue(rawValue, 120);
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.replace(/\s+/g, "").replace(/,/g, "");
+  if (!normalized || normalized === "-" || normalized === "." || normalized === "-.") {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function extractAssistantNumericCandidates(rawValue, maxCandidates = 8) {
+  const source = sanitizeTextValue(rawValue, ASSISTANT_MAX_MESSAGE_LENGTH);
+  if (!source) {
+    return [];
+  }
+
+  const candidates = [];
+  const regex = /-?\d[\d,\s]*(?:\.\d+)?/g;
+  let match;
+  while ((match = regex.exec(source)) && candidates.length < maxCandidates) {
+    const parsed = parseAssistantNumericToken(match[0]);
+    if (parsed === null) {
+      continue;
+    }
+    candidates.push({
+      value: parsed,
+      raw: match[0],
+      index: match.index || 0,
+    });
+  }
+  return candidates;
+}
+
+function extractAssistantTopLimit(rawValue, fallback = 5, maxLimit = 20) {
+  const normalized = normalizeAssistantSearchText(rawValue);
+  const topMatch = normalized.match(/(?:top|топ)\s*[-:]?\s*(\d{1,2})/i);
+  if (topMatch) {
+    return clampAssistantInteger(Number(topMatch[1]), 1, maxLimit, fallback);
+  }
+
+  const candidates = extractAssistantNumericCandidates(rawValue, 4);
+  for (const candidate of candidates) {
+    if (Number.isInteger(candidate.value) && candidate.value >= 1 && candidate.value <= maxLimit) {
+      return candidate.value;
+    }
+  }
+
+  return fallback;
+}
+
+function extractAssistantDayRange(rawValue) {
+  const normalized = normalizeAssistantSearchText(rawValue).replace(/[–—]/g, "-");
+  if (!normalized) {
+    return null;
+  }
+
+  const textualMatch = normalized.match(/(?:from|between|от|с)\s*(\d{1,3})\s*(?:to|and|до|по|-)\s*(\d{1,3})/i);
+  const dashMatch = normalized.match(/\b(\d{1,3})\s*-\s*(\d{1,3})\b/);
+  const match = textualMatch || dashMatch;
+  if (!match) {
+    return null;
+  }
+
+  const first = clampAssistantInteger(Number(match[1]), 0, 3650, 0);
+  const second = clampAssistantInteger(Number(match[2]), 0, 3650, 0);
+  return {
+    min: Math.min(first, second),
+    max: Math.max(first, second),
+  };
+}
+
+function extractAssistantDayThreshold(rawValue, fallback = 30) {
+  const normalized = normalizeAssistantSearchText(rawValue);
+  if (!normalized) {
+    return fallback;
+  }
+
+  const explicitDayMatch = normalized.match(/(\d{1,3})\s*(?:day|days|дн|дней|дня)\b/i);
+  if (explicitDayMatch) {
+    return clampAssistantInteger(Number(explicitDayMatch[1]), 1, 3650, fallback);
+  }
+
+  const candidates = extractAssistantNumericCandidates(rawValue, 5)
+    .map((item) => clampAssistantInteger(Math.abs(item.value), 0, 3650, 0))
+    .filter((item) => item > 0 && item <= 3650);
+
+  if (candidates.length) {
+    return candidates[0];
+  }
+  return fallback;
+}
+
+function extractAssistantAmountThreshold(rawValue) {
+  const source = sanitizeTextValue(rawValue, ASSISTANT_MAX_MESSAGE_LENGTH);
+  if (!source) {
+    return null;
+  }
+
+  const candidates = extractAssistantNumericCandidates(source, 8)
+    .map((item) => ({
+      ...item,
+      abs: Math.abs(item.value),
+    }))
+    .filter((item) => Number.isFinite(item.abs) && item.abs > 0);
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  const currencyHintCandidate = candidates.find((item) => {
+    const contextStart = Math.max(0, item.index - 8);
+    const contextEnd = Math.min(source.length, item.index + item.raw.length + 10);
+    const context = source.slice(contextStart, contextEnd).toLowerCase();
+    return /(\$|usd|amount|sum|сумм|долг|баланс|контракт|договор|оплат)/i.test(context);
+  });
+  if (currencyHintCandidate) {
+    return currencyHintCandidate.abs;
+  }
+
+  const largeCandidates = [...candidates].filter((item) => item.abs >= 100);
+  if (largeCandidates.length) {
+    largeCandidates.sort((left, right) => right.abs - left.abs);
+    return largeCandidates[0].abs;
+  }
+
+  candidates.sort((left, right) => right.abs - left.abs);
+  return candidates[0].abs;
+}
+
+function detectAssistantComparator(normalizedMessage) {
+  if (!normalizedMessage) {
+    return null;
+  }
+
+  if (/(more than|greater than|over|above|at least|больше|более|свыше|выше|не меньше)/i.test(normalizedMessage)) {
+    return "gt";
+  }
+  if (/(less than|under|below|at most|до|меньше|менее|ниже|не больше)/i.test(normalizedMessage)) {
+    return "lt";
+  }
+  return null;
+}
+
+function getAssistantDaysSinceTimestamp(timestamp) {
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  const diff = getAssistantCurrentUtcDayStart() - timestamp;
+  if (diff <= 0) {
+    return 0;
+  }
+  return Math.floor(diff / ASSISTANT_DAY_IN_MS);
+}
+
+function buildAssistantAnalyzedRows(records) {
+  const rows = [];
+  for (const record of Array.isArray(records) ? records : []) {
+    const status = getAssistantRecordStatus(record);
+    const clientName = getAssistantRecordDisplayName(record);
+    const companyName = getAssistantRecordCompanyName(record);
+    const managerName = getAssistantRecordManagerName(record);
+    const notes = sanitizeTextValue(record?.notes, 260);
+
+    rows.push({
+      record,
+      status,
+      clientName,
+      clientComparable: normalizeAssistantComparableText(clientName, 220),
+      companyName: companyName || "",
+      companyComparable: normalizeAssistantComparableText(companyName, 220),
+      managerName: managerName || "",
+      managerComparable: normalizeAssistantComparableText(managerName, 220),
+      notes: notes || "",
+      contractAmount: Number.isFinite(status.contractAmount) ? status.contractAmount : 0,
+      paidAmount: Number.isFinite(status.totalPaymentsAmount) ? status.totalPaymentsAmount : 0,
+      balanceAmount: Number.isFinite(status.futureAmount) ? status.futureAmount : 0,
+      overdueDays: Number.isFinite(status.overdueDays) ? status.overdueDays : 0,
+      latestPaymentTimestamp: Number.isFinite(status.latestPaymentTimestamp) ? status.latestPaymentTimestamp : null,
+      createdAt: parseAssistantCreatedAtTimestamp(record?.createdAt),
+    });
+  }
+  return rows;
+}
+
+function buildAssistantDistinctEntityEntries(rows, entityType) {
+  const map = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const displayValue = entityType === "manager" ? row.managerName : row.companyName;
+    const comparableValue =
+      entityType === "manager" ? row.managerComparable : row.companyComparable;
+    if (!displayValue || !comparableValue) {
+      continue;
+    }
+    if (!map.has(comparableValue)) {
+      map.set(comparableValue, {
+        display: displayValue,
+        comparable: comparableValue,
+      });
+    }
+  }
+
+  return [...map.values()].sort((left, right) => right.comparable.length - left.comparable.length);
+}
+
+function findAssistantEntityMatchesInMessage(rawMessage, entries, maxMatches = 3) {
+  const normalizedQuery = normalizeAssistantComparableText(rawMessage, ASSISTANT_MAX_MESSAGE_LENGTH);
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const queryTokens = tokenizeAssistantText(normalizedQuery);
+  const scored = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry?.comparable || !entry?.display) {
+      continue;
+    }
+
+    let score = 0;
+    if (normalizedQuery.includes(entry.comparable)) {
+      score = 200 + entry.comparable.length;
+    } else {
+      const entryTokens = tokenizeAssistantText(entry.comparable);
+      if (!entryTokens.length || !queryTokens.length) {
+        continue;
+      }
+
+      const overlap = countAssistantTokenOverlap(queryTokens, entryTokens);
+      const requiredOverlap = entryTokens.length <= 2 ? 1 : 2;
+      if (overlap >= requiredOverlap) {
+        score = overlap * 30 + entry.comparable.length;
+      } else {
+        const hasPrefixMatch = entryTokens.some((entryToken) =>
+          queryTokens.some((queryToken) => {
+            if (entryToken.length < 4 && queryToken.length < 4) {
+              return false;
+            }
+            return entryToken.startsWith(queryToken) || queryToken.startsWith(entryToken);
+          }),
+        );
+        if (!hasPrefixMatch) {
+          continue;
+        }
+        score = 20 + entry.comparable.length;
+      }
+    }
+
+    scored.push({
+      ...entry,
+      score,
+    });
+  }
+
+  scored.sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score;
+    }
+    return right.comparable.length - left.comparable.length;
+  });
+
+  return scored.slice(0, Math.max(1, maxMatches));
+}
+
+function resolveAssistantManagerLabel(managerName, isRussian) {
+  return managerName || (isRussian ? "Не назначен" : "Unassigned");
+}
+
+function summarizeAssistantManagerRows(rows) {
+  const map = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const key = row.managerComparable || "__unassigned__";
+    const current = map.get(key) || {
+      managerComparable: key,
+      managerName: row.managerName || "",
+      clientsCount: 0,
+      contractTotal: 0,
+      paidTotal: 0,
+      debtTotal: 0,
+      overdueCount: 0,
+      fullyPaidCount: 0,
+      debtClientsCount: 0,
+    };
+
+    current.clientsCount += 1;
+    current.contractTotal += row.contractAmount;
+    current.paidTotal += row.paidAmount;
+    if (row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff) {
+      current.debtTotal += row.balanceAmount;
+      current.debtClientsCount += 1;
+    }
+    if (row.status.isOverdue) {
+      current.overdueCount += 1;
+    }
+    if (row.status.isFullyPaid) {
+      current.fullyPaidCount += 1;
+    }
+
+    map.set(key, current);
+  }
+
+  return [...map.values()];
+}
+
+function buildAssistantManagerRankingReply(rows, metricKey, isRussian, requestedLimit = 10) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+  const summaries = summarizeAssistantManagerRows(rows);
+  if (!summaries.length) {
+    return isRussian ? "Нет данных по менеджерам." : "No manager data is available.";
+  }
+
+  let metricLabel = isRussian ? "клиентов" : "clients";
+  let metricFormatter = (value) => String(value);
+  let metricValueGetter = (entry) => entry.clientsCount;
+
+  if (metricKey === "contract") {
+    metricLabel = isRussian ? "сумма договоров" : "contract total";
+    metricFormatter = (value) => formatAssistantMoney(value);
+    metricValueGetter = (entry) => entry.contractTotal;
+  } else if (metricKey === "paid") {
+    metricLabel = isRussian ? "сумма оплат" : "paid total";
+    metricFormatter = (value) => formatAssistantMoney(value);
+    metricValueGetter = (entry) => entry.paidTotal;
+  } else if (metricKey === "debt") {
+    metricLabel = isRussian ? "долг" : "debt";
+    metricFormatter = (value) => formatAssistantMoney(value);
+    metricValueGetter = (entry) => entry.debtTotal;
+  } else if (metricKey === "overdue") {
+    metricLabel = isRussian ? "просроченных клиентов" : "overdue clients";
+    metricValueGetter = (entry) => entry.overdueCount;
+  }
+
+  summaries.sort((left, right) => {
+    const leftValue = metricValueGetter(left);
+    const rightValue = metricValueGetter(right);
+    if (rightValue !== leftValue) {
+      return rightValue - leftValue;
+    }
+    return right.clientsCount - left.clientsCount;
+  });
+
+  const lines = [
+    isRussian
+      ? `Рейтинг менеджеров по метрике "${metricLabel}":`
+      : `Manager ranking by "${metricLabel}":`,
+  ];
+
+  summaries.slice(0, limit).forEach((item, index) => {
+    const managerLabel = resolveAssistantManagerLabel(item.managerName, isRussian);
+    const metricValue = metricFormatter(metricValueGetter(item));
+    lines.push(
+      `${index + 1}. ${managerLabel} - ${metricLabel}: ${metricValue}, ${
+        isRussian ? "клиентов" : "clients"
+      }: ${item.clientsCount}, ${isRussian ? "просрочка" : "overdue"}: ${item.overdueCount}`,
+    );
+  });
+
+  if (summaries.length > limit) {
+    lines.push(isRussian ? `И еще: ${summaries.length - limit}` : `And ${summaries.length - limit} more.`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildAssistantManagerOverviewReply(rows, managerEntry, isRussian) {
+  if (!managerEntry?.comparable) {
+    return isRussian ? "Уточните менеджера." : "Please specify the manager.";
+  }
+
+  const targetRows = rows.filter((row) => row.managerComparable === managerEntry.comparable);
+  if (!targetRows.length) {
+    return isRussian ? "По выбранному менеджеру нет записей." : "No records were found for that manager.";
+  }
+
+  const managerLabel = resolveAssistantManagerLabel(managerEntry.display, isRussian);
+  let contractTotal = 0;
+  let paidTotal = 0;
+  let debtTotal = 0;
+  let overdueCount = 0;
+  let fullyPaidCount = 0;
+
+  for (const row of targetRows) {
+    contractTotal += row.contractAmount;
+    paidTotal += row.paidAmount;
+    if (row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff) {
+      debtTotal += row.balanceAmount;
+    }
+    if (row.status.isOverdue) {
+      overdueCount += 1;
+    }
+    if (row.status.isFullyPaid) {
+      fullyPaidCount += 1;
+    }
+  }
+
+  const lines = [
+    `${isRussian ? "Менеджер" : "Manager"}: ${managerLabel}`,
+    `${isRussian ? "Клиентов" : "Clients"}: ${targetRows.length}`,
+    `${isRussian ? "Сумма договоров" : "Contract total"}: ${formatAssistantMoney(contractTotal)}`,
+    `${isRussian ? "Сумма оплат" : "Paid total"}: ${formatAssistantMoney(paidTotal)}`,
+    `${isRussian ? "Остаток долга" : "Outstanding debt"}: ${formatAssistantMoney(debtTotal)}`,
+    `${isRussian ? "Просроченных клиентов" : "Overdue clients"}: ${overdueCount}`,
+    `${isRussian ? "Полностью оплачены" : "Fully paid"}: ${fullyPaidCount}`,
+  ];
+
+  const topDebtors = [...targetRows]
+    .filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff)
+    .sort((left, right) => right.balanceAmount - left.balanceAmount)
+    .slice(0, 5);
+
+  if (topDebtors.length) {
+    lines.push(isRussian ? "Топ должники менеджера:" : "Top manager debtors:");
+    topDebtors.forEach((row, index) => {
+      lines.push(
+        `${index + 1}. ${row.clientName} - ${isRussian ? "долг" : "debt"} ${formatAssistantMoney(row.balanceAmount)}${
+          row.overdueDays > 0
+            ? isRussian
+              ? `, просрочка ${row.overdueDays} дн.`
+              : `, overdue ${row.overdueDays} days`
+            : ""
+        }`,
+      );
+    });
+  }
+
+  return lines.join("\n");
+}
+
+function buildAssistantManagerClientsReply(rows, managerEntry, isRussian, options = {}) {
+  if (!managerEntry?.comparable) {
+    return isRussian ? "Уточните менеджера." : "Please specify the manager.";
+  }
+
+  const debtOnly = Boolean(options.debtOnly);
+  const overdueOnly = Boolean(options.overdueOnly);
+  const limit = clampAssistantInteger(options.limit || 10, 1, 20, 10);
+  let targetRows = rows.filter((row) => row.managerComparable === managerEntry.comparable);
+
+  if (debtOnly) {
+    targetRows = targetRows.filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff);
+  }
+  if (overdueOnly) {
+    targetRows = targetRows.filter((row) => row.status.isOverdue);
+  }
+
+  if (!targetRows.length) {
+    return isRussian ? "По выбранному менеджеру нет подходящих клиентов." : "No matching clients were found for that manager.";
+  }
+
+  targetRows.sort((left, right) => {
+    if (overdueOnly && right.overdueDays !== left.overdueDays) {
+      return right.overdueDays - left.overdueDays;
+    }
+    if (debtOnly && right.balanceAmount !== left.balanceAmount) {
+      return right.balanceAmount - left.balanceAmount;
+    }
+    return right.createdAt - left.createdAt;
+  });
+
+  const managerLabel = resolveAssistantManagerLabel(managerEntry.display, isRussian);
+  const headline = debtOnly
+    ? isRussian
+      ? `Должники менеджера ${managerLabel}: ${targetRows.length}`
+      : `Debtors of manager ${managerLabel}: ${targetRows.length}`
+    : overdueOnly
+      ? isRussian
+        ? `Просроченные клиенты менеджера ${managerLabel}: ${targetRows.length}`
+        : `Overdue clients of manager ${managerLabel}: ${targetRows.length}`
+      : isRussian
+        ? `Клиенты менеджера ${managerLabel}: ${targetRows.length}`
+        : `Clients of manager ${managerLabel}: ${targetRows.length}`;
+
+  const lines = [headline];
+  targetRows.slice(0, limit).forEach((row, index) => {
+    const latestPayment =
+      row.latestPaymentTimestamp !== null ? formatAssistantDateTimestamp(row.latestPaymentTimestamp) : "-";
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "долг" : "debt"} ${formatAssistantMoney(row.balanceAmount)} - ${
+        isRussian ? "просрочка" : "overdue"
+      } ${row.overdueDays} ${isRussian ? "дн." : "days"} - ${
+        isRussian ? "последний платеж" : "latest payment"
+      } ${latestPayment}`,
+    );
+  });
+
+  if (targetRows.length > limit) {
+    lines.push(isRussian ? `И еще: ${targetRows.length - limit}` : `And ${targetRows.length - limit} more.`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildAssistantCompanyClientsReply(rows, companyEntry, isRussian, requestedLimit = 10) {
+  if (!companyEntry?.comparable) {
+    return isRussian ? "Уточните компанию." : "Please specify the company.";
+  }
+
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+  const targetRows = rows.filter((row) => row.companyComparable === companyEntry.comparable);
+  if (!targetRows.length) {
+    return isRussian ? "По выбранной компании клиентов не найдено." : "No clients were found for that company.";
+  }
+
+  targetRows.sort((left, right) => {
+    if (right.balanceAmount !== left.balanceAmount) {
+      return right.balanceAmount - left.balanceAmount;
+    }
+    return right.createdAt - left.createdAt;
+  });
+
+  const lines = [
+    isRussian
+      ? `Клиенты компании ${companyEntry.display}: ${targetRows.length}`
+      : `Clients of company ${companyEntry.display}: ${targetRows.length}`,
+  ];
+  targetRows.slice(0, limit).forEach((row, index) => {
+    const manager = resolveAssistantManagerLabel(row.managerName, isRussian);
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "долг" : "debt"} ${formatAssistantMoney(row.balanceAmount)} - ${
+        isRussian ? "менеджер" : "manager"
+      } ${manager}`,
+    );
+  });
+  if (targetRows.length > limit) {
+    lines.push(isRussian ? `И еще: ${targetRows.length - limit}` : `And ${targetRows.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantTopByMetricReply(rows, metricKey, isRussian, requestedLimit = 5) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 5);
+  let filtered = [];
+  let title = isRussian ? "Топ клиентов" : "Top clients";
+  let metricLabel = isRussian ? "значение" : "value";
+  let valueGetter = (row) => row.balanceAmount;
+
+  if (metricKey === "debt") {
+    title = isRussian ? `Топ-${limit} должников` : `Top ${limit} debtors`;
+    metricLabel = isRussian ? "долг" : "debt";
+    valueGetter = (row) => row.balanceAmount;
+    filtered = rows.filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff);
+  } else if (metricKey === "contract") {
+    title = isRussian ? `Топ-${limit} по сумме договора` : `Top ${limit} by contract amount`;
+    metricLabel = isRussian ? "договор" : "contract";
+    valueGetter = (row) => row.contractAmount;
+    filtered = rows.filter((row) => row.contractAmount > ASSISTANT_ZERO_TOLERANCE);
+  } else if (metricKey === "paid") {
+    title = isRussian ? `Топ-${limit} по сумме оплат` : `Top ${limit} by paid amount`;
+    metricLabel = isRussian ? "оплачено" : "paid";
+    valueGetter = (row) => row.paidAmount;
+    filtered = rows.filter((row) => row.paidAmount > ASSISTANT_ZERO_TOLERANCE);
+  }
+
+  if (!filtered.length) {
+    return isRussian ? "Подходящих клиентов не найдено." : "No matching clients were found.";
+  }
+
+  filtered.sort((left, right) => {
+    const leftValue = valueGetter(left);
+    const rightValue = valueGetter(right);
+    if (rightValue !== leftValue) {
+      return rightValue - leftValue;
+    }
+    return right.createdAt - left.createdAt;
+  });
+
+  const lines = [`${title}:`];
+  filtered.slice(0, limit).forEach((row, index) => {
+    const manager = resolveAssistantManagerLabel(row.managerName, isRussian);
+    const overdueChunk =
+      metricKey === "debt" && row.overdueDays > 0
+        ? isRussian
+          ? ` - просрочка ${row.overdueDays} дн.`
+          : ` - overdue ${row.overdueDays} days`
+        : "";
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${metricLabel} ${formatAssistantMoney(valueGetter(row))}${overdueChunk} - ${
+        isRussian ? "менеджер" : "manager"
+      } ${manager}`,
+    );
+  });
+
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantOverdueRangeReply(rows, isRussian, minDays, maxDays, requestedLimit = 10) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+  const normalizedMin = Math.max(1, clampAssistantInteger(minDays, 0, 3650, 1));
+  const normalizedMax = Number.isFinite(maxDays) ? Math.max(normalizedMin, clampAssistantInteger(maxDays, 0, 3650, normalizedMin)) : null;
+
+  const filtered = rows
+    .filter((row) => row.status.isOverdue)
+    .filter((row) => {
+      if (row.overdueDays < normalizedMin) {
+        return false;
+      }
+      if (normalizedMax !== null && row.overdueDays > normalizedMax) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => {
+      if (right.overdueDays !== left.overdueDays) {
+        return right.overdueDays - left.overdueDays;
+      }
+      return right.balanceAmount - left.balanceAmount;
+    });
+
+  if (!filtered.length) {
+    return isRussian
+      ? `Клиентов с просрочкой в диапазоне ${normalizedMin}-${normalizedMax || "∞"} дней не найдено.`
+      : `No overdue clients were found in the ${normalizedMin}-${normalizedMax || "∞"} day range.`;
+  }
+
+  const headline = normalizedMax === null
+    ? isRussian
+      ? `Клиенты с просрочкой больше ${normalizedMin - 1} дней: ${filtered.length}`
+      : `Clients overdue more than ${normalizedMin - 1} days: ${filtered.length}`
+    : isRussian
+      ? `Клиенты с просрочкой ${normalizedMin}-${normalizedMax} дней: ${filtered.length}`
+      : `Clients overdue ${normalizedMin}-${normalizedMax} days: ${filtered.length}`;
+
+  const lines = [headline];
+  filtered.slice(0, limit).forEach((row, index) => {
+    const manager = resolveAssistantManagerLabel(row.managerName, isRussian);
+    const latestPayment =
+      row.latestPaymentTimestamp !== null ? formatAssistantDateTimestamp(row.latestPaymentTimestamp) : "-";
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "просрочка" : "overdue"} ${row.overdueDays} ${
+        isRussian ? "дн." : "days"
+      } - ${isRussian ? "долг" : "debt"} ${formatAssistantMoney(row.balanceAmount)} - ${
+        isRussian ? "менеджер" : "manager"
+      } ${manager} - ${isRussian ? "последний платеж" : "latest payment"} ${latestPayment}`,
+    );
+  });
+
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantThresholdReply(rows, metricKey, comparator, threshold, isRussian, requestedLimit = 10) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+  const normalizedThreshold = Number.isFinite(threshold) ? Math.abs(threshold) : 0;
+  if (!(normalizedThreshold > 0)) {
+    return isRussian ? "Уточните пороговое значение." : "Please specify the threshold value.";
+  }
+
+  let metricLabel = isRussian ? "долг" : "debt";
+  let valueGetter = (row) => row.balanceAmount;
+  if (metricKey === "contract") {
+    metricLabel = isRussian ? "договор" : "contract";
+    valueGetter = (row) => row.contractAmount;
+  } else if (metricKey === "paid") {
+    metricLabel = isRussian ? "оплачено" : "paid";
+    valueGetter = (row) => row.paidAmount;
+  }
+
+  const filtered = rows.filter((row) => {
+    const metricValue = valueGetter(row);
+    return comparator === "lt" ? metricValue < normalizedThreshold : metricValue > normalizedThreshold;
+  });
+
+  filtered.sort((left, right) => {
+    const leftValue = valueGetter(left);
+    const rightValue = valueGetter(right);
+    if (comparator === "lt" && leftValue !== rightValue) {
+      return leftValue - rightValue;
+    }
+    if (rightValue !== leftValue) {
+      return rightValue - leftValue;
+    }
+    return right.createdAt - left.createdAt;
+  });
+
+  if (!filtered.length) {
+    return isRussian
+      ? `Клиентов по условию "${metricLabel} ${comparator === "lt" ? "<" : ">"} ${formatAssistantMoney(normalizedThreshold)}" не найдено.`
+      : `No clients match "${metricLabel} ${comparator === "lt" ? "<" : ">"} ${formatAssistantMoney(normalizedThreshold)}".`;
+  }
+
+  const lines = [
+    isRussian
+      ? `Клиенты с условием "${metricLabel} ${comparator === "lt" ? "<" : ">"} ${formatAssistantMoney(normalizedThreshold)}": ${filtered.length}`
+      : `Clients with "${metricLabel} ${comparator === "lt" ? "<" : ">"} ${formatAssistantMoney(normalizedThreshold)}": ${filtered.length}`,
+  ];
+
+  filtered.slice(0, limit).forEach((row, index) => {
+    const manager = resolveAssistantManagerLabel(row.managerName, isRussian);
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${metricLabel} ${formatAssistantMoney(valueGetter(row))} - ${
+        isRussian ? "менеджер" : "manager"
+      } ${manager}`,
+    );
+  });
+
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantLatestPaymentReply(rows, mode, isRussian, dayThreshold = 30, requestedLimit = 10) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+  const thresholdDays = clampAssistantInteger(dayThreshold, 1, 3650, 30);
+  const rowsWithDate = rows.filter((row) => row.latestPaymentTimestamp !== null);
+
+  if (mode === "most_recent") {
+    const sorted = [...rowsWithDate].sort((left, right) => right.latestPaymentTimestamp - left.latestPaymentTimestamp);
+    const first = sorted[0];
+    if (!first) {
+      return isRussian ? "Нет клиентов с датой последнего платежа." : "No clients have a latest payment date.";
+    }
+    const manager = resolveAssistantManagerLabel(first.managerName, isRussian);
+    return isRussian
+      ? `Самый недавний платеж: ${first.clientName}, ${formatAssistantDateTimestamp(first.latestPaymentTimestamp)} (менеджер: ${manager}).`
+      : `Most recent payment: ${first.clientName}, ${formatAssistantDateTimestamp(first.latestPaymentTimestamp)} (manager: ${manager}).`;
+  }
+
+  if (mode === "oldest") {
+    const sorted = [...rowsWithDate].sort((left, right) => left.latestPaymentTimestamp - right.latestPaymentTimestamp);
+    const first = sorted[0];
+    if (!first) {
+      return isRussian ? "Нет клиентов с датой последнего платежа." : "No clients have a latest payment date.";
+    }
+    const manager = resolveAssistantManagerLabel(first.managerName, isRussian);
+    return isRussian
+      ? `Самый давний последний платеж: ${first.clientName}, ${formatAssistantDateTimestamp(first.latestPaymentTimestamp)} (менеджер: ${manager}).`
+      : `Oldest latest payment: ${first.clientName}, ${formatAssistantDateTimestamp(first.latestPaymentTimestamp)} (manager: ${manager}).`;
+  }
+
+  if (mode === "missing") {
+    const filtered = rows.filter((row) => row.latestPaymentTimestamp === null).sort((left, right) => right.createdAt - left.createdAt);
+    if (!filtered.length) {
+      return isRussian ? "Клиентов без даты последнего платежа не найдено." : "No clients are missing latest payment date.";
+    }
+    const lines = [
+      isRussian
+        ? `Клиенты без даты последнего платежа: ${filtered.length}`
+        : `Clients missing latest payment date: ${filtered.length}`,
+    ];
+    filtered.slice(0, limit).forEach((row, index) => {
+      lines.push(`${index + 1}. ${row.clientName} - ${isRussian ? "менеджер" : "manager"} ${resolveAssistantManagerLabel(row.managerName, isRussian)}`);
+    });
+    if (filtered.length > limit) {
+      lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+    }
+    return lines.join("\n");
+  }
+
+  if (mode === "older_than") {
+    const filtered = rowsWithDate
+      .map((row) => ({
+        ...row,
+        daysSince: getAssistantDaysSinceTimestamp(row.latestPaymentTimestamp),
+      }))
+      .filter((row) => row.daysSince !== null && row.daysSince > thresholdDays)
+      .sort((left, right) => right.daysSince - left.daysSince);
+    if (!filtered.length) {
+      return isRussian
+        ? `Нет клиентов с последним платежом старше ${thresholdDays} дней.`
+        : `No clients have latest payment older than ${thresholdDays} days.`;
+    }
+
+    const lines = [
+      isRussian
+        ? `Клиенты с последним платежом старше ${thresholdDays} дней: ${filtered.length}`
+        : `Clients with latest payment older than ${thresholdDays} days: ${filtered.length}`,
+    ];
+    filtered.slice(0, limit).forEach((row, index) => {
+      lines.push(
+        `${index + 1}. ${row.clientName} - ${isRussian ? "дата" : "date"} ${formatAssistantDateTimestamp(
+          row.latestPaymentTimestamp,
+        )} - ${isRussian ? "дней назад" : "days ago"} ${row.daysSince}`,
+      );
+    });
+    if (filtered.length > limit) {
+      lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+    }
+    return lines.join("\n");
+  }
+
+  const filtered = rowsWithDate
+    .map((row) => ({
+      ...row,
+      daysSince: getAssistantDaysSinceTimestamp(row.latestPaymentTimestamp),
+    }))
+    .filter((row) => row.daysSince !== null && row.daysSince <= thresholdDays)
+    .sort((left, right) => right.latestPaymentTimestamp - left.latestPaymentTimestamp);
+  if (!filtered.length) {
+    return isRussian
+      ? `Нет клиентов с платежом за последние ${thresholdDays} дней.`
+      : `No clients have payments in the last ${thresholdDays} days.`;
+  }
+
+  const lines = [
+    isRussian
+      ? `Клиенты с платежом за последние ${thresholdDays} дней: ${filtered.length}`
+      : `Clients with payments in the last ${thresholdDays} days: ${filtered.length}`,
+  ];
+  filtered.slice(0, limit).forEach((row, index) => {
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "дата" : "date"} ${formatAssistantDateTimestamp(
+        row.latestPaymentTimestamp,
+      )} - ${isRussian ? "дней назад" : "days ago"} ${row.daysSince}`,
+    );
+  });
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantAnomalyReply(rows, anomalyType, isRussian, requestedLimit = 10) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+  let filtered = [];
+  let headline = isRussian ? "Аномалии не найдены." : "No anomalies were found.";
+
+  if (anomalyType === "paid_gt_contract") {
+    filtered = rows
+      .filter((row) => row.contractAmount > ASSISTANT_ZERO_TOLERANCE)
+      .filter((row) => row.paidAmount - row.contractAmount > ASSISTANT_ZERO_TOLERANCE)
+      .sort((left, right) => right.paidAmount - right.contractAmount - (left.paidAmount - left.contractAmount));
+    headline = isRussian
+      ? `Аномалия "оплачено больше договора": ${filtered.length}`
+      : `Anomaly "paid > contract": ${filtered.length}`;
+  } else if (anomalyType === "negative_values") {
+    filtered = rows
+      .filter(
+        (row) =>
+          row.contractAmount < -ASSISTANT_ZERO_TOLERANCE ||
+          row.paidAmount < -ASSISTANT_ZERO_TOLERANCE ||
+          row.balanceAmount < -ASSISTANT_ZERO_TOLERANCE,
+      )
+      .sort((left, right) => right.createdAt - left.createdAt);
+    headline = isRussian
+      ? `Аномалия "отрицательные значения": ${filtered.length}`
+      : `Anomaly "negative values": ${filtered.length}`;
+  } else if (anomalyType === "overdue_zero_balance") {
+    filtered = rows
+      .filter((row) => row.status.isOverdue)
+      .filter((row) => row.balanceAmount <= ASSISTANT_ZERO_TOLERANCE)
+      .sort((left, right) => right.overdueDays - left.overdueDays);
+    headline = isRussian
+      ? `Аномалия "есть просрочка, но баланс 0": ${filtered.length}`
+      : `Anomaly "overdue but zero balance": ${filtered.length}`;
+  } else if (anomalyType === "debt_no_overdue") {
+    filtered = rows
+      .filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE)
+      .filter((row) => !row.status.isOverdue && !row.status.isWrittenOff)
+      .sort((left, right) => right.balanceAmount - left.balanceAmount);
+    headline = isRussian
+      ? `Потенциальная аномалия "есть долг, но просрочки нет": ${filtered.length}`
+      : `Potential anomaly "debt exists but no overdue": ${filtered.length}`;
+  } else {
+    const paidGtContractCount = rows.filter(
+      (row) => row.contractAmount > ASSISTANT_ZERO_TOLERANCE && row.paidAmount - row.contractAmount > ASSISTANT_ZERO_TOLERANCE,
+    ).length;
+    const negativeCount = rows.filter(
+      (row) =>
+        row.contractAmount < -ASSISTANT_ZERO_TOLERANCE ||
+        row.paidAmount < -ASSISTANT_ZERO_TOLERANCE ||
+        row.balanceAmount < -ASSISTANT_ZERO_TOLERANCE,
+    ).length;
+    const overdueZeroBalanceCount = rows.filter(
+      (row) => row.status.isOverdue && row.balanceAmount <= ASSISTANT_ZERO_TOLERANCE,
+    ).length;
+    const debtNoOverdueCount = rows.filter(
+      (row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isOverdue && !row.status.isWrittenOff,
+    ).length;
+
+    return [
+      isRussian ? "Сводка по аномалиям:" : "Anomaly summary:",
+      isRussian
+        ? `1) Оплачено больше договора: ${paidGtContractCount}`
+        : `1) Paid greater than contract: ${paidGtContractCount}`,
+      isRussian ? `2) Отрицательные значения: ${negativeCount}` : `2) Negative values: ${negativeCount}`,
+      isRussian
+        ? `3) Есть просрочка, но баланс 0: ${overdueZeroBalanceCount}`
+        : `3) Overdue but zero balance: ${overdueZeroBalanceCount}`,
+      isRussian
+        ? `4) Есть долг, но просрочки нет: ${debtNoOverdueCount}`
+        : `4) Debt exists but no overdue: ${debtNoOverdueCount}`,
+    ].join("\n");
+  }
+
+  if (!filtered.length) {
+    return isRussian ? `${headline}\nНичего подозрительного не найдено.` : `${headline}\nNothing suspicious was found.`;
+  }
+
+  const lines = [headline];
+  filtered.slice(0, limit).forEach((row, index) => {
+    if (anomalyType === "paid_gt_contract") {
+      lines.push(
+        `${index + 1}. ${row.clientName} - ${isRussian ? "оплачено" : "paid"} ${formatAssistantMoney(
+          row.paidAmount,
+        )}, ${isRussian ? "договор" : "contract"} ${formatAssistantMoney(row.contractAmount)}`,
+      );
+      return;
+    }
+
+    if (anomalyType === "negative_values") {
+      const chunks = [];
+      if (row.contractAmount < -ASSISTANT_ZERO_TOLERANCE) {
+        chunks.push(`${isRussian ? "договор" : "contract"} ${formatAssistantMoney(row.contractAmount)}`);
+      }
+      if (row.paidAmount < -ASSISTANT_ZERO_TOLERANCE) {
+        chunks.push(`${isRussian ? "оплачено" : "paid"} ${formatAssistantMoney(row.paidAmount)}`);
+      }
+      if (row.balanceAmount < -ASSISTANT_ZERO_TOLERANCE) {
+        chunks.push(`${isRussian ? "баланс" : "balance"} ${formatAssistantMoney(row.balanceAmount)}`);
+      }
+      lines.push(`${index + 1}. ${row.clientName} - ${chunks.join(", ")}`);
+      return;
+    }
+
+    if (anomalyType === "overdue_zero_balance") {
+      lines.push(
+        `${index + 1}. ${row.clientName} - ${isRussian ? "просрочка" : "overdue"} ${row.overdueDays} ${
+          isRussian ? "дн." : "days"
+        }, ${isRussian ? "баланс" : "balance"} ${formatAssistantMoney(row.balanceAmount)}`,
+      );
+      return;
+    }
+
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "долг" : "debt"} ${formatAssistantMoney(row.balanceAmount)} - ${
+        isRussian ? "просрочка" : "overdue"
+      } ${row.overdueDays} ${isRussian ? "дн." : "days"}`,
+    );
+  });
+
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildAssistantMissingFieldReply(rows, fieldKey, hasValue, isRussian, requestedLimit = 10) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+
+  let filtered = [];
+  if (fieldKey === "manager") {
+    filtered = rows.filter((row) => (hasValue ? Boolean(row.managerName) : !row.managerName));
+  } else if (fieldKey === "company") {
+    filtered = rows.filter((row) => (hasValue ? Boolean(row.companyName) : !row.companyName));
+  } else if (fieldKey === "notes") {
+    filtered = rows.filter((row) => (hasValue ? Boolean(row.notes) : !row.notes));
+  } else if (fieldKey === "latest_payment") {
+    filtered = rows.filter((row) => (hasValue ? row.latestPaymentTimestamp !== null : row.latestPaymentTimestamp === null));
+  }
+
+  filtered.sort((left, right) => right.createdAt - left.createdAt);
+
+  if (!filtered.length) {
+    return isRussian ? "Подходящих клиентов не найдено." : "No matching clients were found.";
+  }
+
+  let headline = isRussian ? "Список клиентов" : "Client list";
+  if (fieldKey === "manager") {
+    headline = isRussian
+      ? hasValue
+        ? `Клиенты с назначенным менеджером: ${filtered.length}`
+        : `Клиенты без менеджера: ${filtered.length}`
+      : hasValue
+        ? `Clients with assigned manager: ${filtered.length}`
+        : `Clients without manager: ${filtered.length}`;
+  } else if (fieldKey === "company") {
+    headline = isRussian
+      ? hasValue
+        ? `Клиенты с компанией: ${filtered.length}`
+        : `Клиенты без компании: ${filtered.length}`
+      : hasValue
+        ? `Clients with company: ${filtered.length}`
+        : `Clients without company: ${filtered.length}`;
+  } else if (fieldKey === "notes") {
+    headline = isRussian
+      ? hasValue
+        ? `Клиенты с примечанием: ${filtered.length}`
+        : `Клиенты без примечания: ${filtered.length}`
+      : hasValue
+        ? `Clients with notes: ${filtered.length}`
+        : `Clients without notes: ${filtered.length}`;
+  } else if (fieldKey === "latest_payment") {
+    headline = isRussian
+      ? hasValue
+        ? `Клиенты с датой последнего платежа: ${filtered.length}`
+        : `Клиенты без даты последнего платежа: ${filtered.length}`
+      : hasValue
+        ? `Clients with latest payment date: ${filtered.length}`
+        : `Clients without latest payment date: ${filtered.length}`;
+  }
+
+  const lines = [headline];
+  filtered.slice(0, limit).forEach((row, index) => {
+    const manager = resolveAssistantManagerLabel(row.managerName, isRussian);
+    const company = row.companyName || (isRussian ? "-" : "-");
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "компания" : "company"} ${company} - ${
+        isRussian ? "менеджер" : "manager"
+      } ${manager}`,
+    );
+  });
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantCallListReply(rows, isRussian, requestedLimit = 10) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+  const filtered = rows
+    .filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE)
+    .filter((row) => !row.status.isWrittenOff && !row.status.isFullyPaid)
+    .sort((left, right) => {
+      if (right.overdueDays !== left.overdueDays) {
+        return right.overdueDays - left.overdueDays;
+      }
+      if (right.balanceAmount !== left.balanceAmount) {
+        return right.balanceAmount - left.balanceAmount;
+      }
+      const leftTimestamp = left.latestPaymentTimestamp === null ? -1 : left.latestPaymentTimestamp;
+      const rightTimestamp = right.latestPaymentTimestamp === null ? -1 : right.latestPaymentTimestamp;
+      return leftTimestamp - rightTimestamp;
+    });
+
+  if (!filtered.length) {
+    return isRussian ? "Нет клиентов для обзвона по текущим условиям." : "No clients match the current call-list criteria.";
+  }
+
+  const lines = [isRussian ? `Список для обзвона на сегодня: ${filtered.length}` : `Today's call list: ${filtered.length}`];
+  filtered.slice(0, limit).forEach((row, index) => {
+    const manager = resolveAssistantManagerLabel(row.managerName, isRussian);
+    const latestPayment =
+      row.latestPaymentTimestamp !== null ? formatAssistantDateTimestamp(row.latestPaymentTimestamp) : "-";
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "долг" : "debt"} ${formatAssistantMoney(row.balanceAmount)} - ${
+        isRussian ? "просрочка" : "overdue"
+      } ${row.overdueDays} ${isRussian ? "дн." : "days"} - ${isRussian ? "менеджер" : "manager"} ${manager} - ${
+        isRussian ? "последний платеж" : "latest payment"
+      } ${latestPayment}`,
+    );
+  });
+
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantSingleMetricReply(rows, metricKey, isRussian) {
+  const metrics = summarizeAssistantMetrics(rows.map((row) => row.record));
+  const contractRows = rows.filter((row) => row.contractAmount > ASSISTANT_ZERO_TOLERANCE);
+  const debtRows = rows.filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff);
+
+  if (metricKey === "total_clients") {
+    return isRussian ? `Всего клиентов: ${metrics.totalClients}` : `Total clients: ${metrics.totalClients}`;
+  }
+  if (metricKey === "fully_paid_count") {
+    return isRussian
+      ? `Полностью оплаченных клиентов: ${metrics.fullyPaidCount}`
+      : `Fully paid clients: ${metrics.fullyPaidCount}`;
+  }
+  if (metricKey === "overdue_count") {
+    return isRussian ? `Просроченных клиентов: ${metrics.overdueCount}` : `Overdue clients: ${metrics.overdueCount}`;
+  }
+  if (metricKey === "debt_clients_count") {
+    return isRussian ? `Клиентов с долгом: ${metrics.activeDebtCount}` : `Clients with debt: ${metrics.activeDebtCount}`;
+  }
+  if (metricKey === "contract_total") {
+    return isRussian
+      ? `Общая сумма договоров: ${formatAssistantMoney(metrics.contractTotal)}`
+      : `Total contract amount: ${formatAssistantMoney(metrics.contractTotal)}`;
+  }
+  if (metricKey === "paid_total") {
+    return isRussian
+      ? `Общая сумма оплат: ${formatAssistantMoney(metrics.receivedTotal)}`
+      : `Total paid amount: ${formatAssistantMoney(metrics.receivedTotal)}`;
+  }
+  if (metricKey === "debt_total" || metricKey === "total_to_collect") {
+    return isRussian
+      ? `Общий остаток долга: ${formatAssistantMoney(metrics.debtTotal)}`
+      : `Total outstanding debt: ${formatAssistantMoney(metrics.debtTotal)}`;
+  }
+  if (metricKey === "avg_contract") {
+    const value = contractRows.length ? metrics.contractTotal / contractRows.length : 0;
+    return isRussian
+      ? `Средний размер договора: ${formatAssistantMoney(value)}`
+      : `Average contract amount: ${formatAssistantMoney(value)}`;
+  }
+  if (metricKey === "avg_debt") {
+    const value = debtRows.length ? metrics.debtTotal / debtRows.length : 0;
+    return isRussian
+      ? `Средний долг на должника: ${formatAssistantMoney(value)}`
+      : `Average debt per debtor: ${formatAssistantMoney(value)}`;
+  }
+  if (metricKey === "overdue_percent") {
+    const percent = metrics.totalClients ? (metrics.overdueCount / metrics.totalClients) * 100 : 0;
+    return isRussian
+      ? `Доля просроченных клиентов: ${percent.toFixed(1)}%`
+      : `Overdue clients share: ${percent.toFixed(1)}%`;
+  }
+  if (metricKey === "fully_paid_percent") {
+    const percent = metrics.totalClients ? (metrics.fullyPaidCount / metrics.totalClients) * 100 : 0;
+    return isRussian
+      ? `Доля полностью оплаченных клиентов: ${percent.toFixed(1)}%`
+      : `Fully paid clients share: ${percent.toFixed(1)}%`;
+  }
+
+  return isRussian ? "Метрика не распознана." : "Metric is not recognized.";
+}
+
+function buildAssistantMaxMetricClientReply(rows, metricKey, isRussian) {
+  let metricLabel = isRussian ? "долг" : "debt";
+  let valueGetter = (row) => row.balanceAmount;
+
+  if (metricKey === "contract") {
+    metricLabel = isRussian ? "договор" : "contract";
+    valueGetter = (row) => row.contractAmount;
+  } else if (metricKey === "paid") {
+    metricLabel = isRussian ? "оплачено" : "paid";
+    valueGetter = (row) => row.paidAmount;
+  }
+
+  const target = [...rows]
+    .filter((row) => valueGetter(row) > ASSISTANT_ZERO_TOLERANCE)
+    .sort((left, right) => valueGetter(right) - valueGetter(left))[0];
+
+  if (!target) {
+    return isRussian ? "Подходящих клиентов не найдено." : "No matching clients were found.";
+  }
+
+  const manager = resolveAssistantManagerLabel(target.managerName, isRussian);
+  return isRussian
+    ? `Максимальный ${metricLabel}: ${target.clientName} - ${formatAssistantMoney(valueGetter(target))} (менеджер: ${manager}).`
+    : `Largest ${metricLabel}: ${target.clientName} - ${formatAssistantMoney(valueGetter(target))} (manager: ${manager}).`;
+}
+
+function buildAssistantNotFullyPaidReply(rows, isRussian, requestedLimit = 10) {
+  const limit = clampAssistantInteger(requestedLimit, 1, 20, 10);
+  const filtered = [...rows]
+    .filter((row) => !row.status.isFullyPaid)
+    .sort((left, right) => {
+      if (right.balanceAmount !== left.balanceAmount) {
+        return right.balanceAmount - left.balanceAmount;
+      }
+      return right.createdAt - left.createdAt;
+    });
+
+  if (!filtered.length) {
+    return isRussian ? "Все клиенты полностью оплачены." : "All clients are fully paid.";
+  }
+
+  const lines = [
+    isRussian
+      ? `Клиенты со статусом не fully paid: ${filtered.length}`
+      : `Clients with not fully paid status: ${filtered.length}`,
+  ];
+  filtered.slice(0, limit).forEach((row, index) => {
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "статус" : "status"} ${getAssistantStatusLabel(row.status, isRussian)} - ${
+        isRussian ? "долг" : "debt"
+      } ${formatAssistantMoney(row.balanceAmount)}`,
+    );
+  });
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantManagerComparisonReply(rows, leftManagerEntry, rightManagerEntry, isRussian) {
+  if (!leftManagerEntry?.comparable || !rightManagerEntry?.comparable) {
+    return isRussian ? "Уточните двух менеджеров для сравнения." : "Please specify two managers for comparison.";
+  }
+
+  const summaries = summarizeAssistantManagerRows(rows);
+  const leftSummary = summaries.find((item) => item.managerComparable === leftManagerEntry.comparable);
+  const rightSummary = summaries.find((item) => item.managerComparable === rightManagerEntry.comparable);
+  if (!leftSummary || !rightSummary) {
+    return isRussian ? "Не удалось собрать данные для сравнения менеджеров." : "Unable to build manager comparison data.";
+  }
+
+  const leftName = resolveAssistantManagerLabel(leftSummary.managerName, isRussian);
+  const rightName = resolveAssistantManagerLabel(rightSummary.managerName, isRussian);
+  const debtLeader = leftSummary.debtTotal === rightSummary.debtTotal
+    ? isRussian ? "Одинаково" : "Tie"
+    : leftSummary.debtTotal > rightSummary.debtTotal
+      ? leftName
+      : rightName;
+
+  return [
+    isRussian ? `Сравнение менеджеров: ${leftName} vs ${rightName}` : `Manager comparison: ${leftName} vs ${rightName}`,
+    isRussian
+      ? `${leftName}: клиентов ${leftSummary.clientsCount}, договоры ${formatAssistantMoney(leftSummary.contractTotal)}, оплаты ${formatAssistantMoney(
+          leftSummary.paidTotal,
+        )}, долг ${formatAssistantMoney(leftSummary.debtTotal)}, просрочка ${leftSummary.overdueCount}`
+      : `${leftName}: clients ${leftSummary.clientsCount}, contracts ${formatAssistantMoney(leftSummary.contractTotal)}, paid ${formatAssistantMoney(
+          leftSummary.paidTotal,
+        )}, debt ${formatAssistantMoney(leftSummary.debtTotal)}, overdue ${leftSummary.overdueCount}`,
+    isRussian
+      ? `${rightName}: клиентов ${rightSummary.clientsCount}, договоры ${formatAssistantMoney(rightSummary.contractTotal)}, оплаты ${formatAssistantMoney(
+          rightSummary.paidTotal,
+        )}, долг ${formatAssistantMoney(rightSummary.debtTotal)}, просрочка ${rightSummary.overdueCount}`
+      : `${rightName}: clients ${rightSummary.clientsCount}, contracts ${formatAssistantMoney(rightSummary.contractTotal)}, paid ${formatAssistantMoney(
+          rightSummary.paidTotal,
+        )}, debt ${formatAssistantMoney(rightSummary.debtTotal)}, overdue ${rightSummary.overdueCount}`,
+    isRussian ? `Лидер по долгу: ${debtLeader}` : `Debt leader: ${debtLeader}`,
+  ].join("\n");
+}
+
 function buildAssistantReplyPayload(message, records, updatedAt) {
   const normalizedMessage = normalizeAssistantSearchText(message);
   const isRussian = /[а-яё]/i.test(normalizedMessage);
+  const suggestions = getAssistantDefaultSuggestions(isRussian);
+  const respond = (reply, handledByRules = true) => ({
+    reply,
+    suggestions,
+    handledByRules,
+  });
 
   if (!normalizedMessage) {
-    return {
-      reply: isRussian ? "Напишите вопрос, и я проверю данные клиентов." : "Type a question, and I will check client data.",
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
+    return respond(isRussian ? "Напишите вопрос, и я проверю данные клиентов." : "Type a question, and I will check client data.");
   }
 
   const visibleRecords = Array.isArray(records) ? records : [];
   if (!visibleRecords.length) {
-    return {
-      reply: isRussian
+    return respond(
+      isRussian
         ? "По вашему доступу сейчас нет клиентских записей."
         : "No client records are visible for your current access scope.",
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
+    );
   }
 
   const wantsHelp = /(help|what can you do|commands?|подсказ|что уме|помощ|команд|пример)/i.test(normalizedMessage);
-  const wantsClientLookup = /(client|clients|клиент|клиенты|company|компан|show|покаж|найд|search|find|карточк)/i.test(
+  const wantsClientLookup = /(client|clients|клиент|клиенты|show|покаж|найд|search|find|карточк|lookup|фамил|имя)/i.test(
     normalizedMessage,
   );
   const wantsOverdue = /(overdue|late|просроч)/i.test(normalizedMessage);
   const wantsWrittenOff = /(written[\s-]*off|write[\s-]*off|списан|списано|списанн)/i.test(normalizedMessage);
   const wantsFullyPaid = /(fully[\s-]*paid|paid[\s-]*off|полностью|полност|закрыт|оплачен)/i.test(normalizedMessage);
+  const wantsNotFullyPaid = /(not\s+fully\s+paid|не\s+полностью\s+оплачен|неоплачен)/i.test(normalizedMessage);
   const wantsDebt = /(debt|balance|future payment|future payments|долг|баланс|остат)/i.test(normalizedMessage);
-  const wantsTop = /(top|largest|biggest|топ|крупн|наибольш|больш)/i.test(normalizedMessage);
-  const wantsSummary = /(summary|overview|overall|totals?|итог|свод|общ|всего|сколько|колич)/i.test(normalizedMessage);
+  const wantsDebtorsWord = /(debtor|debtors|должник|должников)/i.test(normalizedMessage);
+  const wantsTop = /(top|largest|biggest|топ|крупн|наибольш|больш|rating|rank|рейтинг)/i.test(normalizedMessage);
+  const wantsSummary = /(summary|overview|overall|totals?|итог|свод|общ|всего)/i.test(normalizedMessage);
+  const wantsCount = /(how many|count|сколько|колич|number of)/i.test(normalizedMessage);
+  const wantsAverage = /(average|avg|средн)/i.test(normalizedMessage);
+  const wantsPercent = /(percent|percentage|процент)/i.test(normalizedMessage);
+  const wantsMax = /(largest|biggest|highest|max|максим|сам(ый|ая).*(больш|крупн))/i.test(normalizedMessage);
+  const wantsContract = /(contract|contracts|договор|контракт)/i.test(normalizedMessage);
+  const wantsPaid = /(paid|payments?|оплач|платеж|получено)/i.test(normalizedMessage);
+  const wantsManager = /(manager|менеджер)/i.test(normalizedMessage);
+  const wantsCompany = /(company|компан)/i.test(normalizedMessage);
+  const wantsNotes = /(notes?|note|примечан|коммент|нотс)/i.test(normalizedMessage);
+  const wantsLatestPayment = /(latest payment|last payment|последн.*плат|payment date|дата платеж)/i.test(normalizedMessage);
+  const wantsWithout = /(without|без|none|пуст|не\s+указан|отсутств)/i.test(normalizedMessage);
+  const wantsWith = /(\bwith\b|есть|имеет|заполнен)/i.test(normalizedMessage);
+  const wantsCompare = /(compare|сравни|versus|vs|против)/i.test(normalizedMessage);
+  const wantsAnomaly = /(anomal|ошиб|аномал|некоррект|проверь|inconsisten|mismatch)/i.test(normalizedMessage);
+  const wantsCallList = /(call list|обзвон|позвон|follow[\s-]*up)/i.test(normalizedMessage);
+  const wantsMostRecent = /(most recent|newest|сам(ый|ая).*(последн|недавн))/i.test(normalizedMessage);
+  const wantsOldest = /(oldest|earliest|сам(ый|ая).*(давн|ранн))/i.test(normalizedMessage);
+  const wantsRecentWindow = /(in the last|за последн|в последн|within)/i.test(normalizedMessage);
+  const wantsNoOverdue = /(no overdue|without overdue|без просроч|нет просроч|overdue 0)/i.test(normalizedMessage);
+  const wantsZeroBalance = /(zero balance|balance 0|нулев|баланс 0|долг 0)/i.test(normalizedMessage);
+  const wantsNegativeHint = /(negative|отрицател)/i.test(normalizedMessage);
+  const wantsPaidGtContractHint =
+    /(paid.*(more|over|greater|больше|выше).*(contract|договор|контракт)|оплач.*(больше|выше).*(договор|контракт))/i.test(
+      normalizedMessage,
+    );
 
   if (wantsHelp) {
-    return {
-      reply: buildAssistantHelpReply(isRussian, visibleRecords.length),
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
+    return respond(buildAssistantHelpReply(isRussian, visibleRecords.length));
+  }
+
+  const analyzedRows = buildAssistantAnalyzedRows(visibleRecords);
+  const managerEntries = buildAssistantDistinctEntityEntries(analyzedRows, "manager");
+  const companyEntries = buildAssistantDistinctEntityEntries(analyzedRows, "company");
+  const managerMatches = findAssistantEntityMatchesInMessage(message, managerEntries, 3);
+  const companyMatches = findAssistantEntityMatchesInMessage(message, companyEntries, 2);
+  const primaryManager = managerMatches[0] || null;
+  const secondaryManager = managerMatches[1] || null;
+  const primaryCompany = companyMatches[0] || null;
+
+  const comparator = detectAssistantComparator(normalizedMessage);
+  const topLimit = extractAssistantTopLimit(message, wantsTop ? 5 : 10);
+  const dayRange = wantsOverdue ? extractAssistantDayRange(message) : null;
+  const dayThreshold = extractAssistantDayThreshold(message, 30);
+  const amountThreshold = extractAssistantAmountThreshold(message);
+
+  if (wantsCompare && wantsManager && primaryManager && secondaryManager) {
+    return respond(buildAssistantManagerComparisonReply(analyzedRows, primaryManager, secondaryManager, isRussian));
+  }
+
+  if (wantsAnomaly || wantsPaidGtContractHint || wantsNegativeHint || (wantsOverdue && wantsZeroBalance) || (wantsDebt && wantsNoOverdue)) {
+    let anomalyType = "summary";
+    if (wantsPaidGtContractHint || (wantsPaid && wantsContract)) {
+      anomalyType = "paid_gt_contract";
+    } else if (wantsNegativeHint) {
+      anomalyType = "negative_values";
+    } else if (wantsOverdue && wantsZeroBalance) {
+      anomalyType = "overdue_zero_balance";
+    } else if (wantsDebt && wantsNoOverdue) {
+      anomalyType = "debt_no_overdue";
+    }
+    return respond(buildAssistantAnomalyReply(analyzedRows, anomalyType, isRussian, topLimit));
+  }
+
+  if (wantsCallList) {
+    return respond(buildAssistantCallListReply(analyzedRows, isRussian, topLimit));
+  }
+
+  if (wantsLatestPayment) {
+    if (wantsWithout) {
+      return respond(buildAssistantLatestPaymentReply(analyzedRows, "missing", isRussian, dayThreshold, topLimit));
+    }
+    if (wantsOldest) {
+      return respond(buildAssistantLatestPaymentReply(analyzedRows, "oldest", isRussian, dayThreshold, topLimit));
+    }
+    if (wantsMostRecent && !wantsRecentWindow && comparator === null) {
+      return respond(buildAssistantLatestPaymentReply(analyzedRows, "most_recent", isRussian, dayThreshold, topLimit));
+    }
+    if (comparator === "gt" || /(older|старше|давно|более)/i.test(normalizedMessage)) {
+      return respond(buildAssistantLatestPaymentReply(analyzedRows, "older_than", isRussian, dayThreshold, topLimit));
+    }
+    if (wantsRecentWindow || comparator === "lt") {
+      return respond(buildAssistantLatestPaymentReply(analyzedRows, "within_days", isRussian, dayThreshold, topLimit));
+    }
+  }
+
+  if (wantsManager && wantsWithout) {
+    return respond(buildAssistantMissingFieldReply(analyzedRows, "manager", false, isRussian, topLimit));
+  }
+  if (wantsCompany && wantsWithout) {
+    return respond(buildAssistantMissingFieldReply(analyzedRows, "company", false, isRussian, topLimit));
+  }
+  if (wantsNotes && wantsWithout) {
+    return respond(buildAssistantMissingFieldReply(analyzedRows, "notes", false, isRussian, topLimit));
+  }
+  if (wantsNotes && wantsWith) {
+    return respond(buildAssistantMissingFieldReply(analyzedRows, "notes", true, isRussian, topLimit));
+  }
+
+  if (primaryManager) {
+    if (wantsManager && wantsSummary && !wantsTop) {
+      return respond(buildAssistantManagerOverviewReply(analyzedRows, primaryManager, isRussian));
+    }
+    if (wantsOverdue && wantsManager) {
+      return respond(
+        buildAssistantManagerClientsReply(analyzedRows, primaryManager, isRussian, {
+          overdueOnly: true,
+          debtOnly: false,
+          limit: topLimit,
+        }),
+      );
+    }
+    if (wantsDebtorsWord || (wantsDebt && wantsManager && !wantsTop)) {
+      return respond(
+        buildAssistantManagerClientsReply(analyzedRows, primaryManager, isRussian, {
+          overdueOnly: false,
+          debtOnly: true,
+          limit: topLimit,
+        }),
+      );
+    }
+    if (wantsClientLookup || wantsManager) {
+      return respond(
+        buildAssistantManagerClientsReply(analyzedRows, primaryManager, isRussian, {
+          overdueOnly: false,
+          debtOnly: false,
+          limit: topLimit,
+        }),
+      );
+    }
+  }
+
+  if (primaryCompany && (wantsCompany || wantsClientLookup)) {
+    return respond(buildAssistantCompanyClientsReply(analyzedRows, primaryCompany, isRussian, topLimit));
+  }
+
+  if (wantsManager && (wantsTop || wantsCount || wantsSummary || /кажд|each|per/.test(normalizedMessage))) {
+    let managerMetric = "clients";
+    if (wantsOverdue) {
+      managerMetric = "overdue";
+    } else if (wantsDebt || wantsDebtorsWord) {
+      managerMetric = "debt";
+    } else if (wantsContract) {
+      managerMetric = "contract";
+    } else if (wantsPaid) {
+      managerMetric = "paid";
+    }
+    return respond(buildAssistantManagerRankingReply(analyzedRows, managerMetric, isRussian, topLimit));
+  }
+
+  if (wantsTop && (wantsDebt || wantsDebtorsWord)) {
+    return respond(buildAssistantTopByMetricReply(analyzedRows, "debt", isRussian, topLimit));
+  }
+  if (wantsTop && wantsContract) {
+    return respond(buildAssistantTopByMetricReply(analyzedRows, "contract", isRussian, topLimit));
+  }
+  if (wantsTop && wantsPaid) {
+    return respond(buildAssistantTopByMetricReply(analyzedRows, "paid", isRussian, topLimit));
+  }
+
+  if (wantsOverdue) {
+    if (dayRange) {
+      return respond(buildAssistantOverdueRangeReply(analyzedRows, isRussian, dayRange.min, dayRange.max, topLimit));
+    }
+    if (comparator === "gt" || /(more than|over|больше|более|свыше)/i.test(normalizedMessage)) {
+      return respond(buildAssistantOverdueRangeReply(analyzedRows, isRussian, Math.max(1, dayThreshold + 1), null, topLimit));
+    }
+    if (comparator === "lt" || /(less than|under|меньше|менее|до)/i.test(normalizedMessage)) {
+      return respond(buildAssistantOverdueRangeReply(analyzedRows, isRussian, 1, Math.max(1, dayThreshold - 1), topLimit));
+    }
+    return respond(buildAssistantStatusReply(visibleRecords, "overdue", isRussian));
+  }
+
+  if (wantsWrittenOff) {
+    return respond(buildAssistantStatusReply(visibleRecords, "written_off", isRussian));
+  }
+
+  if (wantsNotFullyPaid) {
+    return respond(buildAssistantNotFullyPaidReply(analyzedRows, isRussian, topLimit));
+  }
+
+  if (wantsFullyPaid) {
+    return respond(buildAssistantStatusReply(visibleRecords, "fully_paid", isRussian));
+  }
+
+  if (comparator && amountThreshold && (wantsDebt || wantsContract || wantsPaid)) {
+    const metricKey = wantsContract ? "contract" : wantsPaid && !wantsDebt ? "paid" : "debt";
+    return respond(buildAssistantThresholdReply(analyzedRows, metricKey, comparator, amountThreshold, isRussian, topLimit));
+  }
+
+  if (wantsPercent && wantsOverdue) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "overdue_percent", isRussian));
+  }
+  if (wantsPercent && wantsFullyPaid) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "fully_paid_percent", isRussian));
+  }
+  if (wantsAverage && wantsContract) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "avg_contract", isRussian));
+  }
+  if (wantsAverage && (wantsDebt || wantsDebtorsWord)) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "avg_debt", isRussian));
+  }
+
+  if (wantsMax && (wantsDebt || wantsDebtorsWord)) {
+    return respond(buildAssistantMaxMetricClientReply(analyzedRows, "debt", isRussian));
+  }
+  if (wantsMax && wantsContract) {
+    return respond(buildAssistantMaxMetricClientReply(analyzedRows, "contract", isRussian));
+  }
+  if (wantsMax && wantsPaid) {
+    return respond(buildAssistantMaxMetricClientReply(analyzedRows, "paid", isRussian));
+  }
+
+  const asksTotalToCollect = /(collect|close all debt|закрыть все долги|нужно собрать|сколько собрать)/i.test(normalizedMessage);
+  if (asksTotalToCollect || ((wantsSummary || wantsCount) && wantsDebt && !wantsTop)) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "total_to_collect", isRussian));
+  }
+  if ((wantsSummary || wantsCount) && wantsContract && !wantsTop) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "contract_total", isRussian));
+  }
+  if ((wantsSummary || wantsCount) && wantsPaid && !wantsTop) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "paid_total", isRussian));
+  }
+  if (wantsCount && wantsOverdue) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "overdue_count", isRussian));
+  }
+  if (wantsCount && wantsFullyPaid) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "fully_paid_count", isRussian));
+  }
+  if (wantsCount && (wantsDebt || wantsDebtorsWord)) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "debt_clients_count", isRussian));
+  }
+
+  const asksTotalClients = /(all clients|total clients|сколько клиентов|всего клиентов)/i.test(normalizedMessage);
+  if (asksTotalClients) {
+    return respond(buildAssistantSingleMetricReply(analyzedRows, "total_clients", isRussian));
   }
 
   const matches = findAssistantRecordMatches(normalizedMessage, visibleRecords);
   const bestMatch = matches[0] || null;
+  const likelyAggregateRequest =
+    wantsTop ||
+    wantsSummary ||
+    wantsCount ||
+    wantsAverage ||
+    wantsPercent ||
+    wantsManager ||
+    wantsCompany ||
+    wantsAnomaly ||
+    wantsCallList;
   const hasStrongClientMatch = Boolean(bestMatch && (bestMatch.score >= 110 || (bestMatch.score >= 78 && wantsClientLookup)));
 
-  if (hasStrongClientMatch) {
+  if (hasStrongClientMatch && (!likelyAggregateRequest || wantsClientLookup)) {
     const bestClientName = normalizeAssistantComparableText(bestMatch.record?.clientName, 220);
     const sameClientRecords = visibleRecords.filter(
       (record) => normalizeAssistantComparableText(record?.clientName, 220) === bestClientName,
     );
     const selectedRecord = pickAssistantMostRecentRecord(sameClientRecords.length ? sameClientRecords : [bestMatch.record]);
-
     if (selectedRecord) {
-      return {
-        reply: buildAssistantClientDetailsReply(selectedRecord, isRussian),
-        suggestions: getAssistantDefaultSuggestions(isRussian),
-      };
+      return respond(buildAssistantClientDetailsReply(selectedRecord, isRussian));
     }
   }
 
   if (wantsClientLookup && matches.length > 1 && (!bestMatch || bestMatch.score < 110)) {
-    return {
-      reply: buildAssistantClarifyReply(matches, isRussian),
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
-  }
-
-  if (wantsOverdue) {
-    return {
-      reply: buildAssistantStatusReply(visibleRecords, "overdue", isRussian),
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
-  }
-
-  if (wantsWrittenOff) {
-    return {
-      reply: buildAssistantStatusReply(visibleRecords, "written_off", isRussian),
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
-  }
-
-  if (wantsFullyPaid) {
-    return {
-      reply: buildAssistantStatusReply(visibleRecords, "fully_paid", isRussian),
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
-  }
-
-  if (wantsTop && wantsDebt) {
-    return {
-      reply: buildAssistantTopDebtReply(visibleRecords, isRussian),
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
+    return respond(buildAssistantClarifyReply(matches, isRussian));
   }
 
   if (wantsSummary || wantsDebt || wantsTop) {
-    return {
-      reply: buildAssistantSummaryReply(visibleRecords, updatedAt, isRussian),
-      suggestions: getAssistantDefaultSuggestions(isRussian),
-    };
+    return respond(buildAssistantSummaryReply(visibleRecords, updatedAt, isRussian));
   }
 
-  return {
-    reply: `${buildAssistantSummaryReply(visibleRecords, updatedAt, isRussian)}\n\n${buildAssistantHelpReply(
+  return respond(
+    `${buildAssistantSummaryReply(visibleRecords, updatedAt, isRussian)}\n\n${buildAssistantHelpReply(
       isRussian,
       visibleRecords.length,
     )}`,
-    suggestions: getAssistantDefaultSuggestions(isRussian),
-  };
+    false,
+  );
 }
 
 function isOpenAiAssistantConfigured() {
@@ -10359,7 +11791,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     let finalReply = normalizeAssistantReplyForDisplay(fallbackPayload.reply);
     let provider = "rules";
 
-    if (isOpenAiAssistantConfigured()) {
+    if (isOpenAiAssistantConfigured() && !fallbackPayload.handledByRules) {
       try {
         const llmReply = await requestOpenAiAssistantReply(message, mode, filteredRecords, state.updatedAt);
         if (llmReply) {
