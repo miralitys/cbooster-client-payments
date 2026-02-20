@@ -12,6 +12,7 @@ interface NavigationItem {
 
 const NAV_ITEMS: NavigationItem[] = [
   { to: "/dashboard", label: "Dashboard" },
+  { to: "/custom-dashboard", label: "Custom Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
   { to: "/payment-probability", label: "Client Payment Probability" },
   { to: "/quickbooks", label: "QuickBooks" },
@@ -23,6 +24,10 @@ const NAV_ITEMS: NavigationItem[] = [
 function resolvePageTitle(pathname: string): string {
   if (pathname.startsWith("/dashboard")) {
     return "Dashboard";
+  }
+
+  if (pathname.startsWith("/custom-dashboard")) {
+    return "Custom Dashboard";
   }
 
   if (pathname.startsWith("/quickbooks")) {
