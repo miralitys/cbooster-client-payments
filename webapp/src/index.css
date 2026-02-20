@@ -2414,6 +2414,34 @@ a {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.custom-dashboard-tasks-source-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.custom-dashboard-tasks-source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.custom-dashboard-tasks-source-head h3 {
+  margin: 0;
+  font-size: var(--font-size-md);
+}
+
+.custom-dashboard-tasks-source-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
 .custom-dashboard-upload-card {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);

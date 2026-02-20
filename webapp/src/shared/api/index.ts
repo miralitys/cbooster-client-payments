@@ -18,5 +18,7 @@ export {
   getCustomDashboard,
   getCustomDashboardUsers,
   saveCustomDashboardUsers,
+  syncCustomDashboardTasks,
+  updateCustomDashboardTasksSource,
   uploadCustomDashboardFile,
 } from "@/shared/api/customDashboard";
