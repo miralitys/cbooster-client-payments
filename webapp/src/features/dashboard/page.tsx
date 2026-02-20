@@ -149,8 +149,9 @@ export default function DashboardPage() {
     setRecordsLoading(true);
     setRecordsError("");
     try {
-      const items = await getRecords();
-      setRecords(Array.isArray(items) ? items : []);
+      const payload = await getRecords();
+      const items = Array.isArray(payload.records) ? payload.records : [];
+      setRecords(items);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load overview data.";
       setRecords([]);

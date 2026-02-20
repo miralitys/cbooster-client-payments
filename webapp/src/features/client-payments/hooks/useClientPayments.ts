@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 
-import { getRecords, getSession, putRecords } from "@/shared/api";
+import { ApiError, getRecords, getSession, putRecords } from "@/shared/api";
 import type { ClientRecord } from "@/shared/types/records";
 import type { Session } from "@/shared/types/session";
 import {
@@ -63,6 +63,19 @@ const INITIAL_MODAL_STATE: ModalState = {
   dirty: false,
 };
 
+const normalizeRevisionTimestamp = (rawValue: string | null | undefined): string | null => {
+  if (!rawValue) {
+    return null;
+  }
+
+  const timestamp = Date.parse(rawValue);
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+
+  return new Date(timestamp).toISOString();
+};
+
 export function useClientPayments() {
   const uiState = useMemo(() => readClientPaymentsUiState(), []);
 
@@ -102,6 +115,7 @@ export function useClientPayments() {
   const retryAttemptRef = useRef(0);
   const saveSuccessTimerRef = useRef<number | null>(null);
   const lastSaveSuccessAtRef = useRef(0);
+  const serverUpdatedAtRef = useRef<string | null>(null);
 
   const canManage = Boolean(session?.permissions?.manage_client_payments);
 
@@ -159,15 +173,26 @@ export function useClientPayments() {
     setIsSaving(true);
 
     try {
-      await putRecords(snapshot);
+      const savePayload = await putRecords(snapshot, serverUpdatedAtRef.current);
       baselineRef.current = serialized;
       setSaveError("");
       setHasUnsavedChanges(false);
-      setLastSyncedAt(new Date().toISOString());
+      const nextUpdatedAt = normalizeRevisionTimestamp(savePayload.updatedAt) || new Date().toISOString();
+      serverUpdatedAtRef.current = nextUpdatedAt;
+      setLastSyncedAt(nextUpdatedAt);
       maybeShowSaveSuccess(setSaveSuccessNotice, saveSuccessTimerRef, lastSaveSuccessAtRef);
       resetSaveRetryState(retryAttemptRef, setSaveRetryCount, setSaveRetryGiveUp);
       clearRetryTimer(retryTimerRef);
     } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        clearRetryTimer(retryTimerRef);
+        resetSaveRetryState(retryAttemptRef, setSaveRetryCount, setSaveRetryGiveUp);
+        setSaveRetryGiveUp(true);
+        setSaveSuccessNotice("");
+        setSaveError("Save conflict: records were updated elsewhere. Click Refresh and retry.");
+        return;
+      }
+
       const message = extractErrorMessage(error, "Failed to save records.");
       setSaveSuccessNotice("");
       const nextRetryCount = retryAttemptRef.current + 1;
@@ -244,12 +269,14 @@ export function useClientPayments() {
           return;
         }
 
-        const normalizedRecords = normalizeRecords(recordsPayload);
+        const normalizedRecords = normalizeRecords(recordsPayload.records);
         setSession(sessionPayload);
         setRecords(normalizedRecords);
         baselineRef.current = serializeRecords(normalizedRecords);
+        const nextUpdatedAt = normalizeRevisionTimestamp(recordsPayload.updatedAt);
+        serverUpdatedAtRef.current = nextUpdatedAt;
         initializedRef.current = true;
-        setLastSyncedAt(new Date().toISOString());
+        setLastSyncedAt(nextUpdatedAt || new Date().toISOString());
         setHasUnsavedChanges(false);
       } catch (error) {
         if (cancelled) {
@@ -435,10 +462,12 @@ export function useClientPayments() {
 
     try {
       const recordsPayload = await getRecords();
-      const normalized = normalizeRecords(recordsPayload);
+      const normalized = normalizeRecords(recordsPayload.records);
       setRecords(normalized);
       baselineRef.current = serializeRecords(normalized);
-      setLastSyncedAt(new Date().toISOString());
+      const nextUpdatedAt = normalizeRevisionTimestamp(recordsPayload.updatedAt);
+      serverUpdatedAtRef.current = nextUpdatedAt;
+      setLastSyncedAt(nextUpdatedAt || new Date().toISOString());
       setHasUnsavedChanges(false);
       setSaveError("");
       setSaveSuccessNotice("");

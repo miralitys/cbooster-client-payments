@@ -52,7 +52,7 @@ export default function ClientScorePage() {
 
     try {
       const payload = await getRecords();
-      const normalized = normalizeRecords(Array.isArray(payload) ? payload : []);
+      const normalized = normalizeRecords(Array.isArray(payload.records) ? payload.records : []);
       setRecords(normalized);
       setAsOfDate(new Date());
     } catch (error) {
