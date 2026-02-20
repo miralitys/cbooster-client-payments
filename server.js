@@ -20,6 +20,11 @@ const {
   normalizeAttachmentStorageBaseUrl,
   resolveAttachmentStoragePath,
 } = require("./attachments-storage-utils");
+const {
+  computeRecordHash,
+  computeRowsChecksum,
+  normalizeLegacyRecordsSnapshot,
+} = require("./client-records-v2-utils");
 const { registerCustomDashboardModule } = require("./custom-dashboard-module");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
@@ -116,6 +121,8 @@ const PERF_DB_SLOW_QUERY_MS = Math.min(Math.max(parsePositiveInteger(process.env
 const PERF_EVENT_LOOP_INTERVAL_MS = Math.min(Math.max(parsePositiveInteger(process.env.PERF_EVENT_LOOP_INTERVAL_MS, 1000), 100), 10000);
 const PERF_EVENT_LOOP_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.PERF_EVENT_LOOP_SAMPLE_SIZE, 600), 30), 10000);
 const RECORDS_PATCH_ENABLED = resolveOptionalBoolean(process.env.RECORDS_PATCH) === true;
+const DUAL_WRITE_V2_ENABLED = resolveOptionalBoolean(process.env.DUAL_WRITE_V2) === true;
+const DUAL_READ_COMPARE_ENABLED = resolveOptionalBoolean(process.env.DUAL_READ_COMPARE) === true;
 const DB_METRICS_CLIENT_PATCHED_FLAG = Symbol("dbMetricsClientPatched");
 const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
 const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
@@ -1284,7 +1291,162 @@ function createPerformanceObservabilityState(options = {}) {
         timerId: null,
       },
     },
+    recordsDualWrite: {
+      enabled: DUAL_WRITE_V2_ENABLED,
+      attemptedCount: 0,
+      successCount: 0,
+      failedCount: 0,
+      desyncCount: 0,
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastDesyncAt: null,
+      lastFailureCode: "",
+      lastFailureMessage: "",
+      lastSuccessSummary: null,
+      lastDesyncSummary: null,
+    },
+    recordsDualReadCompare: {
+      enabled: DUAL_READ_COMPARE_ENABLED,
+      attemptedCount: 0,
+      matchCount: 0,
+      mismatchCount: 0,
+      errorCount: 0,
+      lastAttemptAt: null,
+      lastMatchAt: null,
+      lastMismatchAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: "",
+      lastMismatchSummary: null,
+    },
   };
+}
+
+function normalizeDualWriteSummaryValue(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function buildDualWriteSummaryPayload(summary = {}) {
+  return {
+    mode: sanitizeTextValue(summary.mode, 32),
+    recordsCount: normalizeDualWriteSummaryValue(summary.recordsCount),
+    expectedCount: normalizeDualWriteSummaryValue(summary.expectedCount),
+    v2Count: normalizeDualWriteSummaryValue(summary.v2Count),
+    insertedCount: normalizeDualWriteSummaryValue(summary.insertedCount),
+    updatedCount: normalizeDualWriteSummaryValue(summary.updatedCount),
+    unchangedCount: normalizeDualWriteSummaryValue(summary.unchangedCount),
+    deletedCount: normalizeDualWriteSummaryValue(summary.deletedCount),
+    skippedInvalidRecordCount: normalizeDualWriteSummaryValue(summary.skippedInvalidRecordCount),
+    skippedMissingIdCount: normalizeDualWriteSummaryValue(summary.skippedMissingIdCount),
+    duplicateIdCount: normalizeDualWriteSummaryValue(summary.duplicateIdCount),
+  };
+}
+
+function recordDualWriteMetricAttempt(state) {
+  if (!state?.recordsDualWrite) {
+    return;
+  }
+  state.recordsDualWrite.attemptedCount += 1;
+  state.recordsDualWrite.lastAttemptAt = new Date().toISOString();
+}
+
+function recordDualWriteMetricSuccess(state, summary) {
+  if (!state?.recordsDualWrite) {
+    return;
+  }
+  state.recordsDualWrite.successCount += 1;
+  state.recordsDualWrite.lastSuccessAt = new Date().toISOString();
+  state.recordsDualWrite.lastSuccessSummary = buildDualWriteSummaryPayload(summary);
+}
+
+function recordDualWriteMetricFailure(state, error) {
+  if (!state?.recordsDualWrite) {
+    return;
+  }
+  state.recordsDualWrite.failedCount += 1;
+  state.recordsDualWrite.lastFailureAt = new Date().toISOString();
+  state.recordsDualWrite.lastFailureCode = sanitizeTextValue(error?.code, 64);
+  state.recordsDualWrite.lastFailureMessage = sanitizeTextValue(error?.message, 500);
+}
+
+function recordDualWriteMetricDesync(state, summary) {
+  if (!state?.recordsDualWrite) {
+    return;
+  }
+  state.recordsDualWrite.desyncCount += 1;
+  state.recordsDualWrite.lastDesyncAt = new Date().toISOString();
+  state.recordsDualWrite.lastDesyncSummary = buildDualWriteSummaryPayload(summary);
+}
+
+function normalizeDualReadSampleIds(rawIds, maxItems = 20) {
+  const list = Array.isArray(rawIds) ? rawIds : [];
+  const normalized = [];
+  for (const rawId of list) {
+    const id = sanitizeTextValue(rawId, 180);
+    if (!id) {
+      continue;
+    }
+    normalized.push(id);
+    if (normalized.length >= maxItems) {
+      break;
+    }
+  }
+  return normalized;
+}
+
+function buildDualReadCompareSummaryPayload(summary = {}) {
+  return {
+    source: sanitizeTextValue(summary.source, 80),
+    legacyCount: normalizeDualWriteSummaryValue(summary.legacyCount),
+    v2Count: normalizeDualWriteSummaryValue(summary.v2Count),
+    legacyChecksum: sanitizeTextValue(summary.legacyChecksum, 80),
+    v2Checksum: sanitizeTextValue(summary.v2Checksum, 80),
+    missingInV2Count: normalizeDualWriteSummaryValue(summary.missingInV2Count),
+    extraInV2Count: normalizeDualWriteSummaryValue(summary.extraInV2Count),
+    hashMismatchCount: normalizeDualWriteSummaryValue(summary.hashMismatchCount),
+    v2StoredHashMismatchCount: normalizeDualWriteSummaryValue(summary.v2StoredHashMismatchCount),
+    missingInV2SampleIds: normalizeDualReadSampleIds(summary.missingInV2SampleIds),
+    extraInV2SampleIds: normalizeDualReadSampleIds(summary.extraInV2SampleIds),
+    hashMismatchSampleIds: normalizeDualReadSampleIds(summary.hashMismatchSampleIds),
+  };
+}
+
+function recordDualReadCompareAttempt(state) {
+  if (!state?.recordsDualReadCompare) {
+    return;
+  }
+  state.recordsDualReadCompare.attemptedCount += 1;
+  state.recordsDualReadCompare.lastAttemptAt = new Date().toISOString();
+}
+
+function recordDualReadCompareMatch(state) {
+  if (!state?.recordsDualReadCompare) {
+    return;
+  }
+  state.recordsDualReadCompare.matchCount += 1;
+  state.recordsDualReadCompare.lastMatchAt = new Date().toISOString();
+}
+
+function recordDualReadCompareMismatch(state, summary) {
+  if (!state?.recordsDualReadCompare) {
+    return;
+  }
+  state.recordsDualReadCompare.mismatchCount += 1;
+  state.recordsDualReadCompare.lastMismatchAt = new Date().toISOString();
+  state.recordsDualReadCompare.lastMismatchSummary = buildDualReadCompareSummaryPayload(summary);
+}
+
+function recordDualReadCompareError(state, error) {
+  if (!state?.recordsDualReadCompare) {
+    return;
+  }
+  state.recordsDualReadCompare.errorCount += 1;
+  state.recordsDualReadCompare.lastErrorAt = new Date().toISOString();
+  state.recordsDualReadCompare.lastErrorMessage = sanitizeTextValue(error?.message, 600);
 }
 
 function startPerformanceObservabilityMonitor(state) {
@@ -1553,6 +1715,8 @@ function buildPerformanceDiagnosticsPayload(state) {
   const dbState = state.db;
   const eventLoopState = state.process.eventLoop;
   const eventLoopSorted = getSortedRollingLatencyValues(eventLoopState.sample);
+  const dualWriteState = state.recordsDualWrite || {};
+  const dualReadCompareState = state.recordsDualReadCompare || {};
 
   const httpRouteRows = Array.from(httpState.routes.values())
     .sort((left, right) => {
@@ -1648,6 +1812,36 @@ function buildPerformanceDiagnosticsPayload(state) {
         lastDurationMs: dbState.lastDurationMs,
       }),
       byStatementType: dbStatementRows,
+    },
+    recordsDualWrite: {
+      enabled: dualWriteState.enabled === true,
+      attemptedCount: normalizeDualWriteSummaryValue(dualWriteState.attemptedCount),
+      successCount: normalizeDualWriteSummaryValue(dualWriteState.successCount),
+      failedCount: normalizeDualWriteSummaryValue(dualWriteState.failedCount),
+      desyncCount: normalizeDualWriteSummaryValue(dualWriteState.desyncCount),
+      lastAttemptAt: sanitizeTextValue(dualWriteState.lastAttemptAt, 60),
+      lastSuccessAt: sanitizeTextValue(dualWriteState.lastSuccessAt, 60),
+      lastFailureAt: sanitizeTextValue(dualWriteState.lastFailureAt, 60),
+      lastDesyncAt: sanitizeTextValue(dualWriteState.lastDesyncAt, 60),
+      lastFailureCode: sanitizeTextValue(dualWriteState.lastFailureCode, 80),
+      lastFailureMessage: sanitizeTextValue(dualWriteState.lastFailureMessage, 500),
+      lastSuccessSummary: dualWriteState.lastSuccessSummary ? buildDualWriteSummaryPayload(dualWriteState.lastSuccessSummary) : null,
+      lastDesyncSummary: dualWriteState.lastDesyncSummary ? buildDualWriteSummaryPayload(dualWriteState.lastDesyncSummary) : null,
+    },
+    recordsDualReadCompare: {
+      enabled: dualReadCompareState.enabled === true,
+      attemptedCount: normalizeDualWriteSummaryValue(dualReadCompareState.attemptedCount),
+      matchCount: normalizeDualWriteSummaryValue(dualReadCompareState.matchCount),
+      mismatchCount: normalizeDualWriteSummaryValue(dualReadCompareState.mismatchCount),
+      errorCount: normalizeDualWriteSummaryValue(dualReadCompareState.errorCount),
+      lastAttemptAt: sanitizeTextValue(dualReadCompareState.lastAttemptAt, 60),
+      lastMatchAt: sanitizeTextValue(dualReadCompareState.lastMatchAt, 60),
+      lastMismatchAt: sanitizeTextValue(dualReadCompareState.lastMismatchAt, 60),
+      lastErrorAt: sanitizeTextValue(dualReadCompareState.lastErrorAt, 60),
+      lastErrorMessage: sanitizeTextValue(dualReadCompareState.lastErrorMessage, 600),
+      lastMismatchSummary: dualReadCompareState.lastMismatchSummary
+        ? buildDualReadCompareSummaryPayload(dualReadCompareState.lastMismatchSummary)
+        : null,
     },
   };
 }
@@ -15210,6 +15404,343 @@ async function getStoredRecords() {
   };
 }
 
+function normalizeV2RowForDualReadCompare(rawRow) {
+  const id = sanitizeTextValue(rawRow?.id, 180);
+  if (!id) {
+    return null;
+  }
+
+  const record = rawRow?.record && typeof rawRow.record === "object" && !Array.isArray(rawRow.record) ? rawRow.record : {};
+  const recordHash = computeRecordHash(record);
+  const storedHash = sanitizeTextValue(rawRow?.record_hash, 128).toLowerCase();
+
+  return {
+    id,
+    recordHash,
+    storedHashMatches: storedHash ? storedHash === recordHash : false,
+  };
+}
+
+function compareLegacyAndV2RecordSnapshots(legacyRows, v2Rows, options = {}) {
+  const source = sanitizeTextValue(options.source, 80) || "GET /api/records";
+  const maxSampleIds = Math.min(Math.max(Number.parseInt(options.maxSampleIds, 10) || 20, 1), 50);
+
+  const normalizedLegacyRows = Array.isArray(legacyRows) ? legacyRows : [];
+  const normalizedV2Rows = Array.isArray(v2Rows) ? v2Rows : [];
+  const legacyMap = new Map(normalizedLegacyRows.map((row) => [row.id, row.recordHash]));
+  const v2Map = new Map(normalizedV2Rows.map((row) => [row.id, row.recordHash]));
+
+  const missingInV2Ids = [];
+  const extraInV2Ids = [];
+  const hashMismatchIds = [];
+  let v2StoredHashMismatchCount = 0;
+
+  for (const [id, legacyHash] of legacyMap.entries()) {
+    if (!v2Map.has(id)) {
+      missingInV2Ids.push(id);
+      continue;
+    }
+    const v2Hash = v2Map.get(id);
+    if (legacyHash !== v2Hash) {
+      hashMismatchIds.push(id);
+    }
+  }
+
+  for (const row of normalizedV2Rows) {
+    if (!legacyMap.has(row.id)) {
+      extraInV2Ids.push(row.id);
+    }
+    if (row.storedHashMatches === false) {
+      v2StoredHashMismatchCount += 1;
+    }
+  }
+
+  const summary = {
+    source,
+    legacyCount: normalizedLegacyRows.length,
+    v2Count: normalizedV2Rows.length,
+    legacyChecksum: computeRowsChecksum(normalizedLegacyRows),
+    v2Checksum: computeRowsChecksum(normalizedV2Rows),
+    missingInV2Count: missingInV2Ids.length,
+    extraInV2Count: extraInV2Ids.length,
+    hashMismatchCount: hashMismatchIds.length,
+    v2StoredHashMismatchCount,
+    missingInV2SampleIds: missingInV2Ids.slice(0, maxSampleIds),
+    extraInV2SampleIds: extraInV2Ids.slice(0, maxSampleIds),
+    hashMismatchSampleIds: hashMismatchIds.slice(0, maxSampleIds),
+  };
+
+  const mismatchDetected =
+    summary.legacyCount !== summary.v2Count ||
+    summary.legacyChecksum !== summary.v2Checksum ||
+    summary.missingInV2Count > 0 ||
+    summary.extraInV2Count > 0 ||
+    summary.hashMismatchCount > 0 ||
+    summary.v2StoredHashMismatchCount > 0;
+
+  return {
+    mismatchDetected,
+    summary,
+  };
+}
+
+async function runDualReadCompareForLegacyRecords(records, options = {}) {
+  if (!DUAL_READ_COMPARE_ENABLED || !pool) {
+    return;
+  }
+
+  recordDualReadCompareAttempt(performanceObservability);
+  const source = sanitizeTextValue(options.source, 80) || "GET /api/records";
+  const requestedBy = sanitizeTextValue(options.requestedBy, 160);
+
+  try {
+    await ensureDatabaseReady();
+
+    const legacySnapshot = normalizeLegacyRecordsSnapshot(records, {
+      sourceStateRowId: STATE_ROW_ID,
+    });
+
+    const v2Result = await pool.query(
+      `
+        SELECT id, record, record_hash
+        FROM ${CLIENT_RECORDS_V2_TABLE}
+        WHERE source_state_row_id = $1
+        ORDER BY id ASC
+      `,
+      [STATE_ROW_ID],
+    );
+
+    const v2Rows = [];
+    for (const row of v2Result.rows) {
+      const normalizedRow = normalizeV2RowForDualReadCompare(row);
+      if (!normalizedRow) {
+        continue;
+      }
+      v2Rows.push(normalizedRow);
+    }
+    v2Rows.sort((left, right) => left.id.localeCompare(right.id));
+
+    const compareResult = compareLegacyAndV2RecordSnapshots(legacySnapshot.rows, v2Rows, {
+      source,
+      maxSampleIds: 20,
+    });
+
+    if (compareResult.mismatchDetected) {
+      const summary = {
+        requestedBy,
+        ...compareResult.summary,
+      };
+      recordDualReadCompareMismatch(performanceObservability, summary);
+      console.warn("[records dual-read compare] mismatch detected:", buildDualReadCompareSummaryPayload(summary));
+      return;
+    }
+
+    recordDualReadCompareMatch(performanceObservability);
+  } catch (error) {
+    recordDualReadCompareError(performanceObservability, error);
+    console.error("[records dual-read compare] failed:", {
+      source,
+      requestedBy,
+      code: sanitizeTextValue(error?.code, 80),
+      message: sanitizeTextValue(error?.message, 600),
+    });
+  }
+}
+
+function scheduleDualReadCompareForLegacyRecords(records, options = {}) {
+  if (!DUAL_READ_COMPARE_ENABLED || !pool) {
+    return;
+  }
+
+  const recordsSnapshot = Array.isArray(records) ? records.slice() : [];
+  setImmediate(() => {
+    void runDualReadCompareForLegacyRecords(recordsSnapshot, options);
+  });
+}
+
+function normalizeSourceStateUpdatedAtForV2(rawValue) {
+  if (!rawValue) {
+    return null;
+  }
+
+  const parsed = Date.parse(rawValue);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return new Date(parsed).toISOString();
+}
+
+async function syncLegacyRecordsSnapshotToV2(client, records, options = {}) {
+  const sourceStateRowId = STATE_ROW_ID;
+  const sourceStateUpdatedAt = normalizeSourceStateUpdatedAtForV2(options.sourceStateUpdatedAt);
+  const snapshot = normalizeLegacyRecordsSnapshot(records, {
+    sourceStateUpdatedAt,
+    sourceStateRowId,
+  });
+
+  let insertedCount = 0;
+  let updatedCount = 0;
+  let unchangedCount = 0;
+
+  for (const row of snapshot.rows) {
+    const result = await client.query(
+      `
+        INSERT INTO ${CLIENT_RECORDS_V2_TABLE}
+          (id, record, record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id, inserted_at, updated_at)
+        VALUES
+          ($1, $2::jsonb, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9, NOW(), NOW())
+        ON CONFLICT (id)
+        DO UPDATE SET
+          record = EXCLUDED.record,
+          record_hash = EXCLUDED.record_hash,
+          client_name = EXCLUDED.client_name,
+          company_name = EXCLUDED.company_name,
+          closed_by = EXCLUDED.closed_by,
+          created_at = EXCLUDED.created_at,
+          source_state_updated_at = EXCLUDED.source_state_updated_at,
+          source_state_row_id = EXCLUDED.source_state_row_id,
+          updated_at = NOW()
+        WHERE
+          (record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id)
+          IS DISTINCT FROM
+          (EXCLUDED.record_hash, EXCLUDED.client_name, EXCLUDED.company_name, EXCLUDED.closed_by, EXCLUDED.created_at, EXCLUDED.source_state_updated_at, EXCLUDED.source_state_row_id)
+        RETURNING (xmax = 0) AS inserted
+      `,
+      [
+        row.id,
+        JSON.stringify(row.record),
+        row.recordHash,
+        row.clientName,
+        row.companyName,
+        row.closedBy,
+        row.createdAt,
+        row.sourceStateUpdatedAt,
+        row.sourceStateRowId,
+      ],
+    );
+
+    if (!result.rows.length) {
+      unchangedCount += 1;
+      continue;
+    }
+
+    if (result.rows[0]?.inserted) {
+      insertedCount += 1;
+    } else {
+      updatedCount += 1;
+    }
+  }
+
+  let deletedCount = 0;
+  if (snapshot.rows.length) {
+    const ids = snapshot.rows.map((row) => row.id);
+    const deleteResult = await client.query(
+      `
+        DELETE FROM ${CLIENT_RECORDS_V2_TABLE}
+        WHERE source_state_row_id = $1
+          AND NOT (id = ANY($2::text[]))
+      `,
+      [sourceStateRowId, ids],
+    );
+    deletedCount = deleteResult.rowCount || 0;
+  } else {
+    const deleteResult = await client.query(
+      `
+        DELETE FROM ${CLIENT_RECORDS_V2_TABLE}
+        WHERE source_state_row_id = $1
+      `,
+      [sourceStateRowId],
+    );
+    deletedCount = deleteResult.rowCount || 0;
+  }
+
+  const countResult = await client.query(
+    `SELECT COUNT(*)::bigint AS total FROM ${CLIENT_RECORDS_V2_TABLE} WHERE source_state_row_id = $1`,
+    [sourceStateRowId],
+  );
+  const v2Count = normalizeDualWriteSummaryValue(countResult.rows[0]?.total);
+
+  return {
+    expectedCount: snapshot.rows.length,
+    v2Count,
+    insertedCount,
+    updatedCount,
+    unchangedCount,
+    deletedCount,
+    skippedInvalidRecordCount: snapshot.skippedInvalidRecordCount,
+    skippedMissingIdCount: snapshot.skippedMissingIdCount,
+    duplicateIdCount: snapshot.duplicateIdCount,
+  };
+}
+
+async function applyRecordsDualWriteV2(client, records, options = {}) {
+  if (!DUAL_WRITE_V2_ENABLED) {
+    return {
+      enabled: false,
+      attempted: false,
+    };
+  }
+
+  const mode = sanitizeTextValue(options.mode, 32) || "unknown";
+  const recordsCount = Array.isArray(records) ? records.length : 0;
+  recordDualWriteMetricAttempt(performanceObservability);
+
+  try {
+    const syncSummary = await syncLegacyRecordsSnapshotToV2(client, records, {
+      sourceStateUpdatedAt: options.sourceStateUpdatedAt,
+    });
+    const metricSummary = {
+      mode,
+      recordsCount,
+      ...syncSummary,
+    };
+
+    if (syncSummary.v2Count !== syncSummary.expectedCount) {
+      recordDualWriteMetricDesync(performanceObservability, metricSummary);
+      const desyncError = createHttpError(
+        "client_records_v2 is out of sync after dual-write verification. Legacy write was rolled back.",
+        503,
+        "records_v2_dual_write_desync",
+      );
+      desyncError.detail = `mode=${mode}, expected=${syncSummary.expectedCount}, actual=${syncSummary.v2Count}`;
+      desyncError.dualWriteSummary = metricSummary;
+      throw desyncError;
+    }
+
+    recordDualWriteMetricSuccess(performanceObservability, metricSummary);
+    return {
+      enabled: true,
+      attempted: true,
+      summary: metricSummary,
+    };
+  } catch (error) {
+    recordDualWriteMetricFailure(performanceObservability, error);
+    if (error?.code === "records_v2_dual_write_desync") {
+      console.error("[records dual-write] desync detected:", {
+        mode,
+        summary: error.dualWriteSummary || null,
+      });
+      throw error;
+    }
+
+    console.error("[records dual-write] failed to write v2 mirror:", {
+      mode,
+      recordsCount,
+      errorCode: sanitizeTextValue(error?.code, 80),
+      message: sanitizeTextValue(error?.message, 600),
+    });
+
+    const wrappedError = createHttpError(
+      "Failed to persist records to client_records_v2. Legacy write was rolled back.",
+      503,
+      "records_v2_dual_write_failed",
+    );
+    wrappedError.detail = sanitizeTextValue(error?.message, 600);
+    throw wrappedError;
+  }
+}
+
 async function saveStoredRecords(records, options = {}) {
   await ensureDatabaseReady();
   const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(options, "expectedUpdatedAt");
@@ -15263,8 +15794,14 @@ async function saveStoredRecords(records, options = {}) {
       [STATE_ROW_ID, JSON.stringify(records)],
     );
 
+    const updatedAt = result.rows[0]?.updated_at || null;
+    await applyRecordsDualWriteV2(client, records, {
+      mode: "put",
+      sourceStateUpdatedAt: updatedAt,
+    });
+
     await client.query("COMMIT");
-    return result.rows[0]?.updated_at || null;
+    return updatedAt;
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -15343,9 +15880,15 @@ async function saveStoredRecordsPatch(operations, options = {}) {
       [STATE_ROW_ID, JSON.stringify(nextRecords)],
     );
 
+    const updatedAt = result.rows[0]?.updated_at || null;
+    await applyRecordsDualWriteV2(client, nextRecords, {
+      mode: "patch",
+      sourceStateUpdatedAt: updatedAt,
+    });
+
     await client.query("COMMIT");
     return {
-      updatedAt: result.rows[0]?.updated_at || null,
+      updatedAt,
     };
   } catch (error) {
     try {
@@ -18508,6 +19051,10 @@ app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAY
 
   try {
     const state = await getStoredRecords();
+    scheduleDualReadCompareForLegacyRecords(state.records, {
+      source: "GET /api/records",
+      requestedBy: req.webAuthUser,
+    });
     const filteredRecords = filterClientRecordsForWebAuthUser(state.records, req.webAuthProfile);
     res.json({
       records: filteredRecords,
@@ -19931,6 +20478,16 @@ app.listen(PORT, () => {
     );
   } else {
     console.warn("Performance observability is disabled (PERF_OBSERVABILITY_ENABLED=false).");
+  }
+  if (DUAL_WRITE_V2_ENABLED) {
+    console.log("Records dual-write is enabled (legacy JSONB + client_records_v2 mirror). Read path remains legacy.");
+  } else {
+    console.log("Records dual-write is disabled (set DUAL_WRITE_V2=true to enable legacy + v2 mirror writes).");
+  }
+  if (DUAL_READ_COMPARE_ENABLED) {
+    console.log("Records dual-read compare is enabled (legacy response + async v2 comparison).");
+  } else {
+    console.log("Records dual-read compare is disabled (set DUAL_READ_COMPARE=true to enable async compare).");
   }
   if (SIMULATE_SLOW_RECORDS_REQUESTED && IS_PRODUCTION) {
     console.warn("SIMULATE_SLOW_RECORDS was requested but ignored in production mode.");
