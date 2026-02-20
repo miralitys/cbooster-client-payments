@@ -11,6 +11,11 @@ export interface ClientRecord {
   ssn: string;
   creditMonitoringLogin: string;
   creditMonitoringPassword: string;
+  leadSource: string;
+  clientPhoneNumber: string;
+  clientEmailAddress: string;
+  futurePayment: string;
+  identityIq: string;
   contractTotals: string;
   totalPayments: string;
   payment1: string;

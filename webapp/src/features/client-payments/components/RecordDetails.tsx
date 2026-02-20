@@ -23,6 +23,16 @@ const HEADER_FIELD_KEYS = new Set<keyof ClientRecord>([
 const PAYMENT_FIELD_KEYS = new Set<keyof ClientRecord>(
   PAYMENT_PAIRS.flatMap(([paymentKey, paymentDateKey]) => [paymentKey, paymentDateKey]),
 );
+const PROFILE_SUMMARY_FIELD_KEYS = new Set<keyof ClientRecord>([
+  "address",
+  "dateOfBirth",
+  "ssn",
+  "creditMonitoringLogin",
+  "creditMonitoringPassword",
+  "purchasedService",
+  "clientPhoneNumber",
+  "clientEmailAddress",
+]);
 
 interface RequestedClientField {
   label: string;
@@ -53,7 +63,13 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const statusBadge = useMemo(() => resolveStatusBadge(record), [record]);
 
   const detailsFields = useMemo(
-    () => FIELD_DEFINITIONS.filter((field) => !HEADER_FIELD_KEYS.has(field.key) && !PAYMENT_FIELD_KEYS.has(field.key)),
+    () =>
+      FIELD_DEFINITIONS.filter(
+        (field) =>
+          !HEADER_FIELD_KEYS.has(field.key) &&
+          !PAYMENT_FIELD_KEYS.has(field.key) &&
+          !PROFILE_SUMMARY_FIELD_KEYS.has(field.key),
+      ),
     [],
   );
 
