@@ -18921,31 +18921,55 @@ function normalizeDateForStorage(rawValue) {
   return formatDateTimestampUs(timestamp);
 }
 
+function createPublicErrorCorrelationId() {
+  if (typeof crypto.randomUUID === "function") {
+    return `err_${crypto.randomUUID()}`;
+  }
+
+  const randomChunk = Math.random().toString(36).slice(2, 10);
+  return `err_${Date.now().toString(36)}_${randomChunk}`;
+}
+
+function resolvePublicErrorCode(rawCode) {
+  const code = sanitizeTextValue(rawCode, 64);
+  if (!code) {
+    return "";
+  }
+
+  // Expose only application-level codes. Hide infrastructure/driver codes like ECONNREFUSED/28P01.
+  if (!/^[a-z][a-z0-9_-]{1,63}$/.test(code)) {
+    return "";
+  }
+
+  return code;
+}
+
 function buildPublicErrorPayload(error, fallbackMessage) {
+  const correlationId = createPublicErrorCorrelationId();
   const payload = {
     error: fallbackMessage,
+    correlationId,
   };
 
-  const code = sanitizeTextValue(error?.code, 40);
+  const code = resolvePublicErrorCode(error?.code);
   const message = sanitizeTextValue(error?.message, 600);
   const detail = sanitizeTextValue(error?.detail, 600);
   const hint = sanitizeTextValue(error?.hint, 600);
+  const stack = sanitizeTextValue(error?.stack, 2600);
 
   if (code) {
     payload.code = code;
   }
 
-  if (message) {
-    payload.details = message;
-  }
-
-  if (detail) {
-    payload.dbDetail = detail;
-  }
-
-  if (hint) {
-    payload.dbHint = hint;
-  }
+  // Keep internals in logs only; never expose DB/network internals in API payload.
+  console.error(`[api-error:${correlationId}]`, {
+    fallbackMessage: sanitizeTextValue(fallbackMessage, 240),
+    code: sanitizeTextValue(error?.code, 80),
+    message,
+    detail,
+    hint,
+    stack,
+  });
 
   return payload;
 }
