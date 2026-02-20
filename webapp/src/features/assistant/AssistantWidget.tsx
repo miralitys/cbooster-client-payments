@@ -69,22 +69,22 @@ interface WindowWithSpeechRecognition extends Window {
 const DEFAULT_SUGGESTIONS_EN = [
   "Give me a client summary",
   "Show top 10 debtors",
+  "How many new clients from 2026-02-01 to 2026-02-09?",
+  "How many first payments in the last 30 days?",
+  "Revenue by week for the last 2 months",
+  "Who stopped paying after 2025-10-01?",
   "Manager ranking by debt",
-  "Clients overdue more than 30 days",
-  "Clients without manager",
-  "Anomalies: paid is higher than contract",
-  "Today's call list",
   "Show client John Smith",
 ];
 
 const DEFAULT_SUGGESTIONS_RU = [
   "Сводка по клиентам",
   "Покажи топ-10 должников",
+  "Сколько новых клиентов с 2026-02-01 по 2026-02-09?",
+  "Сколько первых платежей за последние 30 дней?",
+  "Выручка по неделям за последние 2 месяца",
+  "Кто перестал платить после 2025-10-01?",
   "Рейтинг менеджеров по долгу",
-  "Клиенты с просрочкой больше 30 дней",
-  "Клиенты без менеджера",
-  "Аномалии: оплачено больше договора",
-  "Список для обзвона на сегодня",
   "Покажи клиента John Smith",
 ];
 const FEMALE_VOICE_HINTS = [
@@ -424,8 +424,8 @@ export function AssistantWidget() {
       id: generateMessageId(),
       role: "assistant",
       text: isRussian
-        ? "Привет. Я могу ответить по клиентским данным: сводки, топы, просрочки, рейтинги менеджеров, аномалии и карточки клиентов."
-        : "Hi. I can answer from client data: summaries, top lists, overdue filters, manager rankings, anomalies, and client cards.",
+        ? "Привет. Я могу ответить по клиентским данным: сводки, топы, просрочки, рейтинги менеджеров, динамика по периодам и карточки клиентов."
+        : "Hi. I can answer from client data: summaries, top lists, overdue filters, manager rankings, period analytics, and client cards.",
       mentions: [],
       createdAt: Date.now(),
     },
