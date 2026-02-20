@@ -309,6 +309,18 @@ a {
   gap: var(--space-2);
 }
 
+.cb-page-header-panel__compact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.cb-page-header-panel__compact-meta {
+  min-width: 0;
+}
+
 .cb-page-header-toolbar {
   display: inline-flex;
   align-items: center;
