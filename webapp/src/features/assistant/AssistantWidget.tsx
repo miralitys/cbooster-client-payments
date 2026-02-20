@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import assistantAvatar from "@/assets/assistant-avatar.svg";
-import { sendAssistantMessage } from "@/shared/api";
+import { ApiError, resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api";
 import { cx } from "@/shared/lib/cx";
 import type { AssistantMode } from "@/shared/types/assistant";
 
@@ -104,6 +104,7 @@ const FEMALE_VOICE_HINTS = [
 ];
 const MALE_VOICE_HINTS = ["male", "man", "alex", "david", "daniel", "george", "sergey", "pavel"];
 const NATURAL_VOICE_HINTS = ["natural", "neural", "premium", "enhanced", "wavenet", "online"];
+const ASSISTANT_CHAT_SESSION_STORAGE_KEY = "cbooster_assistant_chat_session_id";
 
 function resolveSpeechRecognitionConstructor(): SpeechRecognitionConstructorLike | null {
   if (typeof window === "undefined") {
@@ -116,6 +117,56 @@ function resolveSpeechRecognitionConstructor(): SpeechRecognitionConstructorLike
 
 function generateMessageId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createAssistantGreetingMessage(isRussian: boolean): ChatMessage {
+  return {
+    id: generateMessageId(),
+    role: "assistant",
+    text: isRussian
+      ? "Привет. Я могу ответить по клиентским данным: сводки, топы, просрочки, рейтинги менеджеров, динамика по периодам и карточки клиентов."
+      : "Hi. I can answer from client data: summaries, top lists, overdue filters, manager rankings, period analytics, and client cards.",
+    mentions: [],
+    createdAt: Date.now(),
+  };
+}
+
+function generateAssistantSessionId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function persistAssistantSessionId(sessionId: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(ASSISTANT_CHAT_SESSION_STORAGE_KEY, sessionId);
+  } catch {
+    // Ignore localStorage write failures.
+  }
+}
+
+function resolveAssistantSessionId(): string {
+  if (typeof window === "undefined") {
+    return generateAssistantSessionId();
+  }
+
+  try {
+    const stored = normalizeOutgoingMessage(window.localStorage.getItem(ASSISTANT_CHAT_SESSION_STORAGE_KEY) || "");
+    if (/^[a-z0-9_.:-]{8,120}$/i.test(stored)) {
+      return stored;
+    }
+  } catch {
+    // Ignore localStorage access failures and use in-memory id.
+  }
+
+  const nextSessionId = generateAssistantSessionId();
+  persistAssistantSessionId(nextSessionId);
+  return nextSessionId;
 }
 
 function normalizeOutgoingMessage(rawValue: string): string {
@@ -419,17 +470,7 @@ export function AssistantWidget() {
   const [isOpen, setIsOpen] = useState(false);
   const [mode, setMode] = useState<AssistantMode>("text");
   const [draft, setDraft] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: generateMessageId(),
-      role: "assistant",
-      text: isRussian
-        ? "Привет. Я могу ответить по клиентским данным: сводки, топы, просрочки, рейтинги менеджеров, динамика по периодам и карточки клиентов."
-        : "Hi. I can answer from client data: summaries, top lists, overdue filters, manager rankings, period analytics, and client cards.",
-      mentions: [],
-      createdAt: Date.now(),
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [createAssistantGreetingMessage(isRussian)]);
   const [suggestions, setSuggestions] = useState<string[]>(defaultSuggestions);
   const [isSending, setIsSending] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -441,8 +482,38 @@ export function AssistantWidget() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const speechSequenceRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const chatSessionIdRef = useRef<string>(resolveAssistantSessionId());
 
   const hasSendableText = normalizeOutgoingMessage(draft).length > 0;
+
+  function renewAssistantSessionId(): void {
+    const nextSessionId = generateAssistantSessionId();
+    chatSessionIdRef.current = nextSessionId;
+    persistAssistantSessionId(nextSessionId);
+  }
+
+  function resetAssistantConversation(clearServerContext = true): void {
+    const currentSessionId = chatSessionIdRef.current;
+
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    stopListening();
+    stopSpeaking();
+
+    if (clearServerContext) {
+      void resetAssistantSessionContext(currentSessionId).catch(() => {
+        // Silently ignore reset failures on close.
+      });
+    }
+
+    setDraft("");
+    setMessages([createAssistantGreetingMessage(isRussian)]);
+    setSuggestions(defaultSuggestions);
+    setMode("text");
+    setIsSending(false);
+    setVoiceError("");
+    renewAssistantSessionId();
+  }
 
   useEffect(() => {
     if (!speechRecognitionSupported && mode === "voice") {
@@ -670,7 +741,7 @@ export function AssistantWidget() {
     abortControllerRef.current = controller;
 
     try {
-      const response = await sendAssistantMessage(outgoingText, mode, controller.signal);
+      const response = await sendAssistantMessage(outgoingText, mode, controller.signal, chatSessionIdRef.current);
       const replyText = normalizeDisplayMessage(response.reply || "");
 
       if (replyText) {
@@ -684,6 +755,10 @@ export function AssistantWidget() {
         setSuggestions(response.suggestions.slice(0, 8));
       }
     } catch (error) {
+      if (error instanceof ApiError && error.code === "aborted") {
+        return;
+      }
+
       const fallbackMessage =
         error instanceof Error && error.message
           ? error.message
@@ -793,7 +868,7 @@ export function AssistantWidget() {
             <div className="assistant-widget__identity">
               <img src={assistantAvatar} alt="Assistant avatar" className="assistant-widget__avatar" />
               <div className="assistant-widget__identity-copy">
-                <strong>{isRussian ? "CBooster Помощник" : "CBooster Assistant"}</strong>
+                <strong>{isRussian ? "Credit Booster Помощник" : "Credit Booster Assistant"}</strong>
                 <span>{isRussian ? "Внутренние данные клиентов" : "Internal client data"}</span>
               </div>
             </div>
@@ -803,9 +878,7 @@ export function AssistantWidget() {
               aria-label={isRussian ? "Закрыть" : "Close"}
               onClick={() => {
                 setIsOpen(false);
-                stopListening();
-                stopSpeaking();
-                setVoiceError("");
+                resetAssistantConversation(true);
               }}
             >
               ×

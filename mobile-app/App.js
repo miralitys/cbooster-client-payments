@@ -710,7 +710,7 @@ export default function App() {
 
       <View style={styles.headerShell}>
         <View style={styles.headerAccent} />
-        <Text style={styles.headerTitle}>CBooster Mobile</Text>
+        <Text style={styles.headerTitle}>Credit Booster</Text>
         <Text style={styles.headerSubtitle}>Native app with direct server sync</Text>
         <Text style={styles.headerMeta}>API: {API_BASE_URL}</Text>
         <View style={styles.headerSessionRow}>
@@ -814,21 +814,13 @@ export default function App() {
           >
             <SafeAreaView style={styles.modalRoot}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Edit Client</Text>
+                <Text style={styles.modalTitle}>Client Details</Text>
                 <Pressable style={styles.ghostButton} onPress={() => setEditingRecordId("")}>
                   <Text style={styles.ghostButtonText}>Close</Text>
                 </Pressable>
               </View>
 
-              {editingRecord ? (
-                <RecordForm
-                  mode="edit"
-                  initialRecord={editingRecord}
-                  isSavingRecords={isSavingRecords}
-                  onCancel={() => setEditingRecordId("")}
-                  onSubmit={handleEditRecord}
-                />
-              ) : null}
+              {editingRecord ? <RecordDetails record={editingRecord} /> : null}
             </SafeAreaView>
           </Modal>
 
@@ -973,6 +965,33 @@ function ClientsScreen({
   return (
     <ScrollView contentContainerStyle={styles.screenContent}>
       <View style={styles.sectionCard}>
+        <Text style={styles.sectionTitle}>Overview</Text>
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+          {OVERVIEW_PERIOD_OPTIONS.map((option) => {
+            const isActive = option.key === overviewPeriod;
+            return (
+              <Pressable
+                key={option.key}
+                style={[styles.filterChip, isActive && styles.filterChipActive]}
+                onPress={() => setOverviewPeriod(option.key)}
+              >
+                <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>
+                  {option.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
+        <View style={styles.metricsRow}>
+          <MetricCard label="Sales" value={formatKpiCurrency(dashboardMetrics.sales)} tone="blue" />
+          <MetricCard label="Received" value={formatKpiCurrency(dashboardMetrics.received)} tone="green" />
+          <MetricCard label="Debt" value={formatKpiCurrency(dashboardMetrics.debt)} tone="amber" />
+        </View>
+      </View>
+
+      <View style={styles.sectionCard}>
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionTitle}>Records</Text>
           <Pressable style={styles.secondaryActionButton} onPress={() => void onRefresh()}>
@@ -1028,33 +1047,6 @@ function ClientsScreen({
         ) : null}
       </View>
 
-      <View style={styles.sectionCard}>
-        <Text style={styles.sectionTitle}>Overview</Text>
-
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-          {OVERVIEW_PERIOD_OPTIONS.map((option) => {
-            const isActive = option.key === overviewPeriod;
-            return (
-              <Pressable
-                key={option.key}
-                style={[styles.filterChip, isActive && styles.filterChipActive]}
-                onPress={() => setOverviewPeriod(option.key)}
-              >
-                <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>
-                  {option.label}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-
-        <View style={styles.metricsRow}>
-          <MetricCard label="Sales" value={formatKpiCurrency(dashboardMetrics.sales)} tone="blue" />
-          <MetricCard label="Received" value={formatKpiCurrency(dashboardMetrics.received)} tone="green" />
-          <MetricCard label="Debt" value={formatKpiCurrency(dashboardMetrics.debt)} tone="amber" />
-        </View>
-      </View>
-
       {recordsError ? (
         <View style={styles.errorCard}>
           <Text style={styles.errorText}>{recordsError}</Text>
@@ -1082,16 +1074,16 @@ function ClientsScreen({
             const statusChips = getStatusChipConfig(status);
 
             return (
-              <View style={styles.recordCard} key={record.id}>
+              <Pressable
+                style={({ pressed }) => [styles.recordCard, pressed && styles.recordCardPressed]}
+                key={record.id}
+                onPress={() => onEditRecord(record.id)}
+              >
                 <View style={styles.recordCardHeader}>
                   <View style={styles.recordTitleWrap}>
                     <Text style={styles.recordTitle}>{record.clientName || "Unnamed client"}</Text>
                     <Text style={styles.recordSubtitle}>{record.companyName || "-"}</Text>
                   </View>
-
-                  <Pressable style={styles.primaryActionButton} onPress={() => onEditRecord(record.id)}>
-                    <Text style={styles.primaryActionButtonText}>Edit</Text>
-                  </Pressable>
                 </View>
 
                 <Text style={styles.recordMetaLine}>Closed by: {record.closedBy || "-"}</Text>
@@ -1117,13 +1109,30 @@ function ClientsScreen({
                     <Text style={styles.recordNumberValue}>{formatMoneyText(record.futurePayments)}</Text>
                   </View>
                 </View>
-              </View>
+              </Pressable>
             );
           })}
 
           <Text style={styles.metaText}>Total records in DB: {records.length}</Text>
         </View>
       ) : null}
+    </ScrollView>
+  );
+}
+
+function RecordDetails({ record }) {
+  const details = useMemo(() => buildRecordDetails(record), [record]);
+
+  return (
+    <ScrollView contentContainerStyle={styles.modalContent}>
+      <View style={styles.submissionCard}>
+        {details.map((item, index) => (
+          <View style={styles.detailRow} key={`${record.id || "record"}-${index}-${item.label}`}>
+            <Text style={styles.detailLabel}>{item.label}</Text>
+            <Text style={styles.detailValue}>{item.value || "-"}</Text>
+          </View>
+        ))}
+      </View>
     </ScrollView>
   );
 }
@@ -2133,6 +2142,90 @@ function getSubmissionClientField(submission, key) {
   return (client[key] || "").toString().trim();
 }
 
+function buildRecordDetails(record) {
+  const source = record && typeof record === "object" ? record : {};
+  const details = [];
+  const shown = new Set();
+  const requiredFields = new Set([
+    "clientName",
+    "closedBy",
+    "companyName",
+    "serviceType",
+    "contractTotals",
+    "totalPayments",
+    "futurePayments",
+    "afterResult",
+    "writtenOff",
+  ]);
+  const orderedFields = [
+    "clientName",
+    "closedBy",
+    "companyName",
+    "serviceType",
+    "leadSource",
+    "clientPhoneNumber",
+    "clientEmailAddress",
+    "contractTotals",
+    "totalPayments",
+    ...PAYMENT_FIELDS,
+    ...PAYMENT_DATE_FIELDS,
+    "futurePayments",
+    "afterResult",
+    "writtenOff",
+    "dateWhenWrittenOff",
+    "dateWhenFullyPaid",
+    "collection",
+    "dateOfCollection",
+    "notes",
+    "ssn",
+    "identityIq",
+    "futurePayment",
+  ];
+
+  for (const key of orderedFields) {
+    if (shown.has(key)) {
+      continue;
+    }
+
+    const rawValue = source[key];
+    let value = "";
+    if (RECORD_CHECKBOX_FIELDS.includes(key)) {
+      value = isCheckboxEnabled(rawValue) ? "Yes" : "No";
+    } else {
+      value = (rawValue || "").toString().trim();
+    }
+
+    if (!value && !requiredFields.has(key)) {
+      shown.add(key);
+      continue;
+    }
+
+    details.push({
+      label: FIELD_LABELS[key] || humanizeKey(key),
+      value: value || "-",
+    });
+    shown.add(key);
+  }
+
+  for (const [key, rawValue] of Object.entries(source)) {
+    if (shown.has(key) || key === "id") {
+      continue;
+    }
+
+    const value = (rawValue || "").toString().trim();
+    if (!value) {
+      continue;
+    }
+
+    details.push({
+      label: FIELD_LABELS[key] || humanizeKey(key),
+      value,
+    });
+  }
+
+  return details;
+}
+
 function buildSubmissionDetails(submission) {
   const client = submission?.client && typeof submission.client === "object" ? submission.client : {};
   const details = [];
@@ -2552,6 +2645,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#fbfdff",
     padding: 12,
     gap: 8,
+  },
+  recordCardPressed: {
+    backgroundColor: "#f4f8ff",
+    borderColor: "#b8caec",
   },
   recordCardHeader: {
     flexDirection: "row",
