@@ -1458,6 +1458,12 @@ function getRequestWebAuthUser(req) {
     return cookieUsername;
   }
 
+  const pathname = sanitizeTextValue(req?.path || req?.originalUrl, 260);
+  const allowHeaderSessionAuth = pathname.startsWith("/api/mobile/");
+  if (!allowHeaderSessionAuth) {
+    return "";
+  }
+
   const headerToken = sanitizeTextValue(req?.headers?.[WEB_AUTH_MOBILE_SESSION_HEADER], 1200);
   const headerUsername = parseWebAuthSessionToken(headerToken);
   if (headerUsername) {
@@ -14156,15 +14162,19 @@ function handleApiAuthLogin(req, res) {
   const sessionToken = createWebAuthSessionToken(authUser.username);
   const mustChangePassword = isWebAuthPasswordChangeRequired(authUser);
   setWebAuthSessionCookie(req, res, authUser.username, sessionToken);
+  const isMobileApiLogin = sanitizeTextValue(req.path, 120).startsWith("/api/mobile/");
   res.setHeader("Cache-Control", "no-store, private");
-  res.json({
+  const payload = {
     ok: true,
-    sessionToken,
     mustChangePassword,
     passwordChangePath: mustChangePassword ? "/first-password" : "",
     user: buildWebAuthPublicUser(authUser),
     permissions: authUser.permissions || {},
-  });
+  };
+  if (isMobileApiLogin) {
+    payload.sessionToken = sessionToken;
+  }
+  res.json(payload);
 }
 
 function handleApiAuthLogout(req, res) {
@@ -14270,13 +14280,17 @@ function handleApiAuthFirstPassword(req, res) {
     setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
     req.webAuthUser = updatedUser.username;
     req.webAuthProfile = updatedUser;
+    const isMobileApiFirstPassword = sanitizeTextValue(req.path, 120).startsWith("/api/mobile/");
     res.setHeader("Cache-Control", "no-store, private");
-    res.json({
+    const payload = {
       ok: true,
-      sessionToken,
       user: buildWebAuthPublicUser(updatedUser),
       permissions: updatedUser.permissions || {},
-    });
+    };
+    if (isMobileApiFirstPassword) {
+      payload.sessionToken = sessionToken;
+    }
+    res.json(payload);
   } catch (error) {
     res.status(error.httpStatus || 400).json({
       error: sanitizeTextValue(error?.message, 260) || "Failed to update password.",
