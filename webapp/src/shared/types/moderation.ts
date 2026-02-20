@@ -22,6 +22,8 @@ export interface ModerationSubmission {
 export interface ModerationSubmissionListPayload {
   status: string;
   items: ModerationSubmission[];
+  hasMore?: boolean;
+  nextCursor?: string | null;
 }
 
 export interface ModerationActionPayload {

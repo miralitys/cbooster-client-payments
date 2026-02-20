@@ -48,6 +48,7 @@ const OVERVIEW_PERIOD_OPTIONS: Array<{ key: OverviewPeriodKey; label: string }> 
   { key: "currentMonth", label: "Current Month" },
   { key: "last30Days", label: "Last 30 Days" },
 ];
+const MODERATION_PAGE_LIMIT = 200;
 const SHOWN_CLIENT_FIELDS = new Set([
   "clientName",
   "closedBy",
@@ -65,6 +66,34 @@ const SHOWN_CLIENT_FIELDS = new Set([
 
 type DashboardQuickBooksViewRow = RowWithKey<QuickBooksPaymentRow>;
 
+function normalizeModerationNextCursor(value: unknown): string | null {
+  const cursor = String(value || "").trim();
+  return cursor ? cursor : null;
+}
+
+function mergeModerationSubmissions(
+  previousItems: ModerationSubmission[],
+  nextItems: ModerationSubmission[],
+): ModerationSubmission[] {
+  if (!previousItems.length) {
+    return nextItems;
+  }
+  if (!nextItems.length) {
+    return previousItems;
+  }
+
+  const seen = new Set(previousItems.map((item) => item.id));
+  const merged = [...previousItems];
+  for (const item of nextItems) {
+    if (seen.has(item.id)) {
+      continue;
+    }
+    seen.add(item.id);
+    merged.push(item);
+  }
+  return merged;
+}
+
 export default function DashboardPage() {
   const [sessionCanReview, setSessionCanReview] = useState(false);
 
@@ -76,7 +105,11 @@ export default function DashboardPage() {
 
   const [submissions, setSubmissions] = useState<ModerationSubmission[]>([]);
   const [submissionsLoading, setSubmissionsLoading] = useState(true);
+  const [submissionsLoadingMore, setSubmissionsLoadingMore] = useState(false);
   const [submissionsError, setSubmissionsError] = useState("");
+  const [submissionsLoadMoreError, setSubmissionsLoadMoreError] = useState("");
+  const [submissionsHasMore, setSubmissionsHasMore] = useState(false);
+  const [submissionsNextCursor, setSubmissionsNextCursor] = useState<string | null>(null);
   const [submissionsUpdatedAt, setSubmissionsUpdatedAt] = useState("");
   const [submissionsRefreshFailed, setSubmissionsRefreshFailed] = useState(false);
 
@@ -92,6 +125,7 @@ export default function DashboardPage() {
   const [isModerationActionRunning, setIsModerationActionRunning] = useState(false);
 
   const activeFilesRequestRef = useRef(0);
+  const submissionsRequestRef = useRef(0);
   const todayPaymentsRef = useRef<DashboardQuickBooksViewRow[]>([]);
   const todayPaymentsKeySequenceRef = useRef(0);
 
@@ -162,32 +196,83 @@ export default function DashboardPage() {
     }
   }, [showDashboardMessage]);
 
-  const loadPendingSubmissions = useCallback(async () => {
-    setSubmissionsLoading(true);
-    setSubmissionsError("");
-    try {
-      const payload = await getModerationSubmissions("pending", 200);
-      const items = Array.isArray(payload.items) ? payload.items : [];
-      setSubmissions(items);
-      setSubmissionsRefreshFailed(false);
-      setSubmissionsUpdatedAt(
-        new Date().toLocaleTimeString("en-US", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        }),
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load submissions.";
-      setSubmissions([]);
-      setSubmissionsError(message);
-      setSubmissionsRefreshFailed(true);
-      setSubmissionsUpdatedAt("");
-      showDashboardMessage(message, "error");
-    } finally {
-      setSubmissionsLoading(false);
-    }
-  }, [showDashboardMessage]);
+  const loadPendingSubmissions = useCallback(
+    async (options?: { append?: boolean; cursor?: string | null }) => {
+      const append = options?.append === true;
+      const cursor = append ? normalizeModerationNextCursor(options?.cursor) : null;
+      const requestId = submissionsRequestRef.current + 1;
+      submissionsRequestRef.current = requestId;
+
+      if (append) {
+        setSubmissionsLoadingMore(true);
+        setSubmissionsLoadMoreError("");
+      } else {
+        setSubmissionsLoading(true);
+        setSubmissionsLoadingMore(false);
+        setSubmissionsError("");
+        setSubmissionsLoadMoreError("");
+        setSubmissionsHasMore(false);
+        setSubmissionsNextCursor(null);
+      }
+
+      try {
+        const payload = await getModerationSubmissions("pending", MODERATION_PAGE_LIMIT, cursor);
+        if (requestId !== submissionsRequestRef.current) {
+          return;
+        }
+
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        const nextCursor = normalizeModerationNextCursor(payload.nextCursor);
+        const hasMore = payload.hasMore === true && Boolean(nextCursor);
+
+        if (append) {
+          setSubmissions((previous) => mergeModerationSubmissions(previous, items));
+        } else {
+          setSubmissions(items);
+          setSubmissionsError("");
+        }
+
+        setSubmissionsHasMore(hasMore);
+        setSubmissionsNextCursor(hasMore ? nextCursor : null);
+        setSubmissionsRefreshFailed(false);
+        setSubmissionsUpdatedAt(
+          new Date().toLocaleTimeString("en-US", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to load submissions.";
+        if (requestId !== submissionsRequestRef.current) {
+          return;
+        }
+
+        if (append) {
+          setSubmissionsLoadMoreError(message);
+          showDashboardMessage(message, "error");
+          return;
+        }
+
+        setSubmissions([]);
+        setSubmissionsError(message);
+        setSubmissionsRefreshFailed(true);
+        setSubmissionsUpdatedAt("");
+        setSubmissionsHasMore(false);
+        setSubmissionsNextCursor(null);
+        showDashboardMessage(message, "error");
+      } finally {
+        if (requestId === submissionsRequestRef.current) {
+          if (append) {
+            setSubmissionsLoadingMore(false);
+          } else {
+            setSubmissionsLoading(false);
+          }
+        }
+      }
+    },
+    [showDashboardMessage],
+  );
 
   const loadTodayQuickBooksPayments = useCallback(async () => {
     setTodayPaymentsLoading(true);
@@ -218,6 +303,23 @@ export default function DashboardPage() {
   const reloadDashboard = useCallback(async () => {
     await Promise.all([loadOverview(), loadPendingSubmissions(), loadTodayQuickBooksPayments()]);
   }, [loadOverview, loadPendingSubmissions, loadTodayQuickBooksPayments]);
+
+  const loadMorePendingSubmissions = useCallback(async () => {
+    if (!submissionsHasMore || !submissionsNextCursor || submissionsLoading || submissionsLoadingMore) {
+      return;
+    }
+
+    await loadPendingSubmissions({
+      append: true,
+      cursor: submissionsNextCursor,
+    });
+  }, [
+    loadPendingSubmissions,
+    submissionsHasMore,
+    submissionsNextCursor,
+    submissionsLoading,
+    submissionsLoadingMore,
+  ]);
 
   useEffect(() => {
     void getSession()
@@ -487,14 +589,36 @@ export default function DashboardPage() {
         ) : null}
 
         {!submissionsLoading && !submissionsError && submissions.length ? (
-          <Table
-            className="moderation-table-wrap mini-clients-table-wrap"
-            columns={submissionsColumns}
-            rows={submissions}
-            rowKey={(submission) => submission.id}
-            onRowActivate={(submission) => openSubmissionModal(submission)}
-            density="compact"
-          />
+          <>
+            <Table
+              className="moderation-table-wrap mini-clients-table-wrap"
+              columns={submissionsColumns}
+              rows={submissions}
+              rowKey={(submission) => submission.id}
+              onRowActivate={(submission) => openSubmissionModal(submission)}
+              density="compact"
+            />
+
+            {(submissionsHasMore || submissionsLoadingMore || submissionsLoadMoreError) ? (
+              <div className="moderation-pagination-row">
+                {submissionsLoadMoreError ? (
+                  <p className="moderation-pagination-error">{submissionsLoadMoreError}</p>
+                ) : null}
+                {submissionsHasMore ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void loadMorePendingSubmissions()}
+                    isLoading={submissionsLoadingMore}
+                    disabled={submissionsLoadingMore || submissionsLoading}
+                  >
+                    Load more
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+          </>
         ) : null}
       </Panel>
 

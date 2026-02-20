@@ -46,3 +46,24 @@ export interface PutRecordsPayload {
   ok: boolean;
   updatedAt?: string | null;
 }
+
+export type RecordsPatchOperationType = "upsert" | "delete";
+
+export interface RecordsPatchUpsertOperation {
+  type: "upsert";
+  id: string;
+  record: Partial<ClientRecord>;
+}
+
+export interface RecordsPatchDeleteOperation {
+  type: "delete";
+  id: string;
+}
+
+export type RecordsPatchOperation = RecordsPatchUpsertOperation | RecordsPatchDeleteOperation;
+
+export interface PatchRecordsPayload {
+  ok: boolean;
+  updatedAt?: string | null;
+  appliedOperations?: number;
+}

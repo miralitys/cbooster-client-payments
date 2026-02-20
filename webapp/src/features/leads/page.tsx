@@ -109,6 +109,12 @@ export default function LeadsPage() {
         cell: (item) => item.source || "-",
       },
       {
+        key: "pipelineName",
+        label: "Pipeline",
+        align: "left",
+        cell: (item) => item.pipelineName || "-",
+      },
+      {
         key: "assignedTo",
         label: "Assigned",
         align: "left",
@@ -131,6 +137,12 @@ export default function LeadsPage() {
         label: "Stage",
         align: "left",
         cell: (item) => item.stageName || "-",
+      },
+      {
+        key: "notes",
+        label: "Notes",
+        align: "left",
+        cell: (item) => formatNotesPreview(item.notes),
       },
       {
         key: "status",
@@ -291,13 +303,14 @@ function exportLeadsToCsv(rows: GhlLeadRow[], filter: string): void {
     "Lead Type",
     "Contact",
     "Source",
+    "Pipeline",
     "Assigned",
     "Phone",
     "Email",
     "Stage",
+    "Notes",
     "Status",
     "Amount",
-    "Pipeline",
     "Lead ID",
   ];
   const lines = [headers.map(escapeCsvValue).join(",")];
@@ -310,13 +323,14 @@ function exportLeadsToCsv(rows: GhlLeadRow[], filter: string): void {
         row.leadType || "",
         row.contactName || "",
         row.source || "",
+        row.pipelineName || "",
         row.assignedTo || "",
         row.phone || "",
         row.email || "",
         row.stageName || "",
+        row.notes || "",
         formatStatus(row.status),
         normalizeNumberForCsv(row.monetaryValue),
-        row.pipelineName || "",
         row.leadId || "",
       ]
         .map(escapeCsvValue)
@@ -371,4 +385,17 @@ function formatFileDate(value: Date): string {
   const hours = String(value.getHours()).padStart(2, "0");
   const minutes = String(value.getMinutes()).padStart(2, "0");
   return `${year}${month}${day}-${hours}${minutes}`;
+}
+
+function formatNotesPreview(rawValue: string): string {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return "-";
+  }
+
+  if (value.length <= 120) {
+    return value;
+  }
+
+  return `${value.slice(0, 117)}...`;
 }
