@@ -11639,14 +11639,22 @@ async function resolveGhlLeadsPipelineContext() {
   const preferredPipelineName = sanitizeTextValue(GHL_LEADS_PIPELINE_NAME, 320);
   const preferredPipelineNameLookup = normalizeGhlPipelineNameForLookup(preferredPipelineName);
   const configuredPipelineId = sanitizeTextValue(GHL_LEADS_PIPELINE_ID, 180);
+  const fallbackContext = {
+    pipelineId: configuredPipelineId,
+    pipelineName: preferredPipelineName || "SALES 3 LINE",
+  };
 
   let pipelines = [];
   try {
     pipelines = await listGhlOpportunityPipelines();
   } catch (error) {
-    if (!configuredPipelineId) {
-      throw error;
+    if (configuredPipelineId) {
+      return fallbackContext;
     }
+    console.warn(
+      `[ghl leads] pipeline list lookup failed, using pipeline-name fallback: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`,
+    );
+    return fallbackContext;
   }
 
   if (configuredPipelineId) {
@@ -11665,10 +11673,7 @@ async function resolveGhlLeadsPipelineContext() {
   }
 
   if (!pipelines.length) {
-    throw createHttpError(
-      `Unable to load GoHighLevel pipelines. Set GHL_LEADS_PIPELINE_ID or ensure pipeline "${preferredPipelineName || "SALES 3 LINE"}" exists.`,
-      502,
-    );
+    return fallbackContext;
   }
 
   const exactMatch = pipelines.find(
@@ -11695,7 +11700,7 @@ async function resolveGhlLeadsPipelineContext() {
     };
   }
 
-  throw createHttpError(`Pipeline "${preferredPipelineName || "SALES 3 LINE"}" was not found in GoHighLevel.`, 404);
+  return fallbackContext;
 }
 
 function extractGhlOpportunitiesFromPayload(payload) {
@@ -11927,8 +11932,21 @@ function isGhlLeadRowMatchingPipeline(row, pipelineContext) {
   const rowPipelineId = sanitizeTextValue(row?.pipelineId, 180);
   const rowPipelineName = sanitizeTextValue(row?.pipelineName, 320);
 
-  if (expectedPipelineId && rowPipelineId && expectedPipelineId !== rowPipelineId) {
-    return false;
+  if (!expectedPipelineId && !expectedPipelineName) {
+    return true;
+  }
+
+  if (expectedPipelineId) {
+    if (rowPipelineId) {
+      if (expectedPipelineId !== rowPipelineId) {
+        return false;
+      }
+      return true;
+    }
+
+    if (!expectedPipelineName) {
+      return false;
+    }
   }
 
   if (!expectedPipelineName) {
@@ -11936,7 +11954,7 @@ function isGhlLeadRowMatchingPipeline(row, pipelineContext) {
   }
 
   if (!rowPipelineName) {
-    return true;
+    return false;
   }
 
   const expectedLookup = normalizeGhlPipelineNameForLookup(expectedPipelineName);
