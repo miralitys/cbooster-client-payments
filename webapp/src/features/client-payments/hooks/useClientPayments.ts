@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 
-import { ApiError, getRecords, getSession, putRecords } from "@/shared/api";
+import { ApiError, getRecords, getSession, patchRecords, putRecords } from "@/shared/api";
 import type { ClientRecord } from "@/shared/types/records";
 import type { Session } from "@/shared/types/session";
 import {
@@ -27,6 +27,11 @@ import {
   STATUS_FILTER_ALL,
   type OverviewPeriodKey,
 } from "@/features/client-payments/domain/constants";
+import {
+  buildRecordsPatchOperations,
+  resolveRecordsPatchEnabled,
+  shouldFallbackToPutFromPatch,
+} from "@/features/client-payments/domain/recordsPatch";
 import {
   readClientPaymentsUiState,
   writeClientPaymentsUiState,
@@ -106,7 +111,9 @@ export function useClientPayments() {
   const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
 
   const recordsRef = useRef<ClientRecord[]>([]);
+  const baselineRecordsRef = useRef<ClientRecord[]>([]);
   const baselineRef = useRef("");
+  const recordsPatchEnabledRef = useRef<boolean>(resolveRecordsPatchEnabled(null));
   const initializedRef = useRef(false);
   const saveInFlightRef = useRef(false);
   const pendingSaveRef = useRef(false);
@@ -173,8 +180,25 @@ export function useClientPayments() {
     setIsSaving(true);
 
     try {
-      const savePayload = await putRecords(snapshot, serverUpdatedAtRef.current);
+      let savePayload: { updatedAt?: string | null };
+      if (recordsPatchEnabledRef.current) {
+        const operations = buildRecordsPatchOperations(baselineRecordsRef.current, snapshot);
+        try {
+          savePayload = await patchRecords(operations, serverUpdatedAtRef.current);
+        } catch (error) {
+          if (!shouldFallbackToPutFromPatch(error)) {
+            throw error;
+          }
+
+          recordsPatchEnabledRef.current = false;
+          savePayload = await putRecords(snapshot, serverUpdatedAtRef.current);
+        }
+      } else {
+        savePayload = await putRecords(snapshot, serverUpdatedAtRef.current);
+      }
+
       baselineRef.current = serialized;
+      baselineRecordsRef.current = cloneRecords(snapshot);
       setSaveError("");
       setHasUnsavedChanges(false);
       const nextUpdatedAt = normalizeRevisionTimestamp(savePayload.updatedAt) || new Date().toISOString();
@@ -270,9 +294,11 @@ export function useClientPayments() {
         }
 
         const normalizedRecords = normalizeRecords(recordsPayload.records);
+        recordsPatchEnabledRef.current = resolveRecordsPatchEnabled(sessionPayload);
         setSession(sessionPayload);
         setRecords(normalizedRecords);
         baselineRef.current = serializeRecords(normalizedRecords);
+        baselineRecordsRef.current = cloneRecords(normalizedRecords);
         const nextUpdatedAt = normalizeRevisionTimestamp(recordsPayload.updatedAt);
         serverUpdatedAtRef.current = nextUpdatedAt;
         initializedRef.current = true;
@@ -465,6 +491,7 @@ export function useClientPayments() {
       const normalized = normalizeRecords(recordsPayload.records);
       setRecords(normalized);
       baselineRef.current = serializeRecords(normalized);
+      baselineRecordsRef.current = cloneRecords(normalized);
       const nextUpdatedAt = normalizeRevisionTimestamp(recordsPayload.updatedAt);
       serverUpdatedAtRef.current = nextUpdatedAt;
       setLastSyncedAt(nextUpdatedAt || new Date().toISOString());
@@ -523,6 +550,10 @@ export function useClientPayments() {
 
 function serializeRecords(records: ClientRecord[]): string {
   return JSON.stringify(records);
+}
+
+function cloneRecords(records: ClientRecord[]): ClientRecord[] {
+  return records.map((record) => ({ ...record }));
 }
 
 function scheduleDebouncedSave(

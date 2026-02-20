@@ -61,6 +61,22 @@ const WRITTEN_OFF_CLIENT_NAMES = new Set(
   ].map(normalizeClientName),
 );
 
+const MONEY_LIKE_FIELDS: ReadonlySet<keyof ClientRecord> = new Set([
+  "contractTotals",
+  "totalPayments",
+  "futurePayments",
+  "collection",
+  ...PAYMENT_PAIRS.map(([paymentFieldKey]) => paymentFieldKey),
+]);
+
+const DATE_LIKE_FIELDS: ReadonlySet<keyof ClientRecord> = new Set([
+  "createdAt",
+  "dateOfCollection",
+  "dateWhenWrittenOff",
+  "dateWhenFullyPaid",
+  ...PAYMENT_PAIRS.map(([, paymentDateFieldKey]) => paymentDateFieldKey),
+]);
+
 export interface DateRange {
   from: string;
   to: string;
@@ -241,7 +257,17 @@ export function matchesStatusFilter(
   statusFilter: StatusFilter,
   overdueRangeFilter: OverdueRangeFilter,
 ): boolean {
-  const status = getRecordStatusFlags(record);
+  return matchesStatusFilterByStatus(getRecordStatusFlags(record), statusFilter, overdueRangeFilter);
+}
+
+function matchesStatusFilterByStatus(
+  status: RecordStatusFlags,
+  statusFilter: StatusFilter,
+  overdueRangeFilter: OverdueRangeFilter,
+): boolean {
+  if (!status) {
+    return false;
+  }
 
   if (statusFilter === STATUS_FILTER_ALL) {
     return true;
@@ -281,60 +307,51 @@ export function filterRecords(records: ClientRecord[], filters: ClientPaymentsFi
   const paymentRange = getDateRangeBounds(filters.paymentDateRange);
   const writtenOffRange = getDateRangeBounds(filters.writtenOffDateRange);
   const fullyPaidRange = getDateRangeBounds(filters.fullyPaidDateRange);
+  const hasPaymentRange = hasDateRangeValues(paymentRange);
+  const hasWrittenOffRange = hasDateRangeValues(writtenOffRange);
+  const hasFullyPaidRange = hasDateRangeValues(fullyPaidRange);
+  const hasStatusFilter = filters.status !== STATUS_FILTER_ALL;
+  const requiresStatus = hasWrittenOffRange || hasFullyPaidRange || hasStatusFilter;
 
-  return records
-    .filter((record) => {
-      if (!query) {
-        return true;
+  const filtered: ClientRecord[] = [];
+
+  for (const record of records) {
+    if (!matchesSearchQuery(record, query)) {
+      continue;
+    }
+
+    if (selectedClosedBy && record.closedBy.trim().toLowerCase() !== selectedClosedBy) {
+      continue;
+    }
+
+    if (!isDateWithinRange(record.payment1Date, createdRange.from, createdRange.to)) {
+      continue;
+    }
+
+    if (hasPaymentRange && !hasAnyPaymentDateWithinRange(record, paymentRange.from, paymentRange.to)) {
+      continue;
+    }
+
+    if (requiresStatus) {
+      const status = getRecordStatusFlags(record);
+
+      if (hasWrittenOffRange && (!status.isWrittenOff || !isDateWithinRange(record.dateWhenWrittenOff, writtenOffRange.from, writtenOffRange.to))) {
+        continue;
       }
 
-      const searchable = [record.clientName, record.companyName, record.closedBy, record.serviceType]
-        .map((value) => value.toLowerCase())
-        .join(" ");
-
-      return searchable.includes(query);
-    })
-    .filter((record) => {
-      if (!selectedClosedBy) {
-        return true;
+      if (hasFullyPaidRange && (!status.isFullyPaid || !isDateWithinRange(record.dateWhenFullyPaid, fullyPaidRange.from, fullyPaidRange.to))) {
+        continue;
       }
 
-      return record.closedBy.trim().toLowerCase() === selectedClosedBy;
-    })
-    .filter((record) => isDateWithinRange(record.payment1Date, createdRange.from, createdRange.to))
-    .filter((record) => {
-      if (!hasDateRangeValues(paymentRange)) {
-        return true;
+      if (hasStatusFilter && !matchesStatusFilterByStatus(status, filters.status, filters.overdueRange)) {
+        continue;
       }
+    }
 
-      return PAYMENT_PAIRS.some(([, paymentDateField]) => {
-        const paymentDate = (record[paymentDateField] || "").toString();
-        return isDateWithinRange(paymentDate, paymentRange.from, paymentRange.to);
-      });
-    })
-    .filter((record) => {
-      if (!hasDateRangeValues(writtenOffRange)) {
-        return true;
-      }
+    filtered.push(record);
+  }
 
-      if (!getRecordStatusFlags(record).isWrittenOff) {
-        return false;
-      }
-
-      return isDateWithinRange(record.dateWhenWrittenOff, writtenOffRange.from, writtenOffRange.to);
-    })
-    .filter((record) => {
-      if (!hasDateRangeValues(fullyPaidRange)) {
-        return true;
-      }
-
-      if (!getRecordStatusFlags(record).isFullyPaid) {
-        return false;
-      }
-
-      return isDateWithinRange(record.dateWhenFullyPaid, fullyPaidRange.from, fullyPaidRange.to);
-    })
-    .filter((record) => matchesStatusFilter(record, filters.status, filters.overdueRange));
+  return filtered;
 }
 
 export function sortRecords(records: ClientRecord[], sortState: SortState): ClientRecord[] {
@@ -774,27 +791,11 @@ function compareField(
   rightRaw: string,
   key: keyof ClientRecord,
 ): number {
-  const moneyLikeFields = new Set<keyof ClientRecord>([
-    "contractTotals",
-    "totalPayments",
-    "futurePayments",
-    "collection",
-    ...PAYMENT_PAIRS.map(([paymentFieldKey]) => paymentFieldKey),
-  ]);
-
-  const dateLikeFields = new Set<keyof ClientRecord>([
-    "createdAt",
-    "dateOfCollection",
-    "dateWhenWrittenOff",
-    "dateWhenFullyPaid",
-    ...PAYMENT_PAIRS.map(([, paymentDateFieldKey]) => paymentDateFieldKey),
-  ]);
-
-  if (moneyLikeFields.has(key)) {
+  if (MONEY_LIKE_FIELDS.has(key)) {
     return compareNullableNumbers(parseMoneyValue(leftRaw), parseMoneyValue(rightRaw));
   }
 
-  if (dateLikeFields.has(key)) {
+  if (DATE_LIKE_FIELDS.has(key)) {
     return compareNullableNumbers(parseDateValue(leftRaw), parseDateValue(rightRaw));
   }
 
@@ -829,6 +830,26 @@ function getDateRangeBounds(range: DateRange): { from: number | null; to: number
 
 function hasDateRangeValues(range: { from: number | null; to: number | null }): boolean {
   return range.from !== null || range.to !== null;
+}
+
+function matchesSearchQuery(record: ClientRecord, query: string): boolean {
+  if (!query) {
+    return true;
+  }
+
+  const searchable = `${record.clientName} ${record.companyName} ${record.closedBy} ${record.serviceType}`.toLowerCase();
+  return searchable.includes(query);
+}
+
+function hasAnyPaymentDateWithinRange(record: ClientRecord, fromDate: number | null, toDate: number | null): boolean {
+  for (const [, paymentDateField] of PAYMENT_PAIRS) {
+    const paymentDate = (record[paymentDateField] || "").toString();
+    if (isDateWithinRange(paymentDate, fromDate, toDate)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function isDateWithinRange(value: string, fromDate: number | null, toDate: number | null): boolean {

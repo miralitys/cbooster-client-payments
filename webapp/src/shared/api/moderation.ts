@@ -5,11 +5,17 @@ import type {
   ModerationSubmissionListPayload,
 } from "@/shared/types/moderation";
 
-export async function getModerationSubmissions(status = "pending", limit = 200): Promise<ModerationSubmissionListPayload> {
-  const query = new URLSearchParams({
-    status,
-    limit: String(limit),
-  });
+export async function getModerationSubmissions(
+  status = "pending",
+  limit = 200,
+  cursor: string | null = null,
+): Promise<ModerationSubmissionListPayload> {
+  const query = new URLSearchParams();
+  query.set("status", status);
+  query.set("limit", String(limit));
+  if (cursor) {
+    query.set("cursor", cursor);
+  }
   return apiRequest<ModerationSubmissionListPayload>(`/api/moderation/submissions?${query.toString()}`);
 }
 

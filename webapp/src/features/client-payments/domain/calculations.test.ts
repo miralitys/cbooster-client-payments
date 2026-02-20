@@ -12,6 +12,7 @@ import {
   normalizeFormRecord,
   parseDateValue,
   parseMoneyValue,
+  sortRecords,
 } from "@/features/client-payments/domain/calculations";
 
 function makeRecord(patch: Partial<ClientRecord>): ClientRecord {
@@ -175,5 +176,99 @@ describe("calculations", () => {
     });
 
     expect(filtered.map((item) => item.id)).toEqual(["payment-in-range"]);
+  });
+
+  it("sorts money-like fields numerically and keeps empty values last in ascending order", () => {
+    const records: ClientRecord[] = [
+      makeRecord({ id: "amount-100", contractTotals: "$100.00" }),
+      makeRecord({ id: "amount-empty", contractTotals: "" }),
+      makeRecord({ id: "amount-negative", contractTotals: "(50)" }),
+      makeRecord({ id: "amount-20", contractTotals: "20" }),
+      makeRecord({ id: "amount-3000", contractTotals: "$3,000.00" }),
+    ];
+
+    const asc = sortRecords(records, { key: "contractTotals", direction: "asc" });
+    expect(asc.map((item) => item.id)).toEqual([
+      "amount-negative",
+      "amount-20",
+      "amount-100",
+      "amount-3000",
+      "amount-empty",
+    ]);
+
+    const desc = sortRecords(records, { key: "contractTotals", direction: "desc" });
+    expect(desc.map((item) => item.id)).toEqual([
+      "amount-empty",
+      "amount-3000",
+      "amount-100",
+      "amount-20",
+      "amount-negative",
+    ]);
+  });
+
+  it("sorts date-like fields by normalized date values", () => {
+    const records: ClientRecord[] = [
+      makeRecord({ id: "date-feb10", payment1Date: "02/10/2026" }),
+      makeRecord({ id: "date-empty", payment1Date: "" }),
+      makeRecord({ id: "date-jan05", payment1Date: "01/05/2026" }),
+      makeRecord({ id: "date-iso-feb01", payment1Date: "2026-02-01" }),
+    ];
+
+    const asc = sortRecords(records, { key: "payment1Date", direction: "asc" });
+    expect(asc.map((item) => item.id)).toEqual([
+      "date-jan05",
+      "date-iso-feb01",
+      "date-feb10",
+      "date-empty",
+    ]);
+
+    const desc = sortRecords(records, { key: "payment1Date", direction: "desc" });
+    expect(desc.map((item) => item.id)).toEqual([
+      "date-empty",
+      "date-feb10",
+      "date-iso-feb01",
+      "date-jan05",
+    ]);
+  });
+
+  it("filters by search + closedBy + payment range across all payment date fields", () => {
+    const records: ClientRecord[] = [
+      makeRecord({
+        id: "match-payment2",
+        clientName: "Alpha Client",
+        companyName: "Alpha Logistics",
+        closedBy: "Manager A",
+        payment1Date: "01/10/2026",
+        payment2Date: "02/20/2026",
+      }),
+      makeRecord({
+        id: "out-of-range",
+        clientName: "Alpha Backup",
+        companyName: "Alpha Transport",
+        closedBy: "Manager A",
+        payment1Date: "01/10/2026",
+        payment2Date: "03/01/2026",
+      }),
+      makeRecord({
+        id: "wrong-closed-by",
+        clientName: "Alpha Third",
+        companyName: "Alpha Fleet",
+        closedBy: "Manager B",
+        payment2Date: "02/15/2026",
+      }),
+    ];
+
+    const filtered = filterRecords(records, {
+      search: "alpha",
+      status: "all",
+      overdueRange: "",
+      closedBy: "manager a",
+      createdAtRange: { from: "", to: "" },
+      paymentDateRange: { from: "02/01/2026", to: "02/28/2026" },
+      writtenOffDateRange: { from: "", to: "" },
+      fullyPaidDateRange: { from: "", to: "" },
+    });
+
+    expect(filtered.map((item) => item.id)).toEqual(["match-payment2"]);
   });
 });

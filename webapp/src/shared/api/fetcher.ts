@@ -86,8 +86,10 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
         : typeof payload?.details === "string"
           ? payload.details
           : `Request failed with status ${response.status}`;
+    const errorCode =
+      typeof payload?.code === "string" && payload.code.trim() ? payload.code.trim() : "http_error";
 
-    throw new ApiError(errorText, response.status, "http_error");
+    throw new ApiError(errorText, response.status, errorCode);
   }
 
   return payload as T;

@@ -1718,6 +1718,21 @@ a {
   color: var(--color-text-muted);
 }
 
+.moderation-pagination-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.moderation-pagination-error {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: #991b1b;
+}
+
 .moderation-table-wrap,
 .payments-today-table-wrap,
 .quickbooks-table-wrap {

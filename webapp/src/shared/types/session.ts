@@ -16,4 +16,5 @@ export interface Session {
   ok: boolean;
   user: AuthUser;
   permissions: PermissionMap;
+  featureFlags?: Record<string, boolean | string | number | null | undefined>;
 }

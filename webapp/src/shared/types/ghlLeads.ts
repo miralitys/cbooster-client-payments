@@ -14,6 +14,7 @@ export interface GhlLeadRow {
   email: string;
   monetaryValue: number;
   source: string;
+  notes: string;
   createdOn: string;
   ghlUpdatedAt: string;
   updatedAt?: string | null;

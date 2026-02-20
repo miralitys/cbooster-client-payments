@@ -6,6 +6,13 @@ const express = require("express");
 const compression = require("compression");
 const multer = require("multer");
 const { Pool } = require("pg");
+const {
+  PATCH_OPERATION_DELETE,
+  PATCH_OPERATION_UPSERT,
+  applyRecordsPatchOperations,
+  isRecordStateRevisionMatch,
+  normalizeRecordStateTimestamp,
+} = require("./records-patch-utils");
 const { registerCustomDashboardModule } = require("./custom-dashboard-module");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
@@ -101,6 +108,7 @@ const PERF_DB_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.P
 const PERF_DB_SLOW_QUERY_MS = Math.min(Math.max(parsePositiveInteger(process.env.PERF_DB_SLOW_QUERY_MS, 700), 50), 60000);
 const PERF_EVENT_LOOP_INTERVAL_MS = Math.min(Math.max(parsePositiveInteger(process.env.PERF_EVENT_LOOP_INTERVAL_MS, 1000), 100), 10000);
 const PERF_EVENT_LOOP_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.PERF_EVENT_LOOP_SAMPLE_SIZE, 600), 30), 10000);
+const RECORDS_PATCH_ENABLED = resolveOptionalBoolean(process.env.RECORDS_PATCH) === true;
 const DB_METRICS_CLIENT_PATCHED_FLAG = Symbol("dbMetricsClientPatched");
 const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
 const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
@@ -449,6 +457,14 @@ const GHL_LEADS_PAGE_MAX_DURATION_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LEADS_PAGE_MAX_DURATION_MS, 8000), 2000),
   30000,
 );
+const GHL_LEADS_ENRICH_CONCURRENCY = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_ENRICH_CONCURRENCY, 4), 1),
+  10,
+);
+const GHL_LEADS_ENRICH_MAX_ROWS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_ENRICH_MAX_ROWS, 250), 0),
+  1000,
+);
 const GHL_LEADS_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: GHL_LEADS_SYNC_TIME_ZONE,
   year: "numeric",
@@ -583,6 +599,10 @@ const RECORDS_PUT_MAX_RECORD_CHARS = Math.min(
 const RECORDS_PUT_MAX_TOTAL_CHARS = Math.min(
   Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_TOTAL_CHARS, 2500000), 10000),
   20000000,
+);
+const RECORDS_PATCH_MAX_OPERATIONS = Math.min(
+  Math.max(parsePositiveInteger(process.env.RECORDS_PATCH_MAX_OPERATIONS, 1000), 1),
+  20000,
 );
 const RECORDS_PUT_DEFAULT_FIELD_MAX_LENGTH = 4000;
 const RECORDS_PUT_FIELD_MAX_LENGTH = Object.freeze({
@@ -11552,6 +11572,80 @@ function mapGhlPipelineCandidate(rawPipeline) {
     return null;
   }
 
+  function mapGhlPipelineStageCandidate(rawStage) {
+    if (!rawStage || typeof rawStage !== "object") {
+      return null;
+    }
+
+    const stageId = sanitizeTextValue(
+      rawStage?.id ||
+        rawStage?._id ||
+        rawStage?.stageId ||
+        rawStage?.stage_id ||
+        rawStage?.pipelineStageId ||
+        rawStage?.pipeline_stage_id ||
+        rawStage?.statusId,
+      180,
+    );
+    const stageName = sanitizeTextValue(
+      rawStage?.name ||
+        rawStage?.title ||
+        rawStage?.stageName ||
+        rawStage?.stage_name ||
+        rawStage?.pipelineStageName ||
+        rawStage?.pipeline_stage_name ||
+        rawStage?.label ||
+        rawStage?.statusLabel,
+      320,
+    );
+
+    if (!stageId && !stageName) {
+      return null;
+    }
+
+    return {
+      stageId,
+      stageName,
+    };
+  }
+
+  function extractGhlPipelineStagesFromRawPipeline(pipeline) {
+    const stageCandidates = [
+      pipeline?.stages,
+      pipeline?.pipelineStages,
+      pipeline?.pipeline_stages,
+      pipeline?.statuses,
+      pipeline?.stagesData,
+      pipeline?.data?.stages,
+    ];
+
+    for (const candidate of stageCandidates) {
+      if (!Array.isArray(candidate)) {
+        continue;
+      }
+
+      const stages = candidate
+        .map(mapGhlPipelineStageCandidate)
+        .filter(Boolean);
+
+      if (stages.length) {
+        const deduped = [];
+        const seen = new Set();
+        for (const stage of stages) {
+          const key = `${sanitizeTextValue(stage.stageId, 180)}::${sanitizeTextValue(stage.stageName, 320).toLowerCase()}`;
+          if (seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+          deduped.push(stage);
+        }
+        return deduped;
+      }
+    }
+
+    return [];
+  }
+
   const pipelineId = sanitizeTextValue(
     rawPipeline?.id || rawPipeline?._id || rawPipeline?.pipelineId || rawPipeline?.pipeline_id,
     180,
@@ -11568,6 +11662,7 @@ function mapGhlPipelineCandidate(rawPipeline) {
   return {
     pipelineId,
     pipelineName,
+    stages: extractGhlPipelineStagesFromRawPipeline(rawPipeline),
   };
 }
 
@@ -11645,19 +11740,51 @@ async function listGhlOpportunityPipelines() {
 
     const deduped = [];
     const seen = new Set();
+    const dedupedMap = new Map();
     for (const item of items) {
       const id = sanitizeTextValue(item?.pipelineId, 180);
       const name = sanitizeTextValue(item?.pipelineName, 320);
       const key = `${id}::${normalizeGhlPipelineNameForLookup(name)}`;
-      if (seen.has(key)) {
+      const stageItems = Array.isArray(item?.stages) ? item.stages : [];
+      if (!seen.has(key)) {
+        seen.add(key);
+        dedupedMap.set(key, {
+          pipelineId: id,
+          pipelineName: name,
+          stages: stageItems
+            .map((stage) => ({
+              stageId: sanitizeTextValue(stage?.stageId, 180),
+              stageName: sanitizeTextValue(stage?.stageName, 320),
+            }))
+            .filter((stage) => stage.stageId || stage.stageName),
+        });
         continue;
       }
-      seen.add(key);
-      deduped.push({
-        pipelineId: id,
-        pipelineName: name,
-      });
+
+      const existing = dedupedMap.get(key);
+      if (!existing) {
+        continue;
+      }
+      const stageSeen = new Set(
+        (existing.stages || []).map(
+          (stage) => `${sanitizeTextValue(stage?.stageId, 180)}::${sanitizeTextValue(stage?.stageName, 320).toLowerCase()}`,
+        ),
+      );
+      for (const stage of stageItems) {
+        const stageId = sanitizeTextValue(stage?.stageId, 180);
+        const stageName = sanitizeTextValue(stage?.stageName, 320);
+        const stageKey = `${stageId}::${stageName.toLowerCase()}`;
+        if (stageSeen.has(stageKey)) {
+          continue;
+        }
+        stageSeen.add(stageKey);
+        existing.stages.push({
+          stageId,
+          stageName,
+        });
+      }
     }
+    deduped.push(...dedupedMap.values());
 
     return deduped;
   }
@@ -11781,6 +11908,32 @@ function resolveGhlLeadSource(opportunity) {
   );
 }
 
+function isTechnicalGhlLeadSource(rawValue) {
+  const value = sanitizeTextValue(rawValue, 240).toLowerCase();
+  if (!value) {
+    return false;
+  }
+
+  if (value.startsWith("opportunities.search.") || value.startsWith("opportunities.get.")) {
+    return true;
+  }
+
+  if (value.startsWith("/opportunities") || value.includes("query_variant_")) {
+    return true;
+  }
+
+  return false;
+}
+
+function sanitizeGhlLeadSourceForDisplay(rawValue) {
+  const value = sanitizeTextValue(rawValue, 240);
+  if (!value) {
+    return "";
+  }
+
+  return isTechnicalGhlLeadSource(value) ? "" : value;
+}
+
 function resolveGhlLeadTypeFromSource(leadSource) {
   const normalizedSource = sanitizeTextValue(leadSource, 240);
   const lookup = normalizedSource.toLowerCase();
@@ -11855,6 +12008,52 @@ function resolveGhlLeadAssignedTo(opportunity) {
   }
 
   return "";
+}
+
+function resolveGhlLeadNotes(opportunity) {
+  const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
+  const candidates = [
+    opportunity?.notes,
+    opportunity?.note,
+    opportunity?.description,
+    opportunity?.details,
+    opportunity?.internalNotes,
+    opportunity?.internal_notes,
+    opportunity?.comment,
+    opportunity?.comments,
+    nestedContact?.notes,
+    nestedContact?.note,
+    nestedContact?.description,
+    nestedContact?.comments,
+  ];
+
+  for (const candidate of candidates) {
+    const value = sanitizeTextValue(candidate, 8000);
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function looksLikeGhlIdentifier(rawValue) {
+  const value = sanitizeTextValue(rawValue, 200);
+  if (!value) {
+    return false;
+  }
+  if (value.includes(" ") || value.includes("@") || value.startsWith("+")) {
+    return false;
+  }
+  return /^[a-zA-Z0-9_-]{12,}$/.test(value);
+}
+
+function shouldResolveGhlLeadAssignedName(rawValue) {
+  const value = sanitizeTextValue(rawValue, 200);
+  if (!value) {
+    return true;
+  }
+  return looksLikeGhlIdentifier(value);
 }
 
 function resolveGhlLeadPhone(opportunity) {
@@ -12021,11 +12220,12 @@ function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", 
       rawOpportunity?.name,
     320,
   ) || contactName || leadId;
-  const leadSource = resolveGhlLeadSource(rawOpportunity);
+  const leadSource = sanitizeGhlLeadSourceForDisplay(resolveGhlLeadSource(rawOpportunity) || source);
   const leadType = resolveGhlLeadTypeFromSource(leadSource);
   const assignedTo = resolveGhlLeadAssignedTo(rawOpportunity);
   const phone = resolveGhlLeadPhone(rawOpportunity);
   const email = resolveGhlLeadEmail(rawOpportunity);
+  const notes = resolveGhlLeadNotes(rawOpportunity);
 
   if (isMissedCallLeadName(opportunityName)) {
     return null;
@@ -12085,6 +12285,7 @@ function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", 
     email,
     monetaryValue,
     source: leadSource,
+    notes,
     createdOn: new Date(createdOnTimestamp).toISOString(),
     createdOnTimestamp,
     ghlUpdatedAt: updatedTimestamp > 0 ? new Date(updatedTimestamp).toISOString() : "",
@@ -12334,6 +12535,380 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
   };
 }
 
+function extractGhlOpportunityFromPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  if (payload.opportunity && typeof payload.opportunity === "object") {
+    return payload.opportunity;
+  }
+
+  if (payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+    if (payload.data.opportunity && typeof payload.data.opportunity === "object") {
+      return payload.data.opportunity;
+    }
+    if (payload.data.id || payload.data._id) {
+      return payload.data;
+    }
+  }
+
+  const opportunities = extractGhlOpportunitiesFromPayload(payload);
+  if (opportunities.length) {
+    return opportunities[0];
+  }
+
+  if (payload.id || payload._id || payload.opportunityId || payload.opportunity_id) {
+    return payload;
+  }
+
+  return null;
+}
+
+async function fetchGhlOpportunityById(leadId, pipelineContext = null) {
+  const normalizedLeadId = sanitizeTextValue(leadId, 180);
+  if (!normalizedLeadId) {
+    return null;
+  }
+
+  const pipelineId = sanitizeTextValue(pipelineContext?.pipelineId, 180);
+  const encodedLeadId = encodeURIComponent(normalizedLeadId);
+  const queryVariants = [
+    pipelineId
+      ? {
+          locationId: GHL_LOCATION_ID,
+          pipelineId,
+        }
+      : {
+          locationId: GHL_LOCATION_ID,
+        },
+    pipelineId
+      ? {
+          location_id: GHL_LOCATION_ID,
+          pipeline_id: pipelineId,
+        }
+      : {
+          location_id: GHL_LOCATION_ID,
+        },
+    {},
+  ];
+
+  const attempts = [];
+  for (const query of queryVariants) {
+    attempts.push(() =>
+      requestGhlApi(`/opportunities/${encodedLeadId}`, {
+        method: "GET",
+        query,
+        tolerateNotFound: true,
+      }),
+    );
+    attempts.push(() =>
+      requestGhlApi(`/opportunities/${encodedLeadId}/`, {
+        method: "GET",
+        query,
+        tolerateNotFound: true,
+      }),
+    );
+  }
+
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt();
+    } catch {
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const opportunity = extractGhlOpportunityFromPayload(response.body);
+    if (opportunity) {
+      return opportunity;
+    }
+  }
+
+  return null;
+}
+
+function buildGhlLeadPipelineLookup(pipelineItems) {
+  const pipelineNameById = new Map();
+  const pipelineNameByLookup = new Map();
+  const stageNameByPipelineAndStageId = new Map();
+  const stageNameByStageId = new Map();
+
+  const items = Array.isArray(pipelineItems) ? pipelineItems : [];
+  for (const item of items) {
+    const pipelineId = sanitizeTextValue(item?.pipelineId, 180);
+    const pipelineName = sanitizeTextValue(item?.pipelineName, 320);
+    const normalizedPipelineLookup = normalizeGhlPipelineNameForLookup(pipelineName);
+
+    if (pipelineId && pipelineName) {
+      pipelineNameById.set(pipelineId, pipelineName);
+    }
+
+    if (normalizedPipelineLookup && pipelineName) {
+      pipelineNameByLookup.set(normalizedPipelineLookup, pipelineName);
+    }
+
+    const stages = Array.isArray(item?.stages) ? item.stages : [];
+    for (const stage of stages) {
+      const stageId = sanitizeTextValue(stage?.stageId, 180);
+      const stageName = sanitizeTextValue(stage?.stageName, 320);
+      if (!stageId || !stageName) {
+        continue;
+      }
+      if (pipelineId) {
+        stageNameByPipelineAndStageId.set(`${pipelineId}::${stageId}`, stageName);
+      }
+      if (!stageNameByStageId.has(stageId)) {
+        stageNameByStageId.set(stageId, stageName);
+      }
+    }
+  }
+
+  return {
+    pipelineNameById,
+    pipelineNameByLookup,
+    stageNameByPipelineAndStageId,
+    stageNameByStageId,
+  };
+}
+
+function applyGhlLeadPipelineLookup(row, lookup) {
+  if (!row || typeof row !== "object" || !lookup) {
+    return row;
+  }
+
+  const pipelineId = sanitizeTextValue(row.pipelineId, 180);
+  const pipelineName = sanitizeTextValue(row.pipelineName, 320);
+  const stageId = sanitizeTextValue(row.stageId, 180);
+  const stageName = sanitizeTextValue(row.stageName, 320);
+
+  let resolvedPipelineName = pipelineName;
+  if (!resolvedPipelineName && pipelineId && lookup.pipelineNameById.has(pipelineId)) {
+    resolvedPipelineName = lookup.pipelineNameById.get(pipelineId);
+  } else if (!resolvedPipelineName) {
+    const lookupName = normalizeGhlPipelineNameForLookup(pipelineName);
+    if (lookupName && lookup.pipelineNameByLookup.has(lookupName)) {
+      resolvedPipelineName = lookup.pipelineNameByLookup.get(lookupName);
+    }
+  }
+
+  let resolvedStageName = stageName;
+  if (!resolvedStageName && stageId && pipelineId) {
+    resolvedStageName = sanitizeTextValue(lookup.stageNameByPipelineAndStageId.get(`${pipelineId}::${stageId}`), 320);
+  }
+  if (!resolvedStageName && stageId) {
+    resolvedStageName = sanitizeTextValue(lookup.stageNameByStageId.get(stageId), 320);
+  }
+
+  if (resolvedPipelineName === pipelineName && resolvedStageName === stageName) {
+    return row;
+  }
+
+  return {
+    ...row,
+    pipelineName: resolvedPipelineName || pipelineName,
+    stageName: resolvedStageName || stageName,
+  };
+}
+
+function mergeGhlLeadRows(baseRow, patchRow) {
+  const base = baseRow && typeof baseRow === "object" ? baseRow : {};
+  const patch = patchRow && typeof patchRow === "object" ? patchRow : {};
+
+  const baseAssignedTo = sanitizeTextValue(base.assignedTo, 200);
+  const patchAssignedTo = sanitizeTextValue(patch.assignedTo, 200);
+  const shouldPreferPatchAssigned =
+    (!baseAssignedTo && patchAssignedTo) ||
+    (baseAssignedTo && patchAssignedTo && shouldResolveGhlLeadAssignedName(baseAssignedTo) && !shouldResolveGhlLeadAssignedName(patchAssignedTo));
+
+  const baseSource = sanitizeGhlLeadSourceForDisplay(base.source);
+  const patchSource = sanitizeGhlLeadSourceForDisplay(patch.source);
+
+  const merged = {
+    ...base,
+    leadId: sanitizeTextValue(base.leadId || patch.leadId, 180),
+    contactId: sanitizeTextValue(base.contactId || patch.contactId, 180),
+    contactName: sanitizeTextValue(base.contactName || patch.contactName, 320),
+    opportunityName: sanitizeTextValue(base.opportunityName || patch.opportunityName, 320),
+    leadType: sanitizeTextValue(base.leadType || patch.leadType, 120),
+    pipelineId: sanitizeTextValue(base.pipelineId || patch.pipelineId, 180),
+    pipelineName: sanitizeTextValue(base.pipelineName || patch.pipelineName, 320),
+    stageId: sanitizeTextValue(base.stageId || patch.stageId, 180),
+    stageName: sanitizeTextValue(base.stageName || patch.stageName, 320),
+    status: normalizeGhlLeadStatus(base.status || patch.status),
+    assignedTo: shouldPreferPatchAssigned ? patchAssignedTo : baseAssignedTo || patchAssignedTo,
+    phone: sanitizeTextValue(base.phone || patch.phone, 80),
+    email: sanitizeTextValue(base.email || patch.email, 320),
+    source: baseSource || patchSource,
+    notes: sanitizeTextValue(base.notes || patch.notes, 8000),
+  };
+
+  if (!Number.isFinite(Number(base.monetaryValue)) || Number(base.monetaryValue) === 0) {
+    merged.monetaryValue = parseGhlLeadAmount(patch.monetaryValue);
+  } else {
+    merged.monetaryValue = parseGhlLeadAmount(base.monetaryValue);
+  }
+
+  const baseCreatedOn = normalizeIsoTimestampOrNull(base.createdOn);
+  const patchCreatedOn = normalizeIsoTimestampOrNull(patch.createdOn);
+  merged.createdOn = baseCreatedOn || patchCreatedOn || "";
+  merged.createdOnTimestamp = merged.createdOn ? new Date(merged.createdOn).getTime() : 0;
+
+  const baseUpdatedAt = normalizeIsoTimestampOrNull(base.ghlUpdatedAt);
+  const patchUpdatedAt = normalizeIsoTimestampOrNull(patch.ghlUpdatedAt);
+  if (baseUpdatedAt && patchUpdatedAt) {
+    merged.ghlUpdatedAt = new Date(baseUpdatedAt).getTime() >= new Date(patchUpdatedAt).getTime() ? baseUpdatedAt : patchUpdatedAt;
+  } else {
+    merged.ghlUpdatedAt = baseUpdatedAt || patchUpdatedAt || "";
+  }
+  merged.ghlUpdatedAtTimestamp = merged.ghlUpdatedAt ? new Date(merged.ghlUpdatedAt).getTime() : 0;
+
+  return merged;
+}
+
+async function enrichGhlLeadRows(rows, pipelineContext = null) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  if (!sourceRows.length || !isGhlConfigured()) {
+    return sourceRows;
+  }
+
+  const maxRows = Math.min(sourceRows.length, GHL_LEADS_ENRICH_MAX_ROWS);
+  if (maxRows <= 0) {
+    return sourceRows;
+  }
+
+  const nextRows = sourceRows.map((row) => (row && typeof row === "object" ? { ...row } : row));
+  let pipelineLookup = null;
+  try {
+    const pipelines = await listGhlOpportunityPipelines();
+    pipelineLookup = buildGhlLeadPipelineLookup(pipelines);
+  } catch {
+    pipelineLookup = null;
+  }
+
+  let shouldLoadUsersIndex = false;
+  for (let index = 0; index < maxRows; index += 1) {
+    const row = nextRows[index];
+    if (!row || typeof row !== "object") {
+      continue;
+    }
+
+    const maybePatched = pipelineLookup ? applyGhlLeadPipelineLookup(row, pipelineLookup) : row;
+    if (maybePatched !== row) {
+      nextRows[index] = maybePatched;
+    }
+
+    if (shouldResolveGhlLeadAssignedName(maybePatched.assignedTo)) {
+      shouldLoadUsersIndex = true;
+    }
+  }
+
+  let usersIndex = new Map();
+  if (shouldLoadUsersIndex) {
+    try {
+      usersIndex = await listGhlUsersIndex();
+    } catch {
+      usersIndex = new Map();
+    }
+  }
+  const managerNameCache = new Map();
+
+  let cursor = 0;
+  const workerCount = Math.min(GHL_LEADS_ENRICH_CONCURRENCY, maxRows);
+  async function worker() {
+    while (cursor < maxRows) {
+      const currentIndex = cursor;
+      cursor += 1;
+      const initialRow = nextRows[currentIndex];
+      if (!initialRow || typeof initialRow !== "object") {
+        continue;
+      }
+
+      let row = initialRow;
+      const shouldFetchOpportunity =
+        !row.contactName ||
+        !row.phone ||
+        !row.email ||
+        !row.pipelineName ||
+        !row.stageName ||
+        !row.source ||
+        !row.notes ||
+        shouldResolveGhlLeadAssignedName(row.assignedTo);
+
+      if (shouldFetchOpportunity && row.leadId) {
+        try {
+          const detailedOpportunity = await fetchGhlOpportunityById(row.leadId, pipelineContext);
+          const normalizedDetail = normalizeGhlOpportunityLeadRow(detailedOpportunity, "gohighlevel.opportunity_detail", pipelineContext);
+          if (normalizedDetail) {
+            row = mergeGhlLeadRows(row, normalizedDetail);
+            if (pipelineLookup) {
+              row = applyGhlLeadPipelineLookup(row, pipelineLookup);
+            }
+          }
+        } catch {
+          // keep row as-is
+        }
+      }
+
+      const contactId = sanitizeTextValue(row.contactId, 180);
+      const shouldFetchContact =
+        Boolean(contactId) &&
+        (!row.contactName || !row.phone || !row.email || !row.source || !row.notes || shouldResolveGhlLeadAssignedName(row.assignedTo));
+      if (shouldFetchContact) {
+        try {
+          const detailedContact = await fetchGhlContactById(contactId);
+          if (detailedContact && typeof detailedContact === "object") {
+            const contactPatch = {
+              contactId,
+              contactName: sanitizeTextValue(buildContactCandidateName(detailedContact), 320),
+              assignedTo: resolveGhlLeadAssignedTo({ contact: detailedContact }),
+              phone: resolveGhlLeadPhone({ contact: detailedContact }),
+              email: resolveGhlLeadEmail({ contact: detailedContact }),
+              source: sanitizeGhlLeadSourceForDisplay(resolveGhlLeadSource({ contact: detailedContact })),
+              notes: resolveGhlLeadNotes({ contact: detailedContact }),
+            };
+            row = mergeGhlLeadRows(row, contactPatch);
+          }
+        } catch {
+          // keep row as-is
+        }
+      }
+
+      if (shouldResolveGhlLeadAssignedName(row.assignedTo)) {
+        const managerId = sanitizeTextValue(row.assignedTo, 160);
+        if (managerId) {
+          try {
+            const managerName = await resolveGhlManagerName(managerId, usersIndex, managerNameCache);
+            if (managerName && !looksLikeGhlIdentifier(managerName)) {
+              row = {
+                ...row,
+                assignedTo: managerName,
+              };
+            }
+          } catch {
+            // keep current value
+          }
+        }
+      }
+
+      row = {
+        ...row,
+        source: sanitizeGhlLeadSourceForDisplay(row.source),
+        notes: sanitizeTextValue(row.notes, 8000),
+      };
+
+      nextRows[currentIndex] = row;
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return nextRows;
+}
+
 function getGhlLeadActivityTimestamp(item) {
   const createdOnTimestamp = Number.isFinite(item?.createdOnTimestamp) ? item.createdOnTimestamp : 0;
   const updatedTimestamp = Number.isFinite(item?.ghlUpdatedAtTimestamp) ? item.ghlUpdatedAtTimestamp : 0;
@@ -12467,7 +13042,7 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
     }
   }
 
-  const rows = [...rowsById.values()].sort((left, right) => {
+  const sortedRows = [...rowsById.values()].sort((left, right) => {
     const leftCreated = Number.isFinite(left?.createdOnTimestamp) ? left.createdOnTimestamp : 0;
     const rightCreated = Number.isFinite(right?.createdOnTimestamp) ? right.createdOnTimestamp : 0;
     if (leftCreated !== rightCreated) {
@@ -12475,6 +13050,7 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
     }
     return getGhlLeadActivityTimestamp(right) - getGhlLeadActivityTimestamp(left);
   });
+  const rows = await enrichGhlLeadRows(sortedRows, pipelineContext);
 
   return {
     rows,
@@ -12521,6 +13097,7 @@ function normalizeGhlLeadRowForCache(row) {
     email: sanitizeTextValue(row?.email, 320),
     monetaryValue,
     source: sanitizeTextValue(row?.source, 240),
+    notes: sanitizeTextValue(row?.notes, 8000),
     createdOn: createdOnIso,
     ghlUpdatedAt: normalizeIsoTimestampOrNull(row?.ghlUpdatedAt),
   };
@@ -12554,6 +13131,7 @@ function mapGhlLeadCacheRow(row) {
     email: sanitizeTextValue(row?.email, 320),
     monetaryValue: Number.isFinite(monetaryValue) ? monetaryValue : 0,
     source: sanitizeTextValue(row?.source, 240),
+    notes: sanitizeTextValue(row?.notes, 8000),
     createdOn: row?.created_on ? new Date(row.created_on).toISOString() : "",
     createdOnTimestamp: row?.created_on ? new Date(row.created_on).getTime() : 0,
     ghlUpdatedAt: row?.ghl_updated_at ? new Date(row.ghl_updated_at).toISOString() : "",
@@ -12585,6 +13163,7 @@ async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE, optio
         status,
         monetary_value,
         source,
+        notes,
         assigned_to,
         phone,
         email,
@@ -12652,9 +13231,9 @@ async function upsertGhlLeadsCacheRows(rows) {
 
     for (let index = 0; index < batch.length; index += 1) {
       const row = batch[index];
-      const base = index * 17;
+      const base = index * 18;
       placeholders.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}::timestamptz, $${base + 17}::timestamptz)`,
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17}::timestamptz, $${base + 18}::timestamptz)`,
       );
       values.push(
         row.leadId,
@@ -12669,6 +13248,7 @@ async function upsertGhlLeadsCacheRows(rows) {
         row.status,
         row.monetaryValue,
         row.source,
+        row.notes,
         row.assignedTo,
         row.phone,
         row.email,
@@ -12692,6 +13272,7 @@ async function upsertGhlLeadsCacheRows(rows) {
           status,
           monetary_value,
           source,
+          notes,
           assigned_to,
           phone,
           email,
@@ -12712,6 +13293,7 @@ async function upsertGhlLeadsCacheRows(rows) {
           status = EXCLUDED.status,
           monetary_value = EXCLUDED.monetary_value,
           source = EXCLUDED.source,
+          notes = EXCLUDED.notes,
           assigned_to = EXCLUDED.assigned_to,
           phone = EXCLUDED.phone,
           email = EXCLUDED.email,
@@ -14057,6 +14639,7 @@ async function ensureDatabaseReady() {
           status TEXT NOT NULL DEFAULT '',
           monetary_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
           source TEXT NOT NULL DEFAULT 'gohighlevel',
+          notes TEXT NOT NULL DEFAULT '',
           assigned_to TEXT NOT NULL DEFAULT '',
           phone TEXT NOT NULL DEFAULT '',
           email TEXT NOT NULL DEFAULT '',
@@ -14084,6 +14667,11 @@ async function ensureDatabaseReady() {
       await pool.query(`
         ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''
       `);
 
       await pool.query(`
@@ -14147,25 +14735,6 @@ async function getStoredRecords() {
   };
 }
 
-function normalizeRecordStateTimestamp(rawValue) {
-  if (rawValue === null || rawValue === undefined || rawValue === "") {
-    return null;
-  }
-
-  if (rawValue instanceof Date) {
-    const timestamp = rawValue.getTime();
-    return Number.isFinite(timestamp) ? timestamp : null;
-  }
-
-  const normalizedText = sanitizeTextValue(rawValue, 120);
-  if (!normalizedText) {
-    return null;
-  }
-
-  const timestamp = Date.parse(normalizedText);
-  return Number.isFinite(timestamp) ? timestamp : null;
-}
-
 async function saveStoredRecords(records, options = {}) {
   await ensureDatabaseReady();
   const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(options, "expectedUpdatedAt");
@@ -14198,14 +14767,7 @@ async function saveStoredRecords(records, options = {}) {
     );
 
     const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
-    const currentUpdatedAtMs = normalizeRecordStateTimestamp(currentUpdatedAt);
-    const expectsEmptyState = expectedUpdatedAt === null || expectedUpdatedAt === "";
-    const isRevisionMatch =
-      expectedUpdatedAtMs !== null
-        ? currentUpdatedAtMs !== null && currentUpdatedAtMs === expectedUpdatedAtMs
-        : expectsEmptyState && currentUpdatedAtMs === null;
-
-    if (!isRevisionMatch) {
+    if (!isRecordStateRevisionMatch(expectedUpdatedAt, currentUpdatedAt)) {
       const conflictError = createHttpError(
         "Records were updated by another operation. Refresh records and try again.",
         409,
@@ -14228,6 +14790,88 @@ async function saveStoredRecords(records, options = {}) {
 
     await client.query("COMMIT");
     return result.rows[0]?.updated_at || null;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function saveStoredRecordsPatch(operations, options = {}) {
+  await ensureDatabaseReady();
+
+  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(options, "expectedUpdatedAt");
+  if (!hasExpectedUpdatedAt) {
+    throw createHttpError(
+      "Payload must include `expectedUpdatedAt` (latest revision from GET /api/records).",
+      428,
+      "records_precondition_required",
+    );
+  }
+
+  const expectedUpdatedAt = options.expectedUpdatedAt;
+  const expectedUpdatedAtMs = normalizeRecordStateTimestamp(expectedUpdatedAt);
+  if (expectedUpdatedAt !== null && expectedUpdatedAt !== "" && expectedUpdatedAtMs === null) {
+    throw createHttpError("`expectedUpdatedAt` must be a valid ISO datetime or null.", 400, "invalid_expected_updated_at");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const stateResult = await client.query(
+      `
+        SELECT records, updated_at
+        FROM ${STATE_TABLE}
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [STATE_ROW_ID],
+    );
+
+    const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
+    if (!isRecordStateRevisionMatch(expectedUpdatedAt, currentUpdatedAt)) {
+      const conflictError = createHttpError(
+        "Records were updated by another operation. Refresh records and try again.",
+        409,
+        "records_conflict",
+      );
+      conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
+      throw conflictError;
+    }
+
+    const currentRecords = Array.isArray(stateResult.rows[0]?.records) ? stateResult.rows[0].records : [];
+    const normalizedOperations = Array.isArray(operations) ? operations : [];
+
+    if (!normalizedOperations.length) {
+      await client.query("COMMIT");
+      return {
+        updatedAt: currentUpdatedAt,
+      };
+    }
+
+    const nextRecords = applyRecordsPatchOperations(currentRecords, normalizedOperations);
+
+    const result = await client.query(
+      `
+        INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+        VALUES ($1, $2::jsonb, NOW())
+        ON CONFLICT (id)
+        DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
+        RETURNING updated_at
+      `,
+      [STATE_ROW_ID, JSON.stringify(nextRecords)],
+    );
+
+    await client.query("COMMIT");
+    return {
+      updatedAt: result.rows[0]?.updated_at || null,
+    };
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -15305,6 +15949,161 @@ function validateRecordsPayload(value) {
   return {
     ok: true,
     records: normalizedRecords,
+  };
+}
+
+function buildInvalidRecordsPatchPayloadResult(message, code = "invalid_records_patch_payload", httpStatus = 400) {
+  return {
+    ok: false,
+    message,
+    code,
+    httpStatus,
+  };
+}
+
+function normalizeRecordsPatchOperationType(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 40).toLowerCase();
+  if (normalized === PATCH_OPERATION_UPSERT || normalized === PATCH_OPERATION_DELETE) {
+    return normalized;
+  }
+  return "";
+}
+
+function validateRecordsPatchPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return buildInvalidRecordsPatchPayloadResult("Payload must be an object.");
+  }
+
+  const operations = payload.operations;
+  if (!Array.isArray(operations)) {
+    return buildInvalidRecordsPatchPayloadResult("Payload must include `operations` as an array.");
+  }
+
+  if (operations.length > RECORDS_PATCH_MAX_OPERATIONS) {
+    return buildInvalidRecordsPatchPayloadResult(
+      `Patch payload is too large. Maximum allowed operations: ${RECORDS_PATCH_MAX_OPERATIONS}.`,
+      "records_patch_too_many_operations",
+      413,
+    );
+  }
+
+  const normalizedOperations = [];
+
+  for (let operationIndex = 0; operationIndex < operations.length; operationIndex += 1) {
+    const operation = operations[operationIndex];
+    if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
+      return buildInvalidRecordsPatchPayloadResult(
+        `Operation at index ${operationIndex} must be an object.`,
+        "records_patch_invalid_operation",
+      );
+    }
+
+    const operationType = normalizeRecordsPatchOperationType(operation.type || operation.op);
+    if (!operationType) {
+      return buildInvalidRecordsPatchPayloadResult(
+        `Operation at index ${operationIndex} has invalid type. Allowed values: upsert, delete.`,
+        "records_patch_invalid_operation_type",
+      );
+    }
+
+    const operationId = sanitizeTextValue(operation.id, 180);
+    if (!operationId) {
+      return buildInvalidRecordsPatchPayloadResult(
+        `Operation at index ${operationIndex} must include \`id\`.`,
+        "records_patch_missing_id",
+      );
+    }
+
+    if (operationType === PATCH_OPERATION_DELETE) {
+      normalizedOperations.push({
+        type: PATCH_OPERATION_DELETE,
+        id: operationId,
+      });
+      continue;
+    }
+
+    const rawRecord = operation.record;
+    if (!rawRecord || typeof rawRecord !== "object" || Array.isArray(rawRecord)) {
+      return buildInvalidRecordsPatchPayloadResult(
+        `Operation at index ${operationIndex} must include \`record\` object for upsert.`,
+        "records_patch_invalid_record",
+      );
+    }
+
+    const recordValidation = validateRecordsPayload([rawRecord]);
+    if (!recordValidation.ok) {
+      return buildInvalidRecordsPatchPayloadResult(
+        `Operation at index ${operationIndex}: ${recordValidation.message}`,
+        recordValidation.code || "records_patch_invalid_record",
+        recordValidation.httpStatus || 400,
+      );
+    }
+
+    const normalizedRecord = recordValidation.records[0] || {};
+    const recordId = sanitizeTextValue(normalizedRecord.id, 180);
+    if (recordId && recordId !== operationId) {
+      return buildInvalidRecordsPatchPayloadResult(
+        `Operation at index ${operationIndex} has mismatched record id.`,
+        "records_patch_id_mismatch",
+      );
+    }
+
+    normalizedRecord.id = operationId;
+    normalizedOperations.push({
+      type: PATCH_OPERATION_UPSERT,
+      id: operationId,
+      record: normalizedRecord,
+    });
+  }
+
+  return {
+    ok: true,
+    operations: normalizedOperations,
+  };
+}
+
+function normalizeExpectedUpdatedAtFromRequest(body = {}) {
+  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(body || {}, "expectedUpdatedAt");
+  if (!hasExpectedUpdatedAt) {
+    return {
+      ok: false,
+      status: 428,
+      error: "Payload must include `expectedUpdatedAt` from GET /api/records.",
+      code: "records_precondition_required",
+    };
+  }
+
+  const rawExpectedUpdatedAt = body?.expectedUpdatedAt;
+  if (!(rawExpectedUpdatedAt === null || rawExpectedUpdatedAt === "" || typeof rawExpectedUpdatedAt === "string")) {
+    return {
+      ok: false,
+      status: 400,
+      error: "`expectedUpdatedAt` must be an ISO datetime string or null.",
+      code: "invalid_expected_updated_at",
+    };
+  }
+
+  if (typeof rawExpectedUpdatedAt === "string" && rawExpectedUpdatedAt.trim()) {
+    const normalizedExpectedUpdatedAt = sanitizeTextValue(rawExpectedUpdatedAt, 120);
+    const expectedTimestamp = Date.parse(normalizedExpectedUpdatedAt);
+    if (!normalizedExpectedUpdatedAt || Number.isNaN(expectedTimestamp)) {
+      return {
+        ok: false,
+        status: 400,
+        error: "`expectedUpdatedAt` must be an ISO datetime string or null.",
+        code: "invalid_expected_updated_at",
+      };
+    }
+
+    return {
+      ok: true,
+      expectedUpdatedAt: new Date(expectedTimestamp).toISOString(),
+    };
+  }
+
+  return {
+    ok: true,
+    expectedUpdatedAt: null,
   };
 }
 
@@ -18021,37 +18820,15 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
     return;
   }
 
-  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(req.body || {}, "expectedUpdatedAt");
-  if (!hasExpectedUpdatedAt) {
-    res.status(428).json({
-      error: "Payload must include `expectedUpdatedAt` from GET /api/records.",
-      code: "records_precondition_required",
+  const expectedUpdatedAtResult = normalizeExpectedUpdatedAtFromRequest(req.body || {});
+  if (!expectedUpdatedAtResult.ok) {
+    res.status(expectedUpdatedAtResult.status || 400).json({
+      error: expectedUpdatedAtResult.error || "Invalid expectedUpdatedAt.",
+      code: expectedUpdatedAtResult.code || "invalid_expected_updated_at",
     });
     return;
   }
-
-  const rawExpectedUpdatedAt = req.body?.expectedUpdatedAt;
-  if (!(rawExpectedUpdatedAt === null || rawExpectedUpdatedAt === "" || typeof rawExpectedUpdatedAt === "string")) {
-    res.status(400).json({
-      error: "`expectedUpdatedAt` must be an ISO datetime string or null.",
-      code: "invalid_expected_updated_at",
-    });
-    return;
-  }
-
-  let expectedUpdatedAt = null;
-  if (typeof rawExpectedUpdatedAt === "string" && rawExpectedUpdatedAt.trim()) {
-    const normalizedExpectedUpdatedAt = sanitizeTextValue(rawExpectedUpdatedAt, 120);
-    const expectedTimestamp = Date.parse(normalizedExpectedUpdatedAt);
-    if (!normalizedExpectedUpdatedAt || Number.isNaN(expectedTimestamp)) {
-      res.status(400).json({
-        error: "`expectedUpdatedAt` must be an ISO datetime string or null.",
-        code: "invalid_expected_updated_at",
-      });
-      return;
-    }
-    expectedUpdatedAt = new Date(expectedTimestamp).toISOString();
-  }
+  const expectedUpdatedAt = expectedUpdatedAtResult.expectedUpdatedAt;
 
   if (SIMULATE_SLOW_RECORDS) {
     await delayMs(SIMULATE_SLOW_RECORDS_DELAY_MS);
@@ -18080,6 +18857,90 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
   } catch (error) {
     console.error("PUT /api/records failed:", error);
     const payload = buildPublicErrorPayload(error, "Failed to save records");
+    if (Object.prototype.hasOwnProperty.call(error || {}, "currentUpdatedAt")) {
+      payload.updatedAt = error.currentUpdatedAt || null;
+    }
+    res.status(error.httpStatus || resolveDbHttpStatus(error)).json(payload);
+  }
+});
+
+app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS), async (req, res) => {
+  if (!RECORDS_PATCH_ENABLED) {
+    res.status(404).json({
+      error: "API route not found",
+      code: "records_patch_disabled",
+    });
+    return;
+  }
+
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.records.write",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.blockMs,
+      },
+      message: "Save request limit reached. Please wait before retrying.",
+      code: "records_write_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const expectedUpdatedAtResult = normalizeExpectedUpdatedAtFromRequest(req.body || {});
+  if (!expectedUpdatedAtResult.ok) {
+    res.status(expectedUpdatedAtResult.status || 400).json({
+      error: expectedUpdatedAtResult.error || "Invalid expectedUpdatedAt.",
+      code: expectedUpdatedAtResult.code || "invalid_expected_updated_at",
+    });
+    return;
+  }
+  const expectedUpdatedAt = expectedUpdatedAtResult.expectedUpdatedAt;
+
+  const validationResult = validateRecordsPatchPayload(req.body || {});
+  if (!validationResult.ok) {
+    res.status(validationResult.httpStatus || 400).json({
+      error: validationResult.message,
+      code: validationResult.code,
+    });
+    return;
+  }
+
+  if (SIMULATE_SLOW_RECORDS) {
+    await delayMs(SIMULATE_SLOW_RECORDS_DELAY_MS);
+    res.json({
+      ok: true,
+      updatedAt: new Date().toISOString(),
+      appliedOperations: validationResult.operations.length,
+    });
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  try {
+    const result = await saveStoredRecordsPatch(validationResult.operations, {
+      expectedUpdatedAt,
+    });
+    res.json({
+      ok: true,
+      updatedAt: result.updatedAt,
+      appliedOperations: validationResult.operations.length,
+    });
+  } catch (error) {
+    console.error("PATCH /api/records failed:", error);
+    const payload = buildPublicErrorPayload(error, "Failed to patch records");
     if (Object.prototype.hasOwnProperty.call(error || {}, "currentUpdatedAt")) {
       payload.updatedAt = error.currentUpdatedAt || null;
     }
