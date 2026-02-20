@@ -11639,6 +11639,23 @@ function normalizeGhlRefreshMode(rawRefreshMode) {
   return "none";
 }
 
+function normalizeGhlLeadsRangeMode(rawRangeMode, fallback = "today") {
+  const value = sanitizeTextValue(rawRangeMode, 40).toLowerCase();
+  if (value === "today") {
+    return "today";
+  }
+  if (value === "week" || value === "this_week" || value === "thisweek") {
+    return "week";
+  }
+  if (value === "month" || value === "this_month" || value === "thismonth") {
+    return "month";
+  }
+  if (value === "all") {
+    return "all";
+  }
+  return normalizeGhlLeadsRangeMode(fallback || "today", "today");
+}
+
 function parseBooleanFlag(rawValue, fallback = false) {
   const normalized = sanitizeTextValue(rawValue, 20).toLowerCase();
   if (!normalized) {
@@ -13480,8 +13497,9 @@ async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE, optio
 
   const requestedLimit = parsePositiveIntegerOrZero(limit);
   const safeLimit = Math.min(Math.max(requestedLimit || GHL_LEADS_MAX_ROWS_RESPONSE, 1), GHL_LEADS_MAX_ROWS_RESPONSE);
-  const todayOnly = options?.todayOnly === true;
-  const boundaries = todayOnly ? buildGhlLeadsTimeBoundaries(new Date()) : null;
+  const rangeMode = normalizeGhlLeadsRangeMode(options?.rangeMode, options?.todayOnly === true ? "today" : "all");
+  const shouldApplyDateRange = rangeMode === "today" || rangeMode === "week" || rangeMode === "month";
+  const boundaries = shouldApplyDateRange ? buildGhlLeadsTimeBoundaries(new Date()) : null;
 
   const queryParts = [
     `
@@ -13511,8 +13529,15 @@ async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE, optio
   ];
   const values = [];
 
-  if (todayOnly && boundaries?.todayStart && boundaries?.tomorrowStart) {
-    values.push(new Date(boundaries.todayStart).toISOString());
+  if (shouldApplyDateRange && boundaries?.tomorrowStart) {
+    let rangeStart = boundaries.todayStart;
+    if (rangeMode === "week") {
+      rangeStart = boundaries.weekStart;
+    } else if (rangeMode === "month") {
+      rangeStart = boundaries.monthStart;
+    }
+
+    values.push(new Date(rangeStart).toISOString());
     values.push(new Date(boundaries.tomorrowStart).toISOString());
     queryParts.push(`AND created_on >= $${values.length - 1}::timestamptz`);
     queryParts.push(`AND created_on < $${values.length}::timestamptz`);
@@ -16766,6 +16791,7 @@ async function queueClientSubmission(record, submittedBy, miniData = {}, attachm
   const submittedByPayload = submittedBy && typeof submittedBy === "object" ? submittedBy : null;
   const miniDataPayload = miniData && typeof miniData === "object" ? miniData : {};
   const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
+  const storedAttachmentKeys = [];
   const client = await pool.connect();
 
   try {
@@ -16781,18 +16807,57 @@ async function queueClientSubmission(record, submittedBy, miniData = {}, attachm
     );
 
     for (const attachment of normalizedAttachments) {
+      const attachmentId = sanitizeTextValue(attachment.id, 180) || `file-${generateId()}`;
+      const fileName = sanitizeAttachmentFileName(attachment.fileName);
+      const mimeType = normalizeAttachmentMimeType(attachment.mimeType);
+      const sizeBytes = Number.parseInt(attachment.sizeBytes, 10) || 0;
+
+      let contentBuffer = null;
+      let storageProvider = ATTACHMENTS_STORAGE_PROVIDER_BYTEA;
+      let storageKey = "";
+      let storageUrl = "";
+
+      if (ATTACHMENTS_STREAMING_ENABLED && ATTACHMENTS_STORAGE_ROOT) {
+        const storedAttachment = await storeAttachmentInStreamingStorage(attachment, submissionId);
+        if (storedAttachment?.storageKey) {
+          storageProvider = storedAttachment.storageProvider || ATTACHMENTS_STORAGE_PROVIDER_LOCAL_FS;
+          storageKey = sanitizeTextValue(storedAttachment.storageKey, 320);
+          storageUrl = sanitizeTextValue(storedAttachment.storageUrl, 1200);
+          storedAttachmentKeys.push(storageKey);
+          attachment.storageKey = storageKey;
+          attachment.storageUrl = storageUrl;
+          attachment.storageProvider = storageProvider;
+          attachment.tempPath = "";
+        }
+      }
+
+      if (!storageKey) {
+        contentBuffer = await readAttachmentContentBuffer(attachment);
+        if (!Buffer.isBuffer(contentBuffer) || !contentBuffer.length) {
+          throw createHttpError(
+            `Failed to read "${fileName}". Please try uploading the file again.`,
+            400,
+            "attachment_content_missing",
+          );
+        }
+      }
+
       await client.query(
         `
-          INSERT INTO ${MODERATION_FILES_TABLE} (id, submission_id, file_name, mime_type, size_bytes, content)
-          VALUES ($1, $2, $3, $4, $5, $6)
+          INSERT INTO ${MODERATION_FILES_TABLE}
+            (id, submission_id, file_name, mime_type, size_bytes, content, storage_provider, storage_key, storage_url)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         `,
         [
-          sanitizeTextValue(attachment.id, 180),
+          attachmentId,
           submissionId,
-          sanitizeAttachmentFileName(attachment.fileName),
-          normalizeAttachmentMimeType(attachment.mimeType),
-          Number.parseInt(attachment.sizeBytes, 10) || 0,
-          attachment.content,
+          fileName,
+          mimeType,
+          sizeBytes,
+          storageKey ? null : contentBuffer,
+          storageProvider,
+          storageKey,
+          storageUrl,
         ],
       );
     }
@@ -16811,6 +16876,13 @@ async function queueClientSubmission(record, submittedBy, miniData = {}, attachm
       await client.query("ROLLBACK");
     } catch {
       // Best-effort rollback.
+    }
+    if (storedAttachmentKeys.length) {
+      try {
+        await Promise.all(storedAttachmentKeys.map((storageKey) => removeStoredAttachmentByKey(storageKey)));
+      } catch (cleanupError) {
+        console.error("Failed to cleanup stored attachments after rollback:", cleanupError);
+      }
     }
     throw error;
   } finally {
@@ -16891,7 +16963,16 @@ async function getPendingSubmissionFile(submissionId, fileId) {
 
   const filesResult = await pool.query(
     `
-      SELECT f.id, f.file_name, f.mime_type, f.size_bytes, f.content, s.status AS submission_status
+      SELECT
+        f.id,
+        f.file_name,
+        f.mime_type,
+        f.size_bytes,
+        f.content,
+        f.storage_provider,
+        f.storage_key,
+        f.storage_url,
+        s.status AS submission_status
       FROM ${MODERATION_FILES_TABLE} f
       JOIN ${MODERATION_TABLE} s ON s.id = f.submission_id
       WHERE f.submission_id = $1 AND f.id = $2
@@ -16918,6 +16999,27 @@ async function getPendingSubmissionFile(submissionId, fileId) {
     };
   }
 
+  const storageProvider = sanitizeTextValue(row.storage_provider, 40).toLowerCase() || ATTACHMENTS_STORAGE_PROVIDER_BYTEA;
+  const storageKey = sanitizeTextValue(row.storage_key, 320);
+  const storageUrl = sanitizeTextValue(row.storage_url, 1200);
+  let content = byteaToBuffer(row.content);
+  if (!content.length && storageKey) {
+    try {
+      content = await loadAttachmentContentBufferFromStorage(storageKey);
+    } catch (error) {
+      console.error("Failed to load attachment from storage:", storageKey, error);
+      content = Buffer.from([]);
+    }
+  }
+
+  if (!content.length) {
+    return {
+      ok: false,
+      status: 404,
+      error: "File content is not available.",
+    };
+  }
+
   return {
     ok: true,
     file: {
@@ -16925,7 +17027,10 @@ async function getPendingSubmissionFile(submissionId, fileId) {
       fileName: sanitizeAttachmentFileName(row.file_name),
       mimeType: normalizeAttachmentMimeType(row.mime_type),
       sizeBytes: Number.parseInt(row.size_bytes, 10) || 0,
-      content: byteaToBuffer(row.content),
+      content,
+      storageProvider,
+      storageKey,
+      storageUrl,
     },
   };
 }
@@ -16999,15 +17104,20 @@ function buildTelegramSubmissionMessage(record, miniData, _submission, telegramU
 }
 
 async function sendMiniSubmissionTelegramAttachments(submission, attachments = []) {
-  const normalizedAttachments = Array.isArray(attachments)
-    ? attachments
-        .map((attachment) => ({
-          fileName: sanitizeAttachmentFileName(attachment?.fileName),
-          mimeType: normalizeAttachmentMimeType(attachment?.mimeType),
-          content: Buffer.isBuffer(attachment?.content) ? attachment.content : null,
-        }))
-        .filter((attachment) => attachment.content && attachment.content.length)
-    : [];
+  const normalizedAttachments = [];
+  const rawAttachments = Array.isArray(attachments) ? attachments : [];
+  for (const attachment of rawAttachments) {
+    const content = await readAttachmentContentBuffer(attachment);
+    if (!Buffer.isBuffer(content) || !content.length) {
+      continue;
+    }
+
+    normalizedAttachments.push({
+      fileName: sanitizeAttachmentFileName(attachment?.fileName),
+      mimeType: normalizeAttachmentMimeType(attachment?.mimeType),
+      content,
+    });
+  }
   if (!normalizedAttachments.length) {
     return;
   }
@@ -18502,7 +18612,8 @@ app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLI
 });
 
 async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/leads", options = {}) {
-  const todayOnly = options?.todayOnly === true;
+  const rangeMode = normalizeGhlLeadsRangeMode(options?.rangeMode, options?.todayOnly === false ? "all" : "today");
+  const todayOnly = rangeMode === "today";
   const leadsRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
     !enforceRateLimit(req, res, {
@@ -18545,6 +18656,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
 
   const refreshMeta = {
     mode: refreshMode,
+    rangeMode,
     todayOnly,
     performed: false,
     pagesFetched: 0,
@@ -18620,7 +18732,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
     }
 
     let items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE, {
-      todayOnly,
+      rangeMode,
     });
     if (isGhlConfigured() && items.length && GHL_LEADS_READ_ENRICH_MAX_ROWS > 0) {
       const rowsNeedingEnrichment = items
@@ -18660,6 +18772,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
         id: sanitizeTextValue(pipelineContext.pipelineId, 180),
         name: sanitizeTextValue(pipelineContext.pipelineName, 320) || GHL_LEADS_PIPELINE_NAME,
       },
+      rangeMode,
       refresh: refreshMeta,
     });
   } catch (error) {
@@ -18770,7 +18883,10 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
 
 app.get("/api/ghl/leads", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
-  const todayOnly = parseBooleanFlag(req.query.todayOnly, true);
+  const rangeMode = normalizeGhlLeadsRangeMode(
+    req.query.range || req.query.rangeMode || req.query.period,
+    parseBooleanFlag(req.query.todayOnly, true) ? "today" : "all",
+  );
   if (refreshMode !== "none") {
     res.status(405).json({
       error: "State-changing refresh is not allowed via GET. Use POST /api/ghl/leads/refresh.",
@@ -18780,16 +18896,19 @@ app.get("/api/ghl/leads", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_M
   }
 
   await respondGhlLeads(req, res, "none", "GET /api/ghl/leads", {
-    todayOnly,
+    rangeMode,
   });
 });
 
 app.post("/api/ghl/leads/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.body?.refresh || req.body?.mode || "incremental");
-  const todayOnly = parseBooleanFlag(req.body?.todayOnly, true);
+  const rangeMode = normalizeGhlLeadsRangeMode(
+    req.body?.range || req.body?.rangeMode || req.body?.period,
+    parseBooleanFlag(req.body?.todayOnly, true) ? "today" : "all",
+  );
   const resolvedRefreshMode = refreshMode === "none" ? "incremental" : refreshMode;
   await respondGhlLeads(req, res, resolvedRefreshMode, "POST /api/ghl/leads/refresh", {
-    todayOnly,
+    rangeMode,
   });
 });
 
@@ -19395,6 +19514,7 @@ app.post("/api/mini/clients", async (req, res) => {
 
   const attachmentsResult = buildMiniSubmissionAttachments(req.files);
   if (attachmentsResult.error) {
+    await cleanupTemporaryUploadFiles(req.files);
     res.status(attachmentsResult.status || 400).json({
       error: attachmentsResult.error,
     });
@@ -19430,6 +19550,9 @@ app.post("/api/mini/clients", async (req, res) => {
   } catch (error) {
     console.error("POST /api/mini/clients failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to submit client"));
+  } finally {
+    await cleanupTemporaryAttachmentFiles(attachmentsResult.attachments || []);
+    await cleanupTemporaryUploadFiles(req.files);
   }
 });
 

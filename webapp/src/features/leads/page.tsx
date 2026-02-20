@@ -14,6 +14,7 @@ const EMPTY_SUMMARY: GhlLeadsSummary = {
   generatedAt: "",
 };
 const SPREADSHEET_FORMULA_PREFIX = /^\s*[=+\-@]/;
+type LeadsRangeMode = "today" | "week";
 
 export default function LeadsPage() {
   const [items, setItems] = useState<GhlLeadRow[]>([]);
@@ -23,10 +24,12 @@ export default function LeadsPage() {
   const [loadError, setLoadError] = useState("");
   const [canSync, setCanSync] = useState(false);
   const [lastSyncedCount, setLastSyncedCount] = useState(0);
+  const [rangeMode, setRangeMode] = useState<LeadsRangeMode>("week");
 
   const statusText = useMemo(() => {
+    const rangeLabel = rangeMode === "week" ? "this week" : "today";
     if (isLoading) {
-      return "Refreshing only today's leads from GoHighLevel...";
+      return `Refreshing leads for ${rangeLabel} from GoHighLevel...`;
     }
 
     if (loadError) {
@@ -34,19 +37,20 @@ export default function LeadsPage() {
     }
 
     if (!items.length) {
-      return "Press Refresh to load today's leads.";
+      return `Press Refresh to load leads for ${rangeLabel}.`;
     }
 
-    return `Loaded ${items.length} leads for today. Last sync added/updated: ${lastSyncedCount}.`;
-  }, [isLoading, items.length, lastSyncedCount, loadError]);
+    return `Loaded ${items.length} leads for ${rangeLabel}. Last sync added/updated: ${lastSyncedCount}.`;
+  }, [isLoading, items.length, lastSyncedCount, loadError, rangeMode]);
 
-  const loadLeads = useCallback(async () => {
+  const loadLeads = useCallback(async (nextRangeMode: LeadsRangeMode = rangeMode) => {
     setIsLoading(true);
     setLoadError("");
+    setRangeMode(nextRangeMode);
 
     try {
-      const payload = await getGhlLeads("incremental", {
-        todayOnly: true,
+      const payload = await getGhlLeads(canSync ? "incremental" : "none", {
+        rangeMode: nextRangeMode,
       });
       const nextItems = Array.isArray(payload.items) ? payload.items : [];
 
@@ -63,7 +67,7 @@ export default function LeadsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [canSync, rangeMode]);
 
   useEffect(() => {
     setIsLoading(false);
@@ -163,8 +167,8 @@ export default function LeadsPage() {
     if (!items.length) {
       return;
     }
-    exportLeadsToCsv(items, "today");
-  }, [items]);
+    exportLeadsToCsv(items, rangeMode);
+  }, [items, rangeMode]);
 
   return (
     <PageShell className="leads-react-page">
@@ -173,6 +177,24 @@ export default function LeadsPage() {
         title={`Leads (${pipelineName})`}
         actions={
           <div className="leads-toolbar-react">
+            <Button
+              type="button"
+              size="sm"
+              variant={rangeMode === "today" ? "primary" : "secondary"}
+              onClick={() => void loadLeads("today")}
+              disabled={isLoading}
+            >
+              Today
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={rangeMode === "week" ? "primary" : "secondary"}
+              onClick={() => void loadLeads("week")}
+              disabled={isLoading}
+            >
+              This Week
+            </Button>
             <Button
               type="button"
               size="sm"
@@ -185,7 +207,7 @@ export default function LeadsPage() {
             <Button
               type="button"
               size="sm"
-              onClick={() => void loadLeads()}
+              onClick={() => void loadLeads(rangeMode)}
               disabled={isLoading || !canSync}
               isLoading={isLoading}
             >
@@ -197,7 +219,10 @@ export default function LeadsPage() {
         {!loadError ? <p className="dashboard-message leads-status">{statusText}</p> : null}
 
         <div className="leads-summary-react" aria-live="polite">
-          <SummaryCard title="Today" value={summary.today || items.length} />
+          <SummaryCard
+            title={rangeMode === "week" ? "This Week" : "Today"}
+            value={rangeMode === "week" ? summary.week || items.length : summary.today || items.length}
+          />
         </div>
 
         {isLoading ? <LoadingSkeleton rows={8} /> : null}
@@ -212,7 +237,7 @@ export default function LeadsPage() {
         ) : null}
 
         {!isLoading && !loadError && !items.length ? (
-          <EmptyState title="Press Refresh to load today's leads." />
+          <EmptyState title={rangeMode === "week" ? "Press Refresh to load this week's leads." : "Press Refresh to load today's leads."} />
         ) : null}
 
         {!isLoading && !loadError && items.length ? (
