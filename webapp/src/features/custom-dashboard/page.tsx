@@ -888,7 +888,7 @@ export default function CustomDashboardPage() {
                   <input
                     ref={tasksFileInputRef}
                     type="file"
-                    accept=".csv,.tsv,.txt,.xlsx,.xls"
+                    accept=".csv,.tsv,.txt"
                     className="custom-dashboard-upload-input"
                     onChange={(event) => {
                       const file = event.target.files?.[0];
@@ -901,7 +901,7 @@ export default function CustomDashboardPage() {
                   <input
                     ref={contactsFileInputRef}
                     type="file"
-                    accept=".csv,.tsv,.txt,.xlsx,.xls"
+                    accept=".csv,.tsv,.txt"
                     className="custom-dashboard-upload-input"
                     onChange={(event) => {
                       const file = event.target.files?.[0];
@@ -914,7 +914,7 @@ export default function CustomDashboardPage() {
                   <input
                     ref={callsFileInputRef}
                     type="file"
-                    accept=".csv,.tsv,.txt,.xlsx,.xls"
+                    accept=".csv,.tsv,.txt"
                     className="custom-dashboard-upload-input"
                     onChange={(event) => {
                       const file = event.target.files?.[0];

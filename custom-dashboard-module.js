@@ -1,20 +1,11 @@
 const path = require("path");
 const multer = require("multer");
 
-let XLSX = null;
-try {
-  // Optional dependency: enables direct XLSX/XLS uploads.
-  // If unavailable, CSV/TSV uploads are still supported.
-  // eslint-disable-next-line global-require
-  XLSX = require("xlsx");
-} catch {
-  XLSX = null;
-}
-
 const CUSTOM_DASHBOARD_TABLE_DEFAULT = "app_data";
 const CUSTOM_DASHBOARD_DB_SCHEMA_DEFAULT = "public";
 const CUSTOM_DASHBOARD_UPLOAD_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 const CUSTOM_DASHBOARD_MAX_ROWS_PER_UPLOAD = 50000;
+const CUSTOM_DASHBOARD_ALLOWED_TEXT_UPLOAD_EXTENSIONS = new Set([".csv", ".tsv", ".txt"]);
 const CUSTOM_DASHBOARD_WIDGET_KEYS = ["managerTasks", "specialistTasks", "salesReport", "callsByManager"];
 
 const CUSTOM_DASHBOARD_UPLOAD_TYPES = new Set(["tasks", "contacts", "calls"]);
@@ -1758,31 +1749,25 @@ function registerCustomDashboardModule(config) {
     }
 
     if (extension === ".xlsx" || extension === ".xls" || mimeType.includes("spreadsheetml") || mimeType.includes("ms-excel")) {
-      if (!XLSX) {
-        throw createHttpError(
-          "XLSX parser is not available on this server. Upload CSV/TSV export from Excel.",
-          400,
-        );
-      }
+      throw createHttpError(
+        "Excel uploads are temporarily disabled for security. Upload CSV/TSV/TXT export instead.",
+        400,
+        "spreadsheet_upload_disabled",
+      );
+    }
 
-      const workbook = XLSX.read(content, {
-        type: "buffer",
-        raw: false,
-        cellDates: true,
-      });
-      const firstSheetName = Array.isArray(workbook.SheetNames) && workbook.SheetNames.length
-        ? workbook.SheetNames[0]
-        : "";
-      if (!firstSheetName || !workbook.Sheets[firstSheetName]) {
-        throw createHttpError("Excel file has no readable sheets.", 400);
-      }
+    const isTextUpload =
+      CUSTOM_DASHBOARD_ALLOWED_TEXT_UPLOAD_EXTENSIONS.has(extension) ||
+      mimeType.includes("text/csv") ||
+      mimeType.includes("text/tab-separated-values") ||
+      mimeType.includes("text/plain");
 
-      const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], {
-        defval: "",
-        raw: false,
-      });
-
-      return normalizeRawRows(rows);
+    if (!isTextUpload) {
+      throw createHttpError(
+        "Unsupported file format. Upload CSV/TSV/TXT file.",
+        400,
+        "unsupported_upload_format",
+      );
     }
 
     const text = decodeTextBuffer(content);
