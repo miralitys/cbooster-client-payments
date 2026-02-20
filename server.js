@@ -1,4 +1,5 @@
 const path = require("path");
+const os = require("os");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const fs = require("fs");
@@ -13,6 +14,12 @@ const {
   isRecordStateRevisionMatch,
   normalizeRecordStateTimestamp,
 } = require("./records-patch-utils");
+const {
+  buildAttachmentStorageKey,
+  buildAttachmentStorageUrl,
+  normalizeAttachmentStorageBaseUrl,
+  resolveAttachmentStoragePath,
+} = require("./attachments-storage-utils");
 const { registerCustomDashboardModule } = require("./custom-dashboard-module");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
@@ -496,6 +503,16 @@ const GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS = Math.min(
   60 * 60 * 1000,
 );
 const PAGINATION_V2_ENABLED = resolveOptionalBoolean(process.env.PAGINATION_V2) === true;
+const ATTACHMENTS_STREAMING_REQUESTED = resolveOptionalBoolean(process.env.ATTACHMENTS_STREAMING) === true;
+const ATTACHMENTS_STORAGE_ROOT = resolveAttachmentStorageRoot(process.env.ATTACHMENTS_STORAGE_ROOT);
+const ATTACHMENTS_STORAGE_PUBLIC_BASE_URL = normalizeAttachmentStorageBaseUrl(process.env.ATTACHMENTS_STORAGE_PUBLIC_BASE_URL);
+const ATTACHMENTS_UPLOAD_TMP_DIR = resolveAttachmentUploadTempDir(
+  process.env.ATTACHMENTS_UPLOAD_TMP_DIR,
+);
+const ATTACHMENTS_STREAMING_ENABLED =
+  ATTACHMENTS_STREAMING_REQUESTED && Boolean(ATTACHMENTS_STORAGE_ROOT) && Boolean(ATTACHMENTS_UPLOAD_TMP_DIR);
+const ATTACHMENTS_STORAGE_PROVIDER_BYTEA = "bytea";
+const ATTACHMENTS_STORAGE_PROVIDER_LOCAL_FS = "local_fs";
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
@@ -535,6 +552,11 @@ const MINI_BLOCKED_MIME_TYPES = new Set([
   "application/x-httpd-php",
 ]);
 const MINI_BLOCKED_MIME_PATTERNS = [/javascript/i, /ecmascript/i, /x-sh/i, /shellscript/i, /python/i, /xhtml/i];
+if (ATTACHMENTS_STREAMING_REQUESTED && !ATTACHMENTS_STREAMING_ENABLED) {
+  console.warn(
+    "[attachments] ATTACHMENTS_STREAMING is enabled, but storage is not fully configured. Falling back to BYTEA storage.",
+  );
+}
 
 const RECORD_TEXT_FIELDS = [
   "clientName",
@@ -918,13 +940,14 @@ const pool = DATABASE_URL
       performanceObservability,
     )
   : null;
-const miniAttachmentsUploadMiddleware = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    files: MINI_MAX_ATTACHMENTS_COUNT,
-    fileSize: MINI_MAX_ATTACHMENT_SIZE_BYTES,
-  },
-}).array("attachments", MINI_MAX_ATTACHMENTS_COUNT);
+const miniAttachmentsUploadMemoryMiddleware = createMiniAttachmentsUploadMiddleware({
+  useDisk: false,
+});
+const miniAttachmentsUploadDiskMiddleware = ATTACHMENTS_STREAMING_ENABLED
+  ? createMiniAttachmentsUploadMiddleware({
+      useDisk: true,
+    })
+  : null;
 
 let dbReadyPromise = null;
 let quickBooksSyncQueue = Promise.resolve();
@@ -1027,6 +1050,39 @@ function parseOptionalTelegramChatId(rawValue) {
   }
 
   return value;
+}
+
+function resolveAttachmentStorageRoot(rawValue) {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return "";
+  }
+
+  const resolvedPath = path.resolve(value);
+  try {
+    fs.mkdirSync(resolvedPath, { recursive: true });
+    return resolvedPath;
+  } catch (error) {
+    console.error("[attachments] Failed to initialize ATTACHMENTS_STORAGE_ROOT:", error);
+    return "";
+  }
+}
+
+function resolveAttachmentUploadTempDir(rawValue) {
+  const configuredPath = (rawValue || "").toString().trim();
+  const fallbackPath = path.resolve(path.join(os.tmpdir(), "cbooster-mini-attachments-tmp"));
+  const candidates = configuredPath ? [path.resolve(configuredPath), fallbackPath] : [fallbackPath];
+
+  for (const candidate of candidates) {
+    try {
+      fs.mkdirSync(candidate, { recursive: true });
+      return candidate;
+    } catch (error) {
+      console.error("[attachments] Failed to initialize upload temp dir:", candidate, error);
+    }
+  }
+
+  return "";
 }
 
 function createRollingLatencySample(maxSize) {
@@ -1804,9 +1860,39 @@ function isMultipartRequest(req) {
   return contentType.includes("multipart/form-data");
 }
 
+function createMiniAttachmentsUploadMiddleware(options = {}) {
+  const useDisk = options.useDisk === true;
+  const multerOptions = {
+    limits: {
+      files: MINI_MAX_ATTACHMENTS_COUNT,
+      fileSize: MINI_MAX_ATTACHMENT_SIZE_BYTES,
+    },
+  };
+
+  if (useDisk) {
+    multerOptions.storage = multer.diskStorage({
+      destination: (_req, _file, callback) => {
+        callback(null, ATTACHMENTS_UPLOAD_TMP_DIR);
+      },
+      filename: (_req, _file, callback) => {
+        callback(null, `upload-${generateId()}`);
+      },
+    });
+  } else {
+    multerOptions.storage = multer.memoryStorage();
+  }
+
+  return multer(multerOptions).array("attachments", MINI_MAX_ATTACHMENTS_COUNT);
+}
+
 function parseMiniMultipartRequest(req, res) {
   return new Promise((resolve, reject) => {
-    miniAttachmentsUploadMiddleware(req, res, (error) => {
+    const uploadMiddleware =
+      ATTACHMENTS_STREAMING_ENABLED && miniAttachmentsUploadDiskMiddleware
+        ? miniAttachmentsUploadDiskMiddleware
+        : miniAttachmentsUploadMemoryMiddleware;
+
+    uploadMiddleware(req, res, (error) => {
       if (!error) {
         resolve();
         return;
@@ -1829,6 +1915,7 @@ function parseMiniMultipartRequest(req, res) {
         }
       }
 
+      void cleanupTemporaryUploadFiles(req.files);
       reject(error);
     });
   });
@@ -1933,8 +2020,8 @@ function buildMiniSubmissionAttachments(rawFiles) {
     const fileName = sanitizeAttachmentFileName(file?.originalname);
     const mimeType = normalizeAttachmentMimeType(file?.mimetype);
     const buffer = Buffer.isBuffer(file?.buffer) ? file.buffer : null;
-
-    if (!buffer || !buffer.length) {
+    const tempPath = sanitizeUploadedTempPath(file?.path);
+    if (!buffer?.length && !tempPath) {
       return {
         error: `Failed to read "${fileName}". Please try uploading the file again.`,
         status: 400,
@@ -1942,7 +2029,25 @@ function buildMiniSubmissionAttachments(rawFiles) {
     }
 
     const sizeBytes = Number.parseInt(file?.size, 10);
-    const normalizedSize = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : buffer.length;
+    let normalizedSize = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : 0;
+    if (!normalizedSize && buffer?.length) {
+      normalizedSize = buffer.length;
+    }
+    if (!normalizedSize && tempPath) {
+      try {
+        const stats = fs.statSync(tempPath);
+        normalizedSize = Number.isFinite(stats.size) && stats.size > 0 ? stats.size : 0;
+      } catch {
+        normalizedSize = 0;
+      }
+    }
+    if (!normalizedSize) {
+      return {
+        error: `Failed to read size of "${fileName}". Please try uploading the file again.`,
+        status: 400,
+      };
+    }
+
     if (normalizedSize > MINI_MAX_ATTACHMENT_SIZE_BYTES) {
       return {
         error: `File "${fileName}" exceeds ${Math.floor(MINI_MAX_ATTACHMENT_SIZE_BYTES / (1024 * 1024))} MB limit.`,
@@ -1971,7 +2076,8 @@ function buildMiniSubmissionAttachments(rawFiles) {
       fileName,
       mimeType,
       sizeBytes: normalizedSize,
-      content: buffer,
+      content: buffer?.length ? buffer : null,
+      tempPath,
     });
   }
 
@@ -2008,6 +2114,184 @@ function byteaToBuffer(value) {
   }
 
   return Buffer.from([]);
+}
+
+function sanitizeUploadedTempPath(rawPath) {
+  const value = (rawPath || "").toString().trim();
+  if (!value) {
+    return "";
+  }
+
+  return path.resolve(value);
+}
+
+function collectAttachmentTempFilePathsFromAttachments(attachments) {
+  const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
+  const uniquePaths = new Set();
+  for (const attachment of normalizedAttachments) {
+    const tempPath = sanitizeUploadedTempPath(attachment?.tempPath);
+    if (tempPath) {
+      uniquePaths.add(tempPath);
+    }
+  }
+  return [...uniquePaths];
+}
+
+async function cleanupTemporaryAttachmentFiles(attachments) {
+  const filePaths = collectAttachmentTempFilePathsFromAttachments(attachments);
+  if (!filePaths.length) {
+    return;
+  }
+
+  await Promise.all(filePaths.map((filePath) => removeFileIfExists(filePath)));
+}
+
+async function cleanupTemporaryUploadFiles(rawFiles) {
+  const files = Array.isArray(rawFiles) ? rawFiles : [];
+  if (!files.length) {
+    return;
+  }
+
+  const uniquePaths = new Set();
+  for (const file of files) {
+    const tempPath = sanitizeUploadedTempPath(file?.path);
+    if (tempPath) {
+      uniquePaths.add(tempPath);
+    }
+  }
+
+  if (!uniquePaths.size) {
+    return;
+  }
+
+  await Promise.all([...uniquePaths].map((filePath) => removeFileIfExists(filePath)));
+}
+
+async function removeFileIfExists(filePath) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    console.error("[attachments] Failed to remove temporary file:", filePath, error);
+  }
+}
+
+async function moveFileToTargetPath(sourcePath, targetPath) {
+  try {
+    await fs.promises.rename(sourcePath, targetPath);
+    return;
+  } catch (error) {
+    if (error?.code !== "EXDEV") {
+      throw error;
+    }
+  }
+
+  await fs.promises.copyFile(sourcePath, targetPath);
+  await removeFileIfExists(sourcePath);
+}
+
+function resolveAttachmentStorageReadPath(storageKey) {
+  if (!ATTACHMENTS_STORAGE_ROOT) {
+    return "";
+  }
+
+  return resolveAttachmentStoragePath(ATTACHMENTS_STORAGE_ROOT, storageKey);
+}
+
+async function loadAttachmentContentBufferFromStorage(storageKey) {
+  const storagePath = resolveAttachmentStorageReadPath(storageKey);
+  if (!storagePath) {
+    return Buffer.from([]);
+  }
+
+  try {
+    return await fs.promises.readFile(storagePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return Buffer.from([]);
+    }
+
+    throw error;
+  }
+}
+
+async function readAttachmentContentBuffer(attachment) {
+  if (Buffer.isBuffer(attachment?.content) && attachment.content.length) {
+    return attachment.content;
+  }
+
+  const tempPath = sanitizeUploadedTempPath(attachment?.tempPath);
+  if (tempPath) {
+    try {
+      return await fs.promises.readFile(tempPath);
+    } catch {
+      return Buffer.from([]);
+    }
+  }
+
+  const storageKey = sanitizeTextValue(attachment?.storageKey, 320);
+  if (storageKey) {
+    try {
+      return await loadAttachmentContentBufferFromStorage(storageKey);
+    } catch {
+      return Buffer.from([]);
+    }
+  }
+
+  return Buffer.from([]);
+}
+
+async function removeStoredAttachmentByKey(storageKey) {
+  const storagePath = resolveAttachmentStorageReadPath(storageKey);
+  if (!storagePath) {
+    return;
+  }
+
+  await removeFileIfExists(storagePath);
+}
+
+async function storeAttachmentInStreamingStorage(attachment, submissionId) {
+  if (!ATTACHMENTS_STREAMING_ENABLED || !ATTACHMENTS_STORAGE_ROOT) {
+    return null;
+  }
+
+  const safeAttachmentId = sanitizeTextValue(attachment?.id, 180);
+  if (!safeAttachmentId) {
+    throw createHttpError("Attachment id is required.", 400, "attachment_invalid_id");
+  }
+
+  const storageKey = buildAttachmentStorageKey({
+    submissionId: sanitizeTextValue(submissionId, 180),
+    fileId: safeAttachmentId,
+    fileName: sanitizeAttachmentFileName(attachment?.fileName),
+  });
+  const storagePath = resolveAttachmentStoragePath(ATTACHMENTS_STORAGE_ROOT, storageKey);
+  if (!storagePath) {
+    throw createHttpError("Attachment storage key is invalid.", 500, "attachment_storage_invalid_key");
+  }
+
+  await fs.promises.mkdir(path.dirname(storagePath), { recursive: true });
+  const tempPath = sanitizeUploadedTempPath(attachment?.tempPath);
+  if (tempPath) {
+    await moveFileToTargetPath(tempPath, storagePath);
+  } else if (Buffer.isBuffer(attachment?.content) && attachment.content.length) {
+    await fs.promises.writeFile(storagePath, attachment.content);
+  } else {
+    throw createHttpError("Attachment content is missing.", 400, "attachment_content_missing");
+  }
+
+  const storageUrl = buildAttachmentStorageUrl(ATTACHMENTS_STORAGE_PUBLIC_BASE_URL, storageKey);
+  return {
+    storageProvider: ATTACHMENTS_STORAGE_PROVIDER_LOCAL_FS,
+    storageKey,
+    storageUrl,
+  };
 }
 
 function safeEqual(leftValue, rightValue) {
@@ -12455,24 +12739,32 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
     }
   }
 
-  if (pipelineId) {
-    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit, pipeline_id: pipelineId });
-    pushUnique(postBodies, { locationId: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit, pipelineId });
-    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit, pipeline_id: pipelineId });
-    pushUnique(postBodies, { page: safePage, pageLimit: safeLimit, pipeline_id: pipelineId });
+  // GHL opportunities/search is unstable across accounts and often rejects pipelineId/pipeline_id.
+  // Keep the first variants minimal and known-working.
+  pushUnique(postBodies, { locationId: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
+  pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
+  pushUnique(postBodies, { locationId: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit });
+  pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit });
+  pushUnique(postBodies, { page: safePage, limit: safeLimit });
+  pushUnique(postBodies, { page: safePage, pageLimit: safeLimit });
 
+  if (pipelineId) {
+    // Optional variants: some GHL tenants support pipeline filters.
+    pushUnique(postBodies, { locationId: GHL_LOCATION_ID, page: safePage, limit: safeLimit, pipelineId });
+    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit, pipeline_id: pipelineId });
+    pushUnique(postBodies, { locationId: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit, pipelineId });
+    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit, pipeline_id: pipelineId });
+    pushUnique(postBodies, { page: safePage, limit: safeLimit, pipelineId });
+    pushUnique(postBodies, { page: safePage, limit: safeLimit, pipeline_id: pipelineId });
+  }
+
+  pushUnique(getQueries, { locationId: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
+  pushUnique(getQueries, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
+  pushUnique(getQueries, { page: safePage, limit: safeLimit });
+  if (pipelineId) {
     pushUnique(getQueries, { locationId: GHL_LOCATION_ID, page: safePage, limit: safeLimit, pipelineId });
     pushUnique(getQueries, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit, pipeline_id: pipelineId });
-    pushUnique(getQueries, { page: safePage, limit: safeLimit, pipeline_id: pipelineId });
-  } else {
-    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit });
-    pushUnique(postBodies, { locationId: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit });
-    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
-    pushUnique(postBodies, { page: safePage, pageLimit: safeLimit });
-
-    pushUnique(getQueries, { locationId: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
-    pushUnique(getQueries, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
-    pushUnique(getQueries, { page: safePage, limit: safeLimit });
+    pushUnique(getQueries, { page: safePage, limit: safeLimit, pipelineId });
   }
 
   for (let index = 0; index < postBodies.length; index += 1) {
@@ -12516,6 +12808,8 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
   }
 
   let lastError = null;
+  let hasSuccessfulResponse = false;
+  const nonOkResponses = [];
   const pageStartedAt = Date.now();
   for (const attempt of attempts) {
     const elapsed = Date.now() - pageStartedAt;
@@ -12535,8 +12829,13 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
     }
 
     if (!response.ok) {
+      nonOkResponses.push({
+        source: attempt.source,
+        status: Number.isFinite(response?.status) ? response.status : 0,
+      });
       continue;
     }
+    hasSuccessfulResponse = true;
 
     const items = extractGhlOpportunitiesFromPayload(response.body);
     const pagination = extractGhlOpportunitiesPagination(response.body, safePage, safeLimit, items.length);
@@ -12550,6 +12849,17 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
 
   if (lastError) {
     throw lastError;
+  }
+
+  if (!hasSuccessfulResponse && nonOkResponses.length) {
+    const preview = nonOkResponses
+      .slice(0, 3)
+      .map((item) => `${item.source}:HTTP${item.status || "?"}`)
+      .join(", ");
+    throw createHttpError(
+      `GHL opportunities lookup failed for all variants (${preview || "no successful variants"}).`,
+      502,
+    );
   }
 
   return {
@@ -14476,9 +14786,32 @@ async function ensureDatabaseReady() {
           file_name TEXT NOT NULL,
           mime_type TEXT NOT NULL,
           size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
-          content BYTEA NOT NULL,
+          content BYTEA,
+          storage_provider TEXT NOT NULL DEFAULT 'bytea',
+          storage_key TEXT NOT NULL DEFAULT '',
+          storage_url TEXT NOT NULL DEFAULT '',
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${MODERATION_FILES_TABLE}
+        ALTER COLUMN content DROP NOT NULL
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${MODERATION_FILES_TABLE}
+        ADD COLUMN IF NOT EXISTS storage_provider TEXT NOT NULL DEFAULT 'bytea'
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${MODERATION_FILES_TABLE}
+        ADD COLUMN IF NOT EXISTS storage_key TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${MODERATION_FILES_TABLE}
+        ADD COLUMN IF NOT EXISTS storage_url TEXT NOT NULL DEFAULT ''
       `);
 
       await pool.query(`
