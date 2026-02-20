@@ -8,7 +8,7 @@ export {
   getModerationSubmissions,
   rejectModerationSubmission,
 } from "@/shared/api/moderation";
-export { getQuickBooksPayments } from "@/shared/api/quickbooks";
+export { createQuickBooksSyncJob, getQuickBooksPayments, getQuickBooksSyncJob } from "@/shared/api/quickbooks";
 export { getClientManagers } from "@/shared/api/clientManagers";
 export { getGhlLeads } from "@/shared/api/ghlLeads";
 export { getGhlClientDocuments } from "@/shared/api/ghlDocuments";

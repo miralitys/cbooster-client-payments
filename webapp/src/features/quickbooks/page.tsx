@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
 import { withStableRowKeys, type RowWithKey } from "@/shared/lib/stableRowKeys";
-import { getSession, getQuickBooksPayments } from "@/shared/api";
-import type { QuickBooksPaymentRow } from "@/shared/types/quickbooks";
+import { createQuickBooksSyncJob, getQuickBooksPayments, getQuickBooksSyncJob, getSession } from "@/shared/api";
+import type { QuickBooksPaymentRow, QuickBooksSyncJob, QuickBooksSyncMeta } from "@/shared/types/quickbooks";
 import { Button, EmptyState, ErrorState, Input, LoadingSkeleton, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const QUICKBOOKS_FROM_DATE = "2026-01-01";
+const QUICKBOOKS_SYNC_POLL_INTERVAL_MS = 1200;
+const QUICKBOOKS_SYNC_POLL_MAX_ATTEMPTS = 150;
 const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -80,9 +82,31 @@ export default function QuickBooksPage() {
     ];
   }, []);
 
+  const pollQuickBooksSyncJob = useCallback(async (jobId: string, shouldTotalRefresh: boolean) => {
+    const normalizedJobId = String(jobId || "").trim();
+    if (!normalizedJobId) {
+      throw new Error("QuickBooks sync job id is missing.");
+    }
+
+    for (let attempt = 0; attempt < QUICKBOOKS_SYNC_POLL_MAX_ATTEMPTS; attempt += 1) {
+      const payload = await getQuickBooksSyncJob(normalizedJobId);
+      const job = payload?.job || null;
+      if (job) {
+        setStatusText(buildQuickBooksSyncProgressMessage(job, shouldTotalRefresh));
+        if (isQuickBooksSyncJobDone(job)) {
+          return job;
+        }
+      }
+      await waitForMs(QUICKBOOKS_SYNC_POLL_INTERVAL_MS);
+    }
+
+    throw new Error("QuickBooks sync is taking too long. Please check again in a minute.");
+  }, []);
+
   const loadRecentQuickBooksPayments = useCallback(async (options: LoadOptions = {}) => {
     const shouldSync = Boolean(options.sync);
     const shouldTotalRefresh = Boolean(options.fullSync);
+    const rangeTo = formatDateForApi(new Date());
     const previousItems = [...transactionsRef.current];
     setIsLoading(true);
     setLoadError("");
@@ -95,11 +119,26 @@ export default function QuickBooksPage() {
     }
 
     try {
+      let syncMetaOverride: QuickBooksSyncMeta | null = null;
+      if (shouldSync) {
+        const syncJobPayload = await createQuickBooksSyncJob({
+          from: QUICKBOOKS_FROM_DATE,
+          to: rangeTo,
+          fullSync: shouldTotalRefresh,
+        });
+        const syncJobId = String(syncJobPayload?.job?.id || "").trim();
+        const finishedJob = await pollQuickBooksSyncJob(syncJobId, shouldTotalRefresh);
+        const failed = String(finishedJob?.status || "").toLowerCase() === "failed";
+        if (failed) {
+          const failureMessage = String(finishedJob?.error || "").trim();
+          throw new Error(failureMessage || "QuickBooks sync failed.");
+        }
+        syncMetaOverride = finishedJob?.sync || null;
+      }
+
       const payload = await getQuickBooksPayments({
         from: QUICKBOOKS_FROM_DATE,
-        to: formatDateForApi(new Date()),
-        sync: shouldSync,
-        fullSync: shouldTotalRefresh,
+        to: rangeTo,
       });
       const items = Array.isArray(payload.items) ? payload.items : [];
       setAllTransactions(
@@ -109,7 +148,7 @@ export default function QuickBooksPage() {
         }),
       );
       setRangeText(payload.range?.from && payload.range?.to ? `Range: ${payload.range.from} -> ${payload.range.to}` : "");
-      setLastLoadPrefix(buildLoadPrefixFromPayload(payload, shouldSync, shouldTotalRefresh));
+      setLastLoadPrefix(buildLoadPrefixFromPayload(payload, shouldSync, shouldTotalRefresh, syncMetaOverride));
       setSyncWarning("");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load transactions.";
@@ -128,7 +167,7 @@ export default function QuickBooksPage() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [pollQuickBooksSyncJob]);
 
   useEffect(() => {
     transactionsRef.current = allTransactions;
@@ -331,24 +370,78 @@ function buildFilterStatusMessage(
   return normalizedPrefix ? `${normalizedPrefix} ${mainMessage}` : mainMessage;
 }
 
+function isQuickBooksSyncJobDone(job: QuickBooksSyncJob | null | undefined): boolean {
+  if (!job) {
+    return false;
+  }
+
+  if (job.done === true) {
+    return true;
+  }
+
+  const status = String(job.status || "").toLowerCase();
+  return status === "completed" || status === "failed";
+}
+
+function buildQuickBooksSyncProgressMessage(job: QuickBooksSyncJob, totalRefreshRequested: boolean): string {
+  const status = String(job?.status || "").toLowerCase();
+  const isFullSync = String(job?.syncMode || "").toLowerCase() === "full" || totalRefreshRequested;
+  const operationText = isFullSync ? "Total refresh" : "Refresh";
+
+  if (status === "queued") {
+    return `${operationText} queued...`;
+  }
+
+  if (status === "running") {
+    return `${operationText} in progress...`;
+  }
+
+  if (status === "completed") {
+    return `${operationText} completed. Loading saved transactions...`;
+  }
+
+  if (status === "failed") {
+    const failureMessage = String(job?.error || "").trim();
+    return failureMessage || `${operationText} failed.`;
+  }
+
+  return `${operationText} in progress...`;
+}
+
+function waitForMs(durationMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, Math.max(0, durationMs));
+  });
+}
+
 function buildLoadPrefixFromPayload(
   payload: {
     sync?: {
       requested?: boolean;
       syncMode?: string;
+      performed?: boolean;
+      syncFrom?: string;
+      fetchedCount?: number;
       insertedCount?: number;
       reconciledCount?: number;
       writtenCount?: number;
+      reconciledWrittenCount?: number;
     };
   },
   syncRequested: boolean,
   totalRefreshRequested: boolean,
+  syncMetaOverride: QuickBooksSyncMeta | null = null,
 ): string {
   if (!syncRequested) {
     return "Saved data:";
   }
-  const syncMeta = payload.sync && typeof payload.sync === "object" ? payload.sync : null;
-  if (!syncMeta?.requested) {
+
+  const payloadSyncMeta = payload.sync && typeof payload.sync === "object" ? payload.sync : null;
+  const syncMeta = syncMetaOverride && typeof syncMetaOverride === "object" ? syncMetaOverride : payloadSyncMeta;
+  if (!syncMeta) {
+    return "Saved data:";
+  }
+  if (!syncMetaOverride && !syncMeta.requested) {
     return "Saved data:";
   }
 
@@ -367,7 +460,10 @@ function buildLoadPrefixFromPayload(
     return `Refresh: +${insertedCount} new.`;
   }
 
-  const reconciledCount = Number.parseInt(String(syncMeta.reconciledCount || ""), 10);
+  const reconciledCount = Number.parseInt(
+    String(syncMeta.reconciledWrittenCount ?? syncMeta.reconciledCount ?? ""),
+    10,
+  );
   if (Number.isFinite(reconciledCount) && reconciledCount > 0) {
     return `Refresh: updated ${reconciledCount} zero rows.`;
   }
