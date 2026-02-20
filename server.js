@@ -93,6 +93,14 @@ const LOGIN_FAILURE_IP_ACCOUNT_POLICY = Object.freeze({
   lockMs: 20 * 60 * 1000,
 });
 const WEB_AUTH_BCRYPT_COST = Math.min(Math.max(parsePositiveInteger(process.env.WEB_AUTH_BCRYPT_COST, 12), 10), 15);
+const PERF_OBSERVABILITY_ENABLED = resolveOptionalBoolean(process.env.PERF_OBSERVABILITY_ENABLED) !== false;
+const PERF_HTTP_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.PERF_HTTP_SAMPLE_SIZE, 512), 64), 5000);
+const PERF_HTTP_MAX_ROUTES = Math.min(Math.max(parsePositiveInteger(process.env.PERF_HTTP_MAX_ROUTES, 250), 50), 2000);
+const PERF_DB_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.PERF_DB_SAMPLE_SIZE, 2048), 64), 10000);
+const PERF_DB_SLOW_QUERY_MS = Math.min(Math.max(parsePositiveInteger(process.env.PERF_DB_SLOW_QUERY_MS, 700), 50), 60000);
+const PERF_EVENT_LOOP_INTERVAL_MS = Math.min(Math.max(parsePositiveInteger(process.env.PERF_EVENT_LOOP_INTERVAL_MS, 1000), 100), 10000);
+const PERF_EVENT_LOOP_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.PERF_EVENT_LOOP_SAMPLE_SIZE, 600), 30), 10000);
+const DB_METRICS_CLIENT_PATCHED_FLAG = Symbol("dbMetricsClientPatched");
 const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
 const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
 const WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS = "manage_client_payments";
@@ -791,10 +799,22 @@ const WEB_AUTH_USERS_BY_USERNAME = WEB_AUTH_USERS_DIRECTORY.usersByUsername;
 seedWebAuthBootstrapUsers();
 validateWebAuthSecurityConfiguration();
 
+const performanceObservability = createPerformanceObservabilityState({
+  enabled: PERF_OBSERVABILITY_ENABLED,
+  httpSampleSize: PERF_HTTP_SAMPLE_SIZE,
+  httpMaxRoutes: PERF_HTTP_MAX_ROUTES,
+  dbSampleSize: PERF_DB_SAMPLE_SIZE,
+  dbSlowQueryMs: PERF_DB_SLOW_QUERY_MS,
+  eventLoopIntervalMs: PERF_EVENT_LOOP_INTERVAL_MS,
+  eventLoopSampleSize: PERF_EVENT_LOOP_SAMPLE_SIZE,
+});
+startPerformanceObservabilityMonitor(performanceObservability);
+
 const app = express();
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: false }));
+app.use(createHttpPerformanceMetricsMiddleware(performanceObservability));
 
 const staticRoot = __dirname;
 const webAppDistRoot = path.join(__dirname, "webapp", "dist");
@@ -805,10 +825,13 @@ const WEB_STATIC_ASSET_ALLOWLIST = new Map([
 ]);
 
 const pool = DATABASE_URL
-  ? new Pool({
-      connectionString: DATABASE_URL,
-      ssl: shouldUseSsl() ? { rejectUnauthorized: false } : false,
-    })
+  ? instrumentDbPoolWithMetrics(
+      new Pool({
+        connectionString: DATABASE_URL,
+        ssl: shouldUseSsl() ? { rejectUnauthorized: false } : false,
+      }),
+      performanceObservability,
+    )
   : null;
 const miniAttachmentsUploadMiddleware = multer({
   storage: multer.memoryStorage(),
@@ -919,6 +942,567 @@ function parseOptionalTelegramChatId(rawValue) {
   }
 
   return value;
+}
+
+function createRollingLatencySample(maxSize) {
+  const normalizedMaxSize = Math.max(1, Number.parseInt(maxSize, 10) || 1);
+  return {
+    maxSize: normalizedMaxSize,
+    values: new Array(normalizedMaxSize),
+    cursor: 0,
+    filled: 0,
+  };
+}
+
+function pushRollingLatencySample(sample, value) {
+  if (!sample || !Number.isFinite(value)) {
+    return;
+  }
+
+  sample.values[sample.cursor] = value;
+  sample.cursor = (sample.cursor + 1) % sample.maxSize;
+  if (sample.filled < sample.maxSize) {
+    sample.filled += 1;
+  }
+}
+
+function getSortedRollingLatencyValues(sample) {
+  if (!sample || !sample.filled) {
+    return [];
+  }
+
+  const size = Math.min(sample.filled, sample.maxSize);
+  const values = new Array(size);
+  for (let index = 0; index < size; index += 1) {
+    values[index] = Number(sample.values[index]) || 0;
+  }
+  values.sort((left, right) => left - right);
+  return values;
+}
+
+function calculatePercentileFromSorted(values, percentile) {
+  if (!Array.isArray(values) || !values.length) {
+    return null;
+  }
+
+  const normalizedPercentile = Math.min(Math.max(Number(percentile) || 0, 0), 1);
+  if (values.length === 1) {
+    return values[0];
+  }
+
+  const index = normalizedPercentile * (values.length - 1);
+  const lowerIndex = Math.floor(index);
+  const upperIndex = Math.ceil(index);
+  if (lowerIndex === upperIndex) {
+    return values[lowerIndex];
+  }
+
+  const lower = values[lowerIndex];
+  const upper = values[upperIndex];
+  const weight = index - lowerIndex;
+  return lower + (upper - lower) * weight;
+}
+
+function roundMetricValue(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return Math.round(value * 1000) / 1000;
+}
+
+function buildLatencySummary({ sample, totalCount, totalDurationMs, maxDurationMs, lastDurationMs }) {
+  if (!totalCount) {
+    return {
+      count: 0,
+      sampleCount: 0,
+      avgMs: null,
+      maxMs: null,
+      lastMs: null,
+      p50Ms: null,
+      p95Ms: null,
+      p99Ms: null,
+    };
+  }
+
+  const sortedValues = getSortedRollingLatencyValues(sample);
+  return {
+    count: totalCount,
+    sampleCount: sortedValues.length,
+    avgMs: roundMetricValue(totalDurationMs / totalCount),
+    maxMs: roundMetricValue(maxDurationMs),
+    lastMs: roundMetricValue(lastDurationMs),
+    p50Ms: roundMetricValue(calculatePercentileFromSorted(sortedValues, 0.5)),
+    p95Ms: roundMetricValue(calculatePercentileFromSorted(sortedValues, 0.95)),
+    p99Ms: roundMetricValue(calculatePercentileFromSorted(sortedValues, 0.99)),
+  };
+}
+
+function normalizeMetricPathSegment(rawSegment) {
+  const segment = (rawSegment || "").toString().trim();
+  if (!segment) {
+    return "";
+  }
+
+  if (segment.startsWith(":")) {
+    return segment;
+  }
+
+  if (/^\d+$/.test(segment)) {
+    return ":id";
+  }
+
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment)) {
+    return ":uuid";
+  }
+
+  if (/^[0-9a-f]{16,}$/i.test(segment)) {
+    return ":hex";
+  }
+
+  if (/^[A-Za-z0-9_-]{24,}$/.test(segment)) {
+    return ":token";
+  }
+
+  if (segment.length > 80) {
+    return `${segment.slice(0, 80)}~`;
+  }
+
+  return segment;
+}
+
+function normalizeMetricRoutePath(rawPath) {
+  const basePath = (rawPath || "").toString().split("?")[0].trim();
+  if (!basePath) {
+    return "/";
+  }
+
+  const withLeadingSlash = basePath.startsWith("/") ? basePath : `/${basePath}`;
+  const segments = withLeadingSlash
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => normalizeMetricPathSegment(segment));
+
+  return segments.length ? `/${segments.join("/")}` : "/";
+}
+
+function resolveHttpMetricRoutePath(req) {
+  const baseUrl = (req?.baseUrl || "").toString();
+  const routePath = req?.route?.path;
+  if (typeof routePath === "string" && routePath) {
+    return normalizeMetricRoutePath(`${baseUrl}${routePath}`);
+  }
+
+  if (Array.isArray(routePath) && routePath.length) {
+    const firstStringPath = routePath.find((item) => typeof item === "string" && item.length);
+    if (firstStringPath) {
+      return normalizeMetricRoutePath(`${baseUrl}${firstStringPath}`);
+    }
+  }
+
+  return normalizeMetricRoutePath(req?.path || req?.originalUrl || "");
+}
+
+function createPerformanceObservabilityState(options = {}) {
+  return {
+    enabled: options.enabled !== false,
+    startedAtMs: Date.now(),
+    http: {
+      sampleSize: Math.max(1, Number.parseInt(options.httpSampleSize, 10) || 512),
+      maxRoutes: Math.max(1, Number.parseInt(options.httpMaxRoutes, 10) || 250),
+      totalCount: 0,
+      errorCount: 0,
+      totalDurationMs: 0,
+      maxDurationMs: 0,
+      lastDurationMs: 0,
+      routes: new Map(),
+    },
+    db: {
+      sampleSize: Math.max(1, Number.parseInt(options.dbSampleSize, 10) || 2048),
+      slowQueryMs: Math.max(1, Number.parseInt(options.dbSlowQueryMs, 10) || 700),
+      queryCount: 0,
+      errorCount: 0,
+      slowQueryCount: 0,
+      totalDurationMs: 0,
+      maxDurationMs: 0,
+      lastDurationMs: 0,
+      latencySample: createRollingLatencySample(Math.max(1, Number.parseInt(options.dbSampleSize, 10) || 2048)),
+      byStatementType: new Map(),
+    },
+    process: {
+      eventLoop: {
+        intervalMs: Math.max(50, Number.parseInt(options.eventLoopIntervalMs, 10) || 1000),
+        sample: createRollingLatencySample(Math.max(1, Number.parseInt(options.eventLoopSampleSize, 10) || 600)),
+        lastLagMs: 0,
+        maxLagMs: 0,
+        timerId: null,
+      },
+    },
+  };
+}
+
+function startPerformanceObservabilityMonitor(state) {
+  if (!state?.enabled || !state.process?.eventLoop) {
+    return;
+  }
+
+  const eventLoopState = state.process.eventLoop;
+  const intervalMs = eventLoopState.intervalMs;
+  let expectedAtMs = Date.now() + intervalMs;
+  const timerId = setInterval(() => {
+    const nowMs = Date.now();
+    const lagMs = Math.max(0, nowMs - expectedAtMs);
+    expectedAtMs = nowMs + intervalMs;
+
+    eventLoopState.lastLagMs = lagMs;
+    eventLoopState.maxLagMs = Math.max(eventLoopState.maxLagMs, lagMs);
+    pushRollingLatencySample(eventLoopState.sample, lagMs);
+  }, intervalMs);
+
+  if (typeof timerId?.unref === "function") {
+    timerId.unref();
+  }
+  eventLoopState.timerId = timerId;
+}
+
+function createHttpPerformanceMetricsMiddleware(state) {
+  if (!state?.enabled) {
+    return (_req, _res, next) => next();
+  }
+
+  return (req, res, next) => {
+    const startedAtNs = process.hrtime.bigint();
+    let finalized = false;
+
+    const finalize = () => {
+      if (finalized) {
+        return;
+      }
+      finalized = true;
+      const endedAtNs = process.hrtime.bigint();
+      const durationMs = Number(endedAtNs - startedAtNs) / 1_000_000;
+      recordHttpPerformanceMetric(state, req, res?.statusCode, durationMs);
+    };
+
+    res.once("finish", finalize);
+    res.once("close", finalize);
+    next();
+  };
+}
+
+function recordHttpPerformanceMetric(state, req, statusCode, durationMs) {
+  if (!state?.enabled || !Number.isFinite(durationMs)) {
+    return;
+  }
+
+  const method = ((req?.method || "GET").toString().toUpperCase() || "GET").slice(0, 12);
+  const routePath = resolveHttpMetricRoutePath(req);
+  const routeKey = `${method} ${routePath}`;
+
+  let routeEntry = state.http.routes.get(routeKey);
+  if (!routeEntry) {
+    routeEntry = {
+      key: routeKey,
+      method,
+      path: routePath,
+      count: 0,
+      errorCount: 0,
+      totalDurationMs: 0,
+      maxDurationMs: 0,
+      lastDurationMs: 0,
+      latencySample: createRollingLatencySample(state.http.sampleSize),
+    };
+    state.http.routes.set(routeKey, routeEntry);
+  }
+
+  const statusCodeNumber = Number(statusCode) || 0;
+  const isError = statusCodeNumber >= 400;
+  routeEntry.count += 1;
+  if (isError) {
+    routeEntry.errorCount += 1;
+  }
+  routeEntry.totalDurationMs += durationMs;
+  routeEntry.maxDurationMs = Math.max(routeEntry.maxDurationMs, durationMs);
+  routeEntry.lastDurationMs = durationMs;
+  pushRollingLatencySample(routeEntry.latencySample, durationMs);
+
+  state.http.totalCount += 1;
+  if (isError) {
+    state.http.errorCount += 1;
+  }
+  state.http.totalDurationMs += durationMs;
+  state.http.maxDurationMs = Math.max(state.http.maxDurationMs, durationMs);
+  state.http.lastDurationMs = durationMs;
+}
+
+function resolveDbStatementType(rawQuery) {
+  if (typeof rawQuery === "string") {
+    const match = rawQuery.trim().match(/^([a-zA-Z]+)/);
+    return match ? match[1].toUpperCase() : "UNKNOWN";
+  }
+
+  if (rawQuery && typeof rawQuery === "object" && typeof rawQuery.text === "string") {
+    const match = rawQuery.text.trim().match(/^([a-zA-Z]+)/);
+    return match ? match[1].toUpperCase() : "UNKNOWN";
+  }
+
+  return "UNKNOWN";
+}
+
+function recordDbPerformanceMetric(state, { durationMs, error, statementType }) {
+  if (!state?.enabled || !Number.isFinite(durationMs)) {
+    return;
+  }
+
+  const dbState = state.db;
+  const normalizedStatementType = (statementType || "UNKNOWN").toString().toUpperCase().slice(0, 24) || "UNKNOWN";
+  const isError = Boolean(error);
+  const isSlow = durationMs >= dbState.slowQueryMs;
+
+  dbState.queryCount += 1;
+  if (isError) {
+    dbState.errorCount += 1;
+  }
+  if (isSlow) {
+    dbState.slowQueryCount += 1;
+  }
+  dbState.totalDurationMs += durationMs;
+  dbState.maxDurationMs = Math.max(dbState.maxDurationMs, durationMs);
+  dbState.lastDurationMs = durationMs;
+  pushRollingLatencySample(dbState.latencySample, durationMs);
+
+  let statementEntry = dbState.byStatementType.get(normalizedStatementType);
+  if (!statementEntry) {
+    statementEntry = {
+      statementType: normalizedStatementType,
+      count: 0,
+      errorCount: 0,
+      slowCount: 0,
+      totalDurationMs: 0,
+      maxDurationMs: 0,
+      lastDurationMs: 0,
+      latencySample: createRollingLatencySample(dbState.sampleSize),
+    };
+    dbState.byStatementType.set(normalizedStatementType, statementEntry);
+  }
+
+  statementEntry.count += 1;
+  if (isError) {
+    statementEntry.errorCount += 1;
+  }
+  if (isSlow) {
+    statementEntry.slowCount += 1;
+  }
+  statementEntry.totalDurationMs += durationMs;
+  statementEntry.maxDurationMs = Math.max(statementEntry.maxDurationMs, durationMs);
+  statementEntry.lastDurationMs = durationMs;
+  pushRollingLatencySample(statementEntry.latencySample, durationMs);
+}
+
+function wrapDbQueryWithMetrics(queryFn, state) {
+  return function wrappedDbQuery(...args) {
+    if (!state?.enabled) {
+      return queryFn(...args);
+    }
+
+    const statementType = resolveDbStatementType(args[0]);
+    const startedAtNs = process.hrtime.bigint();
+    const finalize = (error) => {
+      const endedAtNs = process.hrtime.bigint();
+      const durationMs = Number(endedAtNs - startedAtNs) / 1_000_000;
+      recordDbPerformanceMetric(state, {
+        durationMs,
+        error,
+        statementType,
+      });
+    };
+
+    const maybeCallback = args.length ? args[args.length - 1] : null;
+    if (typeof maybeCallback === "function") {
+      let callbackFinished = false;
+      args[args.length - 1] = function wrappedQueryCallback(error, ...callbackArgs) {
+        if (!callbackFinished) {
+          callbackFinished = true;
+          finalize(error);
+        }
+        return maybeCallback.call(this, error, ...callbackArgs);
+      };
+
+      try {
+        return queryFn(...args);
+      } catch (error) {
+        if (!callbackFinished) {
+          callbackFinished = true;
+          finalize(error);
+        }
+        throw error;
+      }
+    }
+
+    try {
+      const result = queryFn(...args);
+      if (result && typeof result.then === "function") {
+        return result.then(
+          (value) => {
+            finalize(null);
+            return value;
+          },
+          (error) => {
+            finalize(error);
+            throw error;
+          },
+        );
+      }
+
+      finalize(null);
+      return result;
+    } catch (error) {
+      finalize(error);
+      throw error;
+    }
+  };
+}
+
+function instrumentDbPoolWithMetrics(basePool, state) {
+  if (!basePool || !state?.enabled) {
+    return basePool;
+  }
+
+  if (typeof basePool.query === "function") {
+    basePool.query = wrapDbQueryWithMetrics(basePool.query.bind(basePool), state);
+  }
+
+  if (typeof basePool.connect === "function") {
+    const originalConnect = basePool.connect.bind(basePool);
+    basePool.connect = async (...args) => {
+      const client = await originalConnect(...args);
+      if (!client || typeof client.query !== "function" || client[DB_METRICS_CLIENT_PATCHED_FLAG]) {
+        return client;
+      }
+
+      client.query = wrapDbQueryWithMetrics(client.query.bind(client), state);
+      try {
+        client[DB_METRICS_CLIENT_PATCHED_FLAG] = true;
+      } catch (_error) {
+        // Ignore non-extensible clients; instrumentation still works for this object.
+      }
+      return client;
+    };
+  }
+
+  return basePool;
+}
+
+function toMetricMegabytes(valueInBytes) {
+  if (!Number.isFinite(valueInBytes) || valueInBytes < 0) {
+    return null;
+  }
+  return roundMetricValue(valueInBytes / (1024 * 1024));
+}
+
+function buildPerformanceDiagnosticsPayload(state) {
+  const uptimeSec = process.uptime();
+  const memoryUsage = process.memoryUsage();
+  const httpState = state.http;
+  const dbState = state.db;
+  const eventLoopState = state.process.eventLoop;
+  const eventLoopSorted = getSortedRollingLatencyValues(eventLoopState.sample);
+
+  const httpRouteRows = Array.from(httpState.routes.values())
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+      return right.totalDurationMs - left.totalDurationMs;
+    })
+    .slice(0, httpState.maxRoutes)
+    .map((entry) => ({
+      route: entry.key,
+      count: entry.count,
+      errorCount: entry.errorCount,
+      errorRatePct: roundMetricValue(entry.count ? (entry.errorCount / entry.count) * 100 : 0),
+      latency: buildLatencySummary({
+        sample: entry.latencySample,
+        totalCount: entry.count,
+        totalDurationMs: entry.totalDurationMs,
+        maxDurationMs: entry.maxDurationMs,
+        lastDurationMs: entry.lastDurationMs,
+      }),
+    }));
+
+  const dbStatementRows = Array.from(dbState.byStatementType.values())
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+      return right.totalDurationMs - left.totalDurationMs;
+    })
+    .map((entry) => ({
+      statementType: entry.statementType,
+      count: entry.count,
+      errorCount: entry.errorCount,
+      slowCount: entry.slowCount,
+      latency: buildLatencySummary({
+        sample: entry.latencySample,
+        totalCount: entry.count,
+        totalDurationMs: entry.totalDurationMs,
+        maxDurationMs: entry.maxDurationMs,
+        lastDurationMs: entry.lastDurationMs,
+      }),
+    }));
+
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    observabilityStartedAt: new Date(state.startedAtMs).toISOString(),
+    process: {
+      pid: process.pid,
+      nodeVersion: process.version,
+      uptimeSec: roundMetricValue(uptimeSec),
+      memory: {
+        rssMb: toMetricMegabytes(memoryUsage.rss),
+        heapTotalMb: toMetricMegabytes(memoryUsage.heapTotal),
+        heapUsedMb: toMetricMegabytes(memoryUsage.heapUsed),
+        externalMb: toMetricMegabytes(memoryUsage.external),
+      },
+      eventLoopLag: {
+        intervalMs: eventLoopState.intervalMs,
+        lastMs: roundMetricValue(eventLoopState.lastLagMs),
+        maxMs: roundMetricValue(eventLoopState.maxLagMs),
+        p50Ms: roundMetricValue(calculatePercentileFromSorted(eventLoopSorted, 0.5)),
+        p95Ms: roundMetricValue(calculatePercentileFromSorted(eventLoopSorted, 0.95)),
+        p99Ms: roundMetricValue(calculatePercentileFromSorted(eventLoopSorted, 0.99)),
+        sampleCount: eventLoopState.sample.filled,
+      },
+    },
+    http: {
+      totalCount: httpState.totalCount,
+      errorCount: httpState.errorCount,
+      errorRatePct: roundMetricValue(httpState.totalCount ? (httpState.errorCount / httpState.totalCount) * 100 : 0),
+      latency: buildLatencySummary({
+        sample: null,
+        totalCount: httpState.totalCount,
+        totalDurationMs: httpState.totalDurationMs,
+        maxDurationMs: httpState.maxDurationMs,
+        lastDurationMs: httpState.lastDurationMs,
+      }),
+      routes: httpRouteRows,
+    },
+    db: {
+      queryCount: dbState.queryCount,
+      errorCount: dbState.errorCount,
+      slowQueryCount: dbState.slowQueryCount,
+      slowQueryThresholdMs: dbState.slowQueryMs,
+      errorRatePct: roundMetricValue(dbState.queryCount ? (dbState.errorCount / dbState.queryCount) * 100 : 0),
+      latency: buildLatencySummary({
+        sample: dbState.latencySample,
+        totalCount: dbState.queryCount,
+        totalDurationMs: dbState.totalDurationMs,
+        maxDurationMs: dbState.maxDurationMs,
+        lastDurationMs: dbState.lastDurationMs,
+      }),
+      byStatementType: dbStatementRows,
+    },
+  };
 }
 
 function normalizeWebAuthConfigValue(value) {
@@ -6811,6 +7395,18 @@ function denyWebPermission(req, res, message) {
 function requireWebPermission(permissionKey, message = "Access denied.") {
   return (req, res, next) => {
     if (hasWebAuthPermission(req.webAuthProfile, permissionKey)) {
+      next();
+      return;
+    }
+
+    denyWebPermission(req, res, message);
+  };
+}
+
+function requireOwnerOrAdminAccess(message = "Owner or admin access is required.") {
+  return (req, res, next) => {
+    const profile = req.webAuthProfile;
+    if (profile?.isOwner || hasWebAuthPermission(profile, WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL)) {
       next();
       return;
     }
@@ -14902,6 +15498,11 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
+app.get("/api/diagnostics/performance", requireOwnerOrAdminAccess(), (req, res) => {
+  res.setHeader("Cache-Control", "no-store, private");
+  res.json(buildPerformanceDiagnosticsPayload(performanceObservability));
+});
+
 app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (SIMULATE_SLOW_RECORDS) {
     await delayMs(SIMULATE_SLOW_RECORDS_DELAY_MS);
@@ -16055,6 +16656,13 @@ app.listen(PORT, () => {
     console.log("React web app dist detected. SPA routes are served from /app/*.");
   } else {
     console.warn("React web app dist is missing. Build it with `npm --prefix webapp run build`.");
+  }
+  if (performanceObservability.enabled) {
+    console.log(
+      `Performance observability is enabled (HTTP sample: ${PERF_HTTP_SAMPLE_SIZE}, DB sample: ${PERF_DB_SAMPLE_SIZE}, slow query >= ${PERF_DB_SLOW_QUERY_MS}ms).`,
+    );
+  } else {
+    console.warn("Performance observability is disabled (PERF_OBSERVABILITY_ENABLED=false).");
   }
   if (SIMULATE_SLOW_RECORDS_REQUESTED && IS_PRODUCTION) {
     console.warn("SIMULATE_SLOW_RECORDS was requested but ignored in production mode.");
