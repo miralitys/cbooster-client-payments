@@ -7,6 +7,7 @@ export async function getGhlLeads(refresh: GhlLeadsRefreshMode = "none"): Promis
   if (refresh !== "none") {
     return apiRequest<GhlLeadsPayload>("/api/ghl/leads/refresh", {
       method: "POST",
+      timeoutMs: 60_000,
       headers: {
         "Content-Type": "application/json",
       },
@@ -16,5 +17,7 @@ export async function getGhlLeads(refresh: GhlLeadsRefreshMode = "none"): Promis
     });
   }
 
-  return apiRequest<GhlLeadsPayload>("/api/ghl/leads");
+  return apiRequest<GhlLeadsPayload>("/api/ghl/leads", {
+    timeoutMs: 60_000,
+  });
 }
