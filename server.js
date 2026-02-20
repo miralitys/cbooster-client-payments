@@ -668,6 +668,22 @@ const staticRoot = __dirname;
 const webAppDistRoot = path.join(__dirname, "webapp", "dist");
 const webAppIndexFile = path.join(webAppDistRoot, "index.html");
 const webAppDistAvailable = fs.existsSync(webAppIndexFile);
+const WEB_STATIC_ASSET_ALLOWLIST = new Map([
+  ["/styles.css", "styles.css"],
+  ["/dashboard.css", "dashboard.css"],
+  ["/assistant-legacy.css", "assistant-legacy.css"],
+  ["/assistant-legacy.js", "assistant-legacy.js"],
+  ["/assistant-avatar.svg", "assistant-avatar.svg"],
+  ["/dashboard.js", "dashboard.js"],
+  ["/quickbooks-payments.js", "quickbooks-payments.js"],
+  ["/client-managers.js", "client-managers.js"],
+  ["/ghl-contracts.js", "ghl-contracts.js"],
+  ["/app.js", "app.js"],
+  ["/access-control.js", "access-control.js"],
+  ["/user-registration.js", "user-registration.js"],
+  ["/seed-client-data.js", "seed-client-data.js"],
+  ["/mini.js", "mini.js"],
+]);
 
 const pool = DATABASE_URL
   ? new Pool({
@@ -13223,6 +13239,17 @@ function resolveDbHttpStatus(error, fallbackStatus = 500) {
   return fallbackStatus;
 }
 
+function sendWhitelistedWebStaticAsset(req, res) {
+  const requestPath = sanitizeTextValue(req.path, 240);
+  const fileName = WEB_STATIC_ASSET_ALLOWLIST.get(requestPath);
+  if (!fileName) {
+    res.status(404).type("text/plain").send("Asset not found");
+    return;
+  }
+
+  res.sendFile(path.join(staticRoot, fileName));
+}
+
 app.get("/login", (req, res) => {
   const nextPath = resolveSafeNextPath(req.query.next);
   const currentSessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
@@ -13318,10 +13345,11 @@ app.get("/logout", handleWebLogout);
 app.post("/logout", handleWebLogout);
 
 app.use(requireWebAuth);
-app.use(express.static(staticRoot));
 if (webAppDistAvailable) {
   app.use("/app", express.static(webAppDistRoot, { index: false }));
 }
+
+app.get([...WEB_STATIC_ASSET_ALLOWLIST.keys()], sendWhitelistedWebStaticAsset);
 
 app.get("/first-password", (req, res) => {
   const nextPath = resolveSafeNextPath(req.query.next);
@@ -14469,6 +14497,10 @@ app.get("/mini", (_req, res) => {
   res.sendFile(path.join(staticRoot, "mini.html"));
 });
 
+app.get("/mini.html", (_req, res) => {
+  res.sendFile(path.join(staticRoot, "mini.html"));
+});
+
 app.get("/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (_req, res) => {
   res.redirect(302, "/app/quickbooks-payments");
 });
@@ -14559,6 +14591,15 @@ app.get("/app/*", (req, res) => {
 
   res.setHeader("Cache-Control", "no-store, private");
   res.sendFile(webAppIndexFile);
+});
+
+app.get("*", (req, res, next) => {
+  const requestPath = sanitizeTextValue(req.path, 2048);
+  if (path.extname(requestPath || "") !== "") {
+    res.status(404).type("text/plain").send("Not found");
+    return;
+  }
+  next();
 });
 
 app.get("*", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
