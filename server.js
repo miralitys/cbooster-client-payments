@@ -123,6 +123,9 @@ const PERF_EVENT_LOOP_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(proce
 const RECORDS_PATCH_ENABLED = resolveOptionalBoolean(process.env.RECORDS_PATCH) === true;
 const DUAL_WRITE_V2_ENABLED = resolveOptionalBoolean(process.env.DUAL_WRITE_V2) === true;
 const DUAL_READ_COMPARE_ENABLED = resolveOptionalBoolean(process.env.DUAL_READ_COMPARE) === true;
+const READ_V2_ENABLED = resolveOptionalBoolean(process.env.READ_V2) === true;
+const WRITE_V2_ENABLED = resolveOptionalBoolean(process.env.WRITE_V2) === true;
+const LEGACY_MIRROR_ENABLED = resolveOptionalBoolean(process.env.LEGACY_MIRROR) === true;
 const DB_METRICS_CLIENT_PATCHED_FLAG = Symbol("dbMetricsClientPatched");
 const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
 const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
@@ -15404,6 +15407,94 @@ async function getStoredRecords() {
   };
 }
 
+function resolveRecordsV2UpdatedAt(candidateValues) {
+  const values = Array.isArray(candidateValues) ? candidateValues : [];
+  let maxTimestamp = null;
+  for (const value of values) {
+    const normalized = normalizeRecordStateTimestamp(value);
+    if (normalized === null) {
+      continue;
+    }
+    if (maxTimestamp === null || normalized > maxTimestamp) {
+      maxTimestamp = normalized;
+    }
+  }
+  if (maxTimestamp === null) {
+    return null;
+  }
+  return new Date(maxTimestamp).toISOString();
+}
+
+function normalizeRecordFromV2Row(rawValue) {
+  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+    return null;
+  }
+  return rawValue;
+}
+
+async function getStoredRecordsFromV2() {
+  await ensureDatabaseReady();
+  const stateResult = await pool.query(`SELECT updated_at FROM ${STATE_TABLE} WHERE id = $1`, [STATE_ROW_ID]);
+  const stateUpdatedAt = stateResult.rows[0]?.updated_at || null;
+  const result = await pool.query(
+    `
+      SELECT id, record, source_state_updated_at, updated_at
+      FROM ${CLIENT_RECORDS_V2_TABLE}
+      WHERE source_state_row_id = $1
+      ORDER BY id ASC
+    `,
+    [STATE_ROW_ID],
+  );
+
+  const records = [];
+  const updatedAtCandidates = [];
+
+  for (const row of result.rows) {
+    const record = normalizeRecordFromV2Row(row?.record);
+    if (record) {
+      records.push(record);
+    }
+    updatedAtCandidates.push(row?.source_state_updated_at, row?.updated_at);
+  }
+  updatedAtCandidates.push(stateUpdatedAt);
+
+  return {
+    records,
+    updatedAt: resolveRecordsV2UpdatedAt(updatedAtCandidates),
+  };
+}
+
+async function getStoredRecordsForApiRecordsRoute() {
+  if (!READ_V2_ENABLED) {
+    const legacyState = await getStoredRecords();
+    return {
+      ...legacyState,
+      source: "legacy",
+      fallbackFromV2: false,
+    };
+  }
+
+  try {
+    const v2State = await getStoredRecordsFromV2();
+    return {
+      ...v2State,
+      source: "v2",
+      fallbackFromV2: false,
+    };
+  } catch (error) {
+    const message = sanitizeTextValue(error?.message, 600) || "unknown error";
+    const code = sanitizeTextValue(error?.code, 80) || "no_code";
+    console.warn(`[records] READ_V2 fallback to legacy: ${code}: ${message}`);
+
+    const legacyState = await getStoredRecords();
+    return {
+      ...legacyState,
+      source: "legacy",
+      fallbackFromV2: true,
+    };
+  }
+}
+
 function normalizeV2RowForDualReadCompare(rawRow) {
   const id = sanitizeTextValue(rawRow?.id, 180);
   if (!id) {
@@ -15573,7 +15664,8 @@ function normalizeSourceStateUpdatedAtForV2(rawValue) {
 
 async function syncLegacyRecordsSnapshotToV2(client, records, options = {}) {
   const sourceStateRowId = STATE_ROW_ID;
-  const sourceStateUpdatedAt = normalizeSourceStateUpdatedAtForV2(options.sourceStateUpdatedAt);
+  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.writeTimestamp) || new Date().toISOString();
+  const sourceStateUpdatedAt = normalizeSourceStateUpdatedAtForV2(options.sourceStateUpdatedAt) || writeTimestamp;
   const snapshot = normalizeLegacyRecordsSnapshot(records, {
     sourceStateUpdatedAt,
     sourceStateRowId,
@@ -15589,7 +15681,7 @@ async function syncLegacyRecordsSnapshotToV2(client, records, options = {}) {
         INSERT INTO ${CLIENT_RECORDS_V2_TABLE}
           (id, record, record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id, inserted_at, updated_at)
         VALUES
-          ($1, $2::jsonb, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9, NOW(), NOW())
+          ($1, $2::jsonb, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9, $10::timestamptz, $10::timestamptz)
         ON CONFLICT (id)
         DO UPDATE SET
           record = EXCLUDED.record,
@@ -15600,7 +15692,7 @@ async function syncLegacyRecordsSnapshotToV2(client, records, options = {}) {
           created_at = EXCLUDED.created_at,
           source_state_updated_at = EXCLUDED.source_state_updated_at,
           source_state_row_id = EXCLUDED.source_state_row_id,
-          updated_at = NOW()
+          updated_at = EXCLUDED.updated_at
         WHERE
           (record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id)
           IS DISTINCT FROM
@@ -15617,6 +15709,7 @@ async function syncLegacyRecordsSnapshotToV2(client, records, options = {}) {
         row.createdAt,
         row.sourceStateUpdatedAt,
         row.sourceStateRowId,
+        writeTimestamp,
       ],
     );
 
@@ -15662,6 +15755,7 @@ async function syncLegacyRecordsSnapshotToV2(client, records, options = {}) {
   const v2Count = normalizeDualWriteSummaryValue(countResult.rows[0]?.total);
 
   return {
+    writeTimestamp,
     expectedCount: snapshot.rows.length,
     v2Count,
     insertedCount,
@@ -15687,8 +15781,10 @@ async function applyRecordsDualWriteV2(client, records, options = {}) {
   recordDualWriteMetricAttempt(performanceObservability);
 
   try {
+    const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.sourceStateUpdatedAt) || new Date().toISOString();
     const syncSummary = await syncLegacyRecordsSnapshotToV2(client, records, {
-      sourceStateUpdatedAt: options.sourceStateUpdatedAt,
+      sourceStateUpdatedAt: writeTimestamp,
+      writeTimestamp,
     });
     const metricSummary = {
       mode,
@@ -15741,6 +15837,227 @@ async function applyRecordsDualWriteV2(client, records, options = {}) {
   }
 }
 
+async function upsertLegacyStateRevisionPointer(client, updatedAt) {
+  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(updatedAt) || new Date().toISOString();
+  await client.query(
+    `
+      INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+      VALUES ($1, '[]'::jsonb, $2::timestamptz)
+      ON CONFLICT (id)
+      DO UPDATE SET
+        updated_at = EXCLUDED.updated_at
+    `,
+    [STATE_ROW_ID, writeTimestamp],
+  );
+  return writeTimestamp;
+}
+
+async function mirrorLegacyStateRecordsBestEffort(client, records, updatedAt, options = {}) {
+  if (!LEGACY_MIRROR_ENABLED) {
+    return {
+      enabled: false,
+      attempted: false,
+    };
+  }
+
+  const mode = sanitizeTextValue(options.mode, 32) || "unknown";
+  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(updatedAt) || new Date().toISOString();
+  let mirrored = false;
+  let failed = false;
+  let errorMessage = "";
+
+  await client.query("SAVEPOINT legacy_mirror_write");
+  try {
+    await client.query(
+      `
+        INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+        VALUES ($1, $2::jsonb, $3::timestamptz)
+        ON CONFLICT (id)
+        DO UPDATE SET
+          records = EXCLUDED.records,
+          updated_at = EXCLUDED.updated_at
+      `,
+      [STATE_ROW_ID, JSON.stringify(records), writeTimestamp],
+    );
+    mirrored = true;
+    await client.query("RELEASE SAVEPOINT legacy_mirror_write");
+  } catch (error) {
+    failed = true;
+    errorMessage = sanitizeTextValue(error?.message, 600);
+    await client.query("ROLLBACK TO SAVEPOINT legacy_mirror_write");
+    await client.query("RELEASE SAVEPOINT legacy_mirror_write");
+    console.warn("[records write_v2] legacy mirror write failed (primary write kept):", {
+      mode,
+      errorCode: sanitizeTextValue(error?.code, 80),
+      message: errorMessage,
+    });
+  }
+
+  return {
+    enabled: true,
+    attempted: true,
+    mirrored,
+    failed,
+    errorMessage,
+  };
+}
+
+async function listCurrentRecordsFromV2ForWrite(client) {
+  const result = await client.query(
+    `
+      SELECT id, record
+      FROM ${CLIENT_RECORDS_V2_TABLE}
+      WHERE source_state_row_id = $1
+      ORDER BY id ASC
+    `,
+    [STATE_ROW_ID],
+  );
+
+  const records = [];
+  for (const row of result.rows) {
+    const record = normalizeRecordFromV2Row(row?.record);
+    if (!record) {
+      continue;
+    }
+    records.push(record);
+  }
+  return records;
+}
+
+async function saveStoredRecordsUsingV2(records, options = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const stateResult = await client.query(
+      `
+        SELECT updated_at
+        FROM ${STATE_TABLE}
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [STATE_ROW_ID],
+    );
+
+    const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
+    if (!isRecordStateRevisionMatch(options.expectedUpdatedAt, currentUpdatedAt)) {
+      const conflictError = createHttpError(
+        "Records were updated by another operation. Refresh records and try again.",
+        409,
+        "records_conflict",
+      );
+      conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
+      throw conflictError;
+    }
+
+    const writeTimestamp = new Date().toISOString();
+    const syncSummary = await syncLegacyRecordsSnapshotToV2(client, records, {
+      sourceStateUpdatedAt: writeTimestamp,
+      writeTimestamp,
+    });
+
+    if (syncSummary.v2Count !== syncSummary.expectedCount) {
+      const desyncError = createHttpError(
+        "client_records_v2 is out of sync after write verification. Write was rolled back.",
+        503,
+        "records_v2_write_desync",
+      );
+      desyncError.detail = `expected=${syncSummary.expectedCount}, actual=${syncSummary.v2Count}`;
+      throw desyncError;
+    }
+
+    const updatedAt = await upsertLegacyStateRevisionPointer(client, writeTimestamp);
+    await mirrorLegacyStateRecordsBestEffort(client, records, updatedAt, {
+      mode: "put",
+    });
+
+    await client.query("COMMIT");
+    return updatedAt;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function saveStoredRecordsPatchUsingV2(operations, options = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const stateResult = await client.query(
+      `
+        SELECT updated_at
+        FROM ${STATE_TABLE}
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [STATE_ROW_ID],
+    );
+
+    const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
+    if (!isRecordStateRevisionMatch(options.expectedUpdatedAt, currentUpdatedAt)) {
+      const conflictError = createHttpError(
+        "Records were updated by another operation. Refresh records and try again.",
+        409,
+        "records_conflict",
+      );
+      conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
+      throw conflictError;
+    }
+
+    const normalizedOperations = Array.isArray(operations) ? operations : [];
+    if (!normalizedOperations.length) {
+      await client.query("COMMIT");
+      return {
+        updatedAt: currentUpdatedAt,
+      };
+    }
+
+    const currentRecords = await listCurrentRecordsFromV2ForWrite(client);
+    const nextRecords = applyRecordsPatchOperations(currentRecords, normalizedOperations);
+    const writeTimestamp = new Date().toISOString();
+    const syncSummary = await syncLegacyRecordsSnapshotToV2(client, nextRecords, {
+      sourceStateUpdatedAt: writeTimestamp,
+      writeTimestamp,
+    });
+
+    if (syncSummary.v2Count !== syncSummary.expectedCount) {
+      const desyncError = createHttpError(
+        "client_records_v2 is out of sync after write verification. Write was rolled back.",
+        503,
+        "records_v2_write_desync",
+      );
+      desyncError.detail = `expected=${syncSummary.expectedCount}, actual=${syncSummary.v2Count}`;
+      throw desyncError;
+    }
+
+    const updatedAt = await upsertLegacyStateRevisionPointer(client, writeTimestamp);
+    await mirrorLegacyStateRecordsBestEffort(client, nextRecords, updatedAt, {
+      mode: "patch",
+    });
+
+    await client.query("COMMIT");
+    return {
+      updatedAt,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function saveStoredRecords(records, options = {}) {
   await ensureDatabaseReady();
   const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(options, "expectedUpdatedAt");
@@ -15756,6 +16073,12 @@ async function saveStoredRecords(records, options = {}) {
   const expectedUpdatedAtMs = normalizeRecordStateTimestamp(expectedUpdatedAt);
   if (expectedUpdatedAt !== null && expectedUpdatedAt !== "" && expectedUpdatedAtMs === null) {
     throw createHttpError("`expectedUpdatedAt` must be a valid ISO datetime or null.", 400, "invalid_expected_updated_at");
+  }
+
+  if (WRITE_V2_ENABLED) {
+    return saveStoredRecordsUsingV2(records, {
+      expectedUpdatedAt,
+    });
   }
 
   const client = await pool.connect();
@@ -15830,6 +16153,12 @@ async function saveStoredRecordsPatch(operations, options = {}) {
   const expectedUpdatedAtMs = normalizeRecordStateTimestamp(expectedUpdatedAt);
   if (expectedUpdatedAt !== null && expectedUpdatedAt !== "" && expectedUpdatedAtMs === null) {
     throw createHttpError("`expectedUpdatedAt` must be a valid ISO datetime or null.", 400, "invalid_expected_updated_at");
+  }
+
+  if (WRITE_V2_ENABLED) {
+    return saveStoredRecordsPatchUsingV2(operations, {
+      expectedUpdatedAt,
+    });
   }
 
   const client = await pool.connect();
@@ -19050,11 +19379,18 @@ app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAY
   }
 
   try {
-    const state = await getStoredRecords();
-    scheduleDualReadCompareForLegacyRecords(state.records, {
-      source: "GET /api/records",
-      requestedBy: req.webAuthUser,
-    });
+    const state = await getStoredRecordsForApiRecordsRoute();
+    if (!READ_V2_ENABLED && state.source === "legacy") {
+      scheduleDualReadCompareForLegacyRecords(state.records, {
+        source: "GET /api/records",
+        requestedBy: req.webAuthUser,
+      });
+    }
+    if (READ_V2_ENABLED && state.fallbackFromV2) {
+      console.warn(
+        `[records] READ_V2 served legacy fallback for user=${sanitizeTextValue(req.webAuthUser, 160) || "unknown"}`,
+      );
+    }
     const filteredRecords = filterClientRecordsForWebAuthUser(state.records, req.webAuthProfile);
     res.json({
       records: filteredRecords,
@@ -20488,6 +20824,26 @@ app.listen(PORT, () => {
     console.log("Records dual-read compare is enabled (legacy response + async v2 comparison).");
   } else {
     console.log("Records dual-read compare is disabled (set DUAL_READ_COMPARE=true to enable async compare).");
+  }
+  if (READ_V2_ENABLED) {
+    console.log("Records read path is switched to v2 (client_records_v2) with controlled legacy fallback on read errors.");
+  } else {
+    console.log("Records read path uses legacy JSONB state (set READ_V2=true to enable v2 read path).");
+  }
+  if (WRITE_V2_ENABLED) {
+    console.log("Records write path is switched to v2 source-of-truth (set WRITE_V2=false for legacy write path).");
+    if (LEGACY_MIRROR_ENABLED) {
+      console.log("Legacy mirror writes are enabled (LEGACY_MIRROR=true).");
+    } else {
+      console.log("Legacy mirror writes are disabled (LEGACY_MIRROR=false).");
+    }
+  } else {
+    console.log("Records write path uses legacy JSONB state (set WRITE_V2=true for v2 source-of-truth).");
+  }
+  if (WRITE_V2_ENABLED && !READ_V2_ENABLED) {
+    console.warn(
+      "WRITE_V2=true with READ_V2=false: writes go to v2 while reads stay on legacy. Use LEGACY_MIRROR=true during transition.",
+    );
   }
   if (SIMULATE_SLOW_RECORDS_REQUESTED && IS_PRODUCTION) {
     console.warn("SIMULATE_SLOW_RECORDS was requested but ignored in production mode.");
