@@ -3,11 +3,15 @@ export interface GhlLeadRow {
   contactId: string;
   contactName: string;
   opportunityName: string;
+  leadType: string;
   pipelineId: string;
   pipelineName: string;
   stageId: string;
   stageName: string;
   status: string;
+  assignedTo: string;
+  phone: string;
+  email: string;
   monetaryValue: number;
   source: string;
   createdOn: string;
@@ -33,6 +37,9 @@ export interface GhlLeadsRefreshMeta {
   syncedLeadsCount: number;
   writtenRows: number;
   incrementalCutoff: string | null;
+  stoppedByTimeBudget?: boolean;
+  warning?: string;
+  error?: string;
 }
 
 export interface GhlLeadsPipelineMeta {
