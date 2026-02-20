@@ -1281,6 +1281,20 @@ a {
   gap: 6px;
 }
 
+.record-profile-header__title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.record-profile-header__chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .record-profile-header__avatar {
   flex-shrink: 0;
   width: 56px;
@@ -2426,6 +2440,15 @@ a {
   .record-payments-panel__amount,
   .record-payments-panel__date {
     text-align: left;
+  }
+
+  .record-profile-header__title-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .record-profile-header__chips {
+    justify-content: flex-start;
   }
 
   .access-control-departments-grid-react {

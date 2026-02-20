@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { getGhlClientBasicNote } from "@/shared/api";
+import { evaluateClientScore } from "@/features/client-score/domain/scoring";
 import type { GhlClientBasicNotePayload } from "@/shared/types/ghlNotes";
 import type { ClientRecord } from "@/shared/types/records";
 import { FIELD_DEFINITIONS, PAYMENT_PAIRS } from "@/features/client-payments/domain/constants";
-import { formatDate, formatMoney, parseMoneyValue } from "@/features/client-payments/domain/calculations";
+import { formatDate, formatMoney, getRecordStatusFlags, parseMoneyValue } from "@/features/client-payments/domain/calculations";
+import { Badge } from "@/shared/ui";
 
 interface RecordDetailsProps {
   record: ClientRecord;
@@ -27,6 +29,11 @@ interface RequestedClientField {
   value: string;
 }
 
+interface BadgeMeta {
+  label: string;
+  tone: "neutral" | "success" | "warning" | "danger" | "info";
+}
+
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
 
@@ -42,6 +49,8 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const companyDisplay = useMemo(() => (record.companyName || "").trim() || "-", [record.companyName]);
   const avatarSource = useMemo(() => resolveAvatarSource(record, ghlBasicNote), [ghlBasicNote, record]);
   const avatarInitials = useMemo(() => buildAvatarInitials(normalizedClientName), [normalizedClientName]);
+  const scoreResult = useMemo(() => evaluateClientScore(record), [record]);
+  const statusBadge = useMemo(() => resolveStatusBadge(record), [record]);
 
   const detailsFields = useMemo(
     () => FIELD_DEFINITIONS.filter((field) => !HEADER_FIELD_KEYS.has(field.key) && !PAYMENT_FIELD_KEYS.has(field.key)),
@@ -169,7 +178,13 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                 )}
               </div>
               <div className="record-profile-header__identity-main">
-                <h4 className="record-profile-header__name">{normalizedClientName || "Unnamed client"}</h4>
+                <div className="record-profile-header__title-row">
+                  <h4 className="record-profile-header__name">{normalizedClientName || "Unnamed client"}</h4>
+                  <div className="record-profile-header__chips">
+                    <Badge tone={scoreResult.tone}>Score: {scoreResult.displayScore === null ? "N/A" : scoreResult.displayScore}</Badge>
+                    <Badge tone={statusBadge.tone}>{statusBadge.label}</Badge>
+                  </div>
+                </div>
                 <p className="record-profile-header__summary-line">
                   <span>
                     Contract: <strong>{contractDisplay}</strong>
@@ -311,6 +326,28 @@ function formatOptionalDate(rawValue: string): string {
     return "";
   }
   return formatDate(rawValue);
+}
+
+function resolveStatusBadge(record: ClientRecord): BadgeMeta {
+  const status = getRecordStatusFlags(record);
+
+  if (status.isWrittenOff) {
+    return { label: "Status: Written Off", tone: "danger" };
+  }
+
+  if (status.isFullyPaid) {
+    return { label: "Status: Fully Paid", tone: "success" };
+  }
+
+  if (status.isAfterResult) {
+    return { label: "Status: After Result", tone: "info" };
+  }
+
+  if (status.isOverdue) {
+    return { label: `Status: Overdue ${status.overdueRange}`, tone: "warning" };
+  }
+
+  return { label: "Status: Active", tone: "neutral" };
 }
 
 function formatFieldValue(
