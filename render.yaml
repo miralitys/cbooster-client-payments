@@ -11,6 +11,8 @@ services:
         value: "20"
       - key: WEB_AUTH_USERNAME
         sync: false
+      - key: WEB_AUTH_PASSWORD_HASH
+        sync: false
       - key: WEB_AUTH_PASSWORD
         sync: false
       - key: WEB_AUTH_SESSION_SECRET

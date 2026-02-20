@@ -31,7 +31,8 @@ npm start
 3. В Render создайте `Web Service` из этого репозитория (можно по `render.yaml`).
 4. В переменных Render добавьте:
    - `WEB_AUTH_USERNAME` = логин для входа на веб-сайт;
-   - `WEB_AUTH_PASSWORD` = пароль для входа на веб-сайт;
+   - `WEB_AUTH_PASSWORD_HASH` = bcrypt-хеш пароля для входа на веб-сайт;
+   - `WEB_AUTH_PASSWORD` = plaintext-пароль только для локальной разработки (в production отключен);
    - `WEB_AUTH_OWNER_USERNAME` = username владельца с полными правами (по умолчанию `owner`);
    - `WEB_AUTH_USERS_JSON` = JSON-массив пользователей с ролями/департаментами (опционально);
    - `WEB_AUTH_SESSION_SECRET` = длинный случайный секрет для подписи cookie-сессии;
@@ -107,11 +108,12 @@ npm start
 
 - Главный аккаунт (`Owner`) задается через `WEB_AUTH_OWNER_USERNAME` и имеет полный доступ ко всем разделам.
 - Дополнительные аккаунты можно задать через `WEB_AUTH_USERS_JSON`:
-  - `username`, `password`, `displayName` (опционально),
+  - `username`, `passwordHash` (bcrypt), `displayName` (опционально),
   - `department` (`accounting`, `client_service`, `sales`, `collection`),
   - `role` (`department_head`, `middle_manager`, `manager`),
   - `teamUsernames` (опционально, массив или строка через запятую; для `middle_manager` в `client_service`),
   - `isOwner` (`true/false`, опционально).
+- В production plaintext-пароли в конфиге (`WEB_AUTH_PASSWORD`, `WEB_AUTH_USERS_JSON[].password`) запрещены: используйте только bcrypt-хеши.
 - Департаменты и роли (на английском):
   - `Accounting Department`: `Department Head`, `Manager`
   - `Client Service Department`: `Department Head`, `Middle Manager`, `Manager`

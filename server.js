@@ -1,5 +1,6 @@
 const path = require("path");
 const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 const fs = require("fs");
 const express = require("express");
 const multer = require("multer");
@@ -21,7 +22,9 @@ const DEFAULT_WEB_AUTH_USERNAME = "owner";
 const DEFAULT_WEB_AUTH_PASSWORD = "ChangeMe!12345";
 const DEFAULT_WEB_AUTH_OWNER_USERNAME = "owner";
 const WEB_AUTH_USERNAME = normalizeWebAuthConfigValue(process.env.WEB_AUTH_USERNAME) || DEFAULT_WEB_AUTH_USERNAME;
-const WEB_AUTH_PASSWORD = normalizeWebAuthConfigValue(process.env.WEB_AUTH_PASSWORD) || DEFAULT_WEB_AUTH_PASSWORD;
+const WEB_AUTH_PASSWORD_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_PASSWORD);
+const WEB_AUTH_PASSWORD_HASH = normalizeWebAuthPasswordHashValue(process.env.WEB_AUTH_PASSWORD_HASH);
+const WEB_AUTH_PASSWORD = WEB_AUTH_PASSWORD_RAW || (!WEB_AUTH_PASSWORD_HASH ? DEFAULT_WEB_AUTH_PASSWORD : "");
 const WEB_AUTH_OWNER_USERNAME =
   normalizeWebAuthUsername(process.env.WEB_AUTH_OWNER_USERNAME || DEFAULT_WEB_AUTH_OWNER_USERNAME) ||
   normalizeWebAuthUsername(WEB_AUTH_USERNAME) ||
@@ -86,6 +89,7 @@ const LOGIN_FAILURE_IP_ACCOUNT_POLICY = Object.freeze({
   maxFailures: 6,
   lockMs: 20 * 60 * 1000,
 });
+const WEB_AUTH_BCRYPT_COST = Math.min(Math.max(parsePositiveInteger(process.env.WEB_AUTH_BCRYPT_COST, 12), 10), 15);
 const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
 const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
 const WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS = "manage_client_payments";
@@ -706,6 +710,7 @@ const WEB_AUTH_USERS_DIRECTORY = resolveWebAuthUsersDirectory({
   ownerUsername: WEB_AUTH_OWNER_USERNAME,
   legacyUsername: WEB_AUTH_USERNAME,
   legacyPassword: WEB_AUTH_PASSWORD,
+  legacyPasswordHash: WEB_AUTH_PASSWORD_HASH,
   rawUsersJson: WEB_AUTH_USERS_JSON,
 });
 const WEB_AUTH_USERS_BY_USERNAME = WEB_AUTH_USERS_DIRECTORY.usersByUsername;
@@ -846,6 +851,64 @@ function normalizeWebAuthConfigValue(value) {
   return (value || "").toString().normalize("NFKC").trim();
 }
 
+function normalizeWebAuthPasswordHashValue(value) {
+  return normalizeWebAuthConfigValue(value);
+}
+
+function isWebAuthPasswordHash(value) {
+  const normalized = normalizeWebAuthPasswordHashValue(value);
+  if (!normalized) {
+    return false;
+  }
+
+  return /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(normalized);
+}
+
+function hashWebAuthPassword(rawPassword) {
+  const password = normalizeWebAuthConfigValue(rawPassword);
+  if (!password || password.length < 8) {
+    throw createHttpError("Password must be at least 8 characters.", 400);
+  }
+
+  return bcrypt.hashSync(password, WEB_AUTH_BCRYPT_COST);
+}
+
+function verifyWebAuthPasswordHash(rawPassword, passwordHash) {
+  const password = normalizeWebAuthConfigValue(rawPassword);
+  const normalizedHash = normalizeWebAuthPasswordHashValue(passwordHash);
+  if (!password || !isWebAuthPasswordHash(normalizedHash)) {
+    return false;
+  }
+
+  try {
+    return bcrypt.compareSync(password, normalizedHash);
+  } catch {
+    return false;
+  }
+}
+
+function getLegacyWebAuthPassword(userProfile) {
+  return normalizeWebAuthConfigValue(userProfile?.password);
+}
+
+function doesWebAuthPasswordMatchUser(userProfile, rawPassword) {
+  const password = normalizeWebAuthConfigValue(rawPassword);
+  if (!userProfile || typeof userProfile !== "object" || !password) {
+    return false;
+  }
+
+  if (verifyWebAuthPasswordHash(password, userProfile.passwordHash)) {
+    return true;
+  }
+
+  const legacyPassword = getLegacyWebAuthPassword(userProfile);
+  if (legacyPassword) {
+    return safeEqual(password, legacyPassword);
+  }
+
+  return false;
+}
+
 function resolveOptionalBoolean(rawValue) {
   const normalized = (rawValue || "").toString().trim().toLowerCase();
   if (!normalized) {
@@ -878,7 +941,31 @@ function resolveWebAuthSessionSecret(rawSecret) {
 }
 
 function isWebAuthUsingDefaultCredentials() {
-  return WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME && WEB_AUTH_PASSWORD === DEFAULT_WEB_AUTH_PASSWORD;
+  return (
+    WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME &&
+    !WEB_AUTH_PASSWORD_HASH &&
+    WEB_AUTH_PASSWORD === DEFAULT_WEB_AUTH_PASSWORD
+  );
+}
+
+function listWebAuthUsersWithPlaintextConfigPasswords() {
+  const result = [];
+  for (const user of WEB_AUTH_USERS_BY_USERNAME.values()) {
+    if (resolveOptionalBoolean(user?.passwordConfiguredAsPlaintext) === true) {
+      result.push(sanitizeTextValue(user?.username, 200) || "unknown");
+    }
+  }
+  return result;
+}
+
+function listWebAuthUsersWithInvalidPasswordHashConfig() {
+  const result = [];
+  for (const user of WEB_AUTH_USERS_BY_USERNAME.values()) {
+    if (resolveOptionalBoolean(user?.invalidPasswordHashConfigured) === true) {
+      result.push(sanitizeTextValue(user?.username, 200) || "unknown");
+    }
+  }
+  return result;
 }
 
 function isWeakWebAuthSessionSecret(rawSecret) {
@@ -915,6 +1002,24 @@ function validateWebAuthSecurityConfiguration() {
 
   if (isWeakWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW)) {
     issues.push("WEB_AUTH_SESSION_SECRET must be explicitly set to a strong random value (>= 32 chars).");
+  }
+
+  const usersWithPlaintextConfigPasswords = listWebAuthUsersWithPlaintextConfigPasswords();
+  if (usersWithPlaintextConfigPasswords.length) {
+    const usersPreview = usersWithPlaintextConfigPasswords.slice(0, 8).join(", ");
+    const suffix = usersWithPlaintextConfigPasswords.length > 8 ? ", ..." : "";
+    issues.push(
+      `Plaintext passwords are not allowed in config. Use WEB_AUTH_PASSWORD_HASH / WEB_AUTH_USERS_JSON[].passwordHash (affected: ${usersPreview}${suffix}).`,
+    );
+  }
+
+  const usersWithInvalidPasswordHashConfig = listWebAuthUsersWithInvalidPasswordHashConfig();
+  if (usersWithInvalidPasswordHashConfig.length) {
+    const usersPreview = usersWithInvalidPasswordHashConfig.slice(0, 8).join(", ");
+    const suffix = usersWithInvalidPasswordHashConfig.length > 8 ? ", ..." : "";
+    issues.push(
+      `Invalid WEB_AUTH password hash format. Expected bcrypt hash ($2y/$2b/$2a) (affected: ${usersPreview}${suffix}).`,
+    );
   }
 
   if (!issues.length) {
@@ -1444,11 +1549,13 @@ function seedWebAuthBootstrapUsers() {
         roleId,
         teamUsernames: [],
         mustChangePassword: true,
+        passwordConfiguredAsPlaintext: false,
+        invalidPasswordHashConfigured: false,
       },
       WEB_AUTH_OWNER_USERNAME,
     );
 
-    if (!finalized.username || !finalized.password) {
+    if (!finalized.username || !finalized.passwordHash) {
       continue;
     }
 
@@ -5883,6 +5990,8 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
 
   const displayName = sanitizeTextValue(rawUser.displayName || rawUser.name, 140) || username;
   const password = normalizeWebAuthConfigValue(rawUser.password);
+  const passwordHash = normalizeWebAuthPasswordHashValue(rawUser.passwordHash || rawUser.password_hash);
+  const isPasswordHashValid = isWebAuthPasswordHash(passwordHash);
   const explicitOwner = resolveOptionalBoolean(rawUser.isOwner) === true;
   let departmentId = normalizeWebAuthDepartmentId(rawUser.departmentId || rawUser.department);
   let roleId = normalizeWebAuthRoleId(rawUser.roleId || rawUser.role, departmentId);
@@ -5908,18 +6017,23 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   return {
     username,
     password,
+    passwordHash,
     displayName,
     isOwner,
     departmentId,
     roleId,
     teamUsernames,
     mustChangePassword,
+    passwordConfiguredAsPlaintext: Boolean(password),
+    invalidPasswordHashConfigured: Boolean(passwordHash) && !isPasswordHashValid,
   };
 }
 
 function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   const username = normalizeWebAuthUsername(rawUser?.username);
   const password = normalizeWebAuthConfigValue(rawUser?.password);
+  const passwordHash = normalizeWebAuthPasswordHashValue(rawUser?.passwordHash || rawUser?.password_hash);
+  const hasValidPasswordHash = isWebAuthPasswordHash(passwordHash);
   const displayName = sanitizeTextValue(rawUser?.displayName, 140) || username;
   const isOwner = Boolean(rawUser?.isOwner) || username === ownerUsername;
   let departmentId = isOwner ? "" : normalizeWebAuthDepartmentId(rawUser?.departmentId);
@@ -5940,9 +6054,18 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     }
   }
 
+  let resolvedPasswordHash = "";
+  if (hasValidPasswordHash) {
+    resolvedPasswordHash = passwordHash;
+  } else if (password) {
+    resolvedPasswordHash = hashWebAuthPassword(password);
+  } else if (passwordHash) {
+    resolvedPasswordHash = passwordHash;
+  }
+
   const userProfile = {
     username,
-    password,
+    passwordHash: resolvedPasswordHash,
     displayName,
     isOwner,
     departmentId,
@@ -5951,6 +6074,8 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     roleName: getWebAuthRoleName(roleId),
     teamUsernames: isOwner ? [] : teamUsernames,
     mustChangePassword,
+    passwordConfiguredAsPlaintext: resolveOptionalBoolean(rawUser?.passwordConfiguredAsPlaintext) === true,
+    invalidPasswordHashConfigured: resolveOptionalBoolean(rawUser?.invalidPasswordHashConfigured) === true,
   };
   userProfile.permissions = buildWebAuthPermissionsForUser(userProfile);
   return userProfile;
@@ -5959,7 +6084,14 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
 function resolveWebAuthUsersDirectory(options = {}) {
   const ownerUsername = normalizeWebAuthUsername(options.ownerUsername || DEFAULT_WEB_AUTH_OWNER_USERNAME);
   const legacyUsername = normalizeWebAuthUsername(options.legacyUsername || DEFAULT_WEB_AUTH_USERNAME);
-  const legacyPassword = normalizeWebAuthConfigValue(options.legacyPassword || DEFAULT_WEB_AUTH_PASSWORD);
+  const legacyPasswordHash = normalizeWebAuthPasswordHashValue(options.legacyPasswordHash);
+  let legacyPassword = normalizeWebAuthConfigValue(options.legacyPassword);
+  if (!legacyPassword && !legacyPasswordHash) {
+    legacyPassword = DEFAULT_WEB_AUTH_PASSWORD;
+  }
+  const legacyPasswordHashValid = isWebAuthPasswordHash(legacyPasswordHash);
+  const legacyPasswordConfiguredAsPlaintext = Boolean(legacyPassword);
+  const legacyPasswordHashInvalid = Boolean(legacyPasswordHash) && !legacyPasswordHashValid;
   const usersByUsername = new Map();
 
   const configuredUsers = parseWebAuthUsersJson(options.rawUsersJson);
@@ -5971,12 +6103,20 @@ function resolveWebAuthUsersDirectory(options = {}) {
     usersByUsername.set(normalized.username, normalized);
   }
 
-  if (legacyUsername && legacyPassword) {
+  if (legacyUsername && (legacyPassword || legacyPasswordHash)) {
     const existingLegacy = usersByUsername.get(legacyUsername);
     if (existingLegacy) {
+      const existingLegacyPasswordHash = normalizeWebAuthPasswordHashValue(existingLegacy.passwordHash);
       usersByUsername.set(legacyUsername, {
         ...existingLegacy,
-        password: existingLegacy.password || legacyPassword,
+        password: existingLegacyPasswordHash || legacyPasswordHashValid ? "" : existingLegacy.password || legacyPassword,
+        passwordHash: existingLegacyPasswordHash || legacyPasswordHash,
+        passwordConfiguredAsPlaintext:
+          resolveOptionalBoolean(existingLegacy.passwordConfiguredAsPlaintext) === true ||
+          (!existingLegacyPasswordHash && legacyPasswordConfiguredAsPlaintext),
+        invalidPasswordHashConfigured:
+          resolveOptionalBoolean(existingLegacy.invalidPasswordHashConfigured) === true ||
+          (!existingLegacyPasswordHash && legacyPasswordHashInvalid),
         isOwner: existingLegacy.isOwner || legacyUsername === ownerUsername,
         roleId:
           existingLegacy.isOwner || legacyUsername === ownerUsername
@@ -5990,7 +6130,10 @@ function resolveWebAuthUsersDirectory(options = {}) {
     } else {
       usersByUsername.set(legacyUsername, {
         username: legacyUsername,
-        password: legacyPassword,
+        password: legacyPasswordHashValid ? "" : legacyPassword,
+        passwordHash: legacyPasswordHash,
+        passwordConfiguredAsPlaintext: legacyPasswordConfiguredAsPlaintext,
+        invalidPasswordHashConfigured: legacyPasswordHashInvalid,
         displayName: legacyUsername,
         isOwner: legacyUsername === ownerUsername,
         departmentId: legacyUsername === ownerUsername ? "" : WEB_AUTH_DEPARTMENT_SALES,
@@ -5999,10 +6142,13 @@ function resolveWebAuthUsersDirectory(options = {}) {
     }
   }
 
-  if (ownerUsername && legacyPassword && !usersByUsername.has(ownerUsername)) {
+  if (ownerUsername && (legacyPassword || legacyPasswordHash) && !usersByUsername.has(ownerUsername)) {
     usersByUsername.set(ownerUsername, {
       username: ownerUsername,
-      password: legacyPassword,
+      password: legacyPasswordHashValid ? "" : legacyPassword,
+      passwordHash: legacyPasswordHash,
+      passwordConfiguredAsPlaintext: legacyPasswordConfiguredAsPlaintext,
+      invalidPasswordHashConfigured: legacyPasswordHashInvalid,
       displayName: ownerUsername,
       isOwner: true,
       departmentId: "",
@@ -6013,7 +6159,7 @@ function resolveWebAuthUsersDirectory(options = {}) {
   const finalizedByUsername = new Map();
   for (const rawUser of usersByUsername.values()) {
     const finalized = finalizeWebAuthDirectoryUser(rawUser, ownerUsername);
-    if (!finalized.username || !finalized.password) {
+    if (!finalized.username || !finalized.passwordHash) {
       console.warn(`Skipping web auth user without credentials: ${finalized.username || "unknown"}`);
       continue;
     }
@@ -6046,12 +6192,37 @@ function listWebAuthUsers() {
 
 function upsertWebAuthUserInDirectory(rawUser) {
   const finalized = finalizeWebAuthDirectoryUser(rawUser, WEB_AUTH_OWNER_USERNAME);
-  if (!finalized.username || !finalized.password) {
+  if (!finalized.username || !finalized.passwordHash) {
     throw createHttpError("Invalid user payload.", 400);
   }
 
   WEB_AUTH_USERS_BY_USERNAME.set(finalized.username, finalized);
   return finalized;
+}
+
+function migrateLegacyWebAuthUserPasswordToHash(userProfile, rawPassword) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return userProfile;
+  }
+
+  const legacyPassword = getLegacyWebAuthPassword(userProfile);
+  const password = normalizeWebAuthConfigValue(rawPassword);
+  if (!legacyPassword || !password || !safeEqual(legacyPassword, password)) {
+    return userProfile;
+  }
+
+  try {
+    return upsertWebAuthUserInDirectory({
+      ...userProfile,
+      password,
+      passwordHash: "",
+      passwordConfiguredAsPlaintext: false,
+      invalidPasswordHashConfigured: false,
+    });
+  } catch (error) {
+    console.warn("Failed to migrate legacy web auth password hash:", sanitizeTextValue(error?.message, 220));
+    return userProfile;
+  }
 }
 
 function authenticateWebAuthCredentials(rawUsername, rawPassword) {
@@ -6062,11 +6233,19 @@ function authenticateWebAuthCredentials(rawUsername, rawPassword) {
   }
 
   const user = getWebAuthUserByUsername(username);
-  if (!user || !user.password) {
+  if (!user) {
     return null;
   }
 
-  return safeEqual(password, user.password) ? user : null;
+  if (!doesWebAuthPasswordMatchUser(user, password)) {
+    return null;
+  }
+
+  if (!isWebAuthPasswordHash(user.passwordHash) && getLegacyWebAuthPassword(user)) {
+    return migrateLegacyWebAuthUserPasswordToHash(user, password);
+  }
+
+  return user;
 }
 
 function isValidWebAuthCredentials(rawUsername, rawPassword) {
@@ -6188,10 +6367,16 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
     throw createHttpError("Password must be at least 8 characters.", 400);
   }
   const isPasswordUpdateRequested = hasPasswordInPayload && Boolean(password);
-  if (!password) {
-    password = normalizeWebAuthConfigValue(existing.password);
+  const existingPasswordHash = normalizeWebAuthPasswordHashValue(existing.passwordHash);
+  let passwordHash = "";
+  if (!isPasswordUpdateRequested) {
+    if (existingPasswordHash) {
+      passwordHash = existingPasswordHash;
+    } else {
+      password = getLegacyWebAuthPassword(existing);
+    }
   }
-  if (!password) {
+  if (!password && !passwordHash) {
     password = generateWebAuthTemporaryPassword();
   }
 
@@ -6232,12 +6417,15 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
   return {
     username,
     password,
+    passwordHash,
     displayName,
     isOwner: false,
     departmentId,
     roleId,
     teamUsernames: roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER ? teamUsernames : [],
     mustChangePassword,
+    passwordConfiguredAsPlaintext: false,
+    invalidPasswordHashConfigured: false,
   };
 }
 
@@ -6311,7 +6499,10 @@ function setWebAuthUserPassword(username, nextPassword, options = {}) {
     ...existingUser,
     username: existingUser.username,
     password,
+    passwordHash: "",
     mustChangePassword: !existingUser.isOwner && mustChangePassword,
+    passwordConfiguredAsPlaintext: false,
+    invalidPasswordHashConfigured: false,
   });
 }
 
@@ -6319,7 +6510,6 @@ function normalizeWebAuthFirstPasswordPayload(rawBody, userProfile) {
   const payload = rawBody && typeof rawBody === "object" ? rawBody : {};
   const nextPassword = normalizeWebAuthConfigValue(payload.newPassword || payload.password);
   const confirmPassword = normalizeWebAuthConfigValue(payload.confirmPassword || payload.confirm);
-  const currentPassword = normalizeWebAuthConfigValue(userProfile?.password);
 
   if (!nextPassword || nextPassword.length < 8) {
     throw createHttpError("New password must be at least 8 characters.", 400);
@@ -6333,7 +6523,7 @@ function normalizeWebAuthFirstPasswordPayload(rawBody, userProfile) {
     throw createHttpError("Password confirmation does not match.", 400);
   }
 
-  if (currentPassword && safeEqual(nextPassword, currentPassword)) {
+  if (doesWebAuthPasswordMatchUser(userProfile, nextPassword)) {
     throw createHttpError("New password must be different from the temporary password.", 400);
   }
 
@@ -15350,7 +15540,9 @@ app.listen(PORT, () => {
     );
   }
   if (isWebAuthUsingDefaultCredentials()) {
-    console.warn("Using default web auth credentials. Set WEB_AUTH_USERNAME and WEB_AUTH_PASSWORD in environment.");
+    console.warn(
+      "Using default web auth credentials. Set WEB_AUTH_USERNAME and WEB_AUTH_PASSWORD_HASH (or WEB_AUTH_PASSWORD for local dev) in environment.",
+    );
   }
   if (!pool) {
     console.warn("DATABASE_URL is missing. API routes will return 503 until configured.");
