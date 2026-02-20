@@ -438,12 +438,16 @@ const GHL_LEADS_MAX_ROWS_RESPONSE = Math.min(
   30000,
 );
 const GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS = Math.min(
-  Math.max(parsePositiveInteger(process.env.GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS, 3500), 1000),
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS, 2500), 1000),
   GHL_REQUEST_TIMEOUT_MS,
 );
 const GHL_LEADS_SYNC_MAX_DURATION_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LEADS_SYNC_MAX_DURATION_MS, 18000), 3000),
   120000,
+);
+const GHL_LEADS_PAGE_MAX_DURATION_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_PAGE_MAX_DURATION_MS, 8000), 2000),
+  30000,
 );
 const GHL_LEADS_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: GHL_LEADS_SYNC_TIME_ZONE,
@@ -12197,17 +12201,7 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
   const safePage = Math.max(1, parsePositiveIntegerOrZero(page) || 1);
   const safeLimit = Math.min(Math.max(parsePositiveIntegerOrZero(limit) || GHL_LEADS_PAGE_LIMIT, 10), 200);
   const pipelineId = sanitizeTextValue(pipelineContext?.pipelineId, 180);
-
-  const locationVariants = [
-    {
-      location_id: GHL_LOCATION_ID,
-    },
-    {
-      locationId: GHL_LOCATION_ID,
-    },
-    {},
-  ];
-
+  const attempts = [];
   const postBodies = [];
   const getQueries = [];
 
@@ -12218,47 +12212,36 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
     }
   }
 
-  for (const locationPayload of locationVariants) {
-    const postCandidates = [
-      { ...locationPayload, page: safePage, limit: safeLimit },
-      { ...locationPayload, page: safePage, pageLimit: safeLimit },
-    ];
-    const queryCandidates = [{ ...locationPayload, page: safePage, limit: safeLimit }];
+  if (pipelineId) {
+    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit, pipeline_id: pipelineId });
+    pushUnique(postBodies, { locationId: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit, pipelineId });
+    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit, pipeline_id: pipelineId });
+    pushUnique(postBodies, { page: safePage, pageLimit: safeLimit, pipeline_id: pipelineId });
 
-    for (const baseCandidate of postCandidates) {
-      if (pipelineId) {
-        pushUnique(postBodies, { ...baseCandidate, pipelineId });
-        pushUnique(postBodies, { ...baseCandidate, pipeline_id: pipelineId });
-        pushUnique(postBodies, baseCandidate);
-        pushUnique(postBodies, { ...baseCandidate, pipelineId, pipeline_id: pipelineId });
-      } else {
-        pushUnique(postBodies, baseCandidate);
-      }
-    }
+    pushUnique(getQueries, { locationId: GHL_LOCATION_ID, page: safePage, limit: safeLimit, pipelineId });
+    pushUnique(getQueries, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit, pipeline_id: pipelineId });
+    pushUnique(getQueries, { page: safePage, limit: safeLimit, pipeline_id: pipelineId });
+  } else {
+    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit });
+    pushUnique(postBodies, { locationId: GHL_LOCATION_ID, page: safePage, pageLimit: safeLimit });
+    pushUnique(postBodies, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
+    pushUnique(postBodies, { page: safePage, pageLimit: safeLimit });
 
-    for (const baseCandidate of queryCandidates) {
-      if (pipelineId) {
-        pushUnique(getQueries, { ...baseCandidate, pipelineId });
-        pushUnique(getQueries, { ...baseCandidate, pipeline_id: pipelineId });
-        pushUnique(getQueries, baseCandidate);
-        pushUnique(getQueries, { ...baseCandidate, pipelineId, pipeline_id: pipelineId });
-      } else {
-        pushUnique(getQueries, baseCandidate);
-      }
-    }
+    pushUnique(getQueries, { locationId: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
+    pushUnique(getQueries, { location_id: GHL_LOCATION_ID, page: safePage, limit: safeLimit });
+    pushUnique(getQueries, { page: safePage, limit: safeLimit });
   }
 
-  const attempts = [];
   for (let index = 0; index < postBodies.length; index += 1) {
     const body = postBodies[index];
     attempts.push({
       source: `opportunities.search.post.${index + 1}`,
-      request: () =>
+      request: (timeoutMs) =>
         requestGhlApi("/opportunities/search", {
           method: "POST",
           body,
           tolerateNotFound: true,
-          timeoutMs: GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS,
+          timeoutMs,
         }),
     });
   }
@@ -12267,43 +12250,42 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
     const query = getQueries[index];
     attempts.push(
       {
-        source: `opportunities.search.get.${index + 1}`,
-        request: () =>
-          requestGhlApi("/opportunities/search", {
-            method: "GET",
-            query,
-            tolerateNotFound: true,
-            timeoutMs: GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS,
-          }),
-      },
-      {
-        source: `opportunities.trailing_slash.get.${index + 1}`,
-        request: () =>
-          requestGhlApi("/opportunities/", {
-            method: "GET",
-            query,
-            tolerateNotFound: true,
-            timeoutMs: GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS,
-          }),
-      },
-      {
         source: `opportunities.get.${index + 1}`,
-        request: () =>
+        request: (timeoutMs) =>
           requestGhlApi("/opportunities", {
             method: "GET",
             query,
             tolerateNotFound: true,
-            timeoutMs: GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS,
+            timeoutMs,
+          }),
+      },
+      {
+        source: `opportunities.trailing_slash.get.${index + 1}`,
+        request: (timeoutMs) =>
+          requestGhlApi("/opportunities/", {
+            method: "GET",
+            query,
+            tolerateNotFound: true,
+            timeoutMs,
           }),
       },
     );
   }
 
   let lastError = null;
+  const pageStartedAt = Date.now();
   for (const attempt of attempts) {
+    const elapsed = Date.now() - pageStartedAt;
+    if (elapsed >= GHL_LEADS_PAGE_MAX_DURATION_MS) {
+      break;
+    }
+
+    const remainingMs = GHL_LEADS_PAGE_MAX_DURATION_MS - elapsed;
+    const timeoutMs = Math.min(GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS, Math.max(1000, remainingMs));
+
     let response;
     try {
-      response = await attempt.request();
+      response = await attempt.request(timeoutMs);
     } catch (error) {
       lastError = error;
       continue;
