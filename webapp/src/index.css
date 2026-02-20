@@ -1238,6 +1238,10 @@ a {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.record-details-grid--requested {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .record-details-stack {
   display: grid;
   gap: var(--space-3);
@@ -1378,6 +1382,63 @@ a {
   font-size: var(--font-size-sm);
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.record-payments-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.record-payments-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.record-payments-panel__title {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.record-payments-panel__rows {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.record-payments-panel__row {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, auto) minmax(120px, auto);
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.record-payments-panel__label {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.record-payments-panel__amount {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  text-align: right;
+}
+
+.record-payments-panel__date {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  text-align: right;
 }
 
 .record-details-ghl-note {
@@ -2356,6 +2417,15 @@ a {
   .record-details-layout,
   .record-profile-header__contact-row {
     grid-template-columns: 1fr;
+  }
+
+  .record-payments-panel__row {
+    grid-template-columns: 1fr;
+  }
+
+  .record-payments-panel__amount,
+  .record-payments-panel__date {
+    text-align: left;
   }
 
   .access-control-departments-grid-react {

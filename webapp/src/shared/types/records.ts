@@ -5,6 +5,12 @@ export interface ClientRecord {
   closedBy: string;
   companyName: string;
   serviceType: string;
+  purchasedService: string;
+  address: string;
+  dateOfBirth: string;
+  ssn: string;
+  creditMonitoringLogin: string;
+  creditMonitoringPassword: string;
   contractTotals: string;
   totalPayments: string;
   payment1: string;
