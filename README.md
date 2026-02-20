@@ -224,6 +224,71 @@ npm start
 - если в Supabase уже есть данные, они загрузятся в UI;
 - если БД пустая, локальные данные браузера будут отправлены в Supabase автоматически.
 
+## Records v2 Cutover Runbook
+
+Флаги миграции (`.env` / Render):
+- `DUAL_WRITE_V2` — при legacy-write зеркалит запись в `client_records_v2` (подготовительный этап).
+- `DUAL_READ_COMPARE` — при legacy-read асинхронно сравнивает `legacy` и `v2`, логирует mismatch.
+- `READ_V2` — чтение `/api/records` из `client_records_v2` с controlled fallback на `legacy` при ошибке v2.
+- `WRITE_V2` — запись `/api/records` source-of-truth в `client_records_v2`.
+- `LEGACY_MIRROR` — при `WRITE_V2=true` включает best-effort зеркальную запись `records` в `client_records_state`.
+
+Рекомендуемая последовательность cutover:
+1. Backfill `client_records_v2` и сверка:
+   ```bash
+   npm run records:v2:backfill
+   npm run records:v2:verify
+   ```
+2. Включить `DUAL_WRITE_V2=true`, оставить `READ_V2=false`, проверить логи/диагностику.
+3. Включить `DUAL_READ_COMPARE=true`, убедиться, что mismatch нет или они объяснимы.
+4. Переключить чтение: `READ_V2=true` (fallback на legacy останется автоматически).
+5. Переключить запись: `WRITE_V2=true`.
+6. На переходный период держать `LEGACY_MIRROR=true` (если нужны legacy-совместимые readers).
+7. После стабилизации отключить `DUAL_WRITE_V2` и `DUAL_READ_COMPARE`; при необходимости выключить `LEGACY_MIRROR`.
+
+Быстрый rollback только флагами:
+1. Если проблемы с чтением v2: `READ_V2=false`.
+2. Если проблемы с записью v2: `WRITE_V2=false`.
+3. Если mirror создает нагрузку/ошибки: `LEGACY_MIRROR=false`.
+4. Сохранить `DUAL_READ_COMPARE=true` для диагностики после отката (опционально).
+
+Важно:
+- сервис не выполняет auto-drop legacy таблиц;
+- переключение выполняется только через feature flags.
+
+### Manual Cleanup Plan (SQL, не выполняется автоматически)
+
+Запускать только после стабилизации проде и подтвержденного cutover.
+
+1) Проверить, что legacy и v2 синхронны:
+```sql
+SELECT COUNT(*) AS legacy_count
+FROM jsonb_array_elements((SELECT records FROM public.client_records_state WHERE id = 1));
+
+SELECT COUNT(*) AS v2_count
+FROM public.client_records_v2
+WHERE source_state_row_id = 1;
+```
+
+2) Зафиксировать backup legacy row:
+```sql
+CREATE TABLE IF NOT EXISTS public.client_records_state_backup AS
+SELECT *
+FROM public.client_records_state
+WHERE id = 1;
+```
+
+3) После финального подтверждения (ручное решение команды):
+```sql
+-- Опция A: оставить таблицу, но очистить JSON payload:
+UPDATE public.client_records_state
+SET records = '[]'::jsonb
+WHERE id = 1;
+
+-- Опция B: удалить legacy таблицу полностью (только если точно не нужна):
+-- DROP TABLE public.client_records_state;
+```
+
 ## iPhone приложение
 
 Добавлен отдельный мобильный клиент на Expo:  
