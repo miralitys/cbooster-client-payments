@@ -11501,6 +11501,1093 @@ function buildClientManagerItemsFromCache(clientNames, cachedRows) {
   return items;
 }
 
+function normalizeGhlPipelineNameForLookup(rawValue) {
+  const value = sanitizeTextValue(rawValue, 320).toLowerCase();
+  if (!value) {
+    return "";
+  }
+
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function mapGhlPipelineCandidate(rawPipeline) {
+  if (!rawPipeline || typeof rawPipeline !== "object") {
+    return null;
+  }
+
+  const pipelineId = sanitizeTextValue(
+    rawPipeline?.id || rawPipeline?._id || rawPipeline?.pipelineId || rawPipeline?.pipeline_id,
+    180,
+  );
+  const pipelineName = sanitizeTextValue(
+    rawPipeline?.name || rawPipeline?.title || rawPipeline?.pipelineName || rawPipeline?.pipeline_name,
+    320,
+  );
+
+  if (!pipelineId && !pipelineName) {
+    return null;
+  }
+
+  return {
+    pipelineId,
+    pipelineName,
+  };
+}
+
+function extractGhlPipelinesFromPayload(payload) {
+  const candidates = [
+    payload?.pipelines,
+    payload?.data?.pipelines,
+    payload?.data?.items,
+    payload?.items,
+    payload?.data,
+    payload?.result?.pipelines,
+    payload?.result?.items,
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+
+    return candidate
+      .map(mapGhlPipelineCandidate)
+      .filter(Boolean);
+  }
+
+  const singlePipeline = mapGhlPipelineCandidate(payload?.pipeline || payload?.data?.pipeline || payload?.result?.pipeline || payload);
+  return singlePipeline ? [singlePipeline] : [];
+}
+
+async function listGhlOpportunityPipelines() {
+  const attempts = [
+    () =>
+      requestGhlApi("/opportunities/pipelines", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/opportunities/pipelines/", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/pipelines", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/pipelines/", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+        tolerateNotFound: true,
+      }),
+  ];
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt();
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const items = extractGhlPipelinesFromPayload(response.body);
+    if (!items.length) {
+      continue;
+    }
+
+    const deduped = [];
+    const seen = new Set();
+    for (const item of items) {
+      const id = sanitizeTextValue(item?.pipelineId, 180);
+      const name = sanitizeTextValue(item?.pipelineName, 320);
+      const key = `${id}::${normalizeGhlPipelineNameForLookup(name)}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      deduped.push({
+        pipelineId: id,
+        pipelineName: name,
+      });
+    }
+
+    return deduped;
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return [];
+}
+
+async function resolveGhlLeadsPipelineContext() {
+  const preferredPipelineName = sanitizeTextValue(GHL_LEADS_PIPELINE_NAME, 320);
+  const preferredPipelineNameLookup = normalizeGhlPipelineNameForLookup(preferredPipelineName);
+  const configuredPipelineId = sanitizeTextValue(GHL_LEADS_PIPELINE_ID, 180);
+
+  let pipelines = [];
+  try {
+    pipelines = await listGhlOpportunityPipelines();
+  } catch (error) {
+    if (!configuredPipelineId) {
+      throw error;
+    }
+  }
+
+  if (configuredPipelineId) {
+    const matchedById = pipelines.find((item) => sanitizeTextValue(item?.pipelineId, 180) === configuredPipelineId);
+    if (matchedById) {
+      return {
+        pipelineId: configuredPipelineId,
+        pipelineName: sanitizeTextValue(matchedById.pipelineName, 320) || preferredPipelineName || configuredPipelineId,
+      };
+    }
+
+    return {
+      pipelineId: configuredPipelineId,
+      pipelineName: preferredPipelineName || configuredPipelineId,
+    };
+  }
+
+  if (!pipelines.length) {
+    throw createHttpError(
+      `Unable to load GoHighLevel pipelines. Set GHL_LEADS_PIPELINE_ID or ensure pipeline "${preferredPipelineName || "SALES 3 LINE"}" exists.`,
+      502,
+    );
+  }
+
+  const exactMatch = pipelines.find(
+    (item) => normalizeGhlPipelineNameForLookup(item?.pipelineName) === preferredPipelineNameLookup,
+  );
+  if (exactMatch) {
+    return {
+      pipelineId: sanitizeTextValue(exactMatch.pipelineId, 180),
+      pipelineName: sanitizeTextValue(exactMatch.pipelineName, 320) || preferredPipelineName,
+    };
+  }
+
+  const looseMatch = pipelines.find((item) => {
+    const candidate = normalizeGhlPipelineNameForLookup(item?.pipelineName);
+    if (!candidate || !preferredPipelineNameLookup) {
+      return false;
+    }
+    return candidate.includes(preferredPipelineNameLookup) || preferredPipelineNameLookup.includes(candidate);
+  });
+  if (looseMatch) {
+    return {
+      pipelineId: sanitizeTextValue(looseMatch.pipelineId, 180),
+      pipelineName: sanitizeTextValue(looseMatch.pipelineName, 320) || preferredPipelineName,
+    };
+  }
+
+  throw createHttpError(`Pipeline "${preferredPipelineName || "SALES 3 LINE"}" was not found in GoHighLevel.`, 404);
+}
+
+function extractGhlOpportunitiesFromPayload(payload) {
+  const candidates = [
+    payload?.opportunities,
+    payload?.data?.opportunities,
+    payload?.data?.items,
+    payload?.items,
+    payload?.data,
+    payload?.result?.opportunities,
+    payload?.result?.items,
+    payload?.records,
+    payload?.data?.records,
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+    return candidate.filter((item) => item && typeof item === "object");
+  }
+
+  if (payload?.opportunity && typeof payload.opportunity === "object") {
+    return [payload.opportunity];
+  }
+
+  return [];
+}
+
+function parseGhlLeadAmount(rawValue) {
+  if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+    return rawValue;
+  }
+
+  const value = sanitizeTextValue(rawValue, 80);
+  if (!value) {
+    return 0;
+  }
+
+  const normalized = value.replace(/[^\d.-]/g, "");
+  const parsed = Number.parseFloat(normalized);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  return parsed;
+}
+
+function parseGhlOpportunityTimestamp(...candidates) {
+  for (const candidate of candidates) {
+    const timestamp = parseGhlNoteTimestamp(candidate);
+    if (timestamp > 0) {
+      return timestamp;
+    }
+  }
+  return 0;
+}
+
+function resolveGhlLeadContactName(opportunity) {
+  const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
+  const firstName = sanitizeTextValue(
+    opportunity?.firstName || opportunity?.first_name || nestedContact?.firstName || nestedContact?.first_name,
+    160,
+  );
+  const lastName = sanitizeTextValue(
+    opportunity?.lastName || opportunity?.last_name || nestedContact?.lastName || nestedContact?.last_name,
+    160,
+  );
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+
+  return (
+    sanitizeTextValue(
+      opportunity?.contactName ||
+        opportunity?.customerName ||
+        opportunity?.name ||
+        opportunity?.clientName ||
+        nestedContact?.name ||
+        nestedContact?.fullName ||
+        nestedContact?.full_name,
+      320,
+    ) ||
+    fullName
+  );
+}
+
+function normalizeGhlLeadStatus(rawValue) {
+  const value = sanitizeTextValue(rawValue, 120);
+  if (!value) {
+    return "open";
+  }
+
+  return value.toLowerCase();
+}
+
+function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", pipelineContext = null) {
+  if (!rawOpportunity || typeof rawOpportunity !== "object") {
+    return null;
+  }
+
+  const leadId = sanitizeTextValue(
+    rawOpportunity?.id ||
+      rawOpportunity?._id ||
+      rawOpportunity?.opportunityId ||
+      rawOpportunity?.opportunity_id ||
+      rawOpportunity?.dealId ||
+      rawOpportunity?.deal_id,
+    180,
+  );
+  if (!leadId) {
+    return null;
+  }
+
+  const pipelineId = sanitizeTextValue(
+    rawOpportunity?.pipelineId ||
+      rawOpportunity?.pipeline_id ||
+      rawOpportunity?.pipeline?.id ||
+      rawOpportunity?.pipeline?._id ||
+      pipelineContext?.pipelineId,
+    180,
+  );
+  const pipelineName = sanitizeTextValue(
+    rawOpportunity?.pipelineName ||
+      rawOpportunity?.pipeline_name ||
+      rawOpportunity?.pipeline?.name ||
+      rawOpportunity?.pipeline?.title ||
+      pipelineContext?.pipelineName,
+    320,
+  );
+  const stageId = sanitizeTextValue(
+    rawOpportunity?.stageId ||
+      rawOpportunity?.stage_id ||
+      rawOpportunity?.pipelineStageId ||
+      rawOpportunity?.pipeline_stage_id ||
+      rawOpportunity?.stage?.id ||
+      rawOpportunity?.statusId,
+    180,
+  );
+  const stageName = sanitizeTextValue(
+    rawOpportunity?.stageName ||
+      rawOpportunity?.stage_name ||
+      rawOpportunity?.pipelineStageName ||
+      rawOpportunity?.pipeline_stage_name ||
+      rawOpportunity?.stage?.name ||
+      rawOpportunity?.stage?.title ||
+      rawOpportunity?.statusLabel,
+    320,
+  );
+  const contactId = sanitizeTextValue(
+    rawOpportunity?.contactId ||
+      rawOpportunity?.contact_id ||
+      rawOpportunity?.contact?.id ||
+      rawOpportunity?.contact?._id,
+    180,
+  );
+  const contactName = resolveGhlLeadContactName(rawOpportunity);
+  const opportunityName = sanitizeTextValue(
+    rawOpportunity?.opportunityName ||
+      rawOpportunity?.title ||
+      rawOpportunity?.opportunity_title ||
+      rawOpportunity?.dealName ||
+      rawOpportunity?.name,
+    320,
+  ) || contactName || leadId;
+
+  const createdOnTimestamp = parseGhlOpportunityTimestamp(
+    rawOpportunity?.createdAt,
+    rawOpportunity?.created_at,
+    rawOpportunity?.createdOn,
+    rawOpportunity?.created_on,
+    rawOpportunity?.dateAdded,
+    rawOpportunity?.date_added,
+    rawOpportunity?.createdDate,
+    rawOpportunity?.created_date,
+  );
+
+  if (!Number.isFinite(createdOnTimestamp) || createdOnTimestamp <= 0) {
+    return null;
+  }
+
+  const updatedTimestamp = parseGhlOpportunityTimestamp(
+    rawOpportunity?.updatedAt,
+    rawOpportunity?.updated_at,
+    rawOpportunity?.dateUpdated,
+    rawOpportunity?.date_updated,
+    rawOpportunity?.lastUpdated,
+    rawOpportunity?.last_updated,
+    rawOpportunity?.dateModified,
+    rawOpportunity?.date_modified,
+  );
+
+  const monetaryValue = parseGhlLeadAmount(
+    rawOpportunity?.monetaryValue ||
+      rawOpportunity?.monetary_value ||
+      rawOpportunity?.amount ||
+      rawOpportunity?.value ||
+      rawOpportunity?.price ||
+      rawOpportunity?.dealValue,
+  );
+  const status = normalizeGhlLeadStatus(
+    rawOpportunity?.status || rawOpportunity?.state || rawOpportunity?.opportunityStatus || rawOpportunity?.opportunity_status,
+  );
+
+  return {
+    leadId,
+    contactId,
+    contactName,
+    opportunityName,
+    pipelineId,
+    pipelineName,
+    stageId,
+    stageName,
+    status,
+    monetaryValue,
+    source: sanitizeTextValue(source, 140) || "gohighlevel",
+    createdOn: new Date(createdOnTimestamp).toISOString(),
+    createdOnTimestamp,
+    ghlUpdatedAt: updatedTimestamp > 0 ? new Date(updatedTimestamp).toISOString() : "",
+    ghlUpdatedAtTimestamp: updatedTimestamp > 0 ? updatedTimestamp : 0,
+  };
+}
+
+function isGhlLeadRowMatchingPipeline(row, pipelineContext) {
+  if (!row || typeof row !== "object") {
+    return false;
+  }
+
+  const expectedPipelineId = sanitizeTextValue(pipelineContext?.pipelineId, 180);
+  const expectedPipelineName = sanitizeTextValue(pipelineContext?.pipelineName, 320);
+  const rowPipelineId = sanitizeTextValue(row?.pipelineId, 180);
+  const rowPipelineName = sanitizeTextValue(row?.pipelineName, 320);
+
+  if (expectedPipelineId && rowPipelineId && expectedPipelineId !== rowPipelineId) {
+    return false;
+  }
+
+  if (!expectedPipelineName) {
+    return true;
+  }
+
+  if (!rowPipelineName) {
+    return true;
+  }
+
+  const expectedLookup = normalizeGhlPipelineNameForLookup(expectedPipelineName);
+  const rowLookup = normalizeGhlPipelineNameForLookup(rowPipelineName);
+  if (!expectedLookup || !rowLookup) {
+    return true;
+  }
+
+  return rowLookup === expectedLookup || rowLookup.includes(expectedLookup) || expectedLookup.includes(rowLookup);
+}
+
+function parsePositiveIntegerOrZero(rawValue) {
+  if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+    return rawValue > 0 ? Math.trunc(rawValue) : 0;
+  }
+  const text = sanitizeTextValue(rawValue, 40);
+  if (!text) {
+    return 0;
+  }
+  const parsed = Number.parseInt(text, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function extractGhlOpportunitiesPagination(payload, page, limit, itemsLength) {
+  const nextPageCandidates = [
+    payload?.nextPage,
+    payload?.next_page,
+    payload?.meta?.nextPage,
+    payload?.meta?.next_page,
+    payload?.pagination?.nextPage,
+    payload?.pagination?.next_page,
+    payload?.result?.nextPage,
+    payload?.result?.next_page,
+  ];
+  for (const candidate of nextPageCandidates) {
+    const nextPage = parsePositiveIntegerOrZero(candidate);
+    if (nextPage > page) {
+      return {
+        hasMore: true,
+        nextPage,
+      };
+    }
+  }
+
+  const totalPages = parsePositiveIntegerOrZero(
+    payload?.totalPages || payload?.total_pages || payload?.meta?.totalPages || payload?.pagination?.totalPages,
+  );
+  if (totalPages > page) {
+    return {
+      hasMore: true,
+      nextPage: page + 1,
+    };
+  }
+
+  const totalItems = parsePositiveIntegerOrZero(
+    payload?.total || payload?.totalCount || payload?.meta?.total || payload?.pagination?.total,
+  );
+  if (totalItems > page * limit) {
+    return {
+      hasMore: true,
+      nextPage: page + 1,
+    };
+  }
+
+  const hasMoreCandidate = payload?.hasMore ?? payload?.has_more ?? payload?.meta?.hasMore ?? payload?.pagination?.hasMore;
+  const normalizedHasMore = sanitizeTextValue(hasMoreCandidate, 20).toLowerCase();
+  if (normalizedHasMore === "true" || normalizedHasMore === "1" || hasMoreCandidate === true) {
+    return {
+      hasMore: true,
+      nextPage: page + 1,
+    };
+  }
+
+  if (itemsLength >= limit) {
+    return {
+      hasMore: true,
+      nextPage: page + 1,
+    };
+  }
+
+  return {
+    hasMore: false,
+    nextPage: page + 1,
+  };
+}
+
+async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GHL_LEADS_PAGE_LIMIT) {
+  const safePage = Math.max(1, parsePositiveIntegerOrZero(page) || 1);
+  const safeLimit = Math.min(Math.max(parsePositiveIntegerOrZero(limit) || GHL_LEADS_PAGE_LIMIT, 10), 200);
+  const pipelineId = sanitizeTextValue(pipelineContext?.pipelineId, 180);
+
+  const postBodyBase = {
+    locationId: GHL_LOCATION_ID,
+    page: safePage,
+    limit: safeLimit,
+  };
+  const postBodyWithPageLimit = {
+    locationId: GHL_LOCATION_ID,
+    page: safePage,
+    pageLimit: safeLimit,
+  };
+
+  const queryBase = {
+    locationId: GHL_LOCATION_ID,
+    page: safePage,
+    limit: safeLimit,
+  };
+
+  const postBodies = [];
+  const getQueries = [];
+
+  if (pipelineId) {
+    postBodies.push(
+      { ...postBodyBase, pipelineId },
+      { ...postBodyWithPageLimit, pipelineId },
+      { ...postBodyBase, pipeline_id: pipelineId },
+      { ...postBodyWithPageLimit, pipeline_id: pipelineId },
+    );
+    getQueries.push(
+      { ...queryBase, pipelineId },
+      { ...queryBase, pipeline_id: pipelineId },
+    );
+  } else {
+    postBodies.push(postBodyBase, postBodyWithPageLimit);
+    getQueries.push(queryBase);
+  }
+
+  const attempts = [];
+  for (let index = 0; index < postBodies.length; index += 1) {
+    const body = postBodies[index];
+    attempts.push({
+      source: `opportunities.search.post.${index + 1}`,
+      request: () =>
+        requestGhlApi("/opportunities/search", {
+          method: "POST",
+          body,
+          tolerateNotFound: true,
+        }),
+    });
+  }
+
+  for (let index = 0; index < getQueries.length; index += 1) {
+    const query = getQueries[index];
+    attempts.push(
+      {
+        source: `opportunities.search.get.${index + 1}`,
+        request: () =>
+          requestGhlApi("/opportunities/search", {
+            method: "GET",
+            query,
+            tolerateNotFound: true,
+          }),
+      },
+      {
+        source: `opportunities.trailing_slash.get.${index + 1}`,
+        request: () =>
+          requestGhlApi("/opportunities/", {
+            method: "GET",
+            query,
+            tolerateNotFound: true,
+          }),
+      },
+      {
+        source: `opportunities.get.${index + 1}`,
+        request: () =>
+          requestGhlApi("/opportunities", {
+            method: "GET",
+            query,
+            tolerateNotFound: true,
+          }),
+      },
+    );
+  }
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt.request();
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const items = extractGhlOpportunitiesFromPayload(response.body);
+    const pagination = extractGhlOpportunitiesPagination(response.body, safePage, safeLimit, items.length);
+    return {
+      items,
+      source: attempt.source,
+      hasMore: pagination.hasMore,
+      nextPage: pagination.nextPage,
+    };
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return {
+    items: [],
+    source: "opportunities",
+    hasMore: false,
+    nextPage: safePage + 1,
+  };
+}
+
+function getGhlLeadActivityTimestamp(item) {
+  const createdOnTimestamp = Number.isFinite(item?.createdOnTimestamp) ? item.createdOnTimestamp : 0;
+  const updatedTimestamp = Number.isFinite(item?.ghlUpdatedAtTimestamp) ? item.ghlUpdatedAtTimestamp : 0;
+  return Math.max(createdOnTimestamp, updatedTimestamp);
+}
+
+async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
+  const refreshMode = sanitizeTextValue(options?.refreshMode, 20).toLowerCase() === "full" ? "full" : "incremental";
+  const incrementalCutoffTimestamp = Number.isFinite(options?.incrementalCutoffTimestamp)
+    ? Math.max(0, Math.trunc(options.incrementalCutoffTimestamp))
+    : 0;
+
+  const rowsById = new Map();
+  let page = 1;
+  let pagesFetched = 0;
+  let leadsFetched = 0;
+  let skippedByCutoff = 0;
+  let hasMore = true;
+  let lastSource = "";
+
+  while (hasMore && page <= GHL_LEADS_MAX_PAGES) {
+    const pagePayload = await requestGhlOpportunitiesPage(pipelineContext, page, GHL_LEADS_PAGE_LIMIT);
+    pagesFetched += 1;
+    hasMore = pagePayload.hasMore;
+    lastSource = sanitizeTextValue(pagePayload.source, 140) || lastSource;
+
+    const rawItems = Array.isArray(pagePayload.items) ? pagePayload.items : [];
+    leadsFetched += rawItems.length;
+    if (!rawItems.length) {
+      break;
+    }
+
+    let pageHasOnlyOldRows = true;
+    let pageHasAnyKnownActivityTimestamp = false;
+
+    for (const rawItem of rawItems) {
+      const normalized = normalizeGhlOpportunityLeadRow(rawItem, pagePayload.source, pipelineContext);
+      if (!normalized) {
+        pageHasOnlyOldRows = false;
+        continue;
+      }
+      if (!isGhlLeadRowMatchingPipeline(normalized, pipelineContext)) {
+        pageHasOnlyOldRows = false;
+        continue;
+      }
+
+      const activityTimestamp = getGhlLeadActivityTimestamp(normalized);
+      if (activityTimestamp > 0) {
+        pageHasAnyKnownActivityTimestamp = true;
+      }
+
+      if (refreshMode === "incremental" && incrementalCutoffTimestamp > 0 && activityTimestamp > 0 && activityTimestamp < incrementalCutoffTimestamp) {
+        skippedByCutoff += 1;
+        continue;
+      }
+
+      pageHasOnlyOldRows = false;
+      const current = rowsById.get(normalized.leadId) || null;
+      if (!current || getGhlLeadActivityTimestamp(normalized) >= getGhlLeadActivityTimestamp(current)) {
+        rowsById.set(normalized.leadId, normalized);
+      }
+    }
+
+    if (
+      refreshMode === "incremental" &&
+      incrementalCutoffTimestamp > 0 &&
+      pageHasOnlyOldRows &&
+      pageHasAnyKnownActivityTimestamp
+    ) {
+      break;
+    }
+
+    if (!hasMore) {
+      break;
+    }
+
+    const nextPage = parsePositiveIntegerOrZero(pagePayload.nextPage);
+    if (nextPage <= page) {
+      page += 1;
+    } else {
+      page = nextPage;
+    }
+  }
+
+  const rows = [...rowsById.values()].sort((left, right) => {
+    const leftCreated = Number.isFinite(left?.createdOnTimestamp) ? left.createdOnTimestamp : 0;
+    const rightCreated = Number.isFinite(right?.createdOnTimestamp) ? right.createdOnTimestamp : 0;
+    if (leftCreated !== rightCreated) {
+      return rightCreated - leftCreated;
+    }
+    return getGhlLeadActivityTimestamp(right) - getGhlLeadActivityTimestamp(left);
+  });
+
+  return {
+    rows,
+    pagesFetched,
+    leadsFetched,
+    skippedByCutoff,
+    source: lastSource || "gohighlevel",
+  };
+}
+
+function normalizeGhlLeadRowForCache(row) {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+
+  const leadId = sanitizeTextValue(row?.leadId, 180);
+  if (!leadId) {
+    return null;
+  }
+
+  const createdOnIso = normalizeIsoTimestampOrNull(row?.createdOn);
+  if (!createdOnIso) {
+    return null;
+  }
+
+  const monetaryValue = parseGhlLeadAmount(row?.monetaryValue);
+
+  return {
+    leadId,
+    contactId: sanitizeTextValue(row?.contactId, 180),
+    contactName: sanitizeTextValue(row?.contactName, 320),
+    opportunityName: sanitizeTextValue(row?.opportunityName, 320),
+    pipelineId: sanitizeTextValue(row?.pipelineId, 180),
+    pipelineName: sanitizeTextValue(row?.pipelineName, 320),
+    stageId: sanitizeTextValue(row?.stageId, 180),
+    stageName: sanitizeTextValue(row?.stageName, 320),
+    status: normalizeGhlLeadStatus(row?.status),
+    monetaryValue,
+    source: sanitizeTextValue(row?.source, 140) || "gohighlevel",
+    createdOn: createdOnIso,
+    ghlUpdatedAt: normalizeIsoTimestampOrNull(row?.ghlUpdatedAt),
+  };
+}
+
+function mapGhlLeadCacheRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  const leadId = sanitizeTextValue(row?.lead_id, 180);
+  if (!leadId) {
+    return null;
+  }
+
+  const monetaryValue = Number.parseFloat(row?.monetary_value);
+
+  return {
+    leadId,
+    contactId: sanitizeTextValue(row?.contact_id, 180),
+    contactName: sanitizeTextValue(row?.contact_name, 320),
+    opportunityName: sanitizeTextValue(row?.opportunity_name, 320),
+    pipelineId: sanitizeTextValue(row?.pipeline_id, 180),
+    pipelineName: sanitizeTextValue(row?.pipeline_name, 320),
+    stageId: sanitizeTextValue(row?.stage_id, 180),
+    stageName: sanitizeTextValue(row?.stage_name, 320),
+    status: normalizeGhlLeadStatus(row?.status),
+    monetaryValue: Number.isFinite(monetaryValue) ? monetaryValue : 0,
+    source: sanitizeTextValue(row?.source, 140) || "gohighlevel",
+    createdOn: row?.created_on ? new Date(row.created_on).toISOString() : "",
+    createdOnTimestamp: row?.created_on ? new Date(row.created_on).getTime() : 0,
+    ghlUpdatedAt: row?.ghl_updated_at ? new Date(row.ghl_updated_at).toISOString() : "",
+    ghlUpdatedAtTimestamp: row?.ghl_updated_at ? new Date(row.ghl_updated_at).getTime() : 0,
+    updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
+  };
+}
+
+async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE) {
+  await ensureDatabaseReady();
+
+  const requestedLimit = parsePositiveIntegerOrZero(limit);
+  const safeLimit = Math.min(Math.max(requestedLimit || GHL_LEADS_MAX_ROWS_RESPONSE, 1), GHL_LEADS_MAX_ROWS_RESPONSE);
+
+  const result = await pool.query(
+    `
+      SELECT
+        lead_id,
+        contact_id,
+        contact_name,
+        opportunity_name,
+        pipeline_id,
+        pipeline_name,
+        stage_id,
+        stage_name,
+        status,
+        monetary_value,
+        source,
+        created_on,
+        ghl_updated_at,
+        updated_at
+      FROM ${GHL_LEADS_CACHE_TABLE}
+      ORDER BY created_on DESC, lead_id ASC
+      LIMIT $1
+    `,
+    [safeLimit],
+  );
+
+  return result.rows.map(mapGhlLeadCacheRow).filter(Boolean);
+}
+
+async function getGhlLeadsSyncCursor() {
+  await ensureDatabaseReady();
+
+  const result = await pool.query(
+    `
+      SELECT
+        MAX(created_on) AS latest_created_on,
+        MAX(COALESCE(ghl_updated_at, created_on)) AS latest_activity_on
+      FROM ${GHL_LEADS_CACHE_TABLE}
+    `,
+  );
+
+  const latestCreatedOn = result.rows[0]?.latest_created_on ? new Date(result.rows[0].latest_created_on).getTime() : 0;
+  const latestActivityOn = result.rows[0]?.latest_activity_on ? new Date(result.rows[0].latest_activity_on).getTime() : 0;
+
+  return {
+    latestCreatedOnTimestamp: Number.isFinite(latestCreatedOn) ? latestCreatedOn : 0,
+    latestActivityTimestamp: Number.isFinite(latestActivityOn) ? latestActivityOn : 0,
+  };
+}
+
+async function upsertGhlLeadsCacheRows(rows) {
+  await ensureDatabaseReady();
+
+  const normalizedRows = (Array.isArray(rows) ? rows : [])
+    .map(normalizeGhlLeadRowForCache)
+    .filter(Boolean);
+  if (!normalizedRows.length) {
+    return 0;
+  }
+
+  let writtenCount = 0;
+  for (let offset = 0; offset < normalizedRows.length; offset += 120) {
+    const batch = normalizedRows.slice(offset, offset + 120);
+    const placeholders = [];
+    const values = [];
+
+    for (let index = 0; index < batch.length; index += 1) {
+      const row = batch[index];
+      const base = index * 13;
+      placeholders.push(
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}::timestamptz, $${base + 13}::timestamptz)`,
+      );
+      values.push(
+        row.leadId,
+        row.contactId,
+        row.contactName,
+        row.opportunityName,
+        row.pipelineId,
+        row.pipelineName,
+        row.stageId,
+        row.stageName,
+        row.status,
+        row.monetaryValue,
+        row.source,
+        row.createdOn,
+        row.ghlUpdatedAt || null,
+      );
+    }
+
+    const result = await pool.query(
+      `
+        INSERT INTO ${GHL_LEADS_CACHE_TABLE} (
+          lead_id,
+          contact_id,
+          contact_name,
+          opportunity_name,
+          pipeline_id,
+          pipeline_name,
+          stage_id,
+          stage_name,
+          status,
+          monetary_value,
+          source,
+          created_on,
+          ghl_updated_at
+        )
+        VALUES ${placeholders.join(", ")}
+        ON CONFLICT (lead_id)
+        DO UPDATE SET
+          contact_id = EXCLUDED.contact_id,
+          contact_name = EXCLUDED.contact_name,
+          opportunity_name = EXCLUDED.opportunity_name,
+          pipeline_id = EXCLUDED.pipeline_id,
+          pipeline_name = EXCLUDED.pipeline_name,
+          stage_id = EXCLUDED.stage_id,
+          stage_name = EXCLUDED.stage_name,
+          status = EXCLUDED.status,
+          monetary_value = EXCLUDED.monetary_value,
+          source = EXCLUDED.source,
+          created_on = EXCLUDED.created_on,
+          ghl_updated_at = EXCLUDED.ghl_updated_at,
+          updated_at = NOW()
+      `,
+      values,
+    );
+    writtenCount += result.rowCount || 0;
+  }
+
+  return writtenCount;
+}
+
+function getGhlLeadsClockParts(dateValue = new Date()) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const values = {};
+  for (const part of GHL_LEADS_DATE_TIME_FORMATTER.formatToParts(date)) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+
+  const fallbackIsoDate = formatQuickBooksDateUtc(date);
+  const [fallbackYear, fallbackMonth, fallbackDay] = fallbackIsoDate.split("-");
+
+  return {
+    year: Number.parseInt(values.year || fallbackYear, 10),
+    month: Number.parseInt(values.month || fallbackMonth, 10),
+    day: Number.parseInt(values.day || fallbackDay, 10),
+  };
+}
+
+function getGhlLeadsWeekdayIndex(dateValue = new Date()) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const label = sanitizeTextValue(GHL_LEADS_WEEKDAY_FORMATTER.format(date), 24).slice(0, 3).toLowerCase();
+  return GHL_LEAD_WEEKDAY_INDEX_BY_LABEL[label] ?? 0;
+}
+
+function buildGhlLeadsTimeBoundaries(dateValue = new Date()) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const parts = getGhlLeadsClockParts(date);
+  if (!Number.isFinite(parts.year) || !Number.isFinite(parts.month) || !Number.isFinite(parts.day)) {
+    return null;
+  }
+
+  const todayStart = buildUtcDateFromTimeZoneLocalParts(
+    GHL_LEADS_SYNC_TIME_ZONE,
+    parts.year,
+    parts.month,
+    parts.day,
+    0,
+    0,
+  ).getTime();
+
+  const tomorrow = addDaysToCalendarDate(parts.year, parts.month, parts.day, 1);
+  const tomorrowStart = buildUtcDateFromTimeZoneLocalParts(
+    GHL_LEADS_SYNC_TIME_ZONE,
+    tomorrow.year,
+    tomorrow.month,
+    tomorrow.day,
+    0,
+    0,
+  ).getTime();
+
+  const monthStart = buildUtcDateFromTimeZoneLocalParts(
+    GHL_LEADS_SYNC_TIME_ZONE,
+    parts.year,
+    parts.month,
+    1,
+    0,
+    0,
+  ).getTime();
+
+  const weekdayIndex = getGhlLeadsWeekdayIndex(date);
+  const offsetToWeekStart = (weekdayIndex - GHL_LEADS_WEEK_START_DAY + 7) % 7;
+  const weekStartCalendar = addDaysToCalendarDate(parts.year, parts.month, parts.day, -offsetToWeekStart);
+  const weekStart = buildUtcDateFromTimeZoneLocalParts(
+    GHL_LEADS_SYNC_TIME_ZONE,
+    weekStartCalendar.year,
+    weekStartCalendar.month,
+    weekStartCalendar.day,
+    0,
+    0,
+  ).getTime();
+
+  return {
+    todayStart,
+    tomorrowStart,
+    weekStart,
+    monthStart,
+  };
+}
+
+function buildGhlLeadsSummary(rows) {
+  const items = Array.isArray(rows) ? rows : [];
+  const boundaries = buildGhlLeadsTimeBoundaries(new Date());
+  if (!boundaries) {
+    return {
+      total: items.length,
+      today: 0,
+      week: 0,
+      month: 0,
+      timezone: GHL_LEADS_SYNC_TIME_ZONE,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  let today = 0;
+  let week = 0;
+  let month = 0;
+
+  for (const item of items) {
+    const createdOnTimestamp = Number.isFinite(item?.createdOnTimestamp)
+      ? item.createdOnTimestamp
+      : parseGhlNoteTimestamp(item?.createdOn);
+    if (!Number.isFinite(createdOnTimestamp) || createdOnTimestamp <= 0) {
+      continue;
+    }
+
+    if (createdOnTimestamp >= boundaries.todayStart && createdOnTimestamp < boundaries.tomorrowStart) {
+      today += 1;
+    }
+    if (createdOnTimestamp >= boundaries.weekStart && createdOnTimestamp < boundaries.tomorrowStart) {
+      week += 1;
+    }
+    if (createdOnTimestamp >= boundaries.monthStart && createdOnTimestamp < boundaries.tomorrowStart) {
+      month += 1;
+    }
+  }
+
+  return {
+    total: items.length,
+    today,
+    week,
+    month,
+    timezone: GHL_LEADS_SYNC_TIME_ZONE,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
 function formatQuickBooksDateUtc(value) {
   const date = value instanceof Date ? value : new Date(value);
   const year = String(date.getUTCFullYear());
@@ -15830,6 +16917,122 @@ app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLI
   }
 });
 
+async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/leads") {
+  const leadsRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
+  if (
+    !enforceRateLimit(req, res, {
+      scope: refreshMode !== "none" ? "api.ghl.leads.refresh" : "api.ghl.leads.read",
+      ipProfile: {
+        windowMs: leadsRateProfile.windowMs,
+        maxHits: leadsRateProfile.maxHitsIp,
+        blockMs: leadsRateProfile.blockMs,
+      },
+      userProfile: {
+        windowMs: leadsRateProfile.windowMs,
+        maxHits: leadsRateProfile.maxHitsUser,
+        blockMs: leadsRateProfile.blockMs,
+      },
+      message: "Leads lookup limit reached. Please wait before retrying.",
+      code: "ghl_leads_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  if (refreshMode !== "none" && !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS)) {
+    res.status(403).json({
+      error: "Access denied. You do not have permission to refresh leads data.",
+    });
+    return;
+  }
+
+  let pipelineContext = {
+    pipelineId: GHL_LEADS_PIPELINE_ID,
+    pipelineName: GHL_LEADS_PIPELINE_NAME,
+  };
+
+  const refreshMeta = {
+    mode: refreshMode,
+    performed: false,
+    pagesFetched: 0,
+    leadsFetched: 0,
+    skippedByCutoff: 0,
+    syncedLeadsCount: 0,
+    writtenRows: 0,
+    incrementalCutoff: null,
+  };
+
+  try {
+    if (refreshMode !== "none") {
+      if (!isGhlConfigured()) {
+        res.status(503).json({
+          error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+        });
+        return;
+      }
+
+      const pipeline = await resolveGhlLeadsPipelineContext();
+      pipelineContext = {
+        pipelineId: sanitizeTextValue(pipeline?.pipelineId, 180),
+        pipelineName: sanitizeTextValue(pipeline?.pipelineName, 320) || GHL_LEADS_PIPELINE_NAME,
+      };
+
+      const cursor = await getGhlLeadsSyncCursor();
+      const latestCursorTimestamp = Math.max(
+        Number.isFinite(cursor.latestActivityTimestamp) ? cursor.latestActivityTimestamp : 0,
+        Number.isFinite(cursor.latestCreatedOnTimestamp) ? cursor.latestCreatedOnTimestamp : 0,
+      );
+      const incrementalCutoffTimestamp =
+        refreshMode === "full"
+          ? 0
+          : latestCursorTimestamp > 0
+            ? Math.max(0, latestCursorTimestamp - GHL_LEADS_INCREMENTAL_LOOKBACK_MS)
+            : 0;
+      const syncResult = await fetchGhlLeadsFromPipeline(pipelineContext, {
+        refreshMode,
+        incrementalCutoffTimestamp,
+      });
+      const writtenRows = await upsertGhlLeadsCacheRows(syncResult.rows);
+
+      refreshMeta.performed = true;
+      refreshMeta.pagesFetched = syncResult.pagesFetched;
+      refreshMeta.leadsFetched = syncResult.leadsFetched;
+      refreshMeta.skippedByCutoff = syncResult.skippedByCutoff;
+      refreshMeta.syncedLeadsCount = syncResult.rows.length;
+      refreshMeta.writtenRows = writtenRows;
+      refreshMeta.incrementalCutoff = incrementalCutoffTimestamp > 0 ? new Date(incrementalCutoffTimestamp).toISOString() : null;
+    }
+
+    const items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE);
+    const summary = buildGhlLeadsSummary(items);
+
+    res.json({
+      ok: true,
+      count: items.length,
+      items,
+      summary,
+      source: "gohighlevel",
+      pipeline: {
+        id: sanitizeTextValue(pipelineContext.pipelineId, 180),
+        name: sanitizeTextValue(pipelineContext.pipelineName, 320) || GHL_LEADS_PIPELINE_NAME,
+      },
+      refresh: refreshMeta,
+    });
+  } catch (error) {
+    console.error(`${routeLabel} failed:`, error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load leads from GHL.",
+    });
+  }
+}
+
 async function respondGhlClientManagers(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/client-managers") {
   const managerRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
@@ -15927,6 +17130,25 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
     });
   }
 }
+
+app.get("/api/ghl/leads", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+  const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
+  if (refreshMode !== "none") {
+    res.status(405).json({
+      error: "State-changing refresh is not allowed via GET. Use POST /api/ghl/leads/refresh.",
+      code: "method_not_allowed_for_refresh",
+    });
+    return;
+  }
+
+  await respondGhlLeads(req, res, "none", "GET /api/ghl/leads");
+});
+
+app.post("/api/ghl/leads/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+  const refreshMode = normalizeGhlRefreshMode(req.body?.refresh || req.body?.mode || "incremental");
+  const resolvedRefreshMode = refreshMode === "none" ? "incremental" : refreshMode;
+  await respondGhlLeads(req, res, resolvedRefreshMode, "POST /api/ghl/leads/refresh");
+});
 
 app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
@@ -16678,6 +17900,10 @@ app.get("/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QU
 
 app.get("/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
   res.redirect(302, "/app/client-managers");
+});
+
+app.get("/leads", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
+  res.redirect(302, "/app/leads");
 });
 
 app.get("/ghl-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
