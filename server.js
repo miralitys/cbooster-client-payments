@@ -308,6 +308,14 @@ const QUICKBOOKS_AUTO_SYNC_START_HOUR = 8;
 const QUICKBOOKS_AUTO_SYNC_END_HOUR = 22;
 const QUICKBOOKS_AUTO_SYNC_TRIGGER_MINUTE_MAX = 8;
 const QUICKBOOKS_AUTO_SYNC_TICK_INTERVAL_MS = 60 * 1000;
+const QUICKBOOKS_SYNC_JOB_RETENTION_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_SYNC_JOB_RETENTION_MS, 30 * 60 * 1000), 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
+const QUICKBOOKS_SYNC_JOB_MAX_ENTRIES = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_SYNC_JOB_MAX_ENTRIES, 300), 50),
+  5000,
+);
 const QUICKBOOKS_AUTO_SYNC_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: QUICKBOOKS_AUTO_SYNC_TIME_ZONE,
   year: "numeric",
@@ -967,6 +975,7 @@ const miniAttachmentsUploadDiskMiddleware = ATTACHMENTS_STREAMING_ENABLED
 
 let dbReadyPromise = null;
 let quickBooksSyncQueue = Promise.resolve();
+const quickBooksSyncJobsById = new Map();
 let quickBooksAutoSyncIntervalId = null;
 let quickBooksAutoSyncInFlightSlotKey = "";
 let quickBooksAutoSyncLastCompletedSlotKey = "";
@@ -15094,6 +15103,11 @@ async function ensureDatabaseReady() {
       `);
 
       await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${MODERATION_TABLE_NAME}_status_submitted_at_id_idx
+        ON ${MODERATION_TABLE} (status, submitted_at DESC, id DESC)
+      `);
+
+      await pool.query(`
         CREATE TABLE IF NOT EXISTS ${MODERATION_FILES_TABLE} (
           id TEXT PRIMARY KEY,
           submission_id TEXT NOT NULL REFERENCES ${MODERATION_TABLE}(id) ON DELETE CASCADE,
@@ -16752,6 +16766,192 @@ function queueQuickBooksSyncTask(taskFactory) {
   const runPromise = quickBooksSyncQueue.then(runTask, runTask);
   quickBooksSyncQueue = runPromise.catch(() => {});
   return runPromise;
+}
+
+function isQuickBooksSyncJobTerminalStatus(status) {
+  return status === "completed" || status === "failed";
+}
+
+function buildQuickBooksSyncJobPayload(job) {
+  if (!job || typeof job !== "object") {
+    return null;
+  }
+
+  const rangeFrom = sanitizeTextValue(job?.range?.from, 20);
+  const rangeTo = sanitizeTextValue(job?.range?.to, 20);
+  const syncMeta = job.sync && typeof job.sync === "object" ? job.sync : null;
+
+  return {
+    id: sanitizeTextValue(job.id, 120),
+    status: sanitizeTextValue(job.status, 40) || "unknown",
+    done: isQuickBooksSyncJobTerminalStatus(job.status),
+    syncMode: sanitizeTextValue(job.syncMode, 20) === "full" ? "full" : "incremental",
+    range: {
+      from: rangeFrom,
+      to: rangeTo,
+    },
+    requestedBy: sanitizeTextValue(job.requestedBy, 160),
+    queuedAt: sanitizeTextValue(job.queuedAt, 80) || null,
+    startedAt: sanitizeTextValue(job.startedAt, 80) || null,
+    finishedAt: sanitizeTextValue(job.finishedAt, 80) || null,
+    updatedAt: sanitizeTextValue(job.updatedAt, 80) || null,
+    error: sanitizeTextValue(job.error, 600) || null,
+    sync: syncMeta
+      ? {
+          requested: syncMeta.requested === true,
+          syncMode: sanitizeTextValue(syncMeta.syncMode, 20) === "full" ? "full" : "incremental",
+          performed: syncMeta.performed === true,
+          syncFrom: sanitizeTextValue(syncMeta.syncFrom, 20),
+          fetchedCount: normalizeDualWriteSummaryValue(syncMeta.fetchedCount),
+          insertedCount: normalizeDualWriteSummaryValue(syncMeta.insertedCount),
+          writtenCount: normalizeDualWriteSummaryValue(syncMeta.writtenCount),
+          reconciledScannedCount: normalizeDualWriteSummaryValue(syncMeta.reconciledScannedCount),
+          reconciledCount: normalizeDualWriteSummaryValue(syncMeta.reconciledCount),
+          reconciledWrittenCount: normalizeDualWriteSummaryValue(syncMeta.reconciledWrittenCount),
+        }
+      : null,
+  };
+}
+
+function pruneQuickBooksSyncJobs() {
+  const nowMs = Date.now();
+  for (const [jobId, job] of quickBooksSyncJobsById.entries()) {
+    if (!isQuickBooksSyncJobTerminalStatus(job?.status)) {
+      continue;
+    }
+
+    const finishedAtMs = Date.parse(sanitizeTextValue(job?.finishedAt, 80));
+    if (!Number.isFinite(finishedAtMs)) {
+      continue;
+    }
+
+    if (nowMs - finishedAtMs > QUICKBOOKS_SYNC_JOB_RETENTION_MS) {
+      quickBooksSyncJobsById.delete(jobId);
+    }
+  }
+
+  if (quickBooksSyncJobsById.size <= QUICKBOOKS_SYNC_JOB_MAX_ENTRIES) {
+    return;
+  }
+
+  const removableTerminalJobIds = [];
+  for (const [jobId, job] of quickBooksSyncJobsById.entries()) {
+    if (isQuickBooksSyncJobTerminalStatus(job?.status)) {
+      removableTerminalJobIds.push(jobId);
+    }
+  }
+
+  while (quickBooksSyncJobsById.size > QUICKBOOKS_SYNC_JOB_MAX_ENTRIES && removableTerminalJobIds.length) {
+    const jobId = removableTerminalJobIds.shift();
+    if (jobId) {
+      quickBooksSyncJobsById.delete(jobId);
+    }
+  }
+
+  if (quickBooksSyncJobsById.size <= QUICKBOOKS_SYNC_JOB_MAX_ENTRIES) {
+    return;
+  }
+
+  for (const [jobId, job] of quickBooksSyncJobsById.entries()) {
+    if (job?.status === "running") {
+      continue;
+    }
+    quickBooksSyncJobsById.delete(jobId);
+    if (quickBooksSyncJobsById.size <= QUICKBOOKS_SYNC_JOB_MAX_ENTRIES) {
+      break;
+    }
+  }
+}
+
+function getQuickBooksSyncJobById(rawJobId) {
+  const jobId = sanitizeTextValue(rawJobId, 120);
+  if (!jobId) {
+    return null;
+  }
+
+  pruneQuickBooksSyncJobs();
+  return quickBooksSyncJobsById.get(jobId) || null;
+}
+
+function enqueueQuickBooksSyncJob(range, options = {}) {
+  const normalizedRange = range && typeof range === "object" ? range : {};
+  const fromDate = sanitizeTextValue(normalizedRange.from, 20);
+  const toDate = sanitizeTextValue(normalizedRange.to, 20);
+  const syncMode = options.fullSync === true ? "full" : "incremental";
+  const requestedBy = sanitizeTextValue(options.requestedBy, 160) || "unknown";
+
+  pruneQuickBooksSyncJobs();
+  for (const job of quickBooksSyncJobsById.values()) {
+    if (!job || (job.status !== "queued" && job.status !== "running")) {
+      continue;
+    }
+    if (sanitizeTextValue(job.syncMode, 20) !== syncMode) {
+      continue;
+    }
+    if (sanitizeTextValue(job?.range?.from, 20) !== fromDate || sanitizeTextValue(job?.range?.to, 20) !== toDate) {
+      continue;
+    }
+    return {
+      job,
+      reused: true,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const job = {
+    id: crypto.randomUUID(),
+    status: "queued",
+    syncMode,
+    range: {
+      from: fromDate,
+      to: toDate,
+    },
+    requestedBy,
+    queuedAt: nowIso,
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: nowIso,
+    error: "",
+    sync: null,
+  };
+  quickBooksSyncJobsById.set(job.id, job);
+
+  void queueQuickBooksSyncTask(async () => {
+    const targetJob = quickBooksSyncJobsById.get(job.id);
+    if (!targetJob) {
+      return;
+    }
+
+    const startedAt = new Date().toISOString();
+    targetJob.status = "running";
+    targetJob.startedAt = startedAt;
+    targetJob.updatedAt = startedAt;
+    targetJob.error = "";
+
+    try {
+      const syncMeta = await syncQuickBooksTransactionsInRange(targetJob.range, {
+        fullSync: targetJob.syncMode === "full",
+      });
+      targetJob.status = "completed";
+      targetJob.sync = syncMeta;
+    } catch (error) {
+      targetJob.status = "failed";
+      targetJob.error = sanitizeTextValue(error?.message, 600) || "QuickBooks sync failed.";
+      targetJob.sync = null;
+      console.error(`[QuickBooks Sync Job] failed (jobId=${targetJob.id}):`, error);
+    } finally {
+      const finishedAt = new Date().toISOString();
+      targetJob.finishedAt = finishedAt;
+      targetJob.updatedAt = finishedAt;
+      pruneQuickBooksSyncJobs();
+    }
+  });
+
+  pruneQuickBooksSyncJobs();
+  return {
+    job,
+    reused: false,
+  };
 }
 
 function getQuickBooksAutoSyncClockParts(dateValue = new Date()) {
@@ -19199,15 +19399,13 @@ function resolveQuickBooksDateRangeFromRequest(req, source = "query") {
 }
 
 async function respondQuickBooksRecentPayments(req, res, options = {}) {
-  const shouldSync = options.shouldSync === true;
-  const shouldTotalRefresh = options.shouldTotalRefresh === true;
   const range = options.range;
   const routeLabel = sanitizeTextValue(options.routeLabel, 120) || "api/quickbooks/payments/recent";
-  const quickBooksRateProfile = shouldSync ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
+  const quickBooksRateProfile = RATE_LIMIT_PROFILE_API_EXPENSIVE;
 
   if (
     !enforceRateLimit(req, res, {
-      scope: shouldSync ? "api.quickbooks.sync" : "api.quickbooks.read",
+      scope: "api.quickbooks.read",
       ipProfile: {
         windowMs: quickBooksRateProfile.windowMs,
         maxHits: quickBooksRateProfile.maxHitsIp,
@@ -19232,33 +19430,11 @@ async function respondQuickBooksRecentPayments(req, res, options = {}) {
     return;
   }
 
-  if (shouldSync && !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS)) {
-    res.status(403).json({
-      error: "Access denied. You do not have permission to refresh QuickBooks data.",
-    });
-    return;
-  }
-  if (shouldSync && !isQuickBooksConfigured()) {
-    res.status(503).json({
-      error:
-        "QuickBooks is not configured. Set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN, and QUICKBOOKS_REALM_ID.",
-    });
-    return;
-  }
-
   try {
-    let syncMeta = buildQuickBooksSyncMeta({
-      requested: shouldSync,
-      syncMode: shouldTotalRefresh ? "full" : "incremental",
+    const syncMeta = buildQuickBooksSyncMeta({
+      requested: false,
+      syncMode: "incremental",
     });
-
-    if (shouldSync) {
-      syncMeta = await queueQuickBooksSyncTask(() =>
-        syncQuickBooksTransactionsInRange(range, {
-          fullSync: shouldTotalRefresh,
-        }),
-      );
-    }
 
     const items = await listCachedQuickBooksTransactionsInRange(range.from, range.to);
 
@@ -19270,7 +19446,7 @@ async function respondQuickBooksRecentPayments(req, res, options = {}) {
       },
       count: items.length,
       items,
-      source: shouldSync ? "cache+sync" : "cache",
+      source: "cache",
       sync: syncMeta,
     });
   } catch (error) {
@@ -19304,8 +19480,6 @@ app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISS
   }
 
   await respondQuickBooksRecentPayments(req, res, {
-    shouldSync: false,
-    shouldTotalRefresh: false,
     range,
     routeLabel: "GET /api/quickbooks/payments/recent",
   });
@@ -19323,11 +19497,93 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
     return;
   }
 
-  await respondQuickBooksRecentPayments(req, res, {
-    shouldSync: true,
-    shouldTotalRefresh,
-    range,
-    routeLabel: "POST /api/quickbooks/payments/recent/sync",
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.quickbooks.sync",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      message: "QuickBooks request limit reached. Please wait before retrying.",
+      code: "quickbooks_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  if (!hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS)) {
+    res.status(403).json({
+      error: "Access denied. You do not have permission to refresh QuickBooks data.",
+    });
+    return;
+  }
+
+  if (!isQuickBooksConfigured()) {
+    res.status(503).json({
+      error:
+        "QuickBooks is not configured. Set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN, and QUICKBOOKS_REALM_ID.",
+    });
+    return;
+  }
+
+  const { job, reused } = enqueueQuickBooksSyncJob(range, {
+    fullSync: shouldTotalRefresh,
+    requestedBy: req.webAuthUser,
+  });
+  res.status(202).json({
+    ok: true,
+    queued: true,
+    reused,
+    job: buildQuickBooksSyncJobPayload(job),
+  });
+});
+
+app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.quickbooks.read",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "QuickBooks request limit reached. Please wait before retrying.",
+      code: "quickbooks_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const job = getQuickBooksSyncJobById(req.params.jobId);
+  if (!job) {
+    res.status(404).json({
+      error: "QuickBooks sync job not found.",
+      code: "quickbooks_sync_job_not_found",
+    });
+    return;
+  }
+
+  res.json({
+    ok: true,
+    job: buildQuickBooksSyncJobPayload(job),
   });
 });
 

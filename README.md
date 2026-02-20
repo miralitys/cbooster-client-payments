@@ -75,7 +75,8 @@ npm start
 - `GET /api/auth/users`
 - `POST /api/auth/users`
 - `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD`
-- `POST /api/quickbooks/payments/recent/sync` (body: `{ from, to, fullSync? }`)
+- `POST /api/quickbooks/payments/recent/sync` (body: `{ from, to, fullSync? }`, создает async sync job)
+- `GET /api/quickbooks/payments/recent/sync-jobs/:jobId`
 - `GET /api/ghl/client-managers`
 - `POST /api/ghl/client-managers/refresh` (body: `{ refresh: "incremental" | "full" }`)
 - `GET /api/ghl/client-basic-note?clientName=...` (cache read-only)
@@ -163,8 +164,8 @@ npm start
 - При открытии страницы читаются только сохраненные данные из базы (без запроса в QuickBooks).
 - Фоновый авто-sync работает каждый час только в окне `08:00-22:00` по времени `America/Chicago` (вне этого времени автоматических обновлений нет).
 - `GET /api/quickbooks/payments/recent` теперь строго read-only (только кеш).
-- Для ручного обновления нажмите `Refresh`: UI вызывает `POST /api/quickbooks/payments/recent/sync` и подгружает только новые транзакции.
-- Кнопка `Total Refresh` вызывает `POST /api/quickbooks/payments/recent/sync` с `fullSync=true` за весь диапазон `2026-01-01` -> текущая дата.
+- Для ручного обновления нажмите `Refresh`: UI вызывает `POST /api/quickbooks/payments/recent/sync`, получает `jobId`, опрашивает `GET /api/quickbooks/payments/recent/sync-jobs/:jobId` и после завершения job перечитывает кеш через `GET /api/quickbooks/payments/recent`.
+- Кнопка `Total Refresh` делает тот же async flow, но с `fullSync=true` за весь диапазон `2026-01-01` -> текущая дата.
 - Для поиска введите имя клиента в поле `Search by client` (поиск выполняется по подстроке).
 - Чекбокс `Only refunds` показывает только транзакции с возвратами (`RefundReceipt`).
 - Интеграция строго read-only: мы только читаем данные из QuickBooks и не отправляем туда изменения.
