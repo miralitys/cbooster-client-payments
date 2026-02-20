@@ -65,6 +65,14 @@ services:
         value: mini_submission_files
       - key: DB_CUSTOM_DASHBOARD_APP_DATA_TABLE_NAME
         value: app_data
+      - key: CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED
+        value: "false"
+      - key: CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_INTERVAL_MS
+        value: "900000"
+      - key: CUSTOM_DASHBOARD_GHL_TASKS_SYNC_CONCURRENCY
+        value: "6"
+      - key: CUSTOM_DASHBOARD_GHL_TASKS_CURSOR_SKEW_MS
+        value: "300000"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_ALLOWED_USER_IDS

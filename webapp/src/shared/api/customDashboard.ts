@@ -1,6 +1,9 @@
 import { apiRequest } from "@/shared/api/fetcher";
 import type {
   CustomDashboardPayload,
+  CustomDashboardTasksSourceKind,
+  CustomDashboardTasksSourceUpdateResponse,
+  CustomDashboardTasksSyncResponse,
   CustomDashboardUploadResponse,
   CustomDashboardUsersPayload,
   CustomDashboardUsersSavePayload,
@@ -35,5 +38,27 @@ export async function uploadCustomDashboardFile(
   return apiRequest<CustomDashboardUploadResponse>("/api/custom-dashboard/upload", {
     method: "POST",
     body: formData,
+  });
+}
+
+export async function updateCustomDashboardTasksSource(
+  source: CustomDashboardTasksSourceKind,
+): Promise<CustomDashboardTasksSourceUpdateResponse> {
+  return apiRequest<CustomDashboardTasksSourceUpdateResponse>("/api/custom-dashboard/tasks-source", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ source }),
+  });
+}
+
+export async function syncCustomDashboardTasks(mode: "delta" | "full"): Promise<CustomDashboardTasksSyncResponse> {
+  return apiRequest<CustomDashboardTasksSyncResponse>("/api/custom-dashboard/tasks-sync", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ mode }),
   });
 }

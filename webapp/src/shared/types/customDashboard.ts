@@ -25,6 +25,27 @@ export interface CustomDashboardUploadMeta {
   archiveKey: string;
 }
 
+export type CustomDashboardTasksSourceKind = "upload" | "ghl";
+
+export interface CustomDashboardTasksSourceState {
+  selected: CustomDashboardTasksSourceKind;
+  options: CustomDashboardTasksSourceKind[];
+  ghlConfigured: boolean;
+  autoSyncEnabled: boolean;
+  syncInFlight: boolean;
+  lastAttemptedAt: string;
+  lastSyncedAt: string;
+  lastMode: "" | "delta" | "full";
+  lastError: string;
+  cursorUpdatedAt: string;
+  stats: {
+    contactsTotal: number;
+    contactsProcessed: number;
+    contactsDeleted: number;
+    tasksTotal: number;
+  };
+}
+
 export interface CustomDashboardManagerTaskRow {
   managerName: string;
   open: number;
@@ -141,9 +162,11 @@ export interface CustomDashboardPayload {
   widgets: CustomDashboardWidgetSettings;
   uploads: {
     tasks: CustomDashboardUploadMeta;
+    tasksGhl: CustomDashboardUploadMeta;
     contacts: CustomDashboardUploadMeta;
     calls: CustomDashboardUploadMeta;
   };
+  tasksSource: CustomDashboardTasksSourceState;
   options: {
     managerTasks: string[];
     specialistTasks: string[];
@@ -173,6 +196,7 @@ export interface CustomDashboardUsersPayload {
     salesReport: string[];
     callsByManager: string[];
   };
+  tasksSource: CustomDashboardTasksSourceState;
   updatedAt?: string;
 }
 
@@ -189,4 +213,24 @@ export interface CustomDashboardUploadResponse {
   count: number;
   archiveKey: string;
   uploadedAt: string;
+}
+
+export interface CustomDashboardTasksSourceUpdateResponse {
+  ok: boolean;
+  tasksSource: CustomDashboardTasksSourceState;
+}
+
+export interface CustomDashboardTasksSyncResponse {
+  ok: boolean;
+  mode: "delta" | "full";
+  uploadedAt: string;
+  count: number;
+  archiveKey: string;
+  stats: {
+    contactsTotal: number;
+    contactsProcessed: number;
+    contactsDeleted: number;
+    tasksTotal: number;
+  };
+  tasksSource: CustomDashboardTasksSourceState;
 }

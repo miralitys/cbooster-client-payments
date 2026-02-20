@@ -5,6 +5,8 @@ import {
   getCustomDashboard,
   getCustomDashboardUsers,
   saveCustomDashboardUsers,
+  syncCustomDashboardTasks,
+  updateCustomDashboardTasksSource,
   uploadCustomDashboardFile,
 } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
@@ -15,6 +17,7 @@ import type {
   CustomDashboardSalesManagerRow,
   CustomDashboardSalesMetrics,
   CustomDashboardTaskItem,
+  CustomDashboardTasksSourceKind,
   CustomDashboardUploadMeta,
   CustomDashboardUserSettingsEntry,
   CustomDashboardUsersPayload,
@@ -66,6 +69,7 @@ type SettingsTab = "dashboard" | "settings";
 type TasksViewKey = (typeof TASK_VIEW_OPTIONS)[number]["key"];
 type CallsViewKey = (typeof CALLS_VIEW_OPTIONS)[number]["key"];
 type UploadType = "tasks" | "contacts" | "calls";
+type TasksSyncMode = "delta" | "full";
 
 export default function CustomDashboardPage() {
   const location = useLocation();
@@ -81,6 +85,8 @@ export default function CustomDashboardPage() {
   const [selectedCallsManager, setSelectedCallsManager] = useState("");
 
   const [uploadingType, setUploadingType] = useState<UploadType | "">("");
+  const [syncingTasksMode, setSyncingTasksMode] = useState<TasksSyncMode | "">("");
+  const [isUpdatingTasksSource, setIsUpdatingTasksSource] = useState(false);
   const tasksFileInputRef = useRef<HTMLInputElement | null>(null);
   const contactsFileInputRef = useRef<HTMLInputElement | null>(null);
   const callsFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -527,6 +533,33 @@ export default function CustomDashboardPage() {
     return "Uploading calls file...";
   }, [uploadingType]);
 
+  const tasksSyncStateLabel = useMemo(() => {
+    const source = dashboard?.tasksSource;
+    if (!source) {
+      return "";
+    }
+
+    if (syncingTasksMode === "delta") {
+      return "Syncing new changes from GoHighLevel...";
+    }
+    if (syncingTasksMode === "full") {
+      return "Running full re-sync from GoHighLevel...";
+    }
+    if (source.syncInFlight) {
+      return "Task sync is currently running...";
+    }
+    if (source.lastError) {
+      return `Last sync error: ${source.lastError}`;
+    }
+    if (source.lastSyncedAt) {
+      return `Last sync: ${formatDateTimeOrDash(source.lastSyncedAt)} (${source.lastMode || "delta"})`;
+    }
+    if (source.ghlConfigured) {
+      return "GoHighLevel is connected. Run sync to import tasks.";
+    }
+    return "GoHighLevel is not configured on server (GHL_API_KEY + GHL_LOCATION_ID).";
+  }, [dashboard?.tasksSource, syncingTasksMode]);
+
   const refreshEverything = useCallback(async () => {
     await loadDashboard();
     if (canManage && activeTab === "settings") {
@@ -560,6 +593,71 @@ export default function CustomDashboardPage() {
       }
     },
     [refreshEverything],
+  );
+
+  const onUpdateTasksSource = useCallback(
+    async (source: CustomDashboardTasksSourceKind) => {
+      if (!canManage) {
+        return;
+      }
+      if (dashboard?.tasksSource.selected === source) {
+        return;
+      }
+
+      setIsUpdatingTasksSource(true);
+      try {
+        await updateCustomDashboardTasksSource(source);
+        showToast({
+          type: "success",
+          message: source === "ghl" ? "Tasks source switched to GoHighLevel." : "Tasks source switched to uploaded file.",
+          dedupeKey: `custom-dashboard-tasks-source-${source}`,
+          cooldownMs: 2500,
+        });
+        await refreshEverything();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to update tasks source.";
+        showToast({
+          type: "error",
+          message,
+          dedupeKey: `custom-dashboard-tasks-source-error-${message}`,
+          cooldownMs: 3000,
+        });
+      } finally {
+        setIsUpdatingTasksSource(false);
+      }
+    },
+    [canManage, dashboard?.tasksSource.selected, refreshEverything],
+  );
+
+  const onSyncTasks = useCallback(
+    async (mode: TasksSyncMode) => {
+      if (!canManage) {
+        return;
+      }
+
+      setSyncingTasksMode(mode);
+      try {
+        const result = await syncCustomDashboardTasks(mode);
+        showToast({
+          type: "success",
+          message: `Tasks synced from GoHighLevel: ${result.count} rows (${mode}).`,
+          dedupeKey: `custom-dashboard-tasks-sync-${mode}-${result.uploadedAt}`,
+          cooldownMs: 2500,
+        });
+        await refreshEverything();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to sync tasks from GoHighLevel.";
+        showToast({
+          type: "error",
+          message,
+          dedupeKey: `custom-dashboard-tasks-sync-error-${message}`,
+          cooldownMs: 3000,
+        });
+      } finally {
+        setSyncingTasksMode("");
+      }
+    },
+    [canManage, refreshEverything],
   );
 
   const onSaveUsersSettings = useCallback(async () => {
@@ -654,6 +752,9 @@ export default function CustomDashboardPage() {
     });
   }
 
+  const tasksSourceIsGhl = dashboard?.tasksSource.selected === "ghl";
+  const tasksSourceBusy = isUpdatingTasksSource || Boolean(syncingTasksMode) || Boolean(dashboard?.tasksSource.syncInFlight);
+
   return (
     <PageShell className="custom-dashboard-react-page">
       <PageHeader
@@ -712,28 +813,73 @@ export default function CustomDashboardPage() {
             <>
               {canManage ? (
                 <Panel title="Uploads" className="custom-dashboard-uploads-panel">
-                  <p className="dashboard-message">Upload new data files for tasks, contacts and calls.</p>
+                  <p className="dashboard-message">Manage tasks source and upload data files for tasks, contacts and calls.</p>
+                  <div className="custom-dashboard-tasks-source-card">
+                    <div className="custom-dashboard-tasks-source-head">
+                      <h3>Tasks Source</h3>
+                      <Select
+                        value={dashboard.tasksSource.selected}
+                        onChange={(event) => {
+                          const next = event.target.value === "ghl" ? "ghl" : "upload";
+                          void onUpdateTasksSource(next);
+                        }}
+                        disabled={tasksSourceBusy}
+                      >
+                        <option value="upload">Uploaded file</option>
+                        <option value="ghl">GoHighLevel sync</option>
+                      </Select>
+                    </div>
+                    <p className="dashboard-message">{tasksSyncStateLabel}</p>
+                    {dashboard.tasksSource.cursorUpdatedAt ? (
+                      <p className="dashboard-message">Cursor: {formatDateTimeOrDash(dashboard.tasksSource.cursorUpdatedAt)}</p>
+                    ) : null}
+                    <div className="custom-dashboard-tasks-source-actions">
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => void onSyncTasks("delta")}
+                        isLoading={syncingTasksMode === "delta"}
+                        disabled={!dashboard.tasksSource.ghlConfigured || tasksSourceBusy}
+                      >
+                        Sync New Changes
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => void onSyncTasks("full")}
+                        isLoading={syncingTasksMode === "full"}
+                        disabled={!dashboard.tasksSource.ghlConfigured || tasksSourceBusy}
+                      >
+                        Full Re-sync
+                      </Button>
+                    </div>
+                    <p className="dashboard-message">
+                      Processed contacts: {dashboard.tasksSource.stats.contactsProcessed} / {dashboard.tasksSource.stats.contactsTotal}. Tasks: {dashboard.tasksSource.stats.tasksTotal}.
+                    </p>
+                  </div>
                   {uploadStateLabel ? <p className="dashboard-message">{uploadStateLabel}</p> : null}
 
                   <div className="custom-dashboard-upload-grid">
                     <UploadCard
-                      title="Tasks"
+                      title={tasksSourceIsGhl ? "Tasks (Upload fallback)" : "Tasks"}
                       meta={dashboard.uploads.tasks}
-                      disabled={Boolean(uploadingType)}
+                      disabled={Boolean(uploadingType) || tasksSourceBusy}
                       loading={uploadingType === "tasks"}
                       onUploadClick={() => tasksFileInputRef.current?.click()}
+                      actionLabel={tasksSourceIsGhl ? "Upload Fallback" : "Upload File"}
                     />
                     <UploadCard
                       title="Contacts"
                       meta={dashboard.uploads.contacts}
-                      disabled={Boolean(uploadingType)}
+                      disabled={Boolean(uploadingType) || tasksSourceBusy}
                       loading={uploadingType === "contacts"}
                       onUploadClick={() => contactsFileInputRef.current?.click()}
                     />
                     <UploadCard
                       title="Calls"
                       meta={dashboard.uploads.calls}
-                      disabled={Boolean(uploadingType)}
+                      disabled={Boolean(uploadingType) || tasksSourceBusy}
                       loading={uploadingType === "calls"}
                       onUploadClick={() => callsFileInputRef.current?.click()}
                     />
@@ -1147,9 +1293,10 @@ interface UploadCardProps {
   disabled: boolean;
   loading: boolean;
   onUploadClick: () => void;
+  actionLabel?: string;
 }
 
-function UploadCard({ title, meta, disabled, loading, onUploadClick }: UploadCardProps) {
+function UploadCard({ title, meta, disabled, loading, onUploadClick, actionLabel }: UploadCardProps) {
   return (
     <div className="custom-dashboard-upload-card">
       <h3>{title}</h3>
@@ -1166,7 +1313,7 @@ function UploadCard({ title, meta, disabled, loading, onUploadClick }: UploadCar
         disabled={disabled}
         isLoading={loading}
       >
-        Upload File
+        {actionLabel || "Upload File"}
       </Button>
     </div>
   );

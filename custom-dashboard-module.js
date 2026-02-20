@@ -27,6 +27,78 @@ const CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS = {
   contacts: "custom_dashboard/latest/contacts",
   calls: "custom_dashboard/latest/calls",
 };
+const CUSTOM_DASHBOARD_TASKS_SOURCE_KEY = "custom_dashboard/settings/tasks_source";
+const CUSTOM_DASHBOARD_GHL_TASKS_LATEST_KEY = "custom_dashboard/latest/tasks_ghl";
+const CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY = "custom_dashboard/sync/tasks_ghl_state";
+
+const CUSTOM_DASHBOARD_TASKS_SOURCE_UPLOAD = "upload";
+const CUSTOM_DASHBOARD_TASKS_SOURCE_GHL = "ghl";
+const CUSTOM_DASHBOARD_TASKS_SOURCES = new Set([CUSTOM_DASHBOARD_TASKS_SOURCE_UPLOAD, CUSTOM_DASHBOARD_TASKS_SOURCE_GHL]);
+
+const CUSTOM_DASHBOARD_GHL_API_KEY = (
+  process.env.CUSTOM_DASHBOARD_GHL_API_KEY ||
+  process.env.GHL_API_KEY ||
+  process.env.GOHIGHLEVEL_API_KEY ||
+  ""
+)
+  .toString()
+  .trim();
+const CUSTOM_DASHBOARD_GHL_LOCATION_ID = (process.env.CUSTOM_DASHBOARD_GHL_LOCATION_ID || process.env.GHL_LOCATION_ID || "")
+  .toString()
+  .trim();
+const CUSTOM_DASHBOARD_GHL_API_BASE_URL = (
+  process.env.CUSTOM_DASHBOARD_GHL_API_BASE_URL ||
+  process.env.GHL_API_BASE_URL ||
+  process.env.GOHIGHLEVEL_API_BASE_URL ||
+  "https://services.leadconnectorhq.com"
+)
+  .toString()
+  .trim()
+  .replace(/\/+$/, "");
+const CUSTOM_DASHBOARD_GHL_API_VERSION = (
+  process.env.CUSTOM_DASHBOARD_GHL_API_VERSION ||
+  process.env.GHL_API_VERSION ||
+  "2021-07-28"
+)
+  .toString()
+  .trim();
+const CUSTOM_DASHBOARD_GHL_REQUEST_TIMEOUT_MS = Math.min(
+  Math.max(
+    parsePositiveInteger(
+      process.env.CUSTOM_DASHBOARD_GHL_REQUEST_TIMEOUT_MS || process.env.GHL_REQUEST_TIMEOUT_MS,
+      15000,
+    ),
+    2000,
+  ),
+  60000,
+);
+const CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT, 100), 10),
+  200,
+);
+const CUSTOM_DASHBOARD_GHL_CONTACT_MAX_PAGES = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_CONTACT_MAX_PAGES, 500), 1),
+  2000,
+);
+const CUSTOM_DASHBOARD_GHL_TASKS_SYNC_CONCURRENCY = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASKS_SYNC_CONCURRENCY, 6), 1),
+  20,
+);
+const CUSTOM_DASHBOARD_GHL_TASKS_MAX_ITEMS = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASKS_MAX_ITEMS, 100000), 1000),
+  250000,
+);
+const CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED = resolveOptionalBoolean(
+  process.env.CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED,
+) === true;
+const CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_INTERVAL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_INTERVAL_MS, 15 * 60 * 1000), 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
+const CUSTOM_DASHBOARD_GHL_TASKS_CURSOR_SKEW_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASKS_CURSOR_SKEW_MS, 5 * 60 * 1000), 0),
+  24 * 60 * 60 * 1000,
+);
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
@@ -86,6 +158,29 @@ const ANSWERED_STATUS_MATCHERS = [
 const CLOSED_STATUS_MATCHERS = ["closed", "won", "sale", "sold", "dealwon", "успеш", "закрыт", "продан"];
 const INTERESTED_STATUS_MATCHERS = ["interested", "warm", "hot", "qualified", "заинтерес", "тепл", "горяч"];
 const COMPLETED_TASK_STATUS_MATCHERS = ["done", "completed", "closed", "resolved", "выполн", "закрыт", "готов"];
+
+const GHL_CONTACT_ID_FIELDS = ["id", "_id", "contactId", "contact_id"];
+const GHL_CONTACT_UPDATED_FIELDS = ["dateUpdated", "updatedAt", "lastUpdated", "date_updated"];
+const GHL_CONTACT_FULL_NAME_FIELDS = ["name", "fullName", "contactName", "full_name"];
+const GHL_CONTACT_FIRST_NAME_FIELDS = ["firstName", "firstname", "first_name"];
+const GHL_CONTACT_LAST_NAME_FIELDS = ["lastName", "lastname", "last_name"];
+const GHL_TASK_ID_FIELDS = ["id", "_id", "taskId", "task_id"];
+const GHL_TASK_TITLE_FIELDS = ["title", "name", "task", "subject", "body", "description"];
+const GHL_TASK_STATUS_FIELDS = ["status", "state", "result"];
+const GHL_TASK_DUE_FIELDS = ["dueDate", "dueAt", "due", "date", "due_date"];
+const GHL_TASK_CREATED_FIELDS = ["createdAt", "dateAdded", "createdOn", "created_date"];
+const GHL_TASK_COMPLETED_FIELDS = ["completedAt", "dateCompleted", "completedOn", "doneAt", "closedAt"];
+const GHL_TASK_OWNER_FIELDS = [
+  "assignedTo",
+  "assignedUserId",
+  "assignedUser",
+  "userId",
+  "ownerId",
+  "assigned_to",
+  "assigned_user_id",
+];
+const GHL_TASK_OWNER_NAME_FIELDS = ["assignedToName", "assignedUserName", "ownerName", "assigned_to_name"];
+const GHL_TASK_CONTACT_ID_FIELDS = ["contactId", "contactID", "contact_id"];
 
 function registerCustomDashboardModule(config) {
   const {
@@ -179,6 +274,805 @@ function registerCustomDashboardModule(config) {
       `,
       [normalizedKey, serialized],
     );
+  }
+
+  let ghlTasksSyncInFlight = null;
+  let ghlTasksAutoSyncIntervalId = null;
+  let ghlTasksSyncRuntimeState = {
+    inFlight: false,
+    lastStartedAt: "",
+    lastFinishedAt: "",
+    lastTrigger: "",
+    lastError: "",
+  };
+
+  function isGhlTasksSyncConfigured() {
+    return Boolean(CUSTOM_DASHBOARD_GHL_API_KEY && CUSTOM_DASHBOARD_GHL_LOCATION_ID);
+  }
+
+  function normalizeTasksSource(value) {
+    const normalized = sanitizeTextValue(value, 40).toLowerCase();
+    if (CUSTOM_DASHBOARD_TASKS_SOURCES.has(normalized)) {
+      return normalized;
+    }
+    return CUSTOM_DASHBOARD_TASKS_SOURCE_UPLOAD;
+  }
+
+  async function readTasksSourceSetting() {
+    const sourceRaw = await readAppDataValue(CUSTOM_DASHBOARD_TASKS_SOURCE_KEY, null);
+    if (sourceRaw && typeof sourceRaw === "object") {
+      return normalizeTasksSource(sourceRaw.source);
+    }
+    return normalizeTasksSource(sourceRaw);
+  }
+
+  async function saveTasksSourceSetting(source, actorUsername) {
+    const normalizedSource = normalizeTasksSource(source);
+    if (normalizedSource === CUSTOM_DASHBOARD_TASKS_SOURCE_GHL && !isGhlTasksSyncConfigured()) {
+      throw createHttpError("GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.", 400);
+    }
+
+    const payload = {
+      source: normalizedSource,
+      updatedAt: new Date().toISOString(),
+      updatedBy: sanitizeTextValue(actorUsername, 220),
+    };
+    await upsertAppDataValue(CUSTOM_DASHBOARD_TASKS_SOURCE_KEY, payload);
+    return payload;
+  }
+
+  function buildGhlRequestHeaders(includeJsonBody = false) {
+    const headers = {
+      Authorization: `Bearer ${CUSTOM_DASHBOARD_GHL_API_KEY}`,
+      Version: CUSTOM_DASHBOARD_GHL_API_VERSION || "2021-07-28",
+      Accept: "application/json",
+    };
+    if (includeJsonBody) {
+      headers["Content-Type"] = "application/json";
+    }
+    return headers;
+  }
+
+  function buildGhlUrl(pathname, query = {}) {
+    const normalizedPath = `/${sanitizeTextValue(pathname, 600).replace(/^\/+/, "")}`;
+    const url = new URL(`${CUSTOM_DASHBOARD_GHL_API_BASE_URL}${normalizedPath}`);
+
+    for (const [key, rawValue] of Object.entries(query || {})) {
+      if (rawValue === null || rawValue === undefined) {
+        continue;
+      }
+
+      if (Array.isArray(rawValue)) {
+        for (const item of rawValue) {
+          const arrayValue = sanitizeTextValue(item, 1000);
+          if (!arrayValue) {
+            continue;
+          }
+          url.searchParams.append(key, arrayValue);
+        }
+        continue;
+      }
+
+      const value = sanitizeTextValue(rawValue, 1000);
+      if (!value) {
+        continue;
+      }
+      url.searchParams.set(key, value);
+    }
+
+    return url;
+  }
+
+  async function requestGhlApi(pathname, options = {}) {
+    const method = sanitizeTextValue(options.method || "GET", 12).toUpperCase() || "GET";
+    const includeJsonBody = method !== "GET" && method !== "HEAD";
+    const tolerateNotFound = Boolean(options.tolerateNotFound);
+    const headers = buildGhlRequestHeaders(includeJsonBody);
+    const query = options.query && typeof options.query === "object" ? options.query : {};
+    const url = buildGhlUrl(pathname, query);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, CUSTOM_DASHBOARD_GHL_REQUEST_TIMEOUT_MS);
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: includeJsonBody && options.body ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error?.name === "AbortError") {
+        throw createHttpError(`GHL request timed out after ${CUSTOM_DASHBOARD_GHL_REQUEST_TIMEOUT_MS}ms (${pathname}).`, 504);
+      }
+      const details = sanitizeTextValue(error?.message, 300) || "Unknown network error.";
+      throw createHttpError(`GHL request failed (${pathname}): ${details}`, 503);
+    }
+
+    clearTimeout(timeoutId);
+
+    const responseText = await response.text();
+    let body = null;
+    try {
+      body = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      if (tolerateNotFound && response.status === 404) {
+        return {
+          ok: false,
+          status: 404,
+          body: null,
+        };
+      }
+
+      const details = sanitizeTextValue(
+        body?.message || body?.error || body?.detail || body?.details || body?.meta?.message || responseText,
+        500,
+      );
+      throw createHttpError(
+        `GHL API request failed (${pathname}, HTTP ${response.status}). ${details || "No details provided."}`,
+        response.status >= 500 ? 502 : response.status,
+      );
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      body,
+    };
+  }
+
+  function extractArrayCandidate(payload, candidates) {
+    const paths = Array.isArray(candidates) ? candidates : [];
+    for (const candidatePath of paths) {
+      const value = readObjectPath(payload, candidatePath);
+      if (Array.isArray(value)) {
+        return value;
+      }
+    }
+    return [];
+  }
+
+  function extractGhlContactsFromPayload(payload) {
+    return extractArrayCandidate(payload, [
+      "contacts",
+      "data.contacts",
+      "data.items",
+      "items",
+      "data",
+      "",
+    ]).filter((item) => item && typeof item === "object");
+  }
+
+  function extractGhlUsersFromPayload(payload) {
+    return extractArrayCandidate(payload, [
+      "users",
+      "data.users",
+      "data.items",
+      "items",
+      "data",
+      "",
+    ]).filter((item) => item && typeof item === "object");
+  }
+
+  function extractGhlTasksFromPayload(payload) {
+    return extractArrayCandidate(payload, [
+      "tasks",
+      "data.tasks",
+      "data.items",
+      "items",
+      "data",
+      "",
+    ]).filter((item) => item && typeof item === "object");
+  }
+
+  async function listGhlUsersIndex() {
+    const attempts = [
+      () =>
+        requestGhlApi("/users/", {
+          method: "GET",
+          query: {
+            locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
+            limit: 200,
+            page: 1,
+          },
+          tolerateNotFound: true,
+        }),
+      () =>
+        requestGhlApi("/users", {
+          method: "GET",
+          query: {
+            locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
+            limit: 200,
+            page: 1,
+          },
+          tolerateNotFound: true,
+        }),
+    ];
+
+    for (const attempt of attempts) {
+      let response;
+      try {
+        response = await attempt();
+      } catch {
+        continue;
+      }
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const users = extractGhlUsersFromPayload(response.body);
+      if (!users.length) {
+        continue;
+      }
+
+      const index = new Map();
+      for (const user of users) {
+        const userId = sanitizeTextValue(
+          pickValueFromObject(user, ["id", "_id", "userId", "user_id"]),
+          160,
+        );
+        if (!userId) {
+          continue;
+        }
+
+        const userName = buildFullName(
+          sanitizeTextValue(pickValueFromObject(user, ["firstName", "firstname", "first_name"]), 120),
+          sanitizeTextValue(pickValueFromObject(user, ["lastName", "lastname", "last_name"]), 120),
+        );
+        const fallbackName = sanitizeTextValue(
+          pickValueFromObject(user, ["name", "fullName", "email", "username"]),
+          220,
+        );
+        const resolved = userName || fallbackName || userId;
+        index.set(userId, resolved);
+      }
+
+      return index;
+    }
+
+    return new Map();
+  }
+
+  async function listAllGhlContacts() {
+    const allContacts = [];
+    let page = 1;
+
+    while (page <= CUSTOM_DASHBOARD_GHL_CONTACT_MAX_PAGES) {
+      const response = await requestGhlApi("/contacts/search", {
+        method: "POST",
+        body: {
+          locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
+          page,
+          pageLimit: CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT,
+          query: "",
+        },
+      });
+
+      const contacts = extractGhlContactsFromPayload(response.body);
+      if (!contacts.length) {
+        break;
+      }
+
+      allContacts.push(...contacts);
+      if (contacts.length < CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT) {
+        break;
+      }
+      page += 1;
+    }
+
+    return allContacts;
+  }
+
+  async function listGhlContactTasks(contactId) {
+    const normalizedContactId = sanitizeTextValue(contactId, 160);
+    if (!normalizedContactId) {
+      return [];
+    }
+
+    const attempts = [
+      () =>
+        requestGhlApi(`/contacts/${encodeURIComponent(normalizedContactId)}/tasks`, {
+          method: "GET",
+          query: {
+            locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+      () =>
+        requestGhlApi(`/contacts/${encodeURIComponent(normalizedContactId)}/tasks/`, {
+          method: "GET",
+          query: {
+            locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+      () =>
+        requestGhlApi("/tasks", {
+          method: "GET",
+          query: {
+            locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
+            contactId: normalizedContactId,
+          },
+          tolerateNotFound: true,
+        }),
+    ];
+
+    for (const attempt of attempts) {
+      let response;
+      try {
+        response = await attempt();
+      } catch {
+        continue;
+      }
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const tasks = extractGhlTasksFromPayload(response.body);
+      return tasks;
+    }
+
+    return [];
+  }
+
+  function readSyncContactIndex(rawIndex) {
+    const source = rawIndex && typeof rawIndex === "object" ? rawIndex : {};
+    const next = {};
+
+    for (const [rawContactId, rawEntry] of Object.entries(source)) {
+      const contactId = sanitizeTextValue(rawContactId, 160);
+      if (!contactId) {
+        continue;
+      }
+
+      const entry = rawEntry && typeof rawEntry === "object" ? rawEntry : {};
+      const taskIdsRaw = Array.isArray(entry.taskIds) ? entry.taskIds : [];
+      next[contactId] = {
+        updatedAt: normalizeIsoDateOrEmpty(entry.updatedAt),
+        taskIds: taskIdsRaw.map((item) => sanitizeTextValue(item, 260)).filter(Boolean),
+      };
+    }
+
+    return next;
+  }
+
+  function normalizeGhlTasksSyncState(rawValue) {
+    const source = rawValue && typeof rawValue === "object" ? rawValue : {};
+    const mode = sanitizeTextValue(source.lastMode, 20).toLowerCase();
+
+    return {
+      version: 1,
+      lastAttemptedAt: normalizeIsoDateOrEmpty(source.lastAttemptedAt),
+      lastSuccessfulSyncAt: normalizeIsoDateOrEmpty(source.lastSuccessfulSyncAt),
+      lastMode: mode === "full" ? "full" : mode === "delta" ? "delta" : "",
+      lastError: sanitizeTextValue(source.lastError, 600),
+      cursorUpdatedAt: normalizeIsoDateOrEmpty(source.cursorUpdatedAt),
+      contactTaskIndex: readSyncContactIndex(source.contactTaskIndex),
+      stats: {
+        contactsTotal: Math.max(0, toSafeInteger(source.stats?.contactsTotal, 0)),
+        contactsProcessed: Math.max(0, toSafeInteger(source.stats?.contactsProcessed, 0)),
+        contactsDeleted: Math.max(0, toSafeInteger(source.stats?.contactsDeleted, 0)),
+        tasksTotal: Math.max(0, toSafeInteger(source.stats?.tasksTotal, 0)),
+      },
+    };
+  }
+
+  function buildTasksSourcePayload(selectedSource, syncState) {
+    const state = normalizeGhlTasksSyncState(syncState);
+    return {
+      selected: normalizeTasksSource(selectedSource),
+      options: [CUSTOM_DASHBOARD_TASKS_SOURCE_UPLOAD, CUSTOM_DASHBOARD_TASKS_SOURCE_GHL],
+      ghlConfigured: isGhlTasksSyncConfigured(),
+      autoSyncEnabled: CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED,
+      syncInFlight: Boolean(ghlTasksSyncRuntimeState.inFlight),
+      lastAttemptedAt: state.lastAttemptedAt || ghlTasksSyncRuntimeState.lastStartedAt || "",
+      lastSyncedAt: state.lastSuccessfulSyncAt || "",
+      lastMode: state.lastMode || "",
+      lastError: ghlTasksSyncRuntimeState.lastError || state.lastError || "",
+      cursorUpdatedAt: state.cursorUpdatedAt || "",
+      stats: state.stats,
+    };
+  }
+
+  function pickTaskCacheKey(task) {
+    const sourceTaskId = sanitizeTextValue(task?.sourceTaskId, 200);
+    if (sourceTaskId) {
+      return `task:${sourceTaskId}`;
+    }
+
+    const id = sanitizeTextValue(task?.id, 260);
+    if (id) {
+      return `id:${id}`;
+    }
+
+    return "";
+  }
+
+  function normalizeGhlContactRecord(contact) {
+    const contactId = sanitizeTextValue(pickValueFromObject(contact, GHL_CONTACT_ID_FIELDS), 160);
+    if (!contactId) {
+      return null;
+    }
+
+    const fullName = sanitizeTextValue(pickValueFromObject(contact, GHL_CONTACT_FULL_NAME_FIELDS), 260);
+    const firstName = sanitizeTextValue(pickValueFromObject(contact, GHL_CONTACT_FIRST_NAME_FIELDS), 120);
+    const lastName = sanitizeTextValue(pickValueFromObject(contact, GHL_CONTACT_LAST_NAME_FIELDS), 120);
+    const email = sanitizeTextValue(pickValueFromObject(contact, ["email"]), 240);
+    const phone = sanitizeTextValue(pickValueFromObject(contact, ["phone", "mobilePhone"]), 80);
+    const clientName = fullName || buildFullName(firstName, lastName) || email || phone || contactId;
+    const updatedRaw = sanitizeTextValue(pickValueFromObject(contact, GHL_CONTACT_UPDATED_FIELDS), 120);
+    const updatedTimestamp = parseDateTimeValue(updatedRaw);
+
+    return {
+      contactId,
+      clientName,
+      updatedAtIso: updatedTimestamp !== null ? new Date(updatedTimestamp).toISOString() : "",
+      updatedTimestamp,
+      raw: contact,
+    };
+  }
+
+  function resolveGhlTaskOwnerName(task, usersIndex) {
+    const ownerNameDirect = sanitizeTextValue(
+      pickValueFromObject(task, [...GHL_TASK_OWNER_NAME_FIELDS, "assignedTo.name", "assignedUser.name", "owner.name"]),
+      220,
+    );
+    if (ownerNameDirect) {
+      return ownerNameDirect;
+    }
+
+    const ownerValue = pickValueFromObject(task, GHL_TASK_OWNER_FIELDS);
+    const ownerObject = ownerValue && typeof ownerValue === "object" ? ownerValue : null;
+
+    const ownerNameFromObject = ownerObject
+      ? sanitizeTextValue(
+          pickValueFromObject(ownerObject, ["name", "fullName", "email", "username"]),
+          220,
+        )
+      : "";
+    if (ownerNameFromObject) {
+      return ownerNameFromObject;
+    }
+
+    const ownerId = ownerObject
+      ? sanitizeTextValue(pickValueFromObject(ownerObject, ["id", "_id", "userId", "user_id"]), 160)
+      : sanitizeTextValue(ownerValue, 160);
+    if (!ownerId) {
+      return "";
+    }
+    return usersIndex.get(ownerId) || ownerId;
+  }
+
+  function normalizeGhlTaskForDashboard(rawTask, context) {
+    const syncedAtIso = context.syncedAtIso;
+    const todayStart = context.todayStart;
+
+    const taskIdRaw = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_ID_FIELDS), 160);
+    const taskTitle = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_TITLE_FIELDS), 500) || "Task";
+    const status = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_STATUS_FIELDS), 220);
+    const dueRaw = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_DUE_FIELDS), 160);
+    const createdRaw = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_CREATED_FIELDS), 160);
+    const completedRaw = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_COMPLETED_FIELDS), 160);
+    const completedFlag = resolveOptionalBoolean(pickValueFromObject(rawTask, ["completed", "isCompleted", "done"]));
+
+    const dueDateTimestamp = parseDateTimeValue(dueRaw);
+    const createdAtTimestamp = parseDateTimeValue(createdRaw) || parseDateTimeValue(syncedAtIso);
+    const completedAtTimestamp = parseDateTimeValue(completedRaw);
+    const statusComparable = normalizeComparableText(status, 220);
+    const isCompleted =
+      completedFlag === true ||
+      Boolean(completedAtTimestamp) ||
+      COMPLETED_TASK_STATUS_MATCHERS.some((token) => statusComparable.includes(token));
+    const dueDateDayStart = getUtcDayStart(dueDateTimestamp);
+    const isOverdue = !isCompleted && dueDateDayStart !== null && dueDateDayStart < todayStart;
+    const isDueToday = !isCompleted && dueDateDayStart !== null && dueDateDayStart === todayStart;
+    const managerName = resolveGhlTaskOwnerName(rawTask, context.usersIndex) || "Unassigned";
+    const contactTaskContactId = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_CONTACT_ID_FIELDS), 160);
+    const sourceTaskId = taskIdRaw || `${context.contact.contactId}:${taskTitle}:${dueRaw}`;
+    const id = taskIdRaw ? `ghl-${taskIdRaw}` : `ghl-${context.contact.contactId}-${context.rowIndex + 1}`;
+
+    return {
+      id,
+      title: taskTitle,
+      managerName,
+      specialistName: managerName,
+      clientName: context.contact.clientName || "",
+      status: status || (isCompleted ? "completed" : "open"),
+      dueDate: dueDateTimestamp !== null ? new Date(dueDateTimestamp).toISOString() : "",
+      dueDateTimestamp,
+      createdAt: createdAtTimestamp !== null ? new Date(createdAtTimestamp).toISOString() : syncedAtIso,
+      createdAtTimestamp,
+      completedAt: completedAtTimestamp !== null ? new Date(completedAtTimestamp).toISOString() : "",
+      completedAtTimestamp,
+      isCompleted,
+      isOverdue,
+      isDueToday,
+      source: "ghl",
+      sourceTaskId,
+      sourceContactId: contactTaskContactId || context.contact.contactId,
+    };
+  }
+
+  async function runGhlTasksSync(options = {}) {
+    if (!isGhlTasksSyncConfigured()) {
+      throw createHttpError("GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.", 400);
+    }
+
+    const requestedMode = sanitizeTextValue(options.mode, 20).toLowerCase();
+    const syncMode = requestedMode === "full" ? "full" : "delta";
+    const actorUsername = sanitizeTextValue(options.actorUsername, 220) || "system:ghl-sync";
+    const trigger = sanitizeTextValue(options.trigger, 60) || "manual";
+
+    if (ghlTasksSyncInFlight) {
+      throw createHttpError("Tasks sync is already running.", 409);
+    }
+
+    const job = (async () => {
+      const startedAt = new Date().toISOString();
+      ghlTasksSyncRuntimeState = {
+        ...ghlTasksSyncRuntimeState,
+        inFlight: true,
+        lastStartedAt: startedAt,
+        lastTrigger: trigger,
+        lastError: "",
+      };
+
+      const previousSyncStateRaw = await readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY, null);
+      const previousSyncState = normalizeGhlTasksSyncState(previousSyncStateRaw);
+      const previousDataRaw = await readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_LATEST_KEY, null);
+      const previousData = normalizeUploadData(previousDataRaw, "tasks");
+      const previousItems = Array.isArray(previousData.items) ? previousData.items : [];
+      const usersIndex = await listGhlUsersIndex();
+
+      const taskMap = new Map();
+      for (const task of previousItems) {
+        const key = pickTaskCacheKey(task);
+        if (!key) {
+          continue;
+        }
+        taskMap.set(key, task);
+      }
+
+      const contactTaskIndex = new Map(Object.entries(previousSyncState.contactTaskIndex || {}));
+      const contactsRaw = await listAllGhlContacts();
+      const contacts = contactsRaw.map((item) => normalizeGhlContactRecord(item)).filter(Boolean);
+      const contactsById = new Map(contacts.map((item) => [item.contactId, item]));
+      const knownContactIds = new Set(contacts.map((item) => item.contactId));
+      const cursorTimestamp = parseDateTimeValue(previousSyncState.cursorUpdatedAt);
+      const cursorWithSkew = Number.isFinite(cursorTimestamp)
+        ? Math.max(0, cursorTimestamp - CUSTOM_DASHBOARD_GHL_TASKS_CURSOR_SKEW_MS)
+        : null;
+
+      let deletedContacts = 0;
+      for (const [contactId, previousEntry] of contactTaskIndex.entries()) {
+        if (knownContactIds.has(contactId)) {
+          continue;
+        }
+
+        const taskIds = Array.isArray(previousEntry?.taskIds) ? previousEntry.taskIds : [];
+        for (const taskId of taskIds) {
+          taskMap.delete(sanitizeTextValue(taskId, 260));
+        }
+        contactTaskIndex.delete(contactId);
+        deletedContacts += 1;
+      }
+
+      const contactsToProcess = [];
+      for (const contact of contacts) {
+        if (syncMode === "full") {
+          contactsToProcess.push(contact);
+          continue;
+        }
+
+        const existing = contactTaskIndex.get(contact.contactId);
+        if (!existing) {
+          contactsToProcess.push(contact);
+          continue;
+        }
+
+        if (!Number.isFinite(cursorWithSkew) || !Number.isFinite(contact.updatedTimestamp)) {
+          continue;
+        }
+
+        if (contact.updatedTimestamp >= cursorWithSkew) {
+          contactsToProcess.push(contact);
+        }
+      }
+
+      const todayStart = getCurrentUtcDayStart();
+      const contactResults = await mapWithConcurrency(
+        contactsToProcess,
+        CUSTOM_DASHBOARD_GHL_TASKS_SYNC_CONCURRENCY,
+        async (contact) => {
+          const rawTasks = await listGhlContactTasks(contact.contactId);
+          const tasks = [];
+
+          for (let index = 0; index < rawTasks.length; index += 1) {
+            const normalized = normalizeGhlTaskForDashboard(rawTasks[index], {
+              usersIndex,
+              contact,
+              rowIndex: index,
+              syncedAtIso: startedAt,
+              todayStart,
+            });
+
+            tasks.push(normalized);
+            if (tasks.length >= CUSTOM_DASHBOARD_GHL_TASKS_MAX_ITEMS) {
+              break;
+            }
+          }
+
+          return {
+            contactId: contact.contactId,
+            updatedAt: contact.updatedAtIso || startedAt,
+            tasks,
+          };
+        },
+      );
+
+      let processedContacts = 0;
+      let maxCursorTimestamp = Number.isFinite(cursorTimestamp) ? cursorTimestamp : null;
+      for (const result of contactResults) {
+        const previousEntry = contactTaskIndex.get(result.contactId);
+        const previousTaskIds = Array.isArray(previousEntry?.taskIds) ? previousEntry.taskIds : [];
+        for (const taskId of previousTaskIds) {
+          taskMap.delete(sanitizeTextValue(taskId, 260));
+        }
+
+        const nextTaskIds = [];
+        for (const task of result.tasks) {
+          const key = pickTaskCacheKey(task);
+          if (!key) {
+            continue;
+          }
+          taskMap.set(key, task);
+          nextTaskIds.push(key);
+          if (taskMap.size >= CUSTOM_DASHBOARD_GHL_TASKS_MAX_ITEMS) {
+            break;
+          }
+        }
+
+        contactTaskIndex.set(result.contactId, {
+          updatedAt: normalizeIsoDateOrNow(result.updatedAt),
+          taskIds: nextTaskIds,
+        });
+
+        const updatedTimestamp = parseDateTimeValue(result.updatedAt);
+        if (Number.isFinite(updatedTimestamp) && (!Number.isFinite(maxCursorTimestamp) || updatedTimestamp > maxCursorTimestamp)) {
+          maxCursorTimestamp = updatedTimestamp;
+        }
+        processedContacts += 1;
+      }
+
+      const tasks = [...taskMap.values()]
+        .slice(0, CUSTOM_DASHBOARD_GHL_TASKS_MAX_ITEMS)
+        .sort((left, right) => {
+          if (left.isCompleted !== right.isCompleted) {
+            return left.isCompleted ? 1 : -1;
+          }
+          const leftDue = Number.isFinite(left.dueDateTimestamp) ? left.dueDateTimestamp : Number.MAX_SAFE_INTEGER;
+          const rightDue = Number.isFinite(right.dueDateTimestamp) ? right.dueDateTimestamp : Number.MAX_SAFE_INTEGER;
+          if (leftDue !== rightDue) {
+            return leftDue - rightDue;
+          }
+          return sanitizeTextValue(left.title, 220).localeCompare(sanitizeTextValue(right.title, 220), "en-US", {
+            sensitivity: "base",
+          });
+        });
+
+      const finishedAt = new Date().toISOString();
+      const archiveKey = `custom_dashboard/archive_tasks_${buildArchiveTimestamp(finishedAt)}`;
+      const payload = {
+        type: "tasks",
+        uploadedAt: finishedAt,
+        uploadedBy: actorUsername,
+        fileName: "ghl/tasks-sync",
+        count: tasks.length,
+        archiveKey,
+        source: "ghl",
+        items: tasks,
+      };
+
+      const nextSyncState = {
+        version: 1,
+        lastAttemptedAt: finishedAt,
+        lastSuccessfulSyncAt: finishedAt,
+        lastMode: syncMode,
+        lastError: "",
+        cursorUpdatedAt: Number.isFinite(maxCursorTimestamp) ? new Date(maxCursorTimestamp).toISOString() : previousSyncState.cursorUpdatedAt,
+        contactTaskIndex: Object.fromEntries(contactTaskIndex.entries()),
+        stats: {
+          contactsTotal: contactsById.size,
+          contactsProcessed: processedContacts,
+          contactsDeleted: deletedContacts,
+          tasksTotal: tasks.length,
+        },
+      };
+
+      await Promise.all([
+        upsertAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_LATEST_KEY, payload),
+        upsertAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY, nextSyncState),
+        upsertAppDataValue(archiveKey, payload),
+      ]);
+
+      ghlTasksSyncRuntimeState = {
+        ...ghlTasksSyncRuntimeState,
+        inFlight: false,
+        lastFinishedAt: finishedAt,
+        lastError: "",
+      };
+
+      return {
+        ok: true,
+        mode: syncMode,
+        uploadedAt: finishedAt,
+        count: tasks.length,
+        archiveKey,
+        stats: nextSyncState.stats,
+      };
+    })().catch(async (error) => {
+      const finishedAt = new Date().toISOString();
+      const previousSyncStateRaw = await readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY, null);
+      const previousSyncState = normalizeGhlTasksSyncState(previousSyncStateRaw);
+
+      const nextSyncState = {
+        ...previousSyncState,
+        lastAttemptedAt: finishedAt,
+        lastMode: syncMode,
+        lastError: sanitizeTextValue(error?.message, 600) || "Tasks sync failed.",
+      };
+      await upsertAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY, nextSyncState);
+
+      ghlTasksSyncRuntimeState = {
+        ...ghlTasksSyncRuntimeState,
+        inFlight: false,
+        lastFinishedAt: finishedAt,
+        lastError: sanitizeTextValue(error?.message, 600) || "Tasks sync failed.",
+      };
+
+      throw error;
+    });
+
+    ghlTasksSyncInFlight = job;
+    try {
+      return await job;
+    } finally {
+      ghlTasksSyncInFlight = null;
+    }
+  }
+
+  function startGhlTasksAutoSync() {
+    if (ghlTasksAutoSyncIntervalId) {
+      return false;
+    }
+    if (!CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED || !pool || !isGhlTasksSyncConfigured()) {
+      return false;
+    }
+
+    ghlTasksAutoSyncIntervalId = setInterval(() => {
+      if (ghlTasksSyncInFlight) {
+        return;
+      }
+
+      void runGhlTasksSync({
+        mode: "delta",
+        actorUsername: "system:auto-sync",
+        trigger: "auto",
+      }).catch((error) => {
+        console.error("[custom-dashboard] auto sync failed:", error);
+      });
+    }, CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_INTERVAL_MS);
+
+    return true;
   }
 
   function resolveModuleRole(userProfile) {
@@ -687,13 +1581,19 @@ function registerCustomDashboardModule(config) {
     const usersConfigRaw = await readAppDataValue(CUSTOM_DASHBOARD_USERS_KEY, null);
     const usersConfig = normalizeUsersConfig(usersConfigRaw);
 
-    const [tasksDataRaw, contactsDataRaw, callsDataRaw] = await Promise.all([
+    const [tasksSourceSelected, tasksUploadDataRaw, tasksGhlDataRaw, tasksSyncStateRaw, contactsDataRaw, callsDataRaw] = await Promise.all([
+      readTasksSourceSetting(),
       readAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.tasks, null),
+      readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_LATEST_KEY, null),
+      readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY, null),
       readAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.contacts, null),
       readAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.calls, null),
     ]);
 
-    const tasksData = normalizeUploadData(tasksDataRaw, "tasks");
+    const tasksUploadData = normalizeUploadData(tasksUploadDataRaw, "tasks");
+    const tasksGhlData = normalizeUploadData(tasksGhlDataRaw, "tasks");
+    const tasksSyncState = normalizeGhlTasksSyncState(tasksSyncStateRaw);
+    const tasksData = tasksSourceSelected === CUSTOM_DASHBOARD_TASKS_SOURCE_GHL ? tasksGhlData : tasksUploadData;
     const contactsData = normalizeUploadData(contactsDataRaw, "contacts");
     const callsData = normalizeUploadData(callsDataRaw, "calls");
 
@@ -717,10 +1617,12 @@ function registerCustomDashboardModule(config) {
       },
       widgets: activeUserSettings.widgets,
       uploads: {
-        tasks: buildUploadMeta(tasksData),
+        tasks: buildUploadMeta(tasksUploadData),
+        tasksGhl: buildUploadMeta(tasksGhlData),
         contacts: buildUploadMeta(contactsData),
         calls: buildUploadMeta(callsData),
       },
+      tasksSource: buildTasksSourcePayload(tasksSourceSelected, tasksSyncState),
       options,
       managerTasks,
       specialistTasks,
@@ -733,13 +1635,19 @@ function registerCustomDashboardModule(config) {
     const usersConfigRaw = await readAppDataValue(CUSTOM_DASHBOARD_USERS_KEY, null);
     const usersConfig = normalizeUsersConfig(usersConfigRaw);
 
-    const [tasksDataRaw, contactsDataRaw, callsDataRaw] = await Promise.all([
+    const [tasksSourceSelected, tasksUploadDataRaw, tasksGhlDataRaw, tasksSyncStateRaw, contactsDataRaw, callsDataRaw] = await Promise.all([
+      readTasksSourceSetting(),
       readAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.tasks, null),
+      readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_LATEST_KEY, null),
+      readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY, null),
       readAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.contacts, null),
       readAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.calls, null),
     ]);
 
-    const tasksData = normalizeUploadData(tasksDataRaw, "tasks");
+    const tasksUploadData = normalizeUploadData(tasksUploadDataRaw, "tasks");
+    const tasksGhlData = normalizeUploadData(tasksGhlDataRaw, "tasks");
+    const tasksSyncState = normalizeGhlTasksSyncState(tasksSyncStateRaw);
+    const tasksData = tasksSourceSelected === CUSTOM_DASHBOARD_TASKS_SOURCE_GHL ? tasksGhlData : tasksUploadData;
     const contactsData = normalizeUploadData(contactsDataRaw, "contacts");
     const callsData = normalizeUploadData(callsDataRaw, "calls");
 
@@ -768,6 +1676,7 @@ function registerCustomDashboardModule(config) {
       users,
       options,
       updatedAt: usersConfig.updatedAt,
+      tasksSource: buildTasksSourcePayload(tasksSourceSelected, tasksSyncState),
     };
   }
 
@@ -1338,6 +2247,71 @@ function detectCsvDelimiter(csvText) {
     },
   );
 
+  app.put(
+    "/api/custom-dashboard/tasks-source",
+    requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
+    async (req, res) => {
+      if (!pool) {
+        res.status(503).json({
+          error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+        });
+        return;
+      }
+
+      try {
+        const source = normalizeTasksSource(req.body?.source);
+        const saved = await saveTasksSourceSetting(source, req.webAuthUser || req.webAuthProfile?.username || "");
+        const syncStateRaw = await readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY, null);
+        const syncState = normalizeGhlTasksSyncState(syncStateRaw);
+        res.json({
+          ok: true,
+          tasksSource: buildTasksSourcePayload(saved.source, syncState),
+        });
+      } catch (error) {
+        console.error("PUT /api/custom-dashboard/tasks-source failed:", error);
+        res.status(resolveDbErrorStatus(error)).json({
+          error: sanitizeTextValue(error?.message, 600) || "Failed to update tasks source.",
+        });
+      }
+    },
+  );
+
+  app.post(
+    "/api/custom-dashboard/tasks-sync",
+    requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
+    async (req, res) => {
+      if (!pool) {
+        res.status(503).json({
+          error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+        });
+        return;
+      }
+
+      try {
+        const modeRaw = sanitizeTextValue(req.body?.mode, 20).toLowerCase();
+        const mode = modeRaw === "full" ? "full" : "delta";
+        const result = await runGhlTasksSync({
+          mode,
+          actorUsername: req.webAuthUser || req.webAuthProfile?.username || "",
+          trigger: "manual",
+        });
+        const selectedSource = await readTasksSourceSetting();
+        const syncStateRaw = await readAppDataValue(CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY, null);
+        const syncState = normalizeGhlTasksSyncState(syncStateRaw);
+
+        res.status(201).json({
+          ...result,
+          tasksSource: buildTasksSourcePayload(selectedSource, syncState),
+        });
+      } catch (error) {
+        console.error("POST /api/custom-dashboard/tasks-sync failed:", error);
+        res.status(resolveDbErrorStatus(error)).json({
+          error: sanitizeTextValue(error?.message, 600) || "Failed to sync tasks from GoHighLevel.",
+        });
+      }
+    },
+  );
+
   app.post(
     "/api/custom-dashboard/upload",
     requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
@@ -1486,6 +2460,8 @@ function detectCsvDelimiter(csvText) {
         res.json({
           ok: true,
           table: `${dbSchema}.${tableName}`,
+          ghlTasksConfigured: isGhlTasksSyncConfigured(),
+          ghlTasksAutoSyncEnabled: CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED,
         });
       } catch (error) {
         res.status(resolveDbErrorStatus(error)).json({
@@ -1497,6 +2473,20 @@ function detectCsvDelimiter(csvText) {
   );
 
   console.log(`[custom-dashboard] module routes enabled (table: ${dbSchema}.${tableName})`);
+  if (!isGhlTasksSyncConfigured()) {
+    console.warn("[custom-dashboard] GHL tasks sync is disabled. Set GHL_API_KEY and GHL_LOCATION_ID.");
+  }
+  if (!CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED) {
+    console.warn("[custom-dashboard] GHL tasks auto sync is disabled (CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED=false).");
+  } else if (!pool) {
+    console.warn("[custom-dashboard] GHL tasks auto sync is disabled because DATABASE_URL is missing.");
+  } else if (!isGhlTasksSyncConfigured()) {
+    console.warn("[custom-dashboard] GHL tasks auto sync is disabled because GHL credentials are missing.");
+  } else if (startGhlTasksAutoSync()) {
+    console.log(
+      `[custom-dashboard] GHL tasks auto sync started: every ${Math.round(CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_INTERVAL_MS / (60 * 1000))} min.`,
+    );
+  }
 }
 
 function hasWebAuthPermissionSafe(checkFn, userProfile, permissionKey) {
@@ -1601,6 +2591,56 @@ function normalizeColumnKey(value) {
 
 function normalizeUsername(value) {
   return sanitizeTextValue(value, 220).toLowerCase();
+}
+
+function parsePositiveInteger(rawValue, fallbackValue = 0) {
+  const parsed = Number.parseInt(sanitizeTextValue(rawValue, 80), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallbackValue;
+  }
+  return parsed;
+}
+
+function readObjectPath(source, pathExpression) {
+  if (!pathExpression) {
+    return source;
+  }
+
+  const steps = sanitizeTextValue(pathExpression, 320).split(".").filter(Boolean);
+  if (!steps.length) {
+    return source;
+  }
+
+  let cursor = source;
+  for (const step of steps) {
+    if (!cursor || typeof cursor !== "object") {
+      return undefined;
+    }
+    cursor = cursor[step];
+  }
+
+  return cursor;
+}
+
+function pickValueFromObject(source, fieldPaths) {
+  if (!source || typeof source !== "object") {
+    return undefined;
+  }
+
+  for (const fieldPath of Array.isArray(fieldPaths) ? fieldPaths : []) {
+    const value = readObjectPath(source, fieldPath);
+    if (value !== undefined && value !== null && value !== "") {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function buildFullName(firstName, lastName) {
+  const first = sanitizeTextValue(firstName, 120);
+  const last = sanitizeTextValue(lastName, 120);
+  return [first, last].filter(Boolean).join(" ").trim();
 }
 
 function normalizeVisibleNames(rawValues) {
@@ -1934,6 +2974,39 @@ function buildEmptySalesMetrics() {
     closedDeals: 0,
     closedAmount: 0,
   };
+}
+
+async function mapWithConcurrency(items, maxConcurrency, mapper) {
+  const source = Array.isArray(items) ? items : [];
+  if (!source.length) {
+    return [];
+  }
+
+  const concurrency = Math.max(1, toSafeInteger(maxConcurrency, 1));
+  const results = new Array(source.length);
+  let nextIndex = 0;
+
+  const workers = [];
+  const workerCount = Math.min(concurrency, source.length);
+
+  for (let workerIndex = 0; workerIndex < workerCount; workerIndex += 1) {
+    workers.push(
+      (async () => {
+        while (true) {
+          const currentIndex = nextIndex;
+          nextIndex += 1;
+          if (currentIndex >= source.length) {
+            return;
+          }
+
+          results[currentIndex] = await mapper(source[currentIndex], currentIndex);
+        }
+      })(),
+    );
+  }
+
+  await Promise.all(workers);
+  return results;
 }
 
 module.exports = {
