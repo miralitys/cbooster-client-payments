@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const fs = require("fs");
 const express = require("express");
+const compression = require("compression");
 const multer = require("multer");
 const { Pool } = require("pg");
 const { registerCustomDashboardModule } = require("./custom-dashboard-module");
@@ -362,6 +363,11 @@ const GHL_BASIC_NOTE_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_BASIC_NOTE_CACHE_TABLE_NAME,
   DEFAULT_GHL_BASIC_NOTE_CACHE_TABLE_NAME,
 );
+const DEFAULT_GHL_LEADS_CACHE_TABLE_NAME = "ghl_leads_cache";
+const GHL_LEADS_CACHE_TABLE_NAME = resolveTableName(
+  process.env.DB_GHL_LEADS_CACHE_TABLE_NAME,
+  DEFAULT_GHL_LEADS_CACHE_TABLE_NAME,
+);
 const DEFAULT_ASSISTANT_REVIEW_TABLE_NAME = "assistant_review_queue";
 const ASSISTANT_REVIEW_TABLE_NAME = resolveTableName(
   process.env.DB_ASSISTANT_REVIEW_TABLE_NAME,
@@ -376,6 +382,7 @@ const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_
 const QUICKBOOKS_AUTH_STATE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_AUTH_STATE_TABLE_NAME);
 const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
 const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CACHE_TABLE_NAME);
+const GHL_LEADS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_LEADS_CACHE_TABLE_NAME);
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
@@ -416,6 +423,42 @@ const GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT, 20), 1),
   100,
 );
+const GHL_LEADS_PIPELINE_NAME = sanitizeTextValue(process.env.GHL_LEADS_PIPELINE_NAME, 320) || "SALES 3 LINE";
+const GHL_LEADS_PIPELINE_ID = sanitizeTextValue(process.env.GHL_LEADS_PIPELINE_ID, 180);
+const GHL_LEADS_SYNC_TIME_ZONE = sanitizeTextValue(process.env.GHL_LEADS_SYNC_TIME_ZONE, 80) || "America/Chicago";
+const GHL_LEADS_WEEK_START_DAY = 1;
+const GHL_LEADS_PAGE_LIMIT = Math.min(Math.max(parsePositiveInteger(process.env.GHL_LEADS_PAGE_LIMIT, 100), 10), 200);
+const GHL_LEADS_MAX_PAGES = Math.min(Math.max(parsePositiveInteger(process.env.GHL_LEADS_MAX_PAGES, 80), 1), 1000);
+const GHL_LEADS_INCREMENTAL_LOOKBACK_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_INCREMENTAL_LOOKBACK_MS, 5 * 60 * 1000), 0),
+  3 * 24 * 60 * 60 * 1000,
+);
+const GHL_LEADS_MAX_ROWS_RESPONSE = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_MAX_ROWS_RESPONSE, 5000), 100),
+  30000,
+);
+const GHL_LEADS_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: GHL_LEADS_SYNC_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const GHL_LEADS_WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: GHL_LEADS_SYNC_TIME_ZONE,
+  weekday: "short",
+});
+const GHL_LEAD_WEEKDAY_INDEX_BY_LABEL = {
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6,
+};
 const GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS, 5 * 60 * 1000), 10 * 1000),
   60 * 60 * 1000,
@@ -814,6 +857,11 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: false }));
+app.use(
+  compression({
+    threshold: 1024,
+  }),
+);
 app.use(createHttpPerformanceMetricsMiddleware(performanceObservability));
 
 const staticRoot = __dirname;
@@ -12611,6 +12659,35 @@ async function ensureDatabaseReady() {
       `);
 
       await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${GHL_LEADS_CACHE_TABLE} (
+          lead_id TEXT PRIMARY KEY,
+          contact_id TEXT NOT NULL DEFAULT '',
+          contact_name TEXT NOT NULL DEFAULT '',
+          opportunity_name TEXT NOT NULL DEFAULT '',
+          pipeline_id TEXT NOT NULL DEFAULT '',
+          pipeline_name TEXT NOT NULL DEFAULT '',
+          stage_id TEXT NOT NULL DEFAULT '',
+          stage_name TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT '',
+          monetary_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
+          source TEXT NOT NULL DEFAULT 'gohighlevel',
+          created_on TIMESTAMPTZ NOT NULL,
+          ghl_updated_at TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_LEADS_CACHE_TABLE_NAME}_created_on_idx
+        ON ${GHL_LEADS_CACHE_TABLE} (created_on DESC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_LEADS_CACHE_TABLE_NAME}_ghl_updated_at_idx
+        ON ${GHL_LEADS_CACHE_TABLE} (ghl_updated_at DESC NULLS LAST)
+      `);
+
+      await pool.query(`
         CREATE TABLE IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE} (
           id BIGSERIAL PRIMARY KEY,
           asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -14944,6 +15021,28 @@ function sendWhitelistedWebStaticAsset(req, res) {
   res.sendFile(path.join(staticRoot, fileName));
 }
 
+function setNoStoreNoCacheHtmlHeaders(res) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
+
+function setWebAppStaticHeaders(res, filePath) {
+  const normalizedFilePath = typeof filePath === "string" ? filePath : "";
+  const relativePath = path.relative(webAppDistRoot, normalizedFilePath);
+  const normalizedRelativePath = relativePath.split(path.sep).join("/");
+  const isInsideAssetsDir = normalizedRelativePath.startsWith("assets/");
+
+  if (isInsideAssetsDir) {
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    return;
+  }
+
+  if (normalizedFilePath.toLowerCase().endsWith(".html")) {
+    setNoStoreNoCacheHtmlHeaders(res);
+  }
+}
+
 app.get("/login", (req, res) => {
   const nextPath = resolveSafeNextPath(req.query.next);
   const currentSessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
@@ -15056,8 +15155,22 @@ app.post("/logout", handleWebLogout);
 
 app.use(requireWebAuth);
 app.use(requireWebApiCsrf);
+
+app.get("/app", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
+  setNoStoreNoCacheHtmlHeaders(res);
+  res.redirect(302, "/app/dashboard");
+});
+
 if (webAppDistAvailable) {
-  app.use("/app", express.static(webAppDistRoot, { index: false }));
+  app.use(
+    "/app",
+    express.static(webAppDistRoot, {
+      index: false,
+      redirect: false,
+      maxAge: 0,
+      setHeaders: setWebAppStaticHeaders,
+    }),
+  );
 }
 
 registerCustomDashboardModule({
@@ -16631,7 +16744,7 @@ app.get("/app/*", (req, res) => {
     return;
   }
 
-  res.setHeader("Cache-Control", "no-store, private");
+  setNoStoreNoCacheHtmlHeaders(res);
   res.sendFile(webAppIndexFile);
 });
 
