@@ -68,15 +68,23 @@ interface WindowWithSpeechRecognition extends Window {
 
 const DEFAULT_SUGGESTIONS_EN = [
   "Give me a client summary",
-  "Show top 5 debtors",
-  "How many overdue clients do we have?",
+  "Show top 10 debtors",
+  "Manager ranking by debt",
+  "Clients overdue more than 30 days",
+  "Clients without manager",
+  "Anomalies: paid is higher than contract",
+  "Today's call list",
   "Show client John Smith",
 ];
 
 const DEFAULT_SUGGESTIONS_RU = [
   "Сводка по клиентам",
-  "Покажи топ-5 должников",
-  "Сколько просроченных клиентов?",
+  "Покажи топ-10 должников",
+  "Рейтинг менеджеров по долгу",
+  "Клиенты с просрочкой больше 30 дней",
+  "Клиенты без менеджера",
+  "Аномалии: оплачено больше договора",
+  "Список для обзвона на сегодня",
   "Покажи клиента John Smith",
 ];
 const FEMALE_VOICE_HINTS = [
@@ -416,8 +424,8 @@ export function AssistantWidget() {
       id: generateMessageId(),
       role: "assistant",
       text: isRussian
-        ? "Привет. Я могу ответить по вашим клиентским данным: сводка, долги, просрочки, статус конкретного клиента."
-        : "Hi. I can answer from your internal client data: summaries, debt, overdue status, and specific client details.",
+        ? "Привет. Я могу ответить по клиентским данным: сводки, топы, просрочки, рейтинги менеджеров, аномалии и карточки клиентов."
+        : "Hi. I can answer from client data: summaries, top lists, overdue filters, manager rankings, anomalies, and client cards.",
       mentions: [],
       createdAt: Date.now(),
     },
