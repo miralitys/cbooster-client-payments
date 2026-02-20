@@ -11563,37 +11563,34 @@ function extractGhlPipelinesFromPayload(payload) {
 }
 
 async function listGhlOpportunityPipelines() {
+  const locationQuery = {
+    locationId: GHL_LOCATION_ID,
+    location_id: GHL_LOCATION_ID,
+  };
+
   const attempts = [
     () =>
       requestGhlApi("/opportunities/pipelines", {
         method: "GET",
-        query: {
-          locationId: GHL_LOCATION_ID,
-        },
+        query: locationQuery,
         tolerateNotFound: true,
       }),
     () =>
       requestGhlApi("/opportunities/pipelines/", {
         method: "GET",
-        query: {
-          locationId: GHL_LOCATION_ID,
-        },
+        query: locationQuery,
         tolerateNotFound: true,
       }),
     () =>
       requestGhlApi("/pipelines", {
         method: "GET",
-        query: {
-          locationId: GHL_LOCATION_ID,
-        },
+        query: locationQuery,
         tolerateNotFound: true,
       }),
     () =>
       requestGhlApi("/pipelines/", {
         method: "GET",
-        query: {
-          locationId: GHL_LOCATION_ID,
-        },
+        query: locationQuery,
         tolerateNotFound: true,
       }),
   ];
@@ -12041,17 +12038,20 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
 
   const postBodyBase = {
     locationId: GHL_LOCATION_ID,
+    location_id: GHL_LOCATION_ID,
     page: safePage,
     limit: safeLimit,
   };
   const postBodyWithPageLimit = {
     locationId: GHL_LOCATION_ID,
+    location_id: GHL_LOCATION_ID,
     page: safePage,
     pageLimit: safeLimit,
   };
 
   const queryBase = {
     locationId: GHL_LOCATION_ID,
+    location_id: GHL_LOCATION_ID,
     page: safePage,
     limit: safeLimit,
   };
