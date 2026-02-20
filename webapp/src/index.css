@@ -2050,6 +2050,7 @@ a {
 }
 
 .client-managers-react-page .table-panel,
+.leads-react-page .table-panel,
 .ghl-documents-react-page .table-panel,
 .access-control-react-page .table-panel {
   grid-column: 1 / -1;
@@ -2074,6 +2075,49 @@ a {
 }
 
 .client-managers-react-table-wrap {
+  min-height: 280px;
+  height: auto;
+  max-height: 72vh;
+  resize: vertical;
+}
+
+.leads-status {
+  margin: 0;
+}
+
+.leads-toolbar-react {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.leads-summary-react {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-2);
+}
+
+.leads-summary-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-soft);
+  padding: var(--space-2) var(--space-3);
+}
+
+.leads-summary-card__title {
+  margin: 0;
+  font-size: var(--font-size-xxs);
+  color: var(--color-text-muted);
+}
+
+.leads-summary-card__value {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+}
+
+.leads-react-table-wrap {
   min-height: 280px;
   height: auto;
   max-height: 72vh;
