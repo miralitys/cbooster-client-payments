@@ -33,5 +33,10 @@ export interface ClientRecord {
 
 export interface RecordsPayload {
   records: ClientRecord[];
-  updatedAt?: string;
+  updatedAt?: string | null;
+}
+
+export interface PutRecordsPayload {
+  ok: boolean;
+  updatedAt?: string | null;
 }

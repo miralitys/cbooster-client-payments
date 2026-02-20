@@ -891,9 +891,13 @@ function validateWebAuthSecurityConfiguration() {
   );
 }
 
-function createHttpError(message, status = 400) {
+function createHttpError(message, status = 400, code = "") {
   const error = new Error(message);
   error.httpStatus = status;
+  const normalizedCode = sanitizeTextValue(code, 40);
+  if (normalizedCode) {
+    error.code = normalizedCode;
+  }
   return error;
 }
 
@@ -11272,20 +11276,97 @@ async function getStoredRecords() {
   };
 }
 
-async function saveStoredRecords(records) {
-  await ensureDatabaseReady();
-  const result = await pool.query(
-    `
-      INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-      VALUES ($1, $2::jsonb, NOW())
-      ON CONFLICT (id)
-      DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
-      RETURNING updated_at
-    `,
-    [STATE_ROW_ID, JSON.stringify(records)],
-  );
+function normalizeRecordStateTimestamp(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === "") {
+    return null;
+  }
 
-  return result.rows[0]?.updated_at || null;
+  if (rawValue instanceof Date) {
+    const timestamp = rawValue.getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  const normalizedText = sanitizeTextValue(rawValue, 120);
+  if (!normalizedText) {
+    return null;
+  }
+
+  const timestamp = Date.parse(normalizedText);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+async function saveStoredRecords(records, options = {}) {
+  await ensureDatabaseReady();
+  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(options, "expectedUpdatedAt");
+  if (!hasExpectedUpdatedAt) {
+    throw createHttpError(
+      "Payload must include `expectedUpdatedAt` (latest revision from GET /api/records).",
+      428,
+      "records_precondition_required",
+    );
+  }
+
+  const expectedUpdatedAt = options.expectedUpdatedAt;
+  const expectedUpdatedAtMs = normalizeRecordStateTimestamp(expectedUpdatedAt);
+  if (expectedUpdatedAt !== null && expectedUpdatedAt !== "" && expectedUpdatedAtMs === null) {
+    throw createHttpError("`expectedUpdatedAt` must be a valid ISO datetime or null.", 400, "invalid_expected_updated_at");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const stateResult = await client.query(
+      `
+        SELECT updated_at
+        FROM ${STATE_TABLE}
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [STATE_ROW_ID],
+    );
+
+    const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
+    const currentUpdatedAtMs = normalizeRecordStateTimestamp(currentUpdatedAt);
+    const expectsEmptyState = expectedUpdatedAt === null || expectedUpdatedAt === "";
+    const isRevisionMatch =
+      expectedUpdatedAtMs !== null
+        ? currentUpdatedAtMs !== null && currentUpdatedAtMs === expectedUpdatedAtMs
+        : expectsEmptyState && currentUpdatedAtMs === null;
+
+    if (!isRevisionMatch) {
+      const conflictError = createHttpError(
+        "Records were updated by another operation. Refresh records and try again.",
+        409,
+        "records_conflict",
+      );
+      conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
+      throw conflictError;
+    }
+
+    const result = await client.query(
+      `
+        INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+        VALUES ($1, $2::jsonb, NOW())
+        ON CONFLICT (id)
+        DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
+        RETURNING updated_at
+      `,
+      [STATE_ROW_ID, JSON.stringify(records)],
+    );
+
+    await client.query("COMMIT");
+    return result.rows[0]?.updated_at || null;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function listCachedQuickBooksCustomerContacts(customerIds) {
@@ -14261,6 +14342,38 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
     return;
   }
 
+  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(req.body || {}, "expectedUpdatedAt");
+  if (!hasExpectedUpdatedAt) {
+    res.status(428).json({
+      error: "Payload must include `expectedUpdatedAt` from GET /api/records.",
+      code: "records_precondition_required",
+    });
+    return;
+  }
+
+  const rawExpectedUpdatedAt = req.body?.expectedUpdatedAt;
+  if (!(rawExpectedUpdatedAt === null || rawExpectedUpdatedAt === "" || typeof rawExpectedUpdatedAt === "string")) {
+    res.status(400).json({
+      error: "`expectedUpdatedAt` must be an ISO datetime string or null.",
+      code: "invalid_expected_updated_at",
+    });
+    return;
+  }
+
+  let expectedUpdatedAt = null;
+  if (typeof rawExpectedUpdatedAt === "string" && rawExpectedUpdatedAt.trim()) {
+    const normalizedExpectedUpdatedAt = sanitizeTextValue(rawExpectedUpdatedAt, 120);
+    const expectedTimestamp = Date.parse(normalizedExpectedUpdatedAt);
+    if (!normalizedExpectedUpdatedAt || Number.isNaN(expectedTimestamp)) {
+      res.status(400).json({
+        error: "`expectedUpdatedAt` must be an ISO datetime string or null.",
+        code: "invalid_expected_updated_at",
+      });
+      return;
+    }
+    expectedUpdatedAt = new Date(expectedTimestamp).toISOString();
+  }
+
   if (SIMULATE_SLOW_RECORDS) {
     await delayMs(SIMULATE_SLOW_RECORDS_DELAY_MS);
     res.json({
@@ -14278,14 +14391,20 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
   }
 
   try {
-    const updatedAt = await saveStoredRecords(nextRecords);
+    const updatedAt = await saveStoredRecords(nextRecords, {
+      expectedUpdatedAt,
+    });
     res.json({
       ok: true,
       updatedAt,
     });
   } catch (error) {
     console.error("PUT /api/records failed:", error);
-    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to save records"));
+    const payload = buildPublicErrorPayload(error, "Failed to save records");
+    if (Object.prototype.hasOwnProperty.call(error || {}, "currentUpdatedAt")) {
+      payload.updatedAt = error.currentUpdatedAt || null;
+    }
+    res.status(error.httpStatus || resolveDbHttpStatus(error)).json(payload);
   }
 });
 
