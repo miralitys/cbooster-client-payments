@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getGhlClientBasicNote } from "@/shared/api";
 import type { GhlClientBasicNotePayload } from "@/shared/types/ghlNotes";
 import type { ClientRecord } from "@/shared/types/records";
-import { FIELD_DEFINITIONS } from "@/features/client-payments/domain/constants";
+import { FIELD_DEFINITIONS, PAYMENT_PAIRS } from "@/features/client-payments/domain/constants";
 import { formatDate, formatMoney, parseMoneyValue } from "@/features/client-payments/domain/calculations";
 
 interface RecordDetailsProps {
@@ -12,11 +12,20 @@ interface RecordDetailsProps {
 
 const HEADER_FIELD_KEYS = new Set<keyof ClientRecord>([
   "clientName",
+  "serviceType",
   "contractTotals",
   "totalPayments",
   "futurePayments",
   "companyName",
 ]);
+const PAYMENT_FIELD_KEYS = new Set<keyof ClientRecord>(
+  PAYMENT_PAIRS.flatMap(([paymentKey, paymentDateKey]) => [paymentKey, paymentDateKey]),
+);
+
+interface RequestedClientField {
+  label: string;
+  value: string;
+}
 
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
@@ -35,7 +44,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const avatarInitials = useMemo(() => buildAvatarInitials(normalizedClientName), [normalizedClientName]);
 
   const detailsFields = useMemo(
-    () => FIELD_DEFINITIONS.filter((field) => !HEADER_FIELD_KEYS.has(field.key)),
+    () => FIELD_DEFINITIONS.filter((field) => !HEADER_FIELD_KEYS.has(field.key) && !PAYMENT_FIELD_KEYS.has(field.key)),
     [],
   );
 
@@ -85,6 +94,66 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   }, [normalizedClientName, record]);
 
   const contactInfo = useMemo(() => resolveContactInfo(record, ghlBasicNote), [ghlBasicNote, record]);
+  const requestedClientFields = useMemo<RequestedClientField[]>(
+    () =>
+      [
+        {
+          label: "Address",
+          value:
+            getOptionalRecordText(record, "address") ||
+            getOptionalRecordText(record, "clientAddress") ||
+            getOptionalRecordText(record, "mailingAddress"),
+        },
+        {
+          label: "Date of Birth",
+          value: formatOptionalDate(
+            getOptionalRecordText(record, "dateOfBirth") ||
+              getOptionalRecordText(record, "dob") ||
+              getOptionalRecordText(record, "birthDate"),
+          ),
+        },
+        {
+          label: "SSN",
+          value: getOptionalRecordText(record, "ssn") || getOptionalRecordText(record, "clientSsn"),
+        },
+        {
+          label: "Credit Monitoring Login",
+          value:
+            getOptionalRecordText(record, "creditMonitoringLogin") ||
+            getOptionalRecordText(record, "monitoringLogin") ||
+            getOptionalRecordText(record, "monitoringServiceLogin"),
+        },
+        {
+          label: "Credit Monitoring Password",
+          value:
+            getOptionalRecordText(record, "creditMonitoringPassword") ||
+            getOptionalRecordText(record, "monitoringPassword") ||
+            getOptionalRecordText(record, "monitoringServicePassword"),
+        },
+        {
+          label: "Purchased Service",
+          value:
+            getOptionalRecordText(record, "purchasedService") ||
+            getOptionalRecordText(record, "serviceDescription") ||
+            getOptionalRecordText(record, "servicePurchased") ||
+            (record.serviceType || "").trim(),
+        },
+      ].map((field) => ({
+        ...field,
+        value: field.value || "-",
+      })),
+    [record],
+  );
+  const paymentScheduleRows = useMemo(
+    () =>
+      PAYMENT_PAIRS.map(([paymentField, paymentDateField], index) => ({
+        id: `payment-${index + 1}`,
+        label: `Payment ${index + 1}`,
+        amount: record[paymentField] ? formatMoneyCell(record[paymentField]) : "-",
+        date: record[paymentDateField] ? formatDate(record[paymentDateField]) : "-",
+      })),
+    [record],
+  );
 
   return (
     <div className="record-details-stack">
@@ -128,6 +197,30 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                 <span className="record-profile-header__contact-label">Company</span>
                 <strong className="record-profile-header__contact-value">{companyDisplay}</strong>
               </div>
+            </div>
+          </section>
+
+          <section className="record-details-grid record-details-grid--requested">
+            {requestedClientFields.map((field) => (
+              <div key={field.label} className="record-details-grid__item">
+                <span className="record-details-grid__label">{field.label}</span>
+                <strong className="record-details-grid__value">{field.value}</strong>
+              </div>
+            ))}
+          </section>
+
+          <section className="record-payments-panel">
+            <div className="record-payments-panel__header">
+              <h4 className="record-payments-panel__title">Payments</h4>
+            </div>
+            <div className="record-payments-panel__rows" role="list">
+              {paymentScheduleRows.map((payment) => (
+                <div key={payment.id} className="record-payments-panel__row" role="listitem">
+                  <span className="record-payments-panel__label">{payment.label}</span>
+                  <span className="record-payments-panel__amount">{payment.amount}</span>
+                  <span className="record-payments-panel__date">{payment.date}</span>
+                </div>
+              ))}
             </div>
           </section>
 
@@ -211,6 +304,13 @@ function formatMoneyCell(rawValue: string): string {
     return rawValue || "-";
   }
   return formatMoney(amount);
+}
+
+function formatOptionalDate(rawValue: string): string {
+  if (!rawValue) {
+    return "";
+  }
+  return formatDate(rawValue);
 }
 
 function formatFieldValue(
