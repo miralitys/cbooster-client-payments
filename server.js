@@ -3952,6 +3952,7 @@ function buildAssistantFirstPaymentsInRangeReply(rows, paymentEvents, range, isR
   const entries = buildAssistantFirstPaymentEntriesFromEvents(paymentEvents)
     .filter((item) => isAssistantTimestampInRange(item.dateTimestamp, range))
     .sort((left, right) => right.dateTimestamp - left.dateTimestamp);
+  const totalAmount = entries.reduce((sum, item) => sum + (Number.isFinite(item.amount) ? item.amount : 0), 0);
 
   if (!entries.length) {
     return isRussian
@@ -3967,19 +3968,25 @@ function buildAssistantFirstPaymentsInRangeReply(rows, paymentEvents, range, isR
       const current = managerMap.get(key) || {
         managerName: resolveAssistantManagerLabel(item.managerName, isRussian),
         clientsCount: 0,
+        totalAmount: 0,
       };
       current.clientsCount += 1;
+      current.totalAmount += Number.isFinite(item.amount) ? item.amount : 0;
       managerMap.set(key, current);
     }
 
     const summaryItems = [...managerMap.values()].sort((left, right) => right.clientsCount - left.clientsCount);
     const lines = [
       isRussian
-        ? `Первые платежи по менеджерам за период ${formatAssistantDateRangeLabel(range, true)}: ${entries.length}`
-        : `First payments by manager in ${formatAssistantDateRangeLabel(range, false)}: ${entries.length}`,
+        ? `Первые платежи по менеджерам за период ${formatAssistantDateRangeLabel(range, true)}: ${entries.length}, общая сумма ${formatAssistantMoney(totalAmount)}`
+        : `First payments by manager in ${formatAssistantDateRangeLabel(range, false)}: ${entries.length}, total amount ${formatAssistantMoney(totalAmount)}`,
     ];
     summaryItems.slice(0, limit).forEach((item, index) => {
-      lines.push(`${index + 1}. ${item.managerName} - ${item.clientsCount}`);
+      lines.push(
+        `${index + 1}. ${item.managerName} - ${item.clientsCount}, ${isRussian ? "сумма" : "amount"} ${formatAssistantMoney(
+          item.totalAmount,
+        )}`,
+      );
     });
     if (summaryItems.length > limit) {
       lines.push(isRussian ? `И еще: ${summaryItems.length - limit}` : `And ${summaryItems.length - limit} more.`);
@@ -3989,8 +3996,8 @@ function buildAssistantFirstPaymentsInRangeReply(rows, paymentEvents, range, isR
 
   const lines = [
     isRussian
-      ? `Клиентов с первым платежом за период ${formatAssistantDateRangeLabel(range, true)}: ${entries.length}`
-      : `Clients with first payment in ${formatAssistantDateRangeLabel(range, false)}: ${entries.length}`,
+      ? `Клиентов с первым платежом за период ${formatAssistantDateRangeLabel(range, true)}: ${entries.length}, общая сумма ${formatAssistantMoney(totalAmount)}`
+      : `Clients with first payment in ${formatAssistantDateRangeLabel(range, false)}: ${entries.length}, total amount ${formatAssistantMoney(totalAmount)}`,
   ];
   entries.slice(0, limit).forEach((item, index) => {
     lines.push(
