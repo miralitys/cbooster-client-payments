@@ -88,113 +88,119 @@ export function RecordDetails({ record }: RecordDetailsProps) {
 
   return (
     <div className="record-details-stack">
-      <section className="record-profile-header">
-        <div className="record-profile-header__identity">
-          <div className="record-profile-header__avatar" aria-hidden="true">
-            {avatarSource ? (
-              <img src={avatarSource} alt="" className="record-profile-header__avatar-image" />
-            ) : (
-              <span className="record-profile-header__avatar-fallback">{avatarInitials}</span>
-            )}
-          </div>
-          <div className="record-profile-header__identity-main">
-            <h4 className="record-profile-header__name">{normalizedClientName || "Unnamed client"}</h4>
-            <p className="record-profile-header__summary-line">
-              <span>
-                Contract: <strong>{contractDisplay}</strong>
-              </span>
-              <span>
-                Paid: <strong>{paidDisplay}</strong>
-              </span>
-              <span>
-                Debt: <strong>{debtDisplay}</strong>
-              </span>
-            </p>
-          </div>
-        </div>
-
-        <div className="record-profile-header__contact-row">
-          <div className="record-profile-header__contact-item">
-            <span className="record-profile-header__contact-label">Phone</span>
-            <strong className="record-profile-header__contact-value">{contactInfo.phone || "-"}</strong>
-          </div>
-          <div className="record-profile-header__contact-item">
-            <span className="record-profile-header__contact-label">Email</span>
-            <strong className="record-profile-header__contact-value">{contactInfo.email || "-"}</strong>
-          </div>
-          <div className="record-profile-header__contact-item">
-            <span className="record-profile-header__contact-label">Company</span>
-            <strong className="record-profile-header__contact-value">{companyDisplay}</strong>
-          </div>
-        </div>
-      </section>
-
-      <section className="record-details-grid">
-        {detailsFields.map((field) => {
-          const rawValue = record[field.key] || "";
-          if (!rawValue && field.type !== "checkbox") {
-            return null;
-          }
-
-          const displayValue = formatFieldValue(field.key, field.type, rawValue);
-          return (
-            <div key={field.key} className="record-details-grid__item">
-              <span className="record-details-grid__label">{field.label}</span>
-              <strong className="record-details-grid__value">{displayValue || "-"}</strong>
+      <div className="record-details-layout">
+        <div className="record-details-layout__main">
+          <section className="record-profile-header">
+            <div className="record-profile-header__identity">
+              <div className="record-profile-header__avatar" aria-hidden="true">
+                {avatarSource ? (
+                  <img src={avatarSource} alt="" className="record-profile-header__avatar-image" />
+                ) : (
+                  <span className="record-profile-header__avatar-fallback">{avatarInitials}</span>
+                )}
+              </div>
+              <div className="record-profile-header__identity-main">
+                <h4 className="record-profile-header__name">{normalizedClientName || "Unnamed client"}</h4>
+                <p className="record-profile-header__summary-line">
+                  <span>
+                    Contract: <strong>{contractDisplay}</strong>
+                  </span>
+                  <span>
+                    Paid: <strong>{paidDisplay}</strong>
+                  </span>
+                  <span>
+                    Debt: <strong>{debtDisplay}</strong>
+                  </span>
+                </p>
+              </div>
             </div>
-          );
-        })}
-      </section>
 
-      <section className="record-details-ghl-note" aria-live="polite">
-        <div className="record-details-ghl-note__header">
-          <h4 className="record-details-ghl-note__title">Basic Info</h4>
-          {ghlBasicNote?.contactName ? (
-            <p className="react-user-footnote">
-              Contact: {ghlBasicNote.contactName}
-              {ghlBasicNote.contactId ? ` (${ghlBasicNote.contactId})` : ""}
-            </p>
-          ) : null}
+            <div className="record-profile-header__contact-row">
+              <div className="record-profile-header__contact-item">
+                <span className="record-profile-header__contact-label">Phone</span>
+                <strong className="record-profile-header__contact-value">{contactInfo.phone || "-"}</strong>
+              </div>
+              <div className="record-profile-header__contact-item">
+                <span className="record-profile-header__contact-label">Email</span>
+                <strong className="record-profile-header__contact-value">{contactInfo.email || "-"}</strong>
+              </div>
+              <div className="record-profile-header__contact-item">
+                <span className="record-profile-header__contact-label">Company</span>
+                <strong className="record-profile-header__contact-value">{companyDisplay}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="record-details-grid">
+            {detailsFields.map((field) => {
+              const rawValue = record[field.key] || "";
+              if (!rawValue && field.type !== "checkbox") {
+                return null;
+              }
+
+              const displayValue = formatFieldValue(field.key, field.type, rawValue);
+              return (
+                <div key={field.key} className="record-details-grid__item">
+                  <span className="record-details-grid__label">{field.label}</span>
+                  <strong className="record-details-grid__value">{displayValue || "-"}</strong>
+                </div>
+              );
+            })}
+          </section>
         </div>
 
-        {isLoadingGhlBasicNote ? <p className="react-user-footnote">Searching client in GoHighLevel...</p> : null}
-        {!isLoadingGhlBasicNote && ghlBasicNoteError ? (
-          <p className="record-details-ghl-note__error">{ghlBasicNoteError}</p>
-        ) : null}
-        {!isLoadingGhlBasicNote && !ghlBasicNoteError && (!ghlBasicNote || ghlBasicNote.status !== "found") ? (
-          <p className="react-user-footnote">Basic info was not found for this client in GoHighLevel notes.</p>
-        ) : null}
-        {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.status === "found" ? (
-          <>
-            <pre className="record-details-ghl-note__body">{ghlBasicNote.noteBody}</pre>
-            {ghlBasicNote.noteCreatedAt ? (
-              <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.noteCreatedAt)}</p>
-            ) : null}
-          </>
-        ) : null}
-      </section>
+        <aside className="record-details-layout__sidebar">
+          <section className="record-details-ghl-note" aria-live="polite">
+            <div className="record-details-ghl-note__header">
+              <h4 className="record-details-ghl-note__title">Basic Info</h4>
+              {ghlBasicNote?.contactName ? (
+                <p className="react-user-footnote">
+                  Contact: {ghlBasicNote.contactName}
+                  {ghlBasicNote.contactId ? ` (${ghlBasicNote.contactId})` : ""}
+                </p>
+              ) : null}
+            </div>
 
-      <section className="record-details-ghl-note" aria-live="polite">
-        <div className="record-details-ghl-note__header">
-          <h4 className="record-details-ghl-note__title">MEMO</h4>
-        </div>
-
-        {isLoadingGhlBasicNote ? <p className="react-user-footnote">Loading memo...</p> : null}
-        {!isLoadingGhlBasicNote && ghlBasicNoteError ? (
-          <p className="record-details-ghl-note__error">{ghlBasicNoteError}</p>
-        ) : null}
-        {!isLoadingGhlBasicNote && !ghlBasicNoteError && !ghlBasicNote?.memoBody ? (
-          <p className="react-user-footnote">Memo not found in GoHighLevel notes for this client.</p>
-        ) : null}
-        {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.memoBody ? (
-          <>
-            <pre className="record-details-ghl-note__body">{ghlBasicNote.memoBody}</pre>
-            {ghlBasicNote.memoCreatedAt ? (
-              <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.memoCreatedAt)}</p>
+            {isLoadingGhlBasicNote ? <p className="react-user-footnote">Searching client in GoHighLevel...</p> : null}
+            {!isLoadingGhlBasicNote && ghlBasicNoteError ? (
+              <p className="record-details-ghl-note__error">{ghlBasicNoteError}</p>
             ) : null}
-          </>
-        ) : null}
-      </section>
+            {!isLoadingGhlBasicNote && !ghlBasicNoteError && (!ghlBasicNote || ghlBasicNote.status !== "found") ? (
+              <p className="react-user-footnote">Basic info was not found for this client in GoHighLevel notes.</p>
+            ) : null}
+            {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.status === "found" ? (
+              <>
+                <pre className="record-details-ghl-note__body">{ghlBasicNote.noteBody}</pre>
+                {ghlBasicNote.noteCreatedAt ? (
+                  <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.noteCreatedAt)}</p>
+                ) : null}
+              </>
+            ) : null}
+          </section>
+
+          <section className="record-details-ghl-note" aria-live="polite">
+            <div className="record-details-ghl-note__header">
+              <h4 className="record-details-ghl-note__title">Memo</h4>
+            </div>
+
+            {isLoadingGhlBasicNote ? <p className="react-user-footnote">Loading memo...</p> : null}
+            {!isLoadingGhlBasicNote && ghlBasicNoteError ? (
+              <p className="record-details-ghl-note__error">{ghlBasicNoteError}</p>
+            ) : null}
+            {!isLoadingGhlBasicNote && !ghlBasicNoteError && !ghlBasicNote?.memoBody ? (
+              <p className="react-user-footnote">Memo not found in GoHighLevel notes for this client.</p>
+            ) : null}
+            {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.memoBody ? (
+              <>
+                <pre className="record-details-ghl-note__body">{ghlBasicNote.memoBody}</pre>
+                {ghlBasicNote.memoCreatedAt ? (
+                  <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.memoCreatedAt)}</p>
+                ) : null}
+              </>
+            ) : null}
+          </section>
+        </aside>
+      </div>
     </div>
   );
 }

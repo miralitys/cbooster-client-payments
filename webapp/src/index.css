@@ -1243,6 +1243,19 @@ a {
   gap: var(--space-3);
 }
 
+.record-details-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(340px, 0.95fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.record-details-layout__main,
+.record-details-layout__sidebar {
+  display: grid;
+  gap: var(--space-3);
+}
+
 .record-profile-header {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -2340,6 +2353,7 @@ a {
 
   .record-details-grid,
   .record-editor-form,
+  .record-details-layout,
   .record-profile-header__contact-row {
     grid-template-columns: 1fr;
   }
