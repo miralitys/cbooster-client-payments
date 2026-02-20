@@ -9,18 +9,24 @@ interface GetQuickBooksPaymentsOptions {
 }
 
 export async function getQuickBooksPayments(options: GetQuickBooksPaymentsOptions): Promise<QuickBooksPaymentsPayload> {
+  const shouldSync = options.sync === true || options.fullSync === true;
+  if (shouldSync) {
+    return apiRequest<QuickBooksPaymentsPayload>("/api/quickbooks/payments/recent/sync", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: options.from,
+        to: options.to,
+        fullSync: options.fullSync === true,
+      }),
+    });
+  }
+
   const query = new URLSearchParams({
     from: options.from,
     to: options.to,
   });
-
-  if (options.sync) {
-    query.set("sync", "1");
-  }
-
-  if (options.fullSync) {
-    query.set("fullSync", "1");
-  }
-
   return apiRequest<QuickBooksPaymentsPayload>(`/api/quickbooks/payments/recent?${query.toString()}`);
 }

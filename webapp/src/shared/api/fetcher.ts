@@ -16,6 +16,8 @@ interface RequestOptions extends RequestInit {
 }
 
 const DEFAULT_TIMEOUT_MS = 25_000;
+const WEB_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
+const WEB_CSRF_HEADER_NAME = "X-CSRF-Token";
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const {
@@ -35,11 +37,15 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const detachExternalAbort = bindExternalAbortSignal(externalSignal, abortController);
 
   try {
+    const requestMethod = String(rest.method || "GET").toUpperCase();
+    const csrfToken = shouldAttachCsrfToken(requestMethod) ? readWebCsrfTokenFromCookie() : "";
+
     response = await fetch(path, {
       credentials: "same-origin",
       signal: abortController.signal,
       headers: {
         Accept: "application/json",
+        ...(csrfToken ? { [WEB_CSRF_HEADER_NAME]: csrfToken } : {}),
         ...headers,
       },
       ...rest,
@@ -164,4 +170,41 @@ function abortReasonMatchesTimeout(error: unknown): boolean {
   }
 
   return (error as { reason?: unknown })?.reason === "timeout";
+}
+
+function shouldAttachCsrfToken(method: string): boolean {
+  return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+}
+
+function readWebCsrfTokenFromCookie(): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+
+  const rawCookie = String(document.cookie || "");
+  if (!rawCookie) {
+    return "";
+  }
+
+  const chunks = rawCookie.split(";");
+  for (const chunk of chunks) {
+    const [rawKey, ...rawValueParts] = chunk.split("=");
+    const key = (rawKey || "").trim();
+    if (key !== WEB_CSRF_COOKIE_NAME) {
+      continue;
+    }
+
+    const rawValue = rawValueParts.join("=").trim();
+    if (!rawValue) {
+      return "";
+    }
+
+    try {
+      return decodeURIComponent(rawValue);
+    } catch {
+      return rawValue;
+    }
+  }
+
+  return "";
 }

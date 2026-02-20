@@ -31,6 +31,8 @@ const WEB_AUTH_OWNER_USERNAME =
   normalizeWebAuthUsername(DEFAULT_WEB_AUTH_OWNER_USERNAME);
 const WEB_AUTH_USERS_JSON = (process.env.WEB_AUTH_USERS_JSON || "").toString().trim();
 const WEB_AUTH_SESSION_COOKIE_NAME = "cbooster_auth_session";
+const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
+const WEB_AUTH_CSRF_HEADER_NAME = "x-csrf-token";
 const WEB_AUTH_MOBILE_SESSION_HEADER = "x-cbooster-session";
 const WEB_AUTH_SESSION_TTL_SEC = parsePositiveInteger(process.env.WEB_AUTH_SESSION_TTL_SEC, 12 * 60 * 60);
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
@@ -1396,10 +1398,24 @@ function isSecureCookieRequired(req) {
   return false;
 }
 
-function setWebAuthSessionCookie(req, res, username, sessionToken = "") {
-  const token = sanitizeTextValue(sessionToken, 1200) || createWebAuthSessionToken(username);
-  res.cookie(WEB_AUTH_SESSION_COOKIE_NAME, token, {
-    httpOnly: true,
+function createWebAuthCsrfToken(username, sessionToken) {
+  const normalizedUsername = normalizeWebAuthUsername(username);
+  const normalizedSessionToken = sanitizeTextValue(sessionToken, 1200);
+  if (!normalizedUsername || !normalizedSessionToken) {
+    return "";
+  }
+
+  return signWebAuthPayload(`csrf:${normalizedUsername}:${normalizedSessionToken}`);
+}
+
+function setWebAuthCsrfCookie(req, res, csrfToken) {
+  const normalizedCsrfToken = sanitizeTextValue(csrfToken, 220);
+  if (!normalizedCsrfToken) {
+    return;
+  }
+
+  res.cookie(WEB_AUTH_CSRF_COOKIE_NAME, normalizedCsrfToken, {
+    httpOnly: false,
     sameSite: "lax",
     secure: isSecureCookieRequired(req),
     maxAge: WEB_AUTH_SESSION_TTL_SEC * 1000,
@@ -1407,9 +1423,28 @@ function setWebAuthSessionCookie(req, res, username, sessionToken = "") {
   });
 }
 
+function setWebAuthSessionCookie(req, res, username, sessionToken = "") {
+  const token = sanitizeTextValue(sessionToken, 1200) || createWebAuthSessionToken(username);
+  const csrfToken = createWebAuthCsrfToken(username, token);
+  res.cookie(WEB_AUTH_SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isSecureCookieRequired(req),
+    maxAge: WEB_AUTH_SESSION_TTL_SEC * 1000,
+    path: "/",
+  });
+  setWebAuthCsrfCookie(req, res, csrfToken);
+}
+
 function clearWebAuthSessionCookie(req, res) {
   res.clearCookie(WEB_AUTH_SESSION_COOKIE_NAME, {
     httpOnly: true,
+    sameSite: "lax",
+    secure: isSecureCookieRequired(req),
+    path: "/",
+  });
+  res.clearCookie(WEB_AUTH_CSRF_COOKIE_NAME, {
+    httpOnly: false,
     sameSite: "lax",
     secure: isSecureCookieRequired(req),
     path: "/",
@@ -1439,6 +1474,80 @@ function getRequestWebAuthUser(req) {
   }
 
   return "";
+}
+
+function isSafeHttpMethod(rawMethod) {
+  const method = sanitizeTextValue(rawMethod, 20).toUpperCase();
+  return method === "GET" || method === "HEAD" || method === "OPTIONS";
+}
+
+function resolveRequestCsrfToken(req) {
+  const headerToken = sanitizeTextValue(req?.headers?.[WEB_AUTH_CSRF_HEADER_NAME], 220);
+  if (headerToken) {
+    return headerToken;
+  }
+  return sanitizeTextValue(req?.body?._csrf, 220);
+}
+
+function requireWebApiCsrf(req, res, next) {
+  if (isSafeHttpMethod(req.method)) {
+    next();
+    return;
+  }
+
+  const pathname = sanitizeTextValue(req.path, 260);
+  if (!pathname.startsWith("/api/")) {
+    next();
+    return;
+  }
+
+  if (pathname.startsWith("/api/mini/") || pathname.startsWith("/api/mobile/")) {
+    next();
+    return;
+  }
+
+  if (pathname === "/api/auth/login") {
+    next();
+    return;
+  }
+
+  const cookieSessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+  if (!cookieSessionToken) {
+    next();
+    return;
+  }
+
+  const cookieSessionUsername = parseWebAuthSessionToken(cookieSessionToken);
+  const normalizedRequestUsername = normalizeWebAuthUsername(req.webAuthUser);
+  if (!cookieSessionUsername || (normalizedRequestUsername && cookieSessionUsername !== normalizedRequestUsername)) {
+    res.status(403).json({
+      error: "Invalid CSRF session context.",
+      code: "csrf_invalid_session",
+    });
+    return;
+  }
+
+  const expectedCsrfToken = createWebAuthCsrfToken(cookieSessionUsername, cookieSessionToken);
+  const csrfCookieToken = sanitizeTextValue(getRequestCookie(req, WEB_AUTH_CSRF_COOKIE_NAME), 220);
+  const providedCsrfToken = resolveRequestCsrfToken(req);
+
+  if (!expectedCsrfToken || !providedCsrfToken || !safeEqual(providedCsrfToken, expectedCsrfToken)) {
+    res.status(403).json({
+      error: "CSRF token is missing or invalid.",
+      code: "csrf_invalid",
+    });
+    return;
+  }
+
+  if (csrfCookieToken && !safeEqual(csrfCookieToken, expectedCsrfToken)) {
+    res.status(403).json({
+      error: "CSRF token cookie is invalid.",
+      code: "csrf_invalid_cookie",
+    });
+    return;
+  }
+
+  next();
 }
 
 function resolveSafeNextPath(rawValue) {
@@ -7415,6 +7524,16 @@ function requireWebAuth(req, res, next) {
 
     req.webAuthUser = userProfile.username;
     req.webAuthProfile = userProfile;
+
+    const sessionCookieToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+    const sessionCookieUsername = parseWebAuthSessionToken(sessionCookieToken);
+    if (sessionCookieToken && sessionCookieUsername === userProfile.username) {
+      const expectedCsrfToken = createWebAuthCsrfToken(userProfile.username, sessionCookieToken);
+      const currentCsrfCookie = sanitizeTextValue(getRequestCookie(req, WEB_AUTH_CSRF_COOKIE_NAME), 220);
+      if (!currentCsrfCookie || !safeEqual(currentCsrfCookie, expectedCsrfToken)) {
+        setWebAuthCsrfCookie(req, res, expectedCsrfToken);
+      }
+    }
 
     if (isWebAuthPasswordChangeRequired(userProfile) && !isWebAuthPasswordChangeAllowedPath(pathname)) {
       const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
@@ -14071,6 +14190,7 @@ app.get("/logout", handleWebLogout);
 app.post("/logout", handleWebLogout);
 
 app.use(requireWebAuth);
+app.use(requireWebApiCsrf);
 if (webAppDistAvailable) {
   app.use("/app", express.static(webAppDistRoot, { index: false }));
 }
@@ -14321,20 +14441,33 @@ app.put("/api/auth/users/:username", requireWebPermission(WEB_AUTH_PERMISSION_MA
 });
 
 app.all("/api/quickbooks/*", (req, res, next) => {
-  if (req.method === "GET") {
+  const pathname = sanitizeTextValue(req.path, 260);
+  const isAllowedSyncPost =
+    req.method === "POST" &&
+    (pathname === "/api/quickbooks/payments/recent/sync" || pathname === "/payments/recent/sync");
+  if (req.method === "GET" || isAllowedSyncPost) {
     next();
     return;
   }
 
   res.status(405).json({
-    error: "QuickBooks integration is read-only. Write operations are disabled.",
+    error:
+      "QuickBooks integration is read-only toward QuickBooks. Use GET for reads and POST /api/quickbooks/payments/recent/sync for internal sync.",
   });
 });
 
-app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
-  const shouldTotalRefresh = parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
-  const shouldSync = parseQuickBooksSyncFlag(req.query.sync) || shouldTotalRefresh;
+function resolveQuickBooksDateRangeFromRequest(req, source = "query") {
+  const payload = source === "body" ? req.body : req.query;
+  return getQuickBooksDateRange(payload?.from, payload?.to);
+}
+
+async function respondQuickBooksRecentPayments(req, res, options = {}) {
+  const shouldSync = options.shouldSync === true;
+  const shouldTotalRefresh = options.shouldTotalRefresh === true;
+  const range = options.range;
+  const routeLabel = sanitizeTextValue(options.routeLabel, 120) || "api/quickbooks/payments/recent";
   const quickBooksRateProfile = shouldSync ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
+
   if (
     !enforceRateLimit(req, res, {
       scope: shouldSync ? "api.quickbooks.sync" : "api.quickbooks.read",
@@ -14358,16 +14491,6 @@ app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISS
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  let range;
-  try {
-    range = getQuickBooksDateRange(req.query.from, req.query.to);
-  } catch (error) {
-    res.status(error.httpStatus || 400).json({
-      error: sanitizeTextValue(error?.message, 300) || "Invalid date range.",
     });
     return;
   }
@@ -14414,11 +14537,61 @@ app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISS
       sync: syncMeta,
     });
   } catch (error) {
-    console.error("GET /api/quickbooks/payments/recent failed:", error);
+    console.error(`${routeLabel} failed:`, error);
     res.status(error.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 600) || "Failed to load QuickBooks payments.",
     });
   }
+}
+
+app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+  const syncRequestedOnGet =
+    parseQuickBooksSyncFlag(req.query.sync) ||
+    parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
+  if (syncRequestedOnGet) {
+    res.status(405).json({
+      error: "State-changing sync is not allowed via GET. Use POST /api/quickbooks/payments/recent/sync.",
+      code: "method_not_allowed_for_sync",
+    });
+    return;
+  }
+
+  let range;
+  try {
+    range = resolveQuickBooksDateRangeFromRequest(req, "query");
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 300) || "Invalid date range.",
+    });
+    return;
+  }
+
+  await respondQuickBooksRecentPayments(req, res, {
+    shouldSync: false,
+    shouldTotalRefresh: false,
+    range,
+    routeLabel: "GET /api/quickbooks/payments/recent",
+  });
+});
+
+app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+  const shouldTotalRefresh = parseQuickBooksTotalRefreshFlag(req.body?.fullSync || req.body?.totalRefresh);
+  let range;
+  try {
+    range = resolveQuickBooksDateRangeFromRequest(req, "body");
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 300) || "Invalid date range.",
+    });
+    return;
+  }
+
+  await respondQuickBooksRecentPayments(req, res, {
+    shouldSync: true,
+    shouldTotalRefresh,
+    range,
+    routeLabel: "POST /api/quickbooks/payments/recent/sync",
+  });
 });
 
 app.get("/api/health", async (_req, res) => {
@@ -14659,8 +14832,7 @@ app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLI
   }
 });
 
-app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
-  const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
+async function respondGhlClientManagers(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/client-managers") {
   const managerRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
     !enforceRateLimit(req, res, {
@@ -14751,11 +14923,30 @@ app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIE
       },
     });
   } catch (error) {
-    console.error("GET /api/ghl/client-managers failed:", error);
+    console.error(`${routeLabel} failed:`, error);
     res.status(error.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 500) || "Failed to load client-manager data from GHL.",
     });
   }
+}
+
+app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+  const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
+  if (refreshMode !== "none") {
+    res.status(405).json({
+      error: "State-changing refresh is not allowed via GET. Use POST /api/ghl/client-managers/refresh.",
+      code: "method_not_allowed_for_refresh",
+    });
+    return;
+  }
+
+  await respondGhlClientManagers(req, res, "none", "GET /api/ghl/client-managers");
+});
+
+app.post("/api/ghl/client-managers/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+  const refreshMode = normalizeGhlRefreshMode(req.body?.refresh || req.body?.mode || "incremental");
+  const resolvedRefreshMode = refreshMode === "none" ? "incremental" : refreshMode;
+  await respondGhlClientManagers(req, res, resolvedRefreshMode, "POST /api/ghl/client-managers/refresh");
 });
 
 app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
@@ -14955,6 +15146,30 @@ app.get(
   },
 );
 
+function resolveGhlBasicNoteInput(req, source = "query") {
+  const payload = source === "body" ? req.body : req.query;
+  return {
+    requestedClientName: sanitizeTextValue(payload?.clientName, 300),
+    writtenOffFlag: resolveOptionalBoolean(payload?.writtenOff),
+  };
+}
+
+async function resolveGhlBasicNoteContext(req, input) {
+  const state = await getStoredRecords();
+  const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
+  const clientName = resolveVisibleClientNameByRequest(input.requestedClientName, visibilityContext);
+  if (!clientName) {
+    throw createHttpError("Access denied. This client is outside your visible scope.", 403);
+  }
+
+  const isWrittenOffInRecords = resolveGhlBasicNoteWrittenOffStateFromRecords(clientName, visibilityContext.visibleRecords);
+  const isWrittenOff = input.writtenOffFlag === true || isWrittenOffInRecords;
+  return {
+    clientName,
+    isWrittenOff,
+  };
+}
+
 app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
@@ -14976,8 +15191,8 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
     return;
   }
 
-  const requestedClientName = sanitizeTextValue(req.query.clientName, 300);
-  if (!requestedClientName) {
+  const input = resolveGhlBasicNoteInput(req, "query");
+  if (!input.requestedClientName) {
     res.status(400).json({
       error: "Query parameter `clientName` is required.",
     });
@@ -14991,69 +15206,84 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
     return;
   }
 
-  let clientName = "";
   try {
-    const state = await getStoredRecords();
-    const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
-    clientName = resolveVisibleClientNameByRequest(requestedClientName, visibilityContext);
-    if (!clientName) {
-      res.status(403).json({
-        error: "Access denied. This client is outside your visible scope.",
-      });
-      return;
-    }
-
-    const writtenOffQueryFlag = resolveOptionalBoolean(req.query.writtenOff);
-    const isWrittenOffInRecords = resolveGhlBasicNoteWrittenOffStateFromRecords(clientName, visibilityContext.visibleRecords);
-    const isWrittenOff = writtenOffQueryFlag === true || isWrittenOffInRecords;
-
-    const cachedRow = await getCachedGhlBasicNoteByClientName(clientName);
-    const memoMissingInCache = !sanitizeTextValue(cachedRow?.memoBody, 12000);
-    const shouldRefresh = shouldRefreshGhlBasicNoteCache(cachedRow, isWrittenOff) || memoMissingInCache;
-
-    if (!shouldRefresh && cachedRow) {
-      res.json({
-        ok: true,
-        clientName,
-        ...buildGhlBasicNoteApiPayloadFromCacheRow(cachedRow, {
-          fromCache: true,
-        }),
-      });
-      return;
-    }
-
-    if (!isGhlConfigured()) {
-      if (cachedRow) {
-        res.json({
-          ok: true,
-          clientName,
-          ...buildGhlBasicNoteApiPayloadFromCacheRow(cachedRow, {
-            fromCache: true,
-            stale: true,
-            errorMessage: "GHL integration is not configured. Serving cached BASIC note.",
-          }),
-        });
-        return;
-      }
-
-      res.status(503).json({
-        error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
-      });
-      return;
-    }
-
-    const refreshedRow = await refreshAndCacheGhlBasicNoteByClientName(clientName, isWrittenOff);
-    const responseRow = refreshedRow || cachedRow || null;
+    const context = await resolveGhlBasicNoteContext(req, input);
+    const cachedRow = await getCachedGhlBasicNoteByClientName(context.clientName);
 
     res.json({
       ok: true,
-      clientName,
+      clientName: context.clientName,
+      ...buildGhlBasicNoteApiPayloadFromCacheRow(cachedRow, {
+        fromCache: true,
+      }),
+    });
+  } catch (error) {
+    console.error("GET /api/ghl/client-basic-note failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load GoHighLevel BASIC note from cache.",
+    });
+  }
+});
+
+app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.basic_note.refresh",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      message: "BASIC/MEMO refresh limit reached. Please wait before retrying.",
+      code: "ghl_basic_note_refresh_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const input = resolveGhlBasicNoteInput(req, "body");
+  if (!input.requestedClientName) {
+    res.status(400).json({
+      error: "Payload must include `clientName`.",
+    });
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  let clientName = "";
+  try {
+    const context = await resolveGhlBasicNoteContext(req, input);
+    clientName = context.clientName;
+    const refreshedRow = await refreshAndCacheGhlBasicNoteByClientName(context.clientName, context.isWrittenOff);
+    const responseRow = refreshedRow || (await getCachedGhlBasicNoteByClientName(context.clientName)) || null;
+
+    res.json({
+      ok: true,
+      clientName: context.clientName,
       ...buildGhlBasicNoteApiPayloadFromCacheRow(responseRow, {
         fromCache: false,
       }),
     });
   } catch (error) {
-    console.error("GET /api/ghl/client-basic-note failed:", error);
+    console.error("POST /api/ghl/client-basic-note/refresh failed:", error);
     try {
       if (clientName) {
         const cachedRow = await getCachedGhlBasicNoteByClientName(clientName);
@@ -15071,11 +15301,11 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
         }
       }
     } catch (cacheError) {
-      console.error("GET /api/ghl/client-basic-note cache fallback failed:", cacheError);
+      console.error("POST /api/ghl/client-basic-note/refresh cache fallback failed:", cacheError);
     }
 
     res.status(error.httpStatus || 502).json({
-      error: sanitizeTextValue(error?.message, 600) || "Failed to load GoHighLevel BASIC note.",
+      error: sanitizeTextValue(error?.message, 600) || "Failed to refresh GoHighLevel BASIC note.",
     });
   }
 });
