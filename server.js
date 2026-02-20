@@ -471,6 +471,7 @@ const GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS, 5 * 60 * 1000), 10 * 1000),
   60 * 60 * 1000,
 );
+const PAGINATION_V2_ENABLED = resolveOptionalBoolean(process.env.PAGINATION_V2) === true;
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
@@ -11739,6 +11740,163 @@ function resolveGhlLeadContactName(opportunity) {
   );
 }
 
+function resolveGhlLeadSource(opportunity) {
+  const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
+
+  return sanitizeTextValue(
+    opportunity?.leadSource ||
+      opportunity?.lead_source ||
+      opportunity?.source ||
+      opportunity?.sourceName ||
+      opportunity?.source_name ||
+      opportunity?.attributionSource ||
+      opportunity?.attribution_source ||
+      nestedContact?.leadSource ||
+      nestedContact?.lead_source ||
+      nestedContact?.source ||
+      nestedContact?.sourceName ||
+      nestedContact?.source_name,
+    240,
+  );
+}
+
+function resolveGhlLeadTypeFromSource(leadSource) {
+  const normalizedSource = sanitizeTextValue(leadSource, 240);
+  const lookup = normalizedSource.toLowerCase();
+
+  if (lookup.includes("tilda")) {
+    return "Website";
+  }
+
+  if (lookup.includes("call with alex")) {
+    return "Call with Alex";
+  }
+
+  return normalizedSource || "Other";
+}
+
+function resolveGhlLeadAssignedTo(opportunity) {
+  const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
+
+  const candidates = [
+    opportunity?.assignedToName,
+    opportunity?.assigned_to_name,
+    opportunity?.assignedUserName,
+    opportunity?.assigned_user_name,
+    opportunity?.ownerName,
+    opportunity?.owner_name,
+    opportunity?.assignedTo,
+    opportunity?.assigned_to,
+    opportunity?.owner,
+    opportunity?.user,
+    opportunity?.assignedUser,
+    nestedContact?.assignedToName,
+    nestedContact?.assigned_to_name,
+    nestedContact?.assignedUserName,
+    nestedContact?.assigned_user_name,
+    nestedContact?.ownerName,
+    nestedContact?.owner_name,
+    nestedContact?.assignedTo,
+    nestedContact?.assigned_to,
+    nestedContact?.owner,
+    nestedContact?.user,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        const primitiveItem =
+          typeof item === "string" || typeof item === "number"
+            ? item
+            : "";
+        const nestedValue = sanitizeTextValue(
+          item?.name || item?.fullName || item?.full_name || item?.email || item?.id || item?.userId || item?.user_id || primitiveItem,
+          200,
+        );
+        if (nestedValue) {
+          return nestedValue;
+        }
+      }
+      continue;
+    }
+
+    const primitiveCandidate =
+      typeof candidate === "string" || typeof candidate === "number"
+        ? candidate
+        : "";
+    const value = sanitizeTextValue(
+      candidate?.name || candidate?.fullName || candidate?.full_name || candidate?.email || candidate?.id || primitiveCandidate,
+      200,
+    );
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function resolveGhlLeadPhone(opportunity) {
+  const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
+  const candidates = [
+    opportunity?.phone,
+    opportunity?.phoneNumber,
+    opportunity?.phone_number,
+    opportunity?.contactPhone,
+    opportunity?.contact_phone,
+    opportunity?.mobile,
+    nestedContact?.phone,
+    nestedContact?.phoneNumber,
+    nestedContact?.phone_number,
+    nestedContact?.mobile,
+    nestedContact?.contactPhone,
+    nestedContact?.contact_phone,
+  ];
+
+  for (const candidate of candidates) {
+    const value = sanitizeTextValue(candidate, 80);
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function resolveGhlLeadEmail(opportunity) {
+  const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
+  const candidates = [
+    opportunity?.email,
+    opportunity?.emailAddress,
+    opportunity?.email_address,
+    opportunity?.contactEmail,
+    opportunity?.contact_email,
+    nestedContact?.email,
+    nestedContact?.emailAddress,
+    nestedContact?.email_address,
+    nestedContact?.contactEmail,
+    nestedContact?.contact_email,
+  ];
+
+  for (const candidate of candidates) {
+    const value = sanitizeTextValue(candidate, 320);
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function isMissedCallLeadName(rawValue) {
+  const value = sanitizeTextValue(rawValue, 400).toLowerCase();
+  if (!value) {
+    return false;
+  }
+
+  return value.startsWith("missed call |") || value.startsWith("missed call");
+}
+
 function normalizeGhlLeadStatus(rawValue) {
   const value = sanitizeTextValue(rawValue, 120);
   if (!value) {
@@ -11817,6 +11975,15 @@ function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", 
       rawOpportunity?.name,
     320,
   ) || contactName || leadId;
+  const leadSource = resolveGhlLeadSource(rawOpportunity);
+  const leadType = resolveGhlLeadTypeFromSource(leadSource);
+  const assignedTo = resolveGhlLeadAssignedTo(rawOpportunity);
+  const phone = resolveGhlLeadPhone(rawOpportunity);
+  const email = resolveGhlLeadEmail(rawOpportunity);
+
+  if (isMissedCallLeadName(opportunityName)) {
+    return null;
+  }
 
   const createdOnTimestamp = parseGhlOpportunityTimestamp(
     rawOpportunity?.createdAt,
@@ -11861,13 +12028,17 @@ function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", 
     contactId,
     contactName,
     opportunityName,
+    leadType,
     pipelineId,
     pipelineName,
     stageId,
     stageName,
     status,
+    assignedTo,
+    phone,
+    email,
     monetaryValue,
-    source: sanitizeTextValue(source, 140) || "gohighlevel",
+    source: leadSource,
     createdOn: new Date(createdOnTimestamp).toISOString(),
     createdOnTimestamp,
     ghlUpdatedAt: updatedTimestamp > 0 ? new Date(updatedTimestamp).toISOString() : "",
@@ -12280,13 +12451,17 @@ function normalizeGhlLeadRowForCache(row) {
     contactId: sanitizeTextValue(row?.contactId, 180),
     contactName: sanitizeTextValue(row?.contactName, 320),
     opportunityName: sanitizeTextValue(row?.opportunityName, 320),
+    leadType: sanitizeTextValue(row?.leadType, 120),
     pipelineId: sanitizeTextValue(row?.pipelineId, 180),
     pipelineName: sanitizeTextValue(row?.pipelineName, 320),
     stageId: sanitizeTextValue(row?.stageId, 180),
     stageName: sanitizeTextValue(row?.stageName, 320),
     status: normalizeGhlLeadStatus(row?.status),
+    assignedTo: sanitizeTextValue(row?.assignedTo, 200),
+    phone: sanitizeTextValue(row?.phone, 80),
+    email: sanitizeTextValue(row?.email, 320),
     monetaryValue,
-    source: sanitizeTextValue(row?.source, 140) || "gohighlevel",
+    source: sanitizeTextValue(row?.source, 240),
     createdOn: createdOnIso,
     ghlUpdatedAt: normalizeIsoTimestampOrNull(row?.ghlUpdatedAt),
   };
@@ -12309,13 +12484,17 @@ function mapGhlLeadCacheRow(row) {
     contactId: sanitizeTextValue(row?.contact_id, 180),
     contactName: sanitizeTextValue(row?.contact_name, 320),
     opportunityName: sanitizeTextValue(row?.opportunity_name, 320),
+    leadType: sanitizeTextValue(row?.lead_type, 120),
     pipelineId: sanitizeTextValue(row?.pipeline_id, 180),
     pipelineName: sanitizeTextValue(row?.pipeline_name, 320),
     stageId: sanitizeTextValue(row?.stage_id, 180),
     stageName: sanitizeTextValue(row?.stage_name, 320),
     status: normalizeGhlLeadStatus(row?.status),
+    assignedTo: sanitizeTextValue(row?.assigned_to, 200),
+    phone: sanitizeTextValue(row?.phone, 80),
+    email: sanitizeTextValue(row?.email, 320),
     monetaryValue: Number.isFinite(monetaryValue) ? monetaryValue : 0,
-    source: sanitizeTextValue(row?.source, 140) || "gohighlevel",
+    source: sanitizeTextValue(row?.source, 240),
     createdOn: row?.created_on ? new Date(row.created_on).toISOString() : "",
     createdOnTimestamp: row?.created_on ? new Date(row.created_on).getTime() : 0,
     ghlUpdatedAt: row?.ghl_updated_at ? new Date(row.ghl_updated_at).toISOString() : "",
@@ -12337,6 +12516,7 @@ async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE) {
         contact_id,
         contact_name,
         opportunity_name,
+        lead_type,
         pipeline_id,
         pipeline_name,
         stage_id,
@@ -12344,10 +12524,14 @@ async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE) {
         status,
         monetary_value,
         source,
+        assigned_to,
+        phone,
+        email,
         created_on,
         ghl_updated_at,
         updated_at
       FROM ${GHL_LEADS_CACHE_TABLE}
+      WHERE LOWER(COALESCE(opportunity_name, '')) NOT LIKE 'missed call%'
       ORDER BY created_on DESC, lead_id ASC
       LIMIT $1
     `,
@@ -12396,15 +12580,16 @@ async function upsertGhlLeadsCacheRows(rows) {
 
     for (let index = 0; index < batch.length; index += 1) {
       const row = batch[index];
-      const base = index * 13;
+      const base = index * 17;
       placeholders.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}::timestamptz, $${base + 13}::timestamptz)`,
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}::timestamptz, $${base + 17}::timestamptz)`,
       );
       values.push(
         row.leadId,
         row.contactId,
         row.contactName,
         row.opportunityName,
+        row.leadType,
         row.pipelineId,
         row.pipelineName,
         row.stageId,
@@ -12412,6 +12597,9 @@ async function upsertGhlLeadsCacheRows(rows) {
         row.status,
         row.monetaryValue,
         row.source,
+        row.assignedTo,
+        row.phone,
+        row.email,
         row.createdOn,
         row.ghlUpdatedAt || null,
       );
@@ -12424,6 +12612,7 @@ async function upsertGhlLeadsCacheRows(rows) {
           contact_id,
           contact_name,
           opportunity_name,
+          lead_type,
           pipeline_id,
           pipeline_name,
           stage_id,
@@ -12431,6 +12620,9 @@ async function upsertGhlLeadsCacheRows(rows) {
           status,
           monetary_value,
           source,
+          assigned_to,
+          phone,
+          email,
           created_on,
           ghl_updated_at
         )
@@ -12440,6 +12632,7 @@ async function upsertGhlLeadsCacheRows(rows) {
           contact_id = EXCLUDED.contact_id,
           contact_name = EXCLUDED.contact_name,
           opportunity_name = EXCLUDED.opportunity_name,
+          lead_type = EXCLUDED.lead_type,
           pipeline_id = EXCLUDED.pipeline_id,
           pipeline_name = EXCLUDED.pipeline_name,
           stage_id = EXCLUDED.stage_id,
@@ -12447,6 +12640,9 @@ async function upsertGhlLeadsCacheRows(rows) {
           status = EXCLUDED.status,
           monetary_value = EXCLUDED.monetary_value,
           source = EXCLUDED.source,
+          assigned_to = EXCLUDED.assigned_to,
+          phone = EXCLUDED.phone,
+          email = EXCLUDED.email,
           created_on = EXCLUDED.created_on,
           ghl_updated_at = EXCLUDED.ghl_updated_at,
           updated_at = NOW()
@@ -12457,6 +12653,17 @@ async function upsertGhlLeadsCacheRows(rows) {
   }
 
   return writtenCount;
+}
+
+async function deleteMissedCallGhlLeadsCacheRows() {
+  await ensureDatabaseReady();
+  const result = await pool.query(
+    `
+      DELETE FROM ${GHL_LEADS_CACHE_TABLE}
+      WHERE LOWER(COALESCE(opportunity_name, '')) LIKE 'missed call%'
+    `,
+  );
+  return result.rowCount || 0;
 }
 
 function getGhlLeadsClockParts(dateValue = new Date()) {
@@ -13749,6 +13956,7 @@ async function ensureDatabaseReady() {
           contact_id TEXT NOT NULL DEFAULT '',
           contact_name TEXT NOT NULL DEFAULT '',
           opportunity_name TEXT NOT NULL DEFAULT '',
+          lead_type TEXT NOT NULL DEFAULT '',
           pipeline_id TEXT NOT NULL DEFAULT '',
           pipeline_name TEXT NOT NULL DEFAULT '',
           stage_id TEXT NOT NULL DEFAULT '',
@@ -13756,10 +13964,33 @@ async function ensureDatabaseReady() {
           status TEXT NOT NULL DEFAULT '',
           monetary_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
           source TEXT NOT NULL DEFAULT 'gohighlevel',
+          assigned_to TEXT NOT NULL DEFAULT '',
+          phone TEXT NOT NULL DEFAULT '',
+          email TEXT NOT NULL DEFAULT '',
           created_on TIMESTAMPTZ NOT NULL,
           ghl_updated_at TIMESTAMPTZ,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS lead_type TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS assigned_to TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''
       `);
 
       await pool.query(`
@@ -14998,6 +15229,75 @@ function mapModerationRow(row) {
   };
 }
 
+function createModerationSubmissionsCursor(row) {
+  const id = sanitizeTextValue(row?.id, 180);
+  if (!id) {
+    return "";
+  }
+
+  const submittedAtIso = row?.submitted_at ? new Date(row.submitted_at).toISOString() : "";
+  if (!submittedAtIso) {
+    return "";
+  }
+
+  return encodeBase64Url(
+    JSON.stringify({
+      submittedAt: submittedAtIso,
+      id,
+    }),
+  );
+}
+
+function decodeModerationSubmissionsCursor(rawCursor) {
+  const cursor = sanitizeTextValue(rawCursor, 2400);
+  if (!cursor) {
+    return {
+      ok: true,
+      value: null,
+    };
+  }
+
+  let decodedCursor = "";
+  try {
+    decodedCursor = decodeBase64Url(cursor);
+  } catch {
+    decodedCursor = "";
+  }
+
+  if (!decodedCursor) {
+    return {
+      ok: false,
+      error: "Invalid moderation cursor.",
+    };
+  }
+
+  let payload = null;
+  try {
+    payload = JSON.parse(decodedCursor);
+  } catch {
+    payload = null;
+  }
+
+  const submittedAtRaw = sanitizeTextValue(payload?.submittedAt || payload?.submitted_at, 120);
+  const id = sanitizeTextValue(payload?.id, 180);
+  const submittedAtTimestamp = Date.parse(submittedAtRaw);
+
+  if (!submittedAtRaw || !id || !Number.isFinite(submittedAtTimestamp)) {
+    return {
+      ok: false,
+      error: "Invalid moderation cursor.",
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      submittedAtIso: new Date(submittedAtTimestamp).toISOString(),
+      id,
+    },
+  };
+}
+
 function normalizeModerationStatus(rawStatus, options = {}) {
   const { allowAll = false, fallback = "pending" } = options;
   const normalized = (rawStatus || "").toString().trim().toLowerCase();
@@ -15613,38 +15913,74 @@ async function listModerationSubmissions(options = {}) {
     };
   }
 
+  const paginationV2Enabled = options.paginationV2 === true;
   const limit = Math.min(
     Math.max(parsePositiveInteger(options.limit, DEFAULT_MODERATION_LIST_LIMIT), 1),
     500,
   );
+  const cursorResult = paginationV2Enabled
+    ? decodeModerationSubmissionsCursor(options.cursor)
+    : { ok: true, value: null };
+  if (!cursorResult.ok) {
+    return {
+      error: cursorResult.error || "Invalid moderation cursor.",
+      items: [],
+      status: null,
+    };
+  }
 
-  let result;
-  if (status === "all") {
-    result = await pool.query(
-      `
-        SELECT id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
-        FROM ${MODERATION_TABLE}
-        ORDER BY submitted_at DESC
-        LIMIT $1
-      `,
-      [limit],
-    );
-  } else {
-    result = await pool.query(
-      `
-        SELECT id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
-        FROM ${MODERATION_TABLE}
-        WHERE status = $1
-        ORDER BY submitted_at DESC
-        LIMIT $2
-      `,
-      [status, limit],
+  const whereClauses = [];
+  const queryParams = [];
+  if (status !== "all") {
+    queryParams.push(status);
+    whereClauses.push(`status = $${queryParams.length}`);
+  }
+
+  if (cursorResult.value) {
+    queryParams.push(cursorResult.value.submittedAtIso);
+    const submittedAtParamIndex = queryParams.length;
+    queryParams.push(cursorResult.value.id);
+    const idParamIndex = queryParams.length;
+    whereClauses.push(
+      `(submitted_at < $${submittedAtParamIndex} OR (submitted_at = $${submittedAtParamIndex} AND id < $${idParamIndex}))`,
     );
   }
 
+  const effectiveLimit = paginationV2Enabled ? limit + 1 : limit;
+  queryParams.push(effectiveLimit);
+  const limitParamIndex = queryParams.length;
+
+  const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
+  const result = await pool.query(
+    `
+      SELECT id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+      FROM ${MODERATION_TABLE}
+      ${whereSql}
+      ORDER BY submitted_at DESC, id DESC
+      LIMIT $${limitParamIndex}
+    `,
+    queryParams,
+  );
+
+  if (!paginationV2Enabled) {
+    return {
+      status,
+      items: result.rows.map(mapModerationRow),
+    };
+  }
+
+  const hasMore = result.rows.length > limit;
+  const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows;
+  const nextCursor =
+    hasMore && pageRows.length
+      ? createModerationSubmissionsCursor(pageRows[pageRows.length - 1])
+      : null;
+
   return {
     status,
-    items: result.rows.map(mapModerationRow),
+    items: pageRows.map(mapModerationRow),
+    hasMore,
+    nextCursor: nextCursor || null,
   };
 }
 
@@ -17017,6 +17353,14 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
       }
     }
 
+    try {
+      await deleteMissedCallGhlLeadsCacheRows();
+    } catch (cleanupError) {
+      console.warn(
+        `[ghl leads] missed-call cleanup skipped: ${sanitizeTextValue(cleanupError?.message, 320) || "unknown error"}`,
+      );
+    }
+
     const items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE);
     const summary = buildGhlLeadsSummary(items);
 
@@ -17747,6 +18091,8 @@ app.get("/api/moderation/submissions", requireWebPermission(WEB_AUTH_PERMISSION_
     const result = await listModerationSubmissions({
       status: req.query.status,
       limit: req.query.limit,
+      cursor: req.query.cursor,
+      paginationV2: PAGINATION_V2_ENABLED,
     });
 
     if (result.error) {
@@ -17756,10 +18102,17 @@ app.get("/api/moderation/submissions", requireWebPermission(WEB_AUTH_PERMISSION_
       return;
     }
 
-    res.json({
+    const responsePayload = {
       status: result.status,
       items: result.items,
-    });
+    };
+
+    if (PAGINATION_V2_ENABLED) {
+      responsePayload.hasMore = Boolean(result.hasMore);
+      responsePayload.nextCursor = result.nextCursor || null;
+    }
+
+    res.json(responsePayload);
   } catch (error) {
     console.error("GET /api/moderation/submissions failed:", error);
     res

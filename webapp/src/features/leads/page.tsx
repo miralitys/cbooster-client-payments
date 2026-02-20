@@ -131,10 +131,40 @@ export default function LeadsPage() {
         cell: (item) => item.opportunityName || "-",
       },
       {
+        key: "leadType",
+        label: "Lead Type",
+        align: "left",
+        cell: (item) => item.leadType || "-",
+      },
+      {
         key: "contactName",
         label: "Contact",
         align: "left",
         cell: (item) => item.contactName || "-",
+      },
+      {
+        key: "source",
+        label: "Source",
+        align: "left",
+        cell: (item) => item.source || "-",
+      },
+      {
+        key: "assignedTo",
+        label: "Assigned",
+        align: "left",
+        cell: (item) => item.assignedTo || "-",
+      },
+      {
+        key: "phone",
+        label: "Phone",
+        align: "left",
+        cell: (item) => item.phone || "-",
+      },
+      {
+        key: "email",
+        label: "Email",
+        align: "left",
+        cell: (item) => item.email || "-",
       },
       {
         key: "stageName",
@@ -466,7 +496,21 @@ function addDaysToCalendarDate(year: number, month: number, day: number, dayOffs
 }
 
 function exportLeadsToCsv(rows: GhlLeadRow[], filter: LeadsFilter): void {
-  const headers = ["Created On", "Lead", "Contact", "Stage", "Status", "Amount", "Pipeline", "Lead ID"];
+  const headers = [
+    "Created On",
+    "Lead",
+    "Lead Type",
+    "Contact",
+    "Source",
+    "Assigned",
+    "Phone",
+    "Email",
+    "Stage",
+    "Status",
+    "Amount",
+    "Pipeline",
+    "Lead ID",
+  ];
   const lines = [headers.map(escapeCsvValue).join(",")];
 
   for (const row of rows) {
@@ -474,7 +518,12 @@ function exportLeadsToCsv(rows: GhlLeadRow[], filter: LeadsFilter): void {
       [
         formatDateTime(row.createdOn),
         row.opportunityName || "",
+        row.leadType || "",
         row.contactName || "",
+        row.source || "",
+        row.assignedTo || "",
+        row.phone || "",
+        row.email || "",
         row.stageName || "",
         formatStatus(row.status),
         normalizeNumberForCsv(row.monetaryValue),
