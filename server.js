@@ -1800,7 +1800,6 @@ function buildWebAuthPermissionsForUser(userProfile) {
 
   permissions[WEB_AUTH_PERMISSION_VIEW_DASHBOARD] = true;
   permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS] = true;
-  permissions[WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL] = true;
 
   const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
   const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
@@ -14297,7 +14296,7 @@ app.get("/api/auth/session", (req, res) => {
   });
 });
 
-app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (req, res) => {
+app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (req, res) => {
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
   res.json({
     ok: true,
@@ -14307,7 +14306,7 @@ app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_
   });
 });
 
-app.get("/api/assistant/reviews", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), async (req, res) => {
+app.get("/api/assistant/reviews", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), async (req, res) => {
   if (!req.webAuthProfile?.isOwner) {
     res.status(403).json({
       error: "Access denied. Owner role is required.",
@@ -14341,7 +14340,7 @@ app.get("/api/assistant/reviews", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_
   }
 });
 
-app.put("/api/assistant/reviews/:id", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), async (req, res) => {
+app.put("/api/assistant/reviews/:id", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), async (req, res) => {
   if (!req.webAuthProfile?.isOwner) {
     res.status(403).json({
       error: "Access denied. Owner role is required.",
@@ -15697,7 +15696,7 @@ app.get("/dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), 
   res.redirect(302, "/app/dashboard");
 });
 
-app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
+app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
   res.redirect(302, "/app/access-control");
 });
 
@@ -15709,7 +15708,7 @@ app.get("/moderation", (_req, res) => {
   res.redirect(302, "/app/dashboard");
 });
 
-app.get("/user-registration", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
+app.get("/user-registration", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
   res.redirect(302, "/app/access-control");
 });
 
