@@ -5,6 +5,7 @@ const fs = require("fs");
 const express = require("express");
 const multer = require("multer");
 const { Pool } = require("pg");
+const { registerCustomDashboardModule } = require("./custom-dashboard-module");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
@@ -14463,6 +14464,16 @@ if (webAppDistAvailable) {
   app.use("/app", express.static(webAppDistRoot, { index: false }));
 }
 
+registerCustomDashboardModule({
+  app,
+  pool,
+  requireWebPermission,
+  hasWebAuthPermission,
+  listWebAuthUsers,
+  WEB_AUTH_PERMISSION_VIEW_DASHBOARD,
+  WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL,
+});
+
 app.get([...WEB_STATIC_ASSET_ALLOWLIST.keys()], sendWhitelistedWebStaticAsset);
 
 app.get("/first-password", (req, res) => {
@@ -15971,8 +15982,16 @@ app.get("/dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), 
   res.redirect(302, "/app/dashboard");
 });
 
+app.get("/custom-dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
+  res.redirect(302, "/app/custom-dashboard");
+});
+
 app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
   res.redirect(302, "/app/access-control");
+});
+
+app.get("/admin/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
+  res.redirect(302, "/app/custom-dashboard?tab=settings");
 });
 
 app.get("/client-score", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
