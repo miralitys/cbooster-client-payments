@@ -2,7 +2,10 @@ const path = require("path");
 
 function sanitizeAttachmentStorageSegment(rawValue, fallback = "file") {
   const value = (rawValue || "").toString().trim();
-  const normalized = value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+  const normalized = value
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/\.\.+/g, "_")
+    .replace(/^_+|_+$/g, "");
   return normalized || fallback;
 }
 
