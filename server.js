@@ -440,6 +440,16 @@ const ASSISTANT_REVIEW_DEFAULT_LIMIT = 60;
 const ASSISTANT_REVIEW_MAX_LIMIT = 200;
 const ASSISTANT_ZERO_TOLERANCE = 0.000001;
 const ASSISTANT_DAY_IN_MS = 24 * 60 * 60 * 1000;
+const ASSISTANT_SESSION_SCOPE_TTL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_SESSION_SCOPE_TTL_MS, 6 * 60 * 60 * 1000), 5 * 60 * 1000),
+  48 * 60 * 60 * 1000,
+);
+const ASSISTANT_DEFAULT_SESSION_ID = "default";
+const ASSISTANT_SESSION_SCOPE_MAX_ENTRIES = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_SESSION_SCOPE_MAX_ENTRIES, 3000), 100),
+  10000,
+);
+const ASSISTANT_SESSION_SCOPE_MAX_CLIENTS = 1200;
 const ASSISTANT_LLM_MAX_CONTEXT_RECORDS = 18;
 const ASSISTANT_LLM_MAX_NOTES_LENGTH = 220;
 const ASSISTANT_PAYMENT_FIELDS = ["payment1", "payment2", "payment3", "payment4", "payment5", "payment6", "payment7"];
@@ -684,6 +694,7 @@ let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
   items: [],
 };
+let assistantSessionScopeCache = new Map();
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
@@ -1632,6 +1643,194 @@ function normalizeAssistantComparableText(rawValue, maxLength = 220) {
     .replace(/[^\p{L}\p{N}\s@._-]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function normalizeAssistantSessionId(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 120).replace(/\s+/g, "");
+  if (!normalized) {
+    return "";
+  }
+  if (!/^[a-z0-9_.:-]{4,120}$/i.test(normalized)) {
+    return "";
+  }
+  return normalized.toLowerCase();
+}
+
+function normalizeAssistantDateRange(rawRange) {
+  if (!rawRange || typeof rawRange !== "object") {
+    return null;
+  }
+
+  const fromTimestamp = getAssistantUtcDayStartFromTimestamp(rawRange.fromTimestamp);
+  const toTimestamp = getAssistantUtcDayStartFromTimestamp(rawRange.toTimestamp);
+  if (fromTimestamp === null || toTimestamp === null) {
+    return null;
+  }
+
+  return {
+    fromTimestamp: Math.min(fromTimestamp, toTimestamp),
+    toTimestamp: Math.max(fromTimestamp, toTimestamp),
+    source: sanitizeTextValue(rawRange.source, 80) || "session_scope",
+  };
+}
+
+function normalizeAssistantScopeClientComparables(rawValues, maxItems = ASSISTANT_SESSION_SCOPE_MAX_CLIENTS) {
+  const limit = Math.max(1, Math.min(maxItems, ASSISTANT_SESSION_SCOPE_MAX_CLIENTS));
+  const items = [];
+  const seen = new Set();
+
+  for (const value of Array.isArray(rawValues) ? rawValues : []) {
+    if (items.length >= limit) {
+      break;
+    }
+
+    const comparable = normalizeAssistantComparableText(value, 220);
+    if (!comparable || seen.has(comparable)) {
+      continue;
+    }
+
+    seen.add(comparable);
+    items.push(comparable);
+  }
+
+  return items;
+}
+
+function normalizeAssistantScopePayload(rawScope) {
+  if (!rawScope || typeof rawScope !== "object") {
+    return null;
+  }
+
+  const clientComparables = normalizeAssistantScopeClientComparables(rawScope.clientComparables);
+  if (!clientComparables.length) {
+    return null;
+  }
+
+  return {
+    clientComparables,
+    range: normalizeAssistantDateRange(rawScope.range),
+  };
+}
+
+function buildAssistantScopeFromComparableList(rawComparables, range = null) {
+  const clientComparables = normalizeAssistantScopeClientComparables(rawComparables);
+  if (!clientComparables.length) {
+    return null;
+  }
+
+  return {
+    clientComparables,
+    range: normalizeAssistantDateRange(range),
+  };
+}
+
+function buildAssistantScopeFromRows(rows, range = null) {
+  const clientComparables = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row?.clientComparable) {
+      continue;
+    }
+    clientComparables.push(row.clientComparable);
+  }
+  return buildAssistantScopeFromComparableList(clientComparables, range);
+}
+
+function buildAssistantScopeFromEvents(events, range = null) {
+  const clientComparables = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    if (!event?.clientComparable) {
+      continue;
+    }
+    clientComparables.push(event.clientComparable);
+  }
+  return buildAssistantScopeFromComparableList(clientComparables, range);
+}
+
+function buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId) {
+  const username = normalizeAssistantComparableText(rawUsername, 160) || "unknown";
+  const sessionId = normalizeAssistantSessionId(rawSessionId) || ASSISTANT_DEFAULT_SESSION_ID;
+  return `${username}::${sessionId}`;
+}
+
+function pruneAssistantSessionScopeCache(nowMs = Date.now()) {
+  if (!(assistantSessionScopeCache instanceof Map) || assistantSessionScopeCache.size === 0) {
+    return;
+  }
+
+  for (const [cacheKey, entry] of assistantSessionScopeCache.entries()) {
+    const updatedAtMs = Number.isFinite(entry?.updatedAtMs) ? entry.updatedAtMs : 0;
+    if (!updatedAtMs || nowMs - updatedAtMs > ASSISTANT_SESSION_SCOPE_TTL_MS) {
+      assistantSessionScopeCache.delete(cacheKey);
+    }
+  }
+
+  if (assistantSessionScopeCache.size <= ASSISTANT_SESSION_SCOPE_MAX_ENTRIES) {
+    return;
+  }
+
+  const orderedKeys = [...assistantSessionScopeCache.entries()]
+    .sort((left, right) => {
+      const leftUpdatedAt = Number.isFinite(left?.[1]?.updatedAtMs) ? left[1].updatedAtMs : 0;
+      const rightUpdatedAt = Number.isFinite(right?.[1]?.updatedAtMs) ? right[1].updatedAtMs : 0;
+      return leftUpdatedAt - rightUpdatedAt;
+    })
+    .map((entry) => entry[0]);
+
+  const overflow = assistantSessionScopeCache.size - ASSISTANT_SESSION_SCOPE_MAX_ENTRIES;
+  for (let index = 0; index < overflow; index += 1) {
+    assistantSessionScopeCache.delete(orderedKeys[index]);
+  }
+}
+
+function getAssistantSessionScope(rawUsername, rawSessionId) {
+  pruneAssistantSessionScopeCache();
+  const cacheKey = buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId);
+  const cached = assistantSessionScopeCache.get(cacheKey);
+  if (!cached || typeof cached !== "object") {
+    return null;
+  }
+
+  const normalizedScope = normalizeAssistantScopePayload(cached.scope);
+  if (!normalizedScope) {
+    assistantSessionScopeCache.delete(cacheKey);
+    return null;
+  }
+
+  return normalizedScope;
+}
+
+function upsertAssistantSessionScope(rawUsername, rawSessionId, rawScope) {
+  const scope = normalizeAssistantScopePayload(rawScope);
+  if (!scope) {
+    return;
+  }
+
+  pruneAssistantSessionScopeCache();
+  const cacheKey = buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId);
+  assistantSessionScopeCache.set(cacheKey, {
+    updatedAtMs: Date.now(),
+    scope,
+  });
+}
+
+function clearAssistantSessionScope(rawUsername, rawSessionId) {
+  const cacheKey = buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId);
+  assistantSessionScopeCache.delete(cacheKey);
+}
+
+function hasAssistantScopeReferenceInMessage(normalizedMessage) {
+  if (!normalizedMessage) {
+    return false;
+  }
+
+  return (
+    /(?:\bthem\b|\btheir\b|\bthose\b|\bthese\b|\bthat list\b|\bprevious list\b|\bfrom that list\b|\bthey\b|\bshe\b|\bhe\b)/i.test(
+      normalizedMessage,
+    ) ||
+    /(этих\s+клиент|эти\s+клиент|этих|эти|по\s+ним|по\s+этим|из\s+них|из\s+этого\s+списк|по\s+предыдущ|они|она|он)/i.test(
+      normalizedMessage,
+    )
+  );
 }
 
 function tokenizeAssistantText(rawValue) {
@@ -3931,6 +4130,7 @@ function buildAssistantFirstPaymentEntriesFromEvents(paymentEvents) {
     if (!current || event.dateTimestamp < current.dateTimestamp) {
       firstPaymentByClient.set(event.clientComparable, {
         clientName: event.clientName,
+        clientComparable: event.clientComparable,
         managerName: event.managerName || "",
         dateTimestamp: event.dateTimestamp,
         amount: event.amount,
@@ -3939,6 +4139,165 @@ function buildAssistantFirstPaymentEntriesFromEvents(paymentEvents) {
   }
 
   return [...firstPaymentByClient.values()];
+}
+
+function buildAssistantScopedRowsByComparable(rows, rawClientComparables) {
+  const normalizedComparables = normalizeAssistantScopeClientComparables(rawClientComparables);
+  if (!normalizedComparables.length) {
+    return [];
+  }
+
+  const comparableSet = new Set(normalizedComparables);
+  const selectedByClient = new Map();
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row?.clientComparable || !comparableSet.has(row.clientComparable)) {
+      continue;
+    }
+
+    const current = selectedByClient.get(row.clientComparable);
+    const candidateCreatedAt = Number.isFinite(row.createdAt) ? row.createdAt : 0;
+    const currentCreatedAt = Number.isFinite(current?.createdAt) ? current.createdAt : 0;
+    if (!current || candidateCreatedAt >= currentCreatedAt) {
+      selectedByClient.set(row.clientComparable, row);
+    }
+  }
+
+  return [...selectedByClient.values()];
+}
+
+function filterAssistantPaymentEventsByComparable(paymentEvents, rawClientComparables, range = null) {
+  const normalizedComparables = normalizeAssistantScopeClientComparables(rawClientComparables);
+  if (!normalizedComparables.length) {
+    return [];
+  }
+
+  const comparableSet = new Set(normalizedComparables);
+  return (Array.isArray(paymentEvents) ? paymentEvents : [])
+    .filter((event) => event?.clientComparable && comparableSet.has(event.clientComparable))
+    .filter((event) => (range ? isAssistantTimestampInRange(event.dateTimestamp, range) : true));
+}
+
+function buildAssistantScopePaymentsSummaryReply(rows, scopedPaymentEvents, range, isRussian) {
+  const events = Array.isArray(scopedPaymentEvents) ? scopedPaymentEvents : [];
+  const rangeLabel = range
+    ? formatAssistantDateRangeLabel(range, isRussian)
+    : isRussian
+      ? "весь доступный период"
+      : "all available time";
+
+  if (!events.length) {
+    return isRussian
+      ? `По текущему контексту клиентов нет платежей за период ${rangeLabel}.`
+      : `No payments were found for the current client context in ${rangeLabel}.`;
+  }
+
+  let totalAmount = 0;
+  const clientsWithPayments = new Set();
+  for (const event of events) {
+    totalAmount += Number.isFinite(event?.amount) ? event.amount : 0;
+    if (event?.clientComparable) {
+      clientsWithPayments.add(event.clientComparable);
+    }
+  }
+
+  const lines = [
+    isRussian
+      ? `По текущему контексту клиентов за период ${rangeLabel}:`
+      : `For the current client context in ${rangeLabel}:`,
+    isRussian ? `Клиентов в контексте: ${rows.length}` : `Clients in context: ${rows.length}`,
+    isRussian ? `Платежей: ${events.length}` : `Payments: ${events.length}`,
+    isRussian
+      ? `Клиентов с платежами: ${clientsWithPayments.size}`
+      : `Clients with payments: ${clientsWithPayments.size}`,
+    isRussian ? `Общая сумма оплат: ${formatAssistantMoney(totalAmount)}` : `Total paid amount: ${formatAssistantMoney(totalAmount)}`,
+  ];
+
+  return lines.join("\n");
+}
+
+function buildAssistantClientsWithPaymentsInRangeEntries(paymentEvents, range) {
+  if (!range) {
+    return [];
+  }
+
+  const byClient = new Map();
+  for (const event of Array.isArray(paymentEvents) ? paymentEvents : []) {
+    if (!event?.clientComparable || !Number.isFinite(event?.dateTimestamp)) {
+      continue;
+    }
+    if (!isAssistantTimestampInRange(event.dateTimestamp, range)) {
+      continue;
+    }
+
+    const current = byClient.get(event.clientComparable) || {
+      clientName: event.clientName || "",
+      clientComparable: event.clientComparable,
+      managerName: event.managerName || "",
+      latestPaymentTimestamp: 0,
+      paymentCount: 0,
+      totalAmount: 0,
+    };
+    current.paymentCount += 1;
+    current.totalAmount += Number.isFinite(event.amount) ? event.amount : 0;
+    if (event.dateTimestamp > current.latestPaymentTimestamp) {
+      current.latestPaymentTimestamp = event.dateTimestamp;
+    }
+    byClient.set(event.clientComparable, current);
+  }
+
+  return [...byClient.values()].sort((left, right) => {
+    if (right.latestPaymentTimestamp !== left.latestPaymentTimestamp) {
+      return right.latestPaymentTimestamp - left.latestPaymentTimestamp;
+    }
+    if (right.totalAmount !== left.totalAmount) {
+      return right.totalAmount - left.totalAmount;
+    }
+    return left.clientName.localeCompare(right.clientName);
+  });
+}
+
+function buildAssistantClientsWithPaymentsInRangeReply(paymentEvents, range, isRussian, requestedLimit = 20) {
+  if (!range) {
+    return isRussian
+      ? "Уточните период, чтобы показать клиентов (например: за последние 7 дней)."
+      : "Please specify a period to list clients (for example: last 7 days).";
+  }
+
+  const limit = clampAssistantInteger(requestedLimit, 1, 50, 20);
+  const entries = buildAssistantClientsWithPaymentsInRangeEntries(paymentEvents, range);
+  const totalAmount = entries.reduce((sum, item) => sum + item.totalAmount, 0);
+  const totalPayments = entries.reduce((sum, item) => sum + item.paymentCount, 0);
+
+  if (!entries.length) {
+    return isRussian
+      ? `За период ${formatAssistantDateRangeLabel(range, true)} не найдено клиентов с платежами.`
+      : `No clients with payments were found in ${formatAssistantDateRangeLabel(range, false)}.`;
+  }
+
+  const lines = [
+    isRussian
+      ? `Клиенты с платежами за период ${formatAssistantDateRangeLabel(range, true)}: ${entries.length} (платежей: ${totalPayments}, сумма: ${formatAssistantMoney(
+          totalAmount,
+        )})`
+      : `Clients with payments in ${formatAssistantDateRangeLabel(range, false)}: ${entries.length} (payments: ${totalPayments}, amount: ${formatAssistantMoney(
+          totalAmount,
+        )})`,
+  ];
+
+  entries.slice(0, limit).forEach((entry, index) => {
+    lines.push(
+      `${index + 1}. ${entry.clientName} - ${isRussian ? "платежей" : "payments"} ${entry.paymentCount} - ${
+        isRussian ? "сумма" : "amount"
+      } ${formatAssistantMoney(entry.totalAmount)} - ${isRussian ? "последний платеж" : "latest payment"} ${formatAssistantDateTimestamp(
+        entry.latestPaymentTimestamp,
+      )} - ${isRussian ? "менеджер" : "manager"} ${resolveAssistantManagerLabel(entry.managerName, isRussian)}`,
+    );
+  });
+  if (entries.length > limit) {
+    lines.push(isRussian ? `И еще: ${entries.length - limit}` : `And ${entries.length - limit} more.`);
+  }
+  return lines.join("\n");
 }
 
 function buildAssistantFirstPaymentsInRangeReply(rows, paymentEvents, range, isRussian, requestedLimit = 10, byManager = false) {
@@ -4214,15 +4573,19 @@ function buildAssistantStoppedPayingAfterDateReply(rows, cutoffTimestamp, isRuss
   return lines.join("\n");
 }
 
-function buildAssistantReplyPayload(message, records, updatedAt) {
+function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = null) {
   const normalizedMessage = normalizeAssistantSearchText(message);
   const isRussian = /[а-яё]/i.test(normalizedMessage);
   const suggestions = getAssistantDefaultSuggestions(isRussian);
-  const respond = (reply, handledByRules = true) => ({
-    reply,
-    suggestions,
-    handledByRules,
-  });
+  const respond = (reply, handledByRules = true, scope = null) => {
+    const normalizedScope = normalizeAssistantScopePayload(scope);
+    return {
+      reply,
+      suggestions,
+      handledByRules,
+      scope: normalizedScope,
+    };
+  };
 
   if (!normalizedMessage) {
     return respond(isRussian ? "Напишите вопрос, и я проверю данные клиентов." : "Type a question, and I will check client data.");
@@ -4283,9 +4646,25 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
     /(paid.*(more|over|greater|больше|выше).*(contract|договор|контракт)|оплач.*(больше|выше).*(договор|контракт))/i.test(
       normalizedMessage,
     );
+  const wantsScopeReference = hasAssistantScopeReferenceInMessage(normalizedMessage);
+  const wantsContextReset = /(reset context|clear context|forget context|сбрось контекст|очисти контекст|забудь контекст)/i.test(
+    normalizedMessage,
+  );
 
   if (wantsHelp) {
     return respond(buildAssistantHelpReply(isRussian, visibleRecords.length));
+  }
+
+  if (wantsContextReset) {
+    return respond(
+      isRussian
+        ? "Контекст предыдущей выборки очищен. Задайте новый базовый запрос."
+        : "Previous selection context has been cleared. Ask a new base query.",
+      true,
+      {
+        clientComparables: [],
+      },
+    );
   }
 
   const analyzedRows = buildAssistantAnalyzedRows(visibleRecords);
@@ -4304,11 +4683,145 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
   const amountThreshold = extractAssistantAmountThreshold(message);
   const parsedDateRange = parseAssistantDateRangeFromMessage(message);
   const periodGranularity = resolveAssistantGranularity(message, parsedDateRange);
-  const needsPaymentEvents = wantsRevenue || wantsDebtDynamics || wantsFirstPayment || wantsNewClients;
+  const activeScope = normalizeAssistantScopePayload(sessionScope);
+  const needsPaymentEvents =
+    wantsRevenue ||
+    wantsDebtDynamics ||
+    wantsFirstPayment ||
+    wantsNewClients ||
+    wantsScopeReference ||
+    (wantsClientLookup && Boolean(parsedDateRange));
   const paymentEvents = needsPaymentEvents ? buildAssistantPaymentEvents(visibleRecords) : [];
+
+  if (wantsScopeReference) {
+    if (!activeScope || !activeScope.clientComparables.length) {
+      return respond(
+        isRussian
+          ? "Не вижу сохраненного контекста списка клиентов. Сначала сделайте базовый запрос (например: покажи клиентов за последнюю неделю)."
+          : "I cannot find a saved client-list context. First run a base query (for example: show clients for the last week).",
+      );
+    }
+
+    const scopedRows = buildAssistantScopedRowsByComparable(analyzedRows, activeScope.clientComparables);
+    if (!scopedRows.length) {
+      return respond(
+        isRussian
+          ? "Контекст найден, но клиенты из него сейчас не попали в ваш видимый срез данных."
+          : "Context was found, but those clients are not visible in your current data scope.",
+      );
+    }
+
+    const scopeRange = parsedDateRange || activeScope.range || null;
+    const scopedEventsInRange = filterAssistantPaymentEventsByComparable(paymentEvents, activeScope.clientComparables, scopeRange);
+    const scopedEventsAllTime = filterAssistantPaymentEventsByComparable(paymentEvents, activeScope.clientComparables);
+    const wantsPeriodBreakdown = /(by week|by month|by day|по недел|по месяц|по дням|динам|trend)/i.test(normalizedMessage);
+    const wantsPaymentSummary = wantsPaid || wantsRevenue || /(сумм|денег|money|amount|total paid|total amount|общая сумма)/i.test(normalizedMessage);
+
+    if (wantsNewClients || wantsFirstPayment) {
+      if (!scopeRange) {
+        return respond(
+          isRussian
+            ? "Для первого платежа по текущему контексту уточните период."
+            : "Please provide a date range for first-payment analytics in the current context.",
+        );
+      }
+
+      return respond(
+        buildAssistantFirstPaymentsInRangeReply(
+          scopedRows,
+          scopedEventsAllTime,
+          scopeRange,
+          isRussian,
+          topLimit,
+          wantsByManager || wantsManager,
+        ),
+        true,
+        buildAssistantScopeFromRows(scopedRows, scopeRange),
+      );
+    }
+
+    if (wantsPaymentSummary) {
+      if (wantsPeriodBreakdown) {
+        const rangeForRevenue =
+          scopeRange ||
+          buildAssistantDateRange(
+            getAssistantCurrentUtcDayStart() - 29 * ASSISTANT_DAY_IN_MS,
+            getAssistantCurrentUtcDayStart(),
+            "default_30_days",
+          );
+        return respond(
+          buildAssistantRevenueByPeriodReply(scopedEventsAllTime, rangeForRevenue, isRussian, periodGranularity, 40),
+          true,
+          buildAssistantScopeFromRows(scopedRows, rangeForRevenue),
+        );
+      }
+
+      return respond(
+        buildAssistantScopePaymentsSummaryReply(scopedRows, scopedEventsInRange, scopeRange, isRussian),
+        true,
+        buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
+      );
+    }
+
+    if (wantsCount && !wantsDebt && !wantsDebtorsWord) {
+      return respond(
+        isRussian
+          ? `Клиентов в текущем контексте: ${scopedRows.length}`
+          : `Clients in the current context: ${scopedRows.length}`,
+        true,
+        buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
+      );
+    }
+
+    if (wantsDebt || wantsDebtorsWord) {
+      const metricKey = wantsCount ? "debt_clients_count" : "total_to_collect";
+      return respond(
+        buildAssistantSingleMetricReply(scopedRows, metricKey, isRussian),
+        true,
+        buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
+      );
+    }
+
+    return respond(
+      isRussian
+        ? `Контекст найден: ${scopedRows.length} клиентов. Уточните метрику (сумма оплат, количество оплат, долг, первые платежи).`
+        : `Context found: ${scopedRows.length} clients. Specify metric (paid amount, payment count, debt, first payments).`,
+      true,
+      buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
+    );
+  }
 
   if (wantsCompare && wantsManager && primaryManager && secondaryManager) {
     return respond(buildAssistantManagerComparisonReply(analyzedRows, primaryManager, secondaryManager, isRussian));
+  }
+
+  const shouldListClientsByRange =
+    wantsClientLookup &&
+    parsedDateRange &&
+    !primaryManager &&
+    !primaryCompany &&
+    !wantsTop &&
+    !wantsSummary &&
+    !wantsDebt &&
+    !wantsOverdue &&
+    !wantsAnomaly &&
+    !wantsCallList &&
+    !wantsStoppedPaying &&
+    !wantsNewClients &&
+    !wantsFirstPayment &&
+    !wantsRevenue &&
+    !wantsDebtDynamics;
+
+  if (shouldListClientsByRange) {
+    const entries = buildAssistantClientsWithPaymentsInRangeEntries(paymentEvents, parsedDateRange);
+    return respond(
+      buildAssistantClientsWithPaymentsInRangeReply(paymentEvents, parsedDateRange, isRussian, Math.max(topLimit, 20)),
+      true,
+      buildAssistantScopeFromComparableList(
+        entries.map((entry) => entry.clientComparable),
+        parsedDateRange,
+      ),
+    );
   }
 
   if (wantsNewClients) {
@@ -4320,7 +4833,14 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
       );
     }
 
-    return respond(buildAssistantNewClientsInRangeReply(paymentEvents, parsedDateRange, isRussian, topLimit, wantsByManager || wantsManager));
+    const firstPaymentEntries = buildAssistantFirstPaymentEntriesFromEvents(paymentEvents).filter((entry) =>
+      isAssistantTimestampInRange(entry.dateTimestamp, parsedDateRange),
+    );
+    return respond(
+      buildAssistantNewClientsInRangeReply(paymentEvents, parsedDateRange, isRussian, topLimit, wantsByManager || wantsManager),
+      true,
+      wantsByManager || wantsManager ? null : buildAssistantScopeFromComparableList(firstPaymentEntries.map((entry) => entry.clientComparable), parsedDateRange),
+    );
   }
 
   if (wantsFirstPayment) {
@@ -4332,6 +4852,9 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
       );
     }
 
+    const firstPaymentEntries = buildAssistantFirstPaymentEntriesFromEvents(paymentEvents).filter((entry) =>
+      isAssistantTimestampInRange(entry.dateTimestamp, parsedDateRange),
+    );
     return respond(
       buildAssistantFirstPaymentsInRangeReply(
         analyzedRows,
@@ -4341,6 +4864,8 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
         topLimit,
         wantsByManager || wantsManager,
       ),
+      true,
+      wantsByManager || wantsManager ? null : buildAssistantScopeFromComparableList(firstPaymentEntries.map((entry) => entry.clientComparable), parsedDateRange),
     );
   }
 
@@ -4364,8 +4889,21 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
           : "Please provide a date for this query, for example: who stopped paying after 2025-10-01?",
       );
     }
+    const cutoffTimestamp = parsedDateRange.fromTimestamp;
+    const stoppedRows = [...analyzedRows]
+      .filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff)
+      .filter((row) => {
+        if (row.latestPaymentTimestamp === null) {
+          return Number.isFinite(row.createdAt) && row.createdAt > 0 && getAssistantUtcDayStartFromTimestamp(row.createdAt) <= cutoffTimestamp;
+        }
+        return row.latestPaymentTimestamp < cutoffTimestamp;
+      });
 
-    return respond(buildAssistantStoppedPayingAfterDateReply(analyzedRows, parsedDateRange.fromTimestamp, isRussian, topLimit));
+    return respond(
+      buildAssistantStoppedPayingAfterDateReply(analyzedRows, cutoffTimestamp, isRussian, topLimit),
+      true,
+      buildAssistantScopeFromRows(stoppedRows, parsedDateRange),
+    );
   }
 
   if (wantsAnomaly || wantsPaidGtContractHint || wantsNegativeHint || (wantsOverdue && wantsZeroBalance) || (wantsDebt && wantsNoOverdue)) {
@@ -4418,25 +4956,36 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
   }
 
   if (primaryManager) {
+    const managerScopedRows = analyzedRows.filter((row) => row.managerComparable === primaryManager.comparable);
     if (wantsManager && wantsSummary && !wantsTop) {
-      return respond(buildAssistantManagerOverviewReply(analyzedRows, primaryManager, isRussian));
+      return respond(
+        buildAssistantManagerOverviewReply(analyzedRows, primaryManager, isRussian),
+        true,
+        buildAssistantScopeFromRows(managerScopedRows),
+      );
     }
     if (wantsOverdue && wantsManager) {
+      const overdueRows = managerScopedRows.filter((row) => row.status.isOverdue);
       return respond(
         buildAssistantManagerClientsReply(analyzedRows, primaryManager, isRussian, {
           overdueOnly: true,
           debtOnly: false,
           limit: topLimit,
         }),
+        true,
+        buildAssistantScopeFromRows(overdueRows),
       );
     }
     if (wantsDebtorsWord || (wantsDebt && wantsManager && !wantsTop)) {
+      const debtRows = managerScopedRows.filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff);
       return respond(
         buildAssistantManagerClientsReply(analyzedRows, primaryManager, isRussian, {
           overdueOnly: false,
           debtOnly: true,
           limit: topLimit,
         }),
+        true,
+        buildAssistantScopeFromRows(debtRows),
       );
     }
     if (wantsClientLookup || wantsManager) {
@@ -4446,12 +4995,19 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
           debtOnly: false,
           limit: topLimit,
         }),
+        true,
+        buildAssistantScopeFromRows(managerScopedRows),
       );
     }
   }
 
   if (primaryCompany && (wantsCompany || wantsClientLookup)) {
-    return respond(buildAssistantCompanyClientsReply(analyzedRows, primaryCompany, isRussian, topLimit));
+    const companyRows = analyzedRows.filter((row) => row.companyComparable === primaryCompany.comparable);
+    return respond(
+      buildAssistantCompanyClientsReply(analyzedRows, primaryCompany, isRussian, topLimit),
+      true,
+      buildAssistantScopeFromRows(companyRows),
+    );
   }
 
   if (wantsManager && (wantsTop || wantsCount || wantsSummary || /кажд|each|per/.test(normalizedMessage))) {
@@ -4469,43 +5025,97 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
   }
 
   if (wantsTop && (wantsDebt || wantsDebtorsWord)) {
-    return respond(buildAssistantTopByMetricReply(analyzedRows, "debt", isRussian, topLimit));
+    const topRows = [...analyzedRows]
+      .filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff)
+      .sort((left, right) => right.balanceAmount - left.balanceAmount)
+      .slice(0, Math.max(1, topLimit));
+    return respond(buildAssistantTopByMetricReply(analyzedRows, "debt", isRussian, topLimit), true, buildAssistantScopeFromRows(topRows));
   }
   if (wantsTop && wantsContract) {
-    return respond(buildAssistantTopByMetricReply(analyzedRows, "contract", isRussian, topLimit));
+    const topRows = [...analyzedRows]
+      .filter((row) => row.contractAmount > ASSISTANT_ZERO_TOLERANCE)
+      .sort((left, right) => right.contractAmount - left.contractAmount)
+      .slice(0, Math.max(1, topLimit));
+    return respond(buildAssistantTopByMetricReply(analyzedRows, "contract", isRussian, topLimit), true, buildAssistantScopeFromRows(topRows));
   }
   if (wantsTop && wantsPaid) {
-    return respond(buildAssistantTopByMetricReply(analyzedRows, "paid", isRussian, topLimit));
+    const topRows = [...analyzedRows]
+      .filter((row) => row.paidAmount > ASSISTANT_ZERO_TOLERANCE)
+      .sort((left, right) => right.paidAmount - left.paidAmount)
+      .slice(0, Math.max(1, topLimit));
+    return respond(buildAssistantTopByMetricReply(analyzedRows, "paid", isRussian, topLimit), true, buildAssistantScopeFromRows(topRows));
   }
 
   if (wantsOverdue) {
     if (dayRange) {
-      return respond(buildAssistantOverdueRangeReply(analyzedRows, isRussian, dayRange.min, dayRange.max, topLimit));
+      const filteredRows = analyzedRows.filter((row) => {
+        if (!row.status.isOverdue) {
+          return false;
+        }
+        if (row.overdueDays < dayRange.min) {
+          return false;
+        }
+        return dayRange.max === null || row.overdueDays <= dayRange.max;
+      });
+      return respond(
+        buildAssistantOverdueRangeReply(analyzedRows, isRussian, dayRange.min, dayRange.max, topLimit),
+        true,
+        buildAssistantScopeFromRows(filteredRows),
+      );
     }
     if (comparator === "gt" || /(more than|over|больше|более|свыше)/i.test(normalizedMessage)) {
-      return respond(buildAssistantOverdueRangeReply(analyzedRows, isRussian, Math.max(1, dayThreshold + 1), null, topLimit));
+      const minDays = Math.max(1, dayThreshold + 1);
+      const filteredRows = analyzedRows.filter((row) => row.status.isOverdue && row.overdueDays >= minDays);
+      return respond(
+        buildAssistantOverdueRangeReply(analyzedRows, isRussian, minDays, null, topLimit),
+        true,
+        buildAssistantScopeFromRows(filteredRows),
+      );
     }
     if (comparator === "lt" || /(less than|under|меньше|менее|до)/i.test(normalizedMessage)) {
-      return respond(buildAssistantOverdueRangeReply(analyzedRows, isRussian, 1, Math.max(1, dayThreshold - 1), topLimit));
+      const maxDays = Math.max(1, dayThreshold - 1);
+      const filteredRows = analyzedRows.filter((row) => row.status.isOverdue && row.overdueDays >= 1 && row.overdueDays <= maxDays);
+      return respond(
+        buildAssistantOverdueRangeReply(analyzedRows, isRussian, 1, maxDays, topLimit),
+        true,
+        buildAssistantScopeFromRows(filteredRows),
+      );
     }
-    return respond(buildAssistantStatusReply(visibleRecords, "overdue", isRussian));
+    const overdueRows = analyzedRows.filter((row) => row.status.isOverdue);
+    return respond(buildAssistantStatusReply(visibleRecords, "overdue", isRussian), true, buildAssistantScopeFromRows(overdueRows));
   }
 
   if (wantsWrittenOff) {
-    return respond(buildAssistantStatusReply(visibleRecords, "written_off", isRussian));
+    const writtenOffRows = analyzedRows.filter((row) => row.status.isWrittenOff);
+    return respond(buildAssistantStatusReply(visibleRecords, "written_off", isRussian), true, buildAssistantScopeFromRows(writtenOffRows));
   }
 
   if (wantsNotFullyPaid) {
-    return respond(buildAssistantNotFullyPaidReply(analyzedRows, isRussian, topLimit));
+    const notFullyPaidRows = analyzedRows.filter((row) => !row.status.isFullyPaid && !row.status.isWrittenOff);
+    return respond(buildAssistantNotFullyPaidReply(analyzedRows, isRussian, topLimit), true, buildAssistantScopeFromRows(notFullyPaidRows));
   }
 
   if (wantsFullyPaid) {
-    return respond(buildAssistantStatusReply(visibleRecords, "fully_paid", isRussian));
+    const fullyPaidRows = analyzedRows.filter((row) => row.status.isFullyPaid);
+    return respond(buildAssistantStatusReply(visibleRecords, "fully_paid", isRussian), true, buildAssistantScopeFromRows(fullyPaidRows));
   }
 
   if (comparator && amountThreshold && (wantsDebt || wantsContract || wantsPaid)) {
     const metricKey = wantsContract ? "contract" : wantsPaid && !wantsDebt ? "paid" : "debt";
-    return respond(buildAssistantThresholdReply(analyzedRows, metricKey, comparator, amountThreshold, isRussian, topLimit));
+    const thresholdRows = analyzedRows.filter((row) => {
+      let value = row.balanceAmount;
+      if (metricKey === "contract") {
+        value = row.contractAmount;
+      } else if (metricKey === "paid") {
+        value = row.paidAmount;
+      }
+      return comparator === "gt" ? value >= amountThreshold : value <= amountThreshold;
+    });
+    return respond(
+      buildAssistantThresholdReply(analyzedRows, metricKey, comparator, amountThreshold, isRussian, topLimit),
+      true,
+      buildAssistantScopeFromRows(thresholdRows),
+    );
   }
 
   if (wantsPercent && wantsOverdue) {
@@ -4577,7 +5187,8 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
     );
     const selectedRecord = pickAssistantMostRecentRecord(sameClientRecords.length ? sameClientRecords : [bestMatch.record]);
     if (selectedRecord) {
-      return respond(buildAssistantClientDetailsReply(selectedRecord, isRussian));
+      const scopedRows = buildAssistantAnalyzedRows([selectedRecord]);
+      return respond(buildAssistantClientDetailsReply(selectedRecord, isRussian), true, buildAssistantScopeFromRows(scopedRows));
     }
   }
 
@@ -4904,6 +5515,31 @@ function buildAssistantClientMentions(replyText, records, limit = 20) {
   }
 
   return mentions;
+}
+
+function buildAssistantScopeFromClientMentions(clientMentions, records, range = null) {
+  const normalizedMentions = [];
+  for (const mention of Array.isArray(clientMentions) ? clientMentions : []) {
+    const comparable = normalizeAssistantComparableText(mention, 220);
+    if (comparable) {
+      normalizedMentions.push(comparable);
+    }
+  }
+  if (!normalizedMentions.length) {
+    return null;
+  }
+
+  const mentionSet = new Set(normalizedMentions);
+  const matchedComparables = [];
+  for (const record of Array.isArray(records) ? records : []) {
+    const comparable = normalizeAssistantComparableText(record?.clientName, 220);
+    if (!comparable || !mentionSet.has(comparable)) {
+      continue;
+    }
+    matchedComparables.push(comparable);
+  }
+
+  return buildAssistantScopeFromComparableList(matchedComparables, range);
 }
 
 async function requestOpenAiAssistantReply(message, mode, records, updatedAt) {
@@ -12592,6 +13228,15 @@ app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAY
   }
 });
 
+app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (req, res) => {
+  const sessionId = normalizeAssistantSessionId(req.body?.sessionId) || ASSISTANT_DEFAULT_SESSION_ID;
+  clearAssistantSessionScope(req.webAuthUser, sessionId);
+
+  res.json({
+    ok: true,
+  });
+});
+
 app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -12609,11 +13254,16 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
   }
 
   const mode = normalizeAssistantChatMode(req.body?.mode);
+  const sessionId = normalizeAssistantSessionId(req.body?.sessionId) || ASSISTANT_DEFAULT_SESSION_ID;
+  const shouldResetContext = /(reset context|clear context|forget context|сбрось контекст|очисти контекст|забудь контекст)/i.test(
+    normalizeAssistantSearchText(message),
+  );
 
   try {
     const state = await getStoredRecords();
     const filteredRecords = filterClientRecordsForWebAuthUser(state.records, req.webAuthProfile);
-    const fallbackPayload = buildAssistantReplyPayload(message, filteredRecords, state.updatedAt);
+    const sessionScope = shouldResetContext ? null : getAssistantSessionScope(req.webAuthUser, sessionId);
+    const fallbackPayload = buildAssistantReplyPayload(message, filteredRecords, state.updatedAt, sessionScope);
     let finalReply = normalizeAssistantReplyForDisplay(fallbackPayload.reply);
     let provider = "rules";
 
@@ -12633,6 +13283,21 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 
     const normalizedReply = normalizeAssistantReplyForDisplay(finalReply);
     const clientMentions = buildAssistantClientMentions(normalizedReply, filteredRecords, 24);
+    const parsedDateRange = parseAssistantDateRangeFromMessage(message);
+    const fallbackScope = normalizeAssistantScopePayload(fallbackPayload.scope);
+    const mentionScope = buildAssistantScopeFromClientMentions(
+      clientMentions,
+      filteredRecords,
+      parsedDateRange || fallbackScope?.range || sessionScope?.range || null,
+    );
+
+    if (shouldResetContext) {
+      clearAssistantSessionScope(req.webAuthUser, sessionId);
+    } else if (fallbackScope) {
+      upsertAssistantSessionScope(req.webAuthUser, sessionId, fallbackScope);
+    } else if (mentionScope) {
+      upsertAssistantSessionScope(req.webAuthUser, sessionId, mentionScope);
+    }
 
     try {
       await logAssistantReviewQuestion({
@@ -12651,7 +13316,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     }
 
     console.info(
-      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length}`,
+      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId}`,
     );
 
     res.json({
