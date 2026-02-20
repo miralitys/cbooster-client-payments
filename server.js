@@ -343,6 +343,10 @@ const GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY, 4), 1),
   12,
 );
+const GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT, 20), 1),
+  100,
+);
 const GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS, 5 * 60 * 1000), 10 * 1000),
   60 * 60 * 1000,
@@ -629,6 +633,7 @@ let quickBooksAutoSyncInFlightSlotKey = "";
 let quickBooksAutoSyncLastCompletedSlotKey = "";
 let ghlBasicNoteAutoRefreshIntervalId = null;
 let ghlBasicNoteAutoRefreshInFlight = false;
+let ghlBasicNoteManualRefreshState = createInitialGhlBasicNoteManualRefreshState();
 let quickBooksRuntimeRefreshToken = QUICKBOOKS_REFRESH_TOKEN;
 let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
@@ -1840,16 +1845,24 @@ function getAssistantDefaultSuggestions(isRussian) {
   if (isRussian) {
     return [
       "Сводка по клиентам",
-      "Покажи топ-5 должников",
-      "Сколько просроченных клиентов?",
+      "Покажи топ-10 должников",
+      "Рейтинг менеджеров по долгу",
+      "Клиенты с просрочкой больше 30 дней",
+      "Клиенты без менеджера",
+      "Аномалии: оплачено больше договора",
+      "Список для обзвона на сегодня",
       "Покажи клиента John Smith",
     ];
   }
 
   return [
     "Give me a client summary",
-    "Show top 5 debtors",
-    "How many overdue clients do we have?",
+    "Show top 10 debtors",
+    "Manager ranking by debt",
+    "Clients overdue more than 30 days",
+    "Clients without manager",
+    "Anomalies: paid is higher than contract",
+    "Today's call list",
     "Show client John Smith",
   ];
 }
@@ -1909,9 +1922,14 @@ function buildAssistantHelpReply(isRussian, visibleCount) {
       `Я работаю по внутренним данным (${visibleCount} клиентских записей по вашим правам).`,
       "Примеры вопросов:",
       "1) Сводка по клиентам",
-      "2) Топ-5 должников",
-      "3) Сколько просроченных?",
-      "4) Покажи клиента <имя>",
+      "2) Топ-10 должников",
+      "3) Клиенты с просрочкой больше 30 дней",
+      "4) Рейтинг менеджеров по долгу",
+      "5) Покажи клиентов менеджера <имя>",
+      "6) Покажи клиентов компании <название>",
+      "7) Аномалии: оплачено больше договора",
+      "8) Список для обзвона на сегодня",
+      "9) Покажи клиента <имя>",
     ].join("\n");
   }
 
@@ -1919,9 +1937,14 @@ function buildAssistantHelpReply(isRussian, visibleCount) {
     `I use internal project data (${visibleCount} client records visible for your role).`,
     "Try asking:",
     "1) Client summary",
-    "2) Top 5 debtors",
-    "3) How many overdue clients?",
-    "4) Show client <name>",
+    "2) Top 10 debtors",
+    "3) Clients overdue more than 30 days",
+    "4) Manager ranking by debt",
+    "5) Show clients of manager <name>",
+    "6) Show clients of company <name>",
+    "7) Anomalies: paid is higher than contract",
+    "8) Today's call list",
+    "9) Show client <name>",
   ].join("\n");
 }
 
@@ -8578,6 +8601,177 @@ function startQuickBooksAutoSyncScheduler() {
   return true;
 }
 
+function createInitialGhlBasicNoteManualRefreshState() {
+  return {
+    inFlight: false,
+    requestedBy: "",
+    startedAt: null,
+    finishedAt: null,
+    totalClients: 0,
+    processedClients: 0,
+    refreshedCount: 0,
+    failedCount: 0,
+    failedItems: [],
+    lastError: "",
+    runId: "",
+  };
+}
+
+function getGhlBasicNoteManualRefreshStateSnapshot() {
+  const state = ghlBasicNoteManualRefreshState || createInitialGhlBasicNoteManualRefreshState();
+  return {
+    inFlight: state.inFlight === true,
+    requestedBy: sanitizeTextValue(state.requestedBy, 200),
+    startedAt: sanitizeTextValue(state.startedAt, 80) || null,
+    finishedAt: sanitizeTextValue(state.finishedAt, 80) || null,
+    totalClients: Number.isFinite(state.totalClients) ? Math.max(Math.trunc(state.totalClients), 0) : 0,
+    processedClients: Number.isFinite(state.processedClients) ? Math.max(Math.trunc(state.processedClients), 0) : 0,
+    refreshedCount: Number.isFinite(state.refreshedCount) ? Math.max(Math.trunc(state.refreshedCount), 0) : 0,
+    failedCount: Number.isFinite(state.failedCount) ? Math.max(Math.trunc(state.failedCount), 0) : 0,
+    failedItems: Array.isArray(state.failedItems)
+      ? state.failedItems
+          .slice(0, GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT)
+          .map((item) => ({
+            clientName: sanitizeTextValue(item?.clientName, 300),
+            error: sanitizeTextValue(item?.error, 500),
+          }))
+          .filter((item) => item.clientName)
+      : [],
+    lastError: sanitizeTextValue(state.lastError, 500),
+    runId: sanitizeTextValue(state.runId, 120),
+  };
+}
+
+async function refreshGhlBasicNoteClientItems(clientItems, options = {}) {
+  const items = (Array.isArray(clientItems) ? clientItems : [])
+    .map((item) => ({
+      clientName: sanitizeTextValue(item?.clientName, 300),
+      isWrittenOff: item?.isWrittenOff === true,
+    }))
+    .filter((item) => item.clientName);
+
+  if (!items.length) {
+    return {
+      total: 0,
+      processed: 0,
+      refreshedCount: 0,
+      failedCount: 0,
+      failedItems: [],
+    };
+  }
+
+  const nowMs = Number.isFinite(options.nowMs) ? Number(options.nowMs) : Date.now();
+  const requestedConcurrency = parsePositiveInteger(options.concurrency, GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY);
+  const workerCount = Math.min(Math.max(requestedConcurrency, 1), items.length);
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const failedItems = [];
+  let cursor = 0;
+  let processed = 0;
+  let refreshedCount = 0;
+  let failedCount = 0;
+
+  async function worker() {
+    while (true) {
+      const currentIndex = cursor;
+      cursor += 1;
+      if (currentIndex >= items.length) {
+        return;
+      }
+
+      const item = items[currentIndex];
+      try {
+        await refreshAndCacheGhlBasicNoteByClientName(item.clientName, item.isWrittenOff, nowMs);
+        refreshedCount += 1;
+      } catch (error) {
+        failedCount += 1;
+        const errorMessage = sanitizeTextValue(error?.message, 500) || "Unknown error.";
+        if (failedItems.length < GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT) {
+          failedItems.push({
+            clientName: item.clientName,
+            error: errorMessage,
+          });
+        }
+        console.error(`[GHL BASIC Note Refresh] ${item.clientName}:`, errorMessage);
+      } finally {
+        processed += 1;
+        if (onProgress) {
+          onProgress({
+            total: items.length,
+            processed,
+            refreshedCount,
+            failedCount,
+            clientName: item.clientName,
+          });
+        }
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return {
+    total: items.length,
+    processed,
+    refreshedCount,
+    failedCount,
+    failedItems,
+  };
+}
+
+async function runGhlBasicNoteManualRefreshAll(requestedBy = "") {
+  if (ghlBasicNoteManualRefreshState.inFlight) {
+    return getGhlBasicNoteManualRefreshStateSnapshot();
+  }
+
+  const startedAt = new Date().toISOString();
+  const requestedByName = sanitizeTextValue(requestedBy, 160) || "unknown";
+  const runId = crypto.randomUUID();
+  ghlBasicNoteManualRefreshState = {
+    ...createInitialGhlBasicNoteManualRefreshState(),
+    inFlight: true,
+    requestedBy: requestedByName,
+    startedAt,
+    runId,
+  };
+
+  try {
+    const stored = await getStoredRecords();
+    const clientNames = getUniqueClientNamesFromRecords(stored.records);
+    const clientItems = clientNames.map((clientName) => ({
+      clientName,
+      isWrittenOff: resolveGhlBasicNoteWrittenOffStateFromRecords(clientName, stored.records),
+    }));
+
+    ghlBasicNoteManualRefreshState.totalClients = clientItems.length;
+    const result = await refreshGhlBasicNoteClientItems(clientItems, {
+      concurrency: GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY,
+      onProgress: (progress) => {
+        ghlBasicNoteManualRefreshState.processedClients = progress.processed;
+        ghlBasicNoteManualRefreshState.refreshedCount = progress.refreshedCount;
+        ghlBasicNoteManualRefreshState.failedCount = progress.failedCount;
+      },
+    });
+
+    ghlBasicNoteManualRefreshState.processedClients = result.processed;
+    ghlBasicNoteManualRefreshState.refreshedCount = result.refreshedCount;
+    ghlBasicNoteManualRefreshState.failedCount = result.failedCount;
+    ghlBasicNoteManualRefreshState.failedItems = result.failedItems;
+    ghlBasicNoteManualRefreshState.finishedAt = new Date().toISOString();
+    console.log(
+      `[GHL BASIC Note Manual Refresh] runId=${runId} requestedBy=${requestedByName} total=${result.total} refreshed=${result.refreshedCount} failed=${result.failedCount}.`,
+    );
+  } catch (error) {
+    ghlBasicNoteManualRefreshState.lastError =
+      sanitizeTextValue(error?.message, 500) || "Failed to refresh BASIC + MEMO notes.";
+    ghlBasicNoteManualRefreshState.finishedAt = new Date().toISOString();
+    console.error("[GHL BASIC Note Manual Refresh] failed:", error);
+  } finally {
+    ghlBasicNoteManualRefreshState.inFlight = false;
+  }
+
+  return getGhlBasicNoteManualRefreshStateSnapshot();
+}
+
 async function runGhlBasicNoteAutoRefreshTick() {
   if (!GHL_BASIC_NOTE_AUTO_REFRESH_ENABLED || !pool || !isGhlConfigured()) {
     return;
@@ -8621,32 +8815,12 @@ async function runGhlBasicNoteAutoRefreshTick() {
     }
 
     const batch = dueItems.slice(0, GHL_BASIC_NOTE_AUTO_REFRESH_MAX_CLIENTS_PER_TICK);
-    const workerCount = Math.min(GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY, batch.length);
-    let cursor = 0;
-    let refreshedCount = 0;
-    let failedCount = 0;
-
-    async function worker() {
-      while (cursor < batch.length) {
-        const currentIndex = cursor;
-        cursor += 1;
-        const item = batch[currentIndex];
-        try {
-          await refreshAndCacheGhlBasicNoteByClientName(item.clientName, item.isWrittenOff, nowMs);
-          refreshedCount += 1;
-        } catch (error) {
-          failedCount += 1;
-          console.error(
-            `[GHL BASIC Note Auto Refresh] ${item.clientName}:`,
-            sanitizeTextValue(error?.message, 500) || "Unknown error.",
-          );
-        }
-      }
-    }
-
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    const result = await refreshGhlBasicNoteClientItems(batch, {
+      nowMs,
+      concurrency: GHL_BASIC_NOTE_AUTO_REFRESH_CONCURRENCY,
+    });
     console.log(
-      `[GHL BASIC Note Auto Refresh] processed ${batch.length}/${dueItems.length} due clients: refreshed=${refreshedCount}, failed=${failedCount}.`,
+      `[GHL BASIC Note Auto Refresh] processed ${result.processed}/${dueItems.length} due clients: refreshed=${result.refreshedCount}, failed=${result.failedCount}.`,
     );
   } catch (error) {
     console.error("[GHL BASIC Note Auto Refresh] Tick failed:", error);
@@ -10389,6 +10563,53 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
     });
   }
 });
+
+app.get(
+  "/api/ghl/client-basic-notes/refresh-all",
+  requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
+  (_req, res) => {
+    res.json({
+      ok: true,
+      job: getGhlBasicNoteManualRefreshStateSnapshot(),
+    });
+  },
+);
+
+app.post(
+  "/api/ghl/client-basic-notes/refresh-all",
+  requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
+  async (req, res) => {
+    if (!pool) {
+      res.status(503).json({
+        error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+      });
+      return;
+    }
+
+    if (!isGhlConfigured()) {
+      res.status(503).json({
+        error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+      });
+      return;
+    }
+
+    if (ghlBasicNoteManualRefreshState.inFlight) {
+      res.status(409).json({
+        ok: false,
+        error: "Bulk BASIC/MEMO refresh is already in progress.",
+        job: getGhlBasicNoteManualRefreshStateSnapshot(),
+      });
+      return;
+    }
+
+    void runGhlBasicNoteManualRefreshAll(req.webAuthUser || "");
+    res.status(202).json({
+      ok: true,
+      started: true,
+      job: getGhlBasicNoteManualRefreshStateSnapshot(),
+    });
+  },
+);
 
 app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   const clientName = sanitizeTextValue(req.query.clientName, 300);
