@@ -11563,43 +11563,38 @@ function extractGhlPipelinesFromPayload(payload) {
 }
 
 async function listGhlOpportunityPipelines() {
-  const locationQuery = {
-    locationId: GHL_LOCATION_ID,
-    location_id: GHL_LOCATION_ID,
-  };
-
-  const attempts = [
-    () =>
-      requestGhlApi("/opportunities/pipelines", {
-        method: "GET",
-        query: locationQuery,
-        tolerateNotFound: true,
-      }),
-    () =>
-      requestGhlApi("/opportunities/pipelines/", {
-        method: "GET",
-        query: locationQuery,
-        tolerateNotFound: true,
-      }),
-    () =>
-      requestGhlApi("/pipelines", {
-        method: "GET",
-        query: locationQuery,
-        tolerateNotFound: true,
-      }),
-    () =>
-      requestGhlApi("/pipelines/", {
-        method: "GET",
-        query: locationQuery,
-        tolerateNotFound: true,
-      }),
+  const attempts = [];
+  const paths = ["/opportunities/pipelines", "/opportunities/pipelines/", "/pipelines", "/pipelines/"];
+  const queryVariants = [
+    {
+      locationId: GHL_LOCATION_ID,
+    },
+    {},
+    {
+      location_id: GHL_LOCATION_ID,
+    },
   ];
+
+  for (const pathname of paths) {
+    for (let index = 0; index < queryVariants.length; index += 1) {
+      const query = queryVariants[index];
+      attempts.push({
+        source: `${pathname}:query_variant_${index + 1}`,
+        request: () =>
+          requestGhlApi(pathname, {
+            method: "GET",
+            query,
+            tolerateNotFound: true,
+          }),
+      });
+    }
+  }
 
   let lastError = null;
   for (const attempt of attempts) {
     let response;
     try {
-      response = await attempt();
+      response = await attempt.request();
     } catch (error) {
       lastError = error;
       continue;
@@ -12036,43 +12031,54 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
   const safeLimit = Math.min(Math.max(parsePositiveIntegerOrZero(limit) || GHL_LEADS_PAGE_LIMIT, 10), 200);
   const pipelineId = sanitizeTextValue(pipelineContext?.pipelineId, 180);
 
-  const postBodyBase = {
-    locationId: GHL_LOCATION_ID,
-    location_id: GHL_LOCATION_ID,
-    page: safePage,
-    limit: safeLimit,
-  };
-  const postBodyWithPageLimit = {
-    locationId: GHL_LOCATION_ID,
-    location_id: GHL_LOCATION_ID,
-    page: safePage,
-    pageLimit: safeLimit,
-  };
-
-  const queryBase = {
-    locationId: GHL_LOCATION_ID,
-    location_id: GHL_LOCATION_ID,
-    page: safePage,
-    limit: safeLimit,
-  };
+  const locationVariants = [
+    {
+      location_id: GHL_LOCATION_ID,
+    },
+    {
+      locationId: GHL_LOCATION_ID,
+    },
+    {},
+  ];
 
   const postBodies = [];
   const getQueries = [];
 
-  if (pipelineId) {
-    postBodies.push(
-      { ...postBodyBase, pipelineId },
-      { ...postBodyWithPageLimit, pipelineId },
-      { ...postBodyBase, pipeline_id: pipelineId },
-      { ...postBodyWithPageLimit, pipeline_id: pipelineId },
-    );
-    getQueries.push(
-      { ...queryBase, pipelineId },
-      { ...queryBase, pipeline_id: pipelineId },
-    );
-  } else {
-    postBodies.push(postBodyBase, postBodyWithPageLimit);
-    getQueries.push(queryBase);
+  function pushUnique(target, candidate) {
+    const key = JSON.stringify(candidate);
+    if (!target.some((item) => JSON.stringify(item) === key)) {
+      target.push(candidate);
+    }
+  }
+
+  for (const locationPayload of locationVariants) {
+    const postCandidates = [
+      { ...locationPayload, page: safePage, limit: safeLimit },
+      { ...locationPayload, page: safePage, pageLimit: safeLimit },
+    ];
+    const queryCandidates = [{ ...locationPayload, page: safePage, limit: safeLimit }];
+
+    for (const baseCandidate of postCandidates) {
+      if (pipelineId) {
+        pushUnique(postBodies, { ...baseCandidate, pipelineId });
+        pushUnique(postBodies, { ...baseCandidate, pipeline_id: pipelineId });
+        pushUnique(postBodies, baseCandidate);
+        pushUnique(postBodies, { ...baseCandidate, pipelineId, pipeline_id: pipelineId });
+      } else {
+        pushUnique(postBodies, baseCandidate);
+      }
+    }
+
+    for (const baseCandidate of queryCandidates) {
+      if (pipelineId) {
+        pushUnique(getQueries, { ...baseCandidate, pipelineId });
+        pushUnique(getQueries, { ...baseCandidate, pipeline_id: pipelineId });
+        pushUnique(getQueries, baseCandidate);
+        pushUnique(getQueries, { ...baseCandidate, pipelineId, pipeline_id: pipelineId });
+      } else {
+        pushUnique(getQueries, baseCandidate);
+      }
+    }
   }
 
   const attempts = [];
