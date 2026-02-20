@@ -465,6 +465,10 @@ const GHL_LEADS_ENRICH_MAX_ROWS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LEADS_ENRICH_MAX_ROWS, 250), 0),
   1000,
 );
+const GHL_LEADS_READ_ENRICH_MAX_ROWS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_READ_ENRICH_MAX_ROWS, 120), 0),
+  1000,
+);
 const GHL_LEADS_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: GHL_LEADS_SYNC_TIME_ZONE,
   year: "numeric",
@@ -11934,6 +11938,27 @@ function sanitizeGhlLeadSourceForDisplay(rawValue) {
   return isTechnicalGhlLeadSource(value) ? "" : value;
 }
 
+function isSparseGhlLeadRow(row) {
+  if (!row || typeof row !== "object") {
+    return false;
+  }
+
+  const source = sanitizeTextValue(row?.source, 240);
+  if (source && isTechnicalGhlLeadSource(source)) {
+    return true;
+  }
+
+  return [
+    sanitizeTextValue(row?.pipelineName, 320),
+    sanitizeTextValue(row?.stageName, 320),
+    sanitizeTextValue(row?.assignedTo, 200),
+    sanitizeTextValue(row?.phone, 80),
+    sanitizeTextValue(row?.email, 320),
+    sanitizeTextValue(row?.source, 240),
+    sanitizeTextValue(row?.notes, 8000),
+  ].some((value) => !value);
+}
+
 function resolveGhlLeadTypeFromSource(leadSource) {
   const normalizedSource = sanitizeTextValue(leadSource, 240);
   const lookup = normalizedSource.toLowerCase();
@@ -18261,9 +18286,35 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
       );
     }
 
-    const items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE, {
+    let items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE, {
       todayOnly,
     });
+    if (isGhlConfigured() && items.length && GHL_LEADS_READ_ENRICH_MAX_ROWS > 0) {
+      const rowsNeedingEnrichment = items
+        .filter((row) => isSparseGhlLeadRow(row))
+        .slice(0, GHL_LEADS_READ_ENRICH_MAX_ROWS);
+
+      if (rowsNeedingEnrichment.length) {
+        try {
+          const enrichedRows = await enrichGhlLeadRows(rowsNeedingEnrichment, pipelineContext);
+          if (enrichedRows.length) {
+            await upsertGhlLeadsCacheRows(enrichedRows);
+            const enrichedById = new Map(enrichedRows.map((row) => [sanitizeTextValue(row?.leadId, 180), row]));
+            items = items.map((row) => {
+              const leadId = sanitizeTextValue(row?.leadId, 180);
+              if (!leadId || !enrichedById.has(leadId)) {
+                return row;
+              }
+              return mergeGhlLeadRows(row, enrichedById.get(leadId));
+            });
+          }
+        } catch (readEnrichError) {
+          console.warn(
+            `[ghl leads] read enrichment skipped: ${sanitizeTextValue(readEnrichError?.message, 300) || "unknown error"}`,
+          );
+        }
+      }
+    }
     const summary = buildGhlLeadsSummary(items);
 
     res.json({
