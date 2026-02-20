@@ -11331,6 +11331,23 @@ function normalizeGhlRefreshMode(rawRefreshMode) {
   return "none";
 }
 
+function parseBooleanFlag(rawValue, fallback = false) {
+  const normalized = sanitizeTextValue(rawValue, 20).toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+
+  return fallback;
+}
+
 function mapGhlClientManagerCacheRow(row) {
   const managers = Array.isArray(row?.managers)
     ? row.managers
@@ -12328,6 +12345,9 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
   const incrementalCutoffTimestamp = Number.isFinite(options?.incrementalCutoffTimestamp)
     ? Math.max(0, Math.trunc(options.incrementalCutoffTimestamp))
     : 0;
+  const todayOnly = options?.todayOnly === true;
+  const todayStart = Number.isFinite(options?.todayStart) ? Math.trunc(options.todayStart) : 0;
+  const tomorrowStart = Number.isFinite(options?.tomorrowStart) ? Math.trunc(options.tomorrowStart) : 0;
   const startedAt = Date.now();
 
   const rowsById = new Map();
@@ -12367,6 +12387,8 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
 
     let pageHasOnlyOldRows = true;
     let pageHasAnyKnownActivityTimestamp = false;
+    let pageHasAnyTodayRows = false;
+    let pageHasOlderRows = false;
 
     for (const rawItem of rawItems) {
       if (isMissedCallRawOpportunity(rawItem)) {
@@ -12386,6 +12408,21 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
       if (!isGhlLeadRowMatchingPipeline(normalized, pipelineContext)) {
         pageHasOnlyOldRows = false;
         continue;
+      }
+
+      if (todayOnly && todayStart > 0 && tomorrowStart > todayStart) {
+        if (normalized.createdOnTimestamp < todayStart) {
+          pageHasOlderRows = true;
+          pageHasOnlyOldRows = false;
+          continue;
+        }
+
+        if (normalized.createdOnTimestamp >= tomorrowStart) {
+          pageHasOnlyOldRows = false;
+          continue;
+        }
+
+        pageHasAnyTodayRows = true;
       }
 
       const activityTimestamp = getGhlLeadActivityTimestamp(normalized);
@@ -12411,6 +12448,10 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
       pageHasOnlyOldRows &&
       pageHasAnyKnownActivityTimestamp
     ) {
+      break;
+    }
+
+    if (todayOnly && !pageHasAnyTodayRows && pageHasOlderRows) {
       break;
     }
 
@@ -12521,13 +12562,15 @@ function mapGhlLeadCacheRow(row) {
   };
 }
 
-async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE) {
+async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE, options = {}) {
   await ensureDatabaseReady();
 
   const requestedLimit = parsePositiveIntegerOrZero(limit);
   const safeLimit = Math.min(Math.max(requestedLimit || GHL_LEADS_MAX_ROWS_RESPONSE, 1), GHL_LEADS_MAX_ROWS_RESPONSE);
+  const todayOnly = options?.todayOnly === true;
+  const boundaries = todayOnly ? buildGhlLeadsTimeBoundaries(new Date()) : null;
 
-  const result = await pool.query(
+  const queryParts = [
     `
       SELECT
         lead_id,
@@ -12550,11 +12593,22 @@ async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE) {
         updated_at
       FROM ${GHL_LEADS_CACHE_TABLE}
       WHERE LOWER(COALESCE(opportunity_name, '')) NOT LIKE 'missed call%'
-      ORDER BY created_on DESC, lead_id ASC
-      LIMIT $1
     `,
-    [safeLimit],
-  );
+  ];
+  const values = [];
+
+  if (todayOnly && boundaries?.todayStart && boundaries?.tomorrowStart) {
+    values.push(new Date(boundaries.todayStart).toISOString());
+    values.push(new Date(boundaries.tomorrowStart).toISOString());
+    queryParts.push(`AND created_on >= $${values.length - 1}::timestamptz`);
+    queryParts.push(`AND created_on < $${values.length}::timestamptz`);
+  }
+
+  values.push(safeLimit);
+  queryParts.push(`ORDER BY created_on DESC, lead_id ASC`);
+  queryParts.push(`LIMIT $${values.length}`);
+
+  const result = await pool.query(queryParts.join("\n"), values);
 
   return result.rows.map(mapGhlLeadCacheRow).filter(Boolean);
 }
@@ -17290,7 +17344,8 @@ app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLI
   }
 });
 
-async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/leads") {
+async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/leads", options = {}) {
+  const todayOnly = options?.todayOnly === true;
   const leadsRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
     !enforceRateLimit(req, res, {
@@ -17333,6 +17388,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
 
   const refreshMeta = {
     mode: refreshMode,
+    todayOnly,
     performed: false,
     pagesFetched: 0,
     leadsFetched: 0,
@@ -17372,10 +17428,14 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
           : latestCursorTimestamp > 0
             ? Math.max(0, latestCursorTimestamp - GHL_LEADS_INCREMENTAL_LOOKBACK_MS)
             : 0;
+      const todayBoundaries = todayOnly ? buildGhlLeadsTimeBoundaries(new Date()) : null;
       try {
         const syncResult = await fetchGhlLeadsFromPipeline(pipelineContext, {
           refreshMode,
           incrementalCutoffTimestamp,
+          todayOnly,
+          todayStart: todayBoundaries?.todayStart || 0,
+          tomorrowStart: todayBoundaries?.tomorrowStart || 0,
         });
         const writtenRows = await upsertGhlLeadsCacheRows(syncResult.rows);
 
@@ -17402,7 +17462,9 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
       );
     }
 
-    const items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE);
+    const items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE, {
+      todayOnly,
+    });
     const summary = buildGhlLeadsSummary(items);
 
     res.json({
@@ -17525,6 +17587,7 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
 
 app.get("/api/ghl/leads", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
+  const todayOnly = parseBooleanFlag(req.query.todayOnly, true);
   if (refreshMode !== "none") {
     res.status(405).json({
       error: "State-changing refresh is not allowed via GET. Use POST /api/ghl/leads/refresh.",
@@ -17533,13 +17596,18 @@ app.get("/api/ghl/leads", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_M
     return;
   }
 
-  await respondGhlLeads(req, res, "none", "GET /api/ghl/leads");
+  await respondGhlLeads(req, res, "none", "GET /api/ghl/leads", {
+    todayOnly,
+  });
 });
 
 app.post("/api/ghl/leads/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.body?.refresh || req.body?.mode || "incremental");
+  const todayOnly = parseBooleanFlag(req.body?.todayOnly, true);
   const resolvedRefreshMode = refreshMode === "none" ? "incremental" : refreshMode;
-  await respondGhlLeads(req, res, resolvedRefreshMode, "POST /api/ghl/leads/refresh");
+  await respondGhlLeads(req, res, resolvedRefreshMode, "POST /api/ghl/leads/refresh", {
+    todayOnly,
+  });
 });
 
 app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {

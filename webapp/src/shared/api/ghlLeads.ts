@@ -3,7 +3,15 @@ import type { GhlLeadsPayload } from "@/shared/types/ghlLeads";
 
 export type GhlLeadsRefreshMode = "none" | "incremental" | "full";
 
-export async function getGhlLeads(refresh: GhlLeadsRefreshMode = "none"): Promise<GhlLeadsPayload> {
+interface GhlLeadsRequestOptions {
+  todayOnly?: boolean;
+}
+
+export async function getGhlLeads(
+  refresh: GhlLeadsRefreshMode = "none",
+  options: GhlLeadsRequestOptions = {},
+): Promise<GhlLeadsPayload> {
+  const todayOnly = options.todayOnly !== false;
   if (refresh !== "none") {
     return apiRequest<GhlLeadsPayload>("/api/ghl/leads/refresh", {
       method: "POST",
@@ -13,11 +21,15 @@ export async function getGhlLeads(refresh: GhlLeadsRefreshMode = "none"): Promis
       },
       body: JSON.stringify({
         refresh,
+        todayOnly,
       }),
     });
   }
 
-  return apiRequest<GhlLeadsPayload>("/api/ghl/leads", {
+  const query = new URLSearchParams();
+  query.set("todayOnly", todayOnly ? "1" : "0");
+
+  return apiRequest<GhlLeadsPayload>(`/api/ghl/leads?${query.toString()}`, {
     timeoutMs: 60_000,
   });
 }
