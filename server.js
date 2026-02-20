@@ -2688,19 +2688,24 @@ function clearWebAuthSessionCookie(req, res) {
   });
 }
 
-function getRequestWebAuthUser(req) {
-  const cookieToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
-  const cookieUsername = parseWebAuthSessionToken(cookieToken);
-  if (cookieUsername) {
-    return cookieUsername;
+function normalizeRequestPathname(req, maxLength = 260) {
+  const normalizedPath = sanitizeTextValue(req?.path, maxLength);
+  if (normalizedPath.startsWith("/")) {
+    return normalizedPath.toLowerCase();
   }
 
-  const pathname = sanitizeTextValue(req?.path || req?.originalUrl, 260);
-  const allowHeaderSessionAuth = pathname.startsWith("/api/mobile/");
-  if (!allowHeaderSessionAuth) {
-    return "";
+  const normalizedOriginalPath = sanitizeTextValue(
+    sanitizeTextValue(req?.originalUrl, maxLength + 400).split("?")[0],
+    maxLength,
+  );
+  if (normalizedOriginalPath.startsWith("/")) {
+    return normalizedOriginalPath.toLowerCase();
   }
 
+  return normalizedPath.toLowerCase();
+}
+
+function resolveMobileSessionUsernameFromRequest(req) {
   const headerToken = sanitizeTextValue(req?.headers?.[WEB_AUTH_MOBILE_SESSION_HEADER], 1200);
   const headerUsername = parseWebAuthSessionToken(headerToken);
   if (headerUsername) {
@@ -2714,6 +2719,22 @@ function getRequestWebAuthUser(req) {
     if (bearerUsername) {
       return bearerUsername;
     }
+  }
+
+  return "";
+}
+
+function getRequestWebAuthUser(req) {
+  const pathname = normalizeRequestPathname(req, 260);
+  const isMobileApiPath = pathname.startsWith("/api/mobile/");
+  if (isMobileApiPath) {
+    return resolveMobileSessionUsernameFromRequest(req);
+  }
+
+  const cookieToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+  const cookieUsername = parseWebAuthSessionToken(cookieToken);
+  if (cookieUsername) {
+    return cookieUsername;
   }
 
   return "";
@@ -2738,18 +2759,18 @@ function requireWebApiCsrf(req, res, next) {
     return;
   }
 
-  const pathname = sanitizeTextValue(req.path, 260);
+  const pathname = normalizeRequestPathname(req, 260);
   if (!pathname.startsWith("/api/")) {
     next();
     return;
   }
 
-  if (pathname.startsWith("/api/mini/") || pathname.startsWith("/api/mobile/")) {
+  if (pathname.startsWith("/api/mini/")) {
     next();
     return;
   }
 
-  if (pathname === "/api/auth/login") {
+  if (pathname === "/api/auth/login" || pathname === "/api/mobile/auth/login") {
     next();
     return;
   }
@@ -8753,7 +8774,7 @@ function escapeHtml(value) {
 }
 
 function requireWebAuth(req, res, next) {
-  const pathname = req.path || "/";
+  const pathname = normalizeRequestPathname(req, 260) || "/";
   if (isPublicWebAuthPath(pathname)) {
     next();
     return;
@@ -19189,6 +19210,8 @@ app.post("/first-password", (req, res) => {
 });
 
 function handleApiAuthFirstPassword(req, res) {
+  const normalizedPathname = normalizeRequestPathname(req, 260);
+  const isMobileApiFirstPassword = normalizedPathname.startsWith("/api/mobile/");
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
   if (!userProfile) {
     clearWebAuthSessionCookie(req, res);
@@ -19198,13 +19221,23 @@ function handleApiAuthFirstPassword(req, res) {
     return;
   }
 
+  if (isMobileApiFirstPassword) {
+    const mobileSessionUsername = normalizeWebAuthUsername(resolveMobileSessionUsernameFromRequest(req));
+    const authenticatedUsername = normalizeWebAuthUsername(userProfile.username);
+    if (!mobileSessionUsername || !authenticatedUsername || mobileSessionUsername !== authenticatedUsername) {
+      res.status(401).json({
+        error: "Mobile auth token is required for this endpoint.",
+      });
+      return;
+    }
+  }
+
   try {
     const updatedUser = applyWebAuthFirstPasswordChange(userProfile, req.body);
     const sessionToken = createWebAuthSessionToken(updatedUser.username);
     setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
     req.webAuthUser = updatedUser.username;
     req.webAuthProfile = updatedUser;
-    const isMobileApiFirstPassword = sanitizeTextValue(req.path, 120).startsWith("/api/mobile/");
     res.setHeader("Cache-Control", "no-store, private");
     const payload = {
       ok: true,
