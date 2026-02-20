@@ -33,6 +33,59 @@ const WEB_AUTH_SESSION_TTL_SEC = parsePositiveInteger(process.env.WEB_AUTH_SESSI
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
 const WEB_AUTH_SESSION_SECRET_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_SESSION_SECRET);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW);
+const RATE_LIMIT_ENABLED = resolveOptionalBoolean(process.env.RATE_LIMIT_ENABLED) !== false;
+const RATE_LIMIT_STORE_MAX_KEYS = Math.min(Math.max(parsePositiveInteger(process.env.RATE_LIMIT_STORE_MAX_KEYS, 60000), 5000), 300000);
+const RATE_LIMIT_SWEEP_EVERY_REQUESTS = 120;
+const RATE_LIMIT_PROFILE_LOGIN_IP = Object.freeze({
+  windowMs: 10 * 60 * 1000,
+  maxHits: 40,
+  blockMs: 15 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_LOGIN_ACCOUNT = Object.freeze({
+  windowMs: 10 * 60 * 1000,
+  maxHits: 12,
+  blockMs: 20 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_API_EXPENSIVE = Object.freeze({
+  windowMs: 60 * 1000,
+  maxHitsIp: 120,
+  maxHitsUser: 90,
+  blockMs: 2 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_API_SYNC = Object.freeze({
+  windowMs: 10 * 60 * 1000,
+  maxHitsIp: 30,
+  maxHitsUser: 20,
+  blockMs: 15 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_API_REFRESH_ALL = Object.freeze({
+  windowMs: 60 * 60 * 1000,
+  maxHitsIp: 6,
+  maxHitsUser: 4,
+  blockMs: 60 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_API_CHAT = Object.freeze({
+  windowMs: 60 * 1000,
+  maxHitsIp: 60,
+  maxHitsUser: 35,
+  blockMs: 2 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_API_RECORDS_WRITE = Object.freeze({
+  windowMs: 60 * 1000,
+  maxHitsIp: 300,
+  maxHitsUser: 180,
+  blockMs: 2 * 60 * 1000,
+});
+const LOGIN_FAILURE_ACCOUNT_POLICY = Object.freeze({
+  windowMs: 15 * 60 * 1000,
+  maxFailures: 8,
+  lockMs: 30 * 60 * 1000,
+});
+const LOGIN_FAILURE_IP_ACCOUNT_POLICY = Object.freeze({
+  windowMs: 10 * 60 * 1000,
+  maxFailures: 6,
+  lockMs: 20 * 60 * 1000,
+});
 const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
 const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
 const WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS = "manage_client_payments";
@@ -700,6 +753,10 @@ let ghlLocationDocumentCandidatesCache = {
   items: [],
 };
 let assistantSessionScopeCache = new Map();
+let rateLimitSweepCounter = 0;
+const rateLimitRequestBuckets = new Map();
+const loginFailureByAccountKey = new Map();
+const loginFailureByIpAccountKey = new Map();
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
@@ -6384,6 +6441,365 @@ function requireWebPermission(permissionKey, message = "Access denied.") {
 
     denyWebPermission(req, res, message);
   };
+}
+
+function resolveRateLimitClientIp(req) {
+  const directIp = sanitizeTextValue(req?.ip, 160);
+  if (directIp) {
+    return directIp;
+  }
+
+  const forwardedRaw = sanitizeTextValue(req?.headers?.["x-forwarded-for"], 400);
+  if (forwardedRaw) {
+    const firstForwarded = forwardedRaw.split(",")[0]?.trim();
+    const normalizedForwarded = sanitizeTextValue(firstForwarded, 160);
+    if (normalizedForwarded) {
+      return normalizedForwarded;
+    }
+  }
+
+  const socketIp = sanitizeTextValue(req?.socket?.remoteAddress || req?.connection?.remoteAddress, 160);
+  if (socketIp) {
+    return socketIp;
+  }
+
+  return "unknown";
+}
+
+function normalizeRateLimitUsername(rawValue) {
+  return normalizeWebAuthUsername(rawValue || "");
+}
+
+function buildRateLimitRetryAfterSeconds(retryAfterMs) {
+  const normalizedMs = Number.isFinite(retryAfterMs) ? Math.max(0, retryAfterMs) : 0;
+  return Math.max(1, Math.ceil(normalizedMs / 1000));
+}
+
+function maybeSweepRateLimitStores(nowMs = Date.now()) {
+  if (!RATE_LIMIT_ENABLED) {
+    return;
+  }
+
+  rateLimitSweepCounter += 1;
+  if (rateLimitSweepCounter % RATE_LIMIT_SWEEP_EVERY_REQUESTS !== 0) {
+    return;
+  }
+
+  const requestBucketExpiryFloorMs = 3 * 60 * 60 * 1000;
+  for (const [key, entry] of rateLimitRequestBuckets) {
+    const staleWindowMs = Math.max(entry.windowMs || 0, entry.blockMs || 0, requestBucketExpiryFloorMs);
+    if ((entry.lastSeenMs || 0) + staleWindowMs < nowMs) {
+      rateLimitRequestBuckets.delete(key);
+    }
+  }
+
+  const failureEntryExpiryFloorMs = 3 * 60 * 60 * 1000;
+  for (const [key, entry] of loginFailureByAccountKey) {
+    const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
+    if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
+      loginFailureByAccountKey.delete(key);
+    }
+  }
+
+  for (const [key, entry] of loginFailureByIpAccountKey) {
+    const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
+    if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
+      loginFailureByIpAccountKey.delete(key);
+    }
+  }
+
+  trimRateLimitStore(rateLimitRequestBuckets);
+  trimRateLimitStore(loginFailureByAccountKey);
+  trimRateLimitStore(loginFailureByIpAccountKey);
+}
+
+function trimRateLimitStore(store) {
+  if (!(store instanceof Map) || store.size <= RATE_LIMIT_STORE_MAX_KEYS) {
+    return;
+  }
+
+  const overflow = store.size - RATE_LIMIT_STORE_MAX_KEYS;
+  let removed = 0;
+  for (const key of store.keys()) {
+    store.delete(key);
+    removed += 1;
+    if (removed >= overflow) {
+      break;
+    }
+  }
+}
+
+function consumeRateLimitBucket(scope, subject, profile, nowMs = Date.now()) {
+  if (!profile || !subject) {
+    return {
+      allowed: true,
+      retryAfterMs: 0,
+    };
+  }
+
+  const windowMs = Math.max(1_000, Number(profile.windowMs) || 60_000);
+  const maxHits = Math.max(1, Number(profile.maxHits) || 1);
+  const blockMs = Math.max(windowMs, Number(profile.blockMs) || windowMs);
+  const key = `${scope}:${subject}`;
+  let entry = rateLimitRequestBuckets.get(key);
+
+  if (!entry) {
+    entry = {
+      windowStartMs: nowMs,
+      hits: 0,
+      blockedUntilMs: 0,
+      lastSeenMs: nowMs,
+      windowMs,
+      blockMs,
+    };
+  }
+
+  if (entry.blockedUntilMs > nowMs) {
+    entry.lastSeenMs = nowMs;
+    rateLimitRequestBuckets.set(key, entry);
+    return {
+      allowed: false,
+      retryAfterMs: entry.blockedUntilMs - nowMs,
+    };
+  }
+
+  if (nowMs - entry.windowStartMs >= windowMs) {
+    entry.windowStartMs = nowMs;
+    entry.hits = 0;
+    entry.blockedUntilMs = 0;
+  }
+
+  entry.hits += 1;
+  entry.lastSeenMs = nowMs;
+  entry.windowMs = windowMs;
+  entry.blockMs = blockMs;
+
+  if (entry.hits > maxHits) {
+    entry.blockedUntilMs = nowMs + blockMs;
+    rateLimitRequestBuckets.set(key, entry);
+    return {
+      allowed: false,
+      retryAfterMs: entry.blockedUntilMs - nowMs,
+    };
+  }
+
+  rateLimitRequestBuckets.set(key, entry);
+  return {
+    allowed: true,
+    retryAfterMs: 0,
+  };
+}
+
+function sendRateLimitResponse(req, res, options = {}) {
+  const retryAfterMs = Math.max(0, Number(options.retryAfterMs) || 0);
+  const retryAfterSec = buildRateLimitRetryAfterSeconds(retryAfterMs);
+  const safeCode = sanitizeTextValue(options.code, 50) || "rate_limited";
+  const safeMessage = sanitizeTextValue(options.message, 260) || "Too many requests. Please try again later.";
+
+  res.setHeader("Retry-After", String(retryAfterSec));
+  res.setHeader("Cache-Control", "no-store, private");
+
+  if ((req.path || "") === "/login" && !String(req.headers?.accept || "").includes("application/json")) {
+    const nextPath = resolveSafeNextPath(options.nextPath || req.body?.next || req.query.next);
+    res.status(429).type("html").send(
+      buildWebLoginPageHtml({
+        nextPath,
+        errorMessage: safeMessage,
+      }),
+    );
+    return;
+  }
+
+  res.status(429).json({
+    error: safeMessage,
+    code: safeCode,
+    retryAfterSec,
+  });
+}
+
+function enforceRateLimit(req, res, options = {}) {
+  if (!RATE_LIMIT_ENABLED) {
+    return true;
+  }
+
+  maybeSweepRateLimitStores();
+  const nowMs = Date.now();
+  const scope = sanitizeTextValue(options.scope, 80) || "api";
+  const ip = resolveRateLimitClientIp(req);
+
+  if (options.ipProfile) {
+    const ipResult = consumeRateLimitBucket(`${scope}:ip`, ip, options.ipProfile, nowMs);
+    if (!ipResult.allowed) {
+      sendRateLimitResponse(req, res, {
+        retryAfterMs: ipResult.retryAfterMs,
+        message: options.message,
+        code: options.code,
+        nextPath: options.nextPath,
+      });
+      return false;
+    }
+  }
+
+  if (options.userProfile) {
+    const fallbackUsername = normalizeRateLimitUsername(options.username || req.body?.username || req.query?.username || "");
+    const sessionUsername = normalizeRateLimitUsername(req.webAuthUser);
+    const userKey = sessionUsername || fallbackUsername;
+    if (userKey) {
+      const userResult = consumeRateLimitBucket(`${scope}:user`, userKey, options.userProfile, nowMs);
+      if (!userResult.allowed) {
+        sendRateLimitResponse(req, res, {
+          retryAfterMs: userResult.retryAfterMs,
+          message: options.message,
+          code: options.code,
+          nextPath: options.nextPath,
+        });
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function readLoginFailureLock(entry, nowMs, policy) {
+  if (!entry) {
+    return 0;
+  }
+
+  if (entry.lockedUntilMs > nowMs) {
+    return entry.lockedUntilMs - nowMs;
+  }
+
+  if (nowMs - entry.lastAttemptMs > policy.windowMs) {
+    return 0;
+  }
+
+  return 0;
+}
+
+function recordLoginFailureEntry(store, key, policy, nowMs) {
+  if (!key) {
+    return;
+  }
+
+  let entry = store.get(key);
+  const shouldResetWindow = !entry || nowMs - entry.firstAttemptMs > policy.windowMs;
+  const lockExpired = entry && entry.lockedUntilMs > 0 && entry.lockedUntilMs <= nowMs;
+  if (shouldResetWindow || lockExpired) {
+    entry = {
+      firstAttemptMs: nowMs,
+      lastAttemptMs: nowMs,
+      failures: 0,
+      lockedUntilMs: 0,
+      windowMs: policy.windowMs,
+      lockMs: policy.lockMs,
+    };
+  }
+
+  entry.failures += 1;
+  entry.lastAttemptMs = nowMs;
+  entry.windowMs = policy.windowMs;
+  entry.lockMs = policy.lockMs;
+
+  if (entry.failures >= policy.maxFailures) {
+    entry.lockedUntilMs = nowMs + policy.lockMs;
+  }
+
+  store.set(key, entry);
+}
+
+function clearLoginFailureEntry(store, key) {
+  if (!key) {
+    return;
+  }
+  store.delete(key);
+}
+
+function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
+  if (!RATE_LIMIT_ENABLED) {
+    return true;
+  }
+
+  const normalizedUsername = normalizeRateLimitUsername(username);
+  const ip = resolveRateLimitClientIp(req);
+
+  const isRateAllowed = enforceRateLimit(req, res, {
+    scope: "login",
+    ipProfile: RATE_LIMIT_PROFILE_LOGIN_IP,
+    userProfile: RATE_LIMIT_PROFILE_LOGIN_ACCOUNT,
+    username: normalizedUsername,
+    message: "Too many login attempts. Please try again later.",
+    code: "login_rate_limited",
+    nextPath,
+  });
+  if (!isRateAllowed) {
+    return false;
+  }
+
+  if (!normalizedUsername) {
+    return true;
+  }
+
+  maybeSweepRateLimitStores();
+  const nowMs = Date.now();
+  const accountKey = `account:${normalizedUsername}`;
+  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const accountLockMs = readLoginFailureLock(loginFailureByAccountKey.get(accountKey), nowMs, LOGIN_FAILURE_ACCOUNT_POLICY);
+  const ipAccountLockMs = readLoginFailureLock(
+    loginFailureByIpAccountKey.get(ipAccountKey),
+    nowMs,
+    LOGIN_FAILURE_IP_ACCOUNT_POLICY,
+  );
+  const retryAfterMs = Math.max(accountLockMs, ipAccountLockMs);
+
+  if (retryAfterMs > 0) {
+    sendRateLimitResponse(req, res, {
+      retryAfterMs,
+      message: "Too many failed login attempts. Please wait before trying again.",
+      code: "login_locked",
+      nextPath,
+    });
+    return false;
+  }
+
+  return true;
+}
+
+function registerFailedLoginAttempt(req, username) {
+  if (!RATE_LIMIT_ENABLED) {
+    return;
+  }
+
+  const normalizedUsername = normalizeRateLimitUsername(username);
+  if (!normalizedUsername) {
+    return;
+  }
+
+  maybeSweepRateLimitStores();
+  const nowMs = Date.now();
+  const ip = resolveRateLimitClientIp(req);
+  const accountKey = `account:${normalizedUsername}`;
+  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+
+  recordLoginFailureEntry(loginFailureByAccountKey, accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
+  recordLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey, LOGIN_FAILURE_IP_ACCOUNT_POLICY, nowMs);
+}
+
+function clearFailedLoginAttempts(req, username) {
+  if (!RATE_LIMIT_ENABLED) {
+    return;
+  }
+
+  const normalizedUsername = normalizeRateLimitUsername(username);
+  if (!normalizedUsername) {
+    return;
+  }
+
+  const ip = resolveRateLimitClientIp(req);
+  const accountKey = `account:${normalizedUsername}`;
+  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  clearLoginFailureEntry(loginFailureByAccountKey, accountKey);
+  clearLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey);
 }
 
 function isPublicWebAuthPath(pathname) {
@@ -13388,14 +13804,20 @@ app.post("/login", (req, res) => {
   const username = req.body?.username;
   const password = req.body?.password;
   const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
+  if (!ensureLoginAttemptAllowed(req, res, username, nextPath)) {
+    return;
+  }
+
   const authUser = authenticateWebAuthCredentials(username, password);
 
   if (!authUser) {
+    registerFailedLoginAttempt(req, username);
     clearWebAuthSessionCookie(req, res);
     res.redirect(302, `/login?error=1&next=${encodeURIComponent(nextPath)}`);
     return;
   }
 
+  clearFailedLoginAttempts(req, authUser.username);
   setWebAuthSessionCookie(req, res, authUser.username);
   if (isWebAuthPasswordChangeRequired(authUser)) {
     res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
@@ -13407,9 +13829,14 @@ app.post("/login", (req, res) => {
 function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
   const password = req.body?.password;
+  if (!ensureLoginAttemptAllowed(req, res, username, "/")) {
+    return;
+  }
+
   const authUser = authenticateWebAuthCredentials(username, password);
 
   if (!authUser) {
+    registerFailedLoginAttempt(req, username);
     clearWebAuthSessionCookie(req, res);
     res.status(401).json({
       error: "Invalid login or password.",
@@ -13417,6 +13844,7 @@ function handleApiAuthLogin(req, res) {
     return;
   }
 
+  clearFailedLoginAttempts(req, authUser.username);
   const sessionToken = createWebAuthSessionToken(authUser.username);
   const mustChangePassword = isWebAuthPasswordChangeRequired(authUser);
   setWebAuthSessionCookie(req, res, authUser.username, sessionToken);
@@ -13714,6 +14142,29 @@ app.all("/api/quickbooks/*", (req, res, next) => {
 });
 
 app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+  const shouldTotalRefresh = parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
+  const shouldSync = parseQuickBooksSyncFlag(req.query.sync) || shouldTotalRefresh;
+  const quickBooksRateProfile = shouldSync ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
+  if (
+    !enforceRateLimit(req, res, {
+      scope: shouldSync ? "api.quickbooks.sync" : "api.quickbooks.read",
+      ipProfile: {
+        windowMs: quickBooksRateProfile.windowMs,
+        maxHits: quickBooksRateProfile.maxHitsIp,
+        blockMs: quickBooksRateProfile.blockMs,
+      },
+      userProfile: {
+        windowMs: quickBooksRateProfile.windowMs,
+        maxHits: quickBooksRateProfile.maxHitsUser,
+        blockMs: quickBooksRateProfile.blockMs,
+      },
+      message: "QuickBooks request limit reached. Please wait before retrying.",
+      code: "quickbooks_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -13731,8 +14182,6 @@ app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISS
     return;
   }
 
-  const shouldTotalRefresh = parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
-  const shouldSync = parseQuickBooksSyncFlag(req.query.sync) || shouldTotalRefresh;
   if (shouldSync && !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS)) {
     res.status(403).json({
       error: "Access denied. You do not have permission to refresh QuickBooks data.",
@@ -13846,6 +14295,26 @@ app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSIO
 });
 
 app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.assistant.chat",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_CHAT.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_CHAT.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_CHAT.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_CHAT.blockMs,
+      },
+      message: "Assistant request limit reached. Please wait before retrying.",
+      code: "assistant_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -13945,6 +14414,26 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 });
 
 app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.assistant.tts",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_CHAT.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_CHAT.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_CHAT.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_CHAT.blockMs,
+      },
+      message: "Assistant audio request limit reached. Please wait before retrying.",
+      code: "assistant_tts_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   const text = sanitizeTextValue(req.body?.text, 2400);
   if (!text) {
     res.status(400).json({
@@ -13981,6 +14470,28 @@ app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLI
 });
 
 app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+  const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
+  const managerRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
+  if (
+    !enforceRateLimit(req, res, {
+      scope: refreshMode !== "none" ? "api.ghl.client_managers.refresh" : "api.ghl.client_managers.read",
+      ipProfile: {
+        windowMs: managerRateProfile.windowMs,
+        maxHits: managerRateProfile.maxHitsIp,
+        blockMs: managerRateProfile.blockMs,
+      },
+      userProfile: {
+        windowMs: managerRateProfile.windowMs,
+        maxHits: managerRateProfile.maxHitsUser,
+        blockMs: managerRateProfile.blockMs,
+      },
+      message: "Client-manager lookup limit reached. Please wait before retrying.",
+      code: "ghl_client_managers_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -13988,7 +14499,6 @@ app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIE
     return;
   }
 
-  const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
   if (refreshMode !== "none" && !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS)) {
     res.status(403).json({
       error: "Access denied. You do not have permission to refresh client-manager data.",
@@ -14059,6 +14569,26 @@ app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIE
 });
 
 app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_contracts",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      message: "Contract lookup limit reached. Please wait before retrying.",
+      code: "ghl_client_contracts_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -14112,6 +14642,26 @@ app.post(
   "/api/ghl/client-basic-notes/refresh-all",
   requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
   async (req, res) => {
+    if (
+      !enforceRateLimit(req, res, {
+        scope: "api.ghl.basic_notes.refresh_all",
+        ipProfile: {
+          windowMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.windowMs,
+          maxHits: RATE_LIMIT_PROFILE_API_REFRESH_ALL.maxHitsIp,
+          blockMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.blockMs,
+        },
+        userProfile: {
+          windowMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.windowMs,
+          maxHits: RATE_LIMIT_PROFILE_API_REFRESH_ALL.maxHitsUser,
+          blockMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.blockMs,
+        },
+        message: "Bulk BASIC/MEMO refresh limit reached. Please wait before retrying.",
+        code: "ghl_basic_notes_refresh_rate_limited",
+      })
+    ) {
+      return;
+    }
+
     if (!pool) {
       res.status(503).json({
         error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -14216,6 +14766,26 @@ app.get(
 );
 
 app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.basic_note",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "BASIC/MEMO request limit reached. Please wait before retrying.",
+      code: "ghl_basic_note_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   const requestedClientName = sanitizeTextValue(req.query.clientName, 300);
   if (!requestedClientName) {
     res.status(400).json({
@@ -14321,6 +14891,26 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
 });
 
 app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.records.write",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.blockMs,
+      },
+      message: "Save request limit reached. Please wait before retrying.",
+      code: "records_write_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   const nextRecords = req.body?.records;
   if (!isValidRecordsPayload(nextRecords)) {
     res.status(400).json({
