@@ -505,6 +505,51 @@ const ASSISTANT_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "2-digit",
 });
+const ASSISTANT_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "short",
+});
+const ASSISTANT_RU_MONTH_NAME_TO_INDEX = new Map([
+  ["январ", 1],
+  ["феврал", 2],
+  ["март", 3],
+  ["апрел", 4],
+  ["май", 5],
+  ["мая", 5],
+  ["июн", 6],
+  ["июл", 7],
+  ["август", 8],
+  ["сентябр", 9],
+  ["октябр", 10],
+  ["ноябр", 11],
+  ["декабр", 12],
+]);
+const ASSISTANT_EN_MONTH_NAME_TO_INDEX = new Map([
+  ["jan", 1],
+  ["january", 1],
+  ["feb", 2],
+  ["february", 2],
+  ["mar", 3],
+  ["march", 3],
+  ["apr", 4],
+  ["april", 4],
+  ["may", 5],
+  ["jun", 6],
+  ["june", 6],
+  ["jul", 7],
+  ["july", 7],
+  ["aug", 8],
+  ["august", 8],
+  ["sep", 9],
+  ["sept", 9],
+  ["september", 9],
+  ["oct", 10],
+  ["october", 10],
+  ["nov", 11],
+  ["november", 11],
+  ["dec", 12],
+  ["december", 12],
+]);
 const ASSISTANT_AFTER_RESULT_CLIENT_NAMES = new Set(
   [
     "Liviu Gurin",
@@ -1679,6 +1724,360 @@ function parseAssistantCreatedAtTimestamp(rawValue) {
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
+function getAssistantUtcDayStartFromTimestamp(timestamp) {
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  const date = new Date(timestamp);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function getAssistantMonthStartTimestamp(timestamp) {
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  const date = new Date(timestamp);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
+}
+
+function getAssistantLastDayOfMonthTimestamp(timestamp) {
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  const date = new Date(timestamp);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0);
+}
+
+function getAssistantWeekStartTimestamp(timestamp) {
+  const dayStart = getAssistantUtcDayStartFromTimestamp(timestamp);
+  if (dayStart === null) {
+    return null;
+  }
+
+  const date = new Date(dayStart);
+  const dayOfWeekIndex = (date.getUTCDay() + 6) % 7;
+  return dayStart - dayOfWeekIndex * ASSISTANT_DAY_IN_MS;
+}
+
+function resolveAssistantMonthIndexFromToken(rawToken) {
+  const token = sanitizeTextValue(rawToken, 40)
+    .toLowerCase()
+    .replace(/[.,]/g, "")
+    .trim();
+  if (!token) {
+    return null;
+  }
+
+  if (ASSISTANT_EN_MONTH_NAME_TO_INDEX.has(token)) {
+    return ASSISTANT_EN_MONTH_NAME_TO_INDEX.get(token);
+  }
+  if (ASSISTANT_RU_MONTH_NAME_TO_INDEX.has(token)) {
+    return ASSISTANT_RU_MONTH_NAME_TO_INDEX.get(token);
+  }
+
+  for (const [monthToken, monthIndex] of ASSISTANT_RU_MONTH_NAME_TO_INDEX.entries()) {
+    if (token.startsWith(monthToken)) {
+      return monthIndex;
+    }
+  }
+  for (const [monthToken, monthIndex] of ASSISTANT_EN_MONTH_NAME_TO_INDEX.entries()) {
+    if (token.startsWith(monthToken)) {
+      return monthIndex;
+    }
+  }
+
+  return null;
+}
+
+function parseAssistantNaturalLanguageDate(rawValue, fallbackYear = new Date().getUTCFullYear()) {
+  const source = sanitizeTextValue(rawValue, 120);
+  if (!source) {
+    return null;
+  }
+
+  const parsedDirectDate = parseDateValue(source);
+  if (parsedDirectDate !== null) {
+    return parsedDirectDate;
+  }
+
+  const normalized = source.toLowerCase().replace(/[,]/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const dayMonthMatch = normalized.match(/^(\d{1,2})\s+([a-zа-яё.]+)\s*(\d{2}|\d{4})?$/i);
+  if (dayMonthMatch) {
+    const day = Number(dayMonthMatch[1]);
+    const monthIndex = resolveAssistantMonthIndexFromToken(dayMonthMatch[2]);
+    let year = dayMonthMatch[3] ? Number(dayMonthMatch[3]) : fallbackYear;
+    if (dayMonthMatch[3] && dayMonthMatch[3].length === 2) {
+      year += 2000;
+    }
+
+    if (Number.isFinite(day) && Number.isFinite(monthIndex) && Number.isFinite(year) && isValidDateParts(year, monthIndex, day)) {
+      return Date.UTC(year, monthIndex - 1, day);
+    }
+  }
+
+  const monthDayMatch = normalized.match(/^([a-zа-яё.]+)\s+(\d{1,2})\s*(\d{2}|\d{4})?$/i);
+  if (monthDayMatch) {
+    const monthIndex = resolveAssistantMonthIndexFromToken(monthDayMatch[1]);
+    const day = Number(monthDayMatch[2]);
+    let year = monthDayMatch[3] ? Number(monthDayMatch[3]) : fallbackYear;
+    if (monthDayMatch[3] && monthDayMatch[3].length === 2) {
+      year += 2000;
+    }
+
+    if (Number.isFinite(day) && Number.isFinite(monthIndex) && Number.isFinite(year) && isValidDateParts(year, monthIndex, day)) {
+      return Date.UTC(year, monthIndex - 1, day);
+    }
+  }
+
+  return null;
+}
+
+function extractAssistantDateMentions(rawMessage) {
+  const source = sanitizeTextValue(rawMessage, ASSISTANT_MAX_MESSAGE_LENGTH);
+  if (!source) {
+    return [];
+  }
+
+  const fallbackYear = new Date().getUTCFullYear();
+  const patterns = [
+    /\b\d{4}-\d{2}-\d{2}\b/g,
+    /\b\d{1,2}[\/.-]\d{1,2}[\/.-](?:\d{2}|\d{4})\b/g,
+    /\b\d{1,2}\s+[a-zа-яё]{3,}\.?,?\s*(?:\d{4})?/gi,
+    /\b[a-z]{3,}\.?\s+\d{1,2}(?:,\s*\d{4})?/gi,
+  ];
+
+  const mentions = [];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(source))) {
+      const rawChunk = sanitizeTextValue(match[0], 80);
+      if (!rawChunk) {
+        continue;
+      }
+      const timestamp = parseAssistantNaturalLanguageDate(rawChunk, fallbackYear);
+      if (timestamp === null) {
+        continue;
+      }
+
+      mentions.push({
+        raw: rawChunk,
+        timestamp,
+        index: match.index || 0,
+        hasExplicitYear: /\b\d{4}\b/.test(rawChunk),
+      });
+    }
+  }
+
+  mentions.sort((left, right) => left.index - right.index);
+
+  const dedupedMentions = [];
+  const seenKeys = new Set();
+  for (const mention of mentions) {
+    const key = `${mention.index}|${mention.timestamp}`;
+    if (seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
+    dedupedMentions.push(mention);
+  }
+  return dedupedMentions;
+}
+
+function buildAssistantDateRange(fromTimestamp, toTimestamp, source = "explicit") {
+  const fromDayStart = getAssistantUtcDayStartFromTimestamp(fromTimestamp);
+  const toDayStart = getAssistantUtcDayStartFromTimestamp(toTimestamp);
+  if (fromDayStart === null || toDayStart === null) {
+    return null;
+  }
+
+  return {
+    fromTimestamp: Math.min(fromDayStart, toDayStart),
+    toTimestamp: Math.max(fromDayStart, toDayStart),
+    source,
+  };
+}
+
+function formatAssistantDateRangeLabel(range, isRussian) {
+  if (!range || !Number.isFinite(range.fromTimestamp) || !Number.isFinite(range.toTimestamp)) {
+    return "";
+  }
+
+  if (range.fromTimestamp === range.toTimestamp) {
+    return formatAssistantDateTimestamp(range.fromTimestamp);
+  }
+
+  return `${formatAssistantDateTimestamp(range.fromTimestamp)} - ${formatAssistantDateTimestamp(range.toTimestamp)}`;
+}
+
+function parseAssistantDateRangeFromMessage(rawMessage) {
+  const source = sanitizeTextValue(rawMessage, ASSISTANT_MAX_MESSAGE_LENGTH);
+  if (!source) {
+    return null;
+  }
+
+  const normalized = normalizeAssistantSearchText(source).replace(/[–—]/g, "-");
+  const todayStart = getAssistantCurrentUtcDayStart();
+
+  if (/\b(today|сегодня)\b/i.test(normalized)) {
+    return buildAssistantDateRange(todayStart, todayStart, "today");
+  }
+  if (/\b(yesterday|вчера)\b/i.test(normalized)) {
+    return buildAssistantDateRange(todayStart - ASSISTANT_DAY_IN_MS, todayStart - ASSISTANT_DAY_IN_MS, "yesterday");
+  }
+  if (/\b(this week|на этой неделе|текущей неделе)\b/i.test(normalized)) {
+    return buildAssistantDateRange(getAssistantWeekStartTimestamp(todayStart), todayStart, "this_week");
+  }
+  if (/\b(this month|в этом месяце|текущем месяце)\b/i.test(normalized)) {
+    return buildAssistantDateRange(getAssistantMonthStartTimestamp(todayStart), todayStart, "this_month");
+  }
+
+  const windowMatch = normalized.match(
+    /(?:last|past|за последн(?:ие|их)?|последние)\s*(\d{1,3})\s*(days?|дн(?:я|ей)?|weeks?|недел(?:я|и|ь|ю)?|months?|месяц(?:а|ев)?)/i,
+  );
+  if (windowMatch) {
+    const amount = Math.min(3650, Math.max(1, Number(windowMatch[1]) || 0));
+    const unit = sanitizeTextValue(windowMatch[2], 32).toLowerCase();
+
+    if (/week|недел/.test(unit)) {
+      const from = todayStart - (amount * 7 - 1) * ASSISTANT_DAY_IN_MS;
+      return buildAssistantDateRange(from, todayStart, "last_weeks");
+    }
+    if (/month|месяц/.test(unit)) {
+      const nowDate = new Date(todayStart);
+      const fromMonthStart = Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth() - (amount - 1), 1);
+      return buildAssistantDateRange(fromMonthStart, todayStart, "last_months");
+    }
+
+    const from = todayStart - (amount - 1) * ASSISTANT_DAY_IN_MS;
+    return buildAssistantDateRange(from, todayStart, "last_days");
+  }
+
+  const dateMentions = extractAssistantDateMentions(source);
+  if (dateMentions.length >= 2) {
+    const first = dateMentions[0];
+    const second = dateMentions[1];
+    return buildAssistantDateRange(first.timestamp, second.timestamp, "between_dates");
+  }
+  if (dateMentions.length === 1) {
+    const singleDate = dateMentions[0].timestamp;
+    if (/\b(after|since|с\s+\d|после|начиная)\b/i.test(normalized)) {
+      return buildAssistantDateRange(singleDate, todayStart, "since_date");
+    }
+    return buildAssistantDateRange(singleDate, singleDate, "single_date");
+  }
+
+  const monthYearMatch = normalized.match(/\b([a-zа-яё]{3,})\s+(\d{4})\b/i);
+  if (monthYearMatch) {
+    const monthIndex = resolveAssistantMonthIndexFromToken(monthYearMatch[1]);
+    const year = Number(monthYearMatch[2]);
+    if (Number.isFinite(monthIndex) && Number.isFinite(year) && year >= 1900 && year <= 2100) {
+      const monthStart = Date.UTC(year, monthIndex - 1, 1);
+      const monthEnd = Date.UTC(year, monthIndex, 0);
+      return buildAssistantDateRange(monthStart, monthEnd, "month_year");
+    }
+  }
+
+  return null;
+}
+
+function isAssistantTimestampInRange(timestamp, range) {
+  if (!Number.isFinite(timestamp) || !range) {
+    return false;
+  }
+  return timestamp >= range.fromTimestamp && timestamp <= range.toTimestamp;
+}
+
+function resolveAssistantGranularity(rawMessage, range) {
+  const normalized = normalizeAssistantSearchText(rawMessage);
+  if (/(by day|daily|по дням|ежеднев)/i.test(normalized)) {
+    return "day";
+  }
+  if (/(by week|weekly|по недел|еженед)/i.test(normalized)) {
+    return "week";
+  }
+  if (/(by month|monthly|по месяц|ежеме)/i.test(normalized)) {
+    return "month";
+  }
+
+  if (!range) {
+    return "day";
+  }
+
+  const daysDiff = Math.max(1, Math.floor((range.toTimestamp - range.fromTimestamp) / ASSISTANT_DAY_IN_MS) + 1);
+  if (daysDiff <= 35) {
+    return "day";
+  }
+  if (daysDiff <= 180) {
+    return "week";
+  }
+  return "month";
+}
+
+function getAssistantPeriodBucketStart(timestamp, granularity) {
+  if (granularity === "month") {
+    return getAssistantMonthStartTimestamp(timestamp);
+  }
+  if (granularity === "week") {
+    return getAssistantWeekStartTimestamp(timestamp);
+  }
+  return getAssistantUtcDayStartFromTimestamp(timestamp);
+}
+
+function formatAssistantPeriodLabel(timestamp, granularity, isRussian) {
+  if (!Number.isFinite(timestamp)) {
+    return "-";
+  }
+
+  if (granularity === "month") {
+    return ASSISTANT_MONTH_FORMATTER.format(new Date(timestamp));
+  }
+  if (granularity === "week") {
+    const weekPrefix = isRussian ? "Неделя с" : "Week of";
+    return `${weekPrefix} ${formatAssistantDateTimestamp(timestamp)}`;
+  }
+  return formatAssistantDateTimestamp(timestamp);
+}
+
+function buildAssistantPaymentEvents(records) {
+  const events = [];
+
+  for (const record of Array.isArray(records) ? records : []) {
+    const clientName = getAssistantRecordDisplayName(record);
+    const managerName = getAssistantRecordManagerName(record);
+    const clientComparable = normalizeAssistantComparableText(clientName, 220);
+
+    for (let index = 0; index < ASSISTANT_PAYMENT_FIELDS.length; index += 1) {
+      const amount = parseAssistantMoneyValue(record?.[ASSISTANT_PAYMENT_FIELDS[index]]);
+      if (!Number.isFinite(amount) || Math.abs(amount) <= ASSISTANT_ZERO_TOLERANCE) {
+        continue;
+      }
+
+      const dateTimestamp = parseDateValue(record?.[ASSISTANT_PAYMENT_DATE_FIELDS[index]]);
+      const dateDayStart = getAssistantUtcDayStartFromTimestamp(dateTimestamp);
+      if (dateDayStart === null) {
+        continue;
+      }
+
+      events.push({
+        clientName,
+        clientComparable,
+        managerName: managerName || "",
+        amount,
+        dateTimestamp: dateDayStart,
+      });
+    }
+  }
+
+  return events;
+}
+
 function computeAssistantTotalPaymentsAmount(record) {
   let sum = 0;
   let hasPayments = false;
@@ -1846,11 +2245,11 @@ function getAssistantDefaultSuggestions(isRussian) {
     return [
       "Сводка по клиентам",
       "Покажи топ-10 должников",
+      "Сколько новых клиентов с 2026-02-01 по 2026-02-09?",
+      "Сколько первых платежей за последние 30 дней?",
+      "Выручка по неделям за последние 2 месяца",
+      "Кто перестал платить после 2025-10-01?",
       "Рейтинг менеджеров по долгу",
-      "Клиенты с просрочкой больше 30 дней",
-      "Клиенты без менеджера",
-      "Аномалии: оплачено больше договора",
-      "Список для обзвона на сегодня",
       "Покажи клиента John Smith",
     ];
   }
@@ -1858,11 +2257,11 @@ function getAssistantDefaultSuggestions(isRussian) {
   return [
     "Give me a client summary",
     "Show top 10 debtors",
+    "How many new clients from 2026-02-01 to 2026-02-09?",
+    "How many first payments in the last 30 days?",
+    "Revenue by week for the last 2 months",
+    "Who stopped paying after 2025-10-01?",
     "Manager ranking by debt",
-    "Clients overdue more than 30 days",
-    "Clients without manager",
-    "Anomalies: paid is higher than contract",
-    "Today's call list",
     "Show client John Smith",
   ];
 }
@@ -1923,13 +2322,12 @@ function buildAssistantHelpReply(isRussian, visibleCount) {
       "Примеры вопросов:",
       "1) Сводка по клиентам",
       "2) Топ-10 должников",
-      "3) Клиенты с просрочкой больше 30 дней",
-      "4) Рейтинг менеджеров по долгу",
-      "5) Покажи клиентов менеджера <имя>",
-      "6) Покажи клиентов компании <название>",
-      "7) Аномалии: оплачено больше договора",
-      "8) Список для обзвона на сегодня",
-      "9) Покажи клиента <имя>",
+      "3) Сколько новых клиентов с 2026-02-01 по 2026-02-09?",
+      "4) Сколько первых платежей за последние 30 дней?",
+      "5) Выручка по неделям за последние 2 месяца",
+      "6) Кто перестал платить после 2025-10-01?",
+      "7) Рейтинг менеджеров по долгу",
+      "8) Покажи клиента <имя>",
     ].join("\n");
   }
 
@@ -1938,13 +2336,12 @@ function buildAssistantHelpReply(isRussian, visibleCount) {
     "Try asking:",
     "1) Client summary",
     "2) Top 10 debtors",
-    "3) Clients overdue more than 30 days",
-    "4) Manager ranking by debt",
-    "5) Show clients of manager <name>",
-    "6) Show clients of company <name>",
-    "7) Anomalies: paid is higher than contract",
-    "8) Today's call list",
-    "9) Show client <name>",
+    "3) How many new clients from 2026-02-01 to 2026-02-09?",
+    "4) How many first payments in the last 30 days?",
+    "5) Revenue by week for the last 2 months",
+    "6) Who stopped paying after 2025-10-01?",
+    "7) Manager ranking by debt",
+    "8) Show client <name>",
   ].join("\n");
 }
 
@@ -3458,6 +3855,358 @@ function buildAssistantManagerComparisonReply(rows, leftManagerEntry, rightManag
   ].join("\n");
 }
 
+function buildAssistantNewClientsInRangeReply(rows, range, isRussian, requestedLimit = 10, byManager = false) {
+  if (!range) {
+    return isRussian
+      ? "Уточните период (например: с 2026-02-01 по 2026-02-09)."
+      : "Please specify a period (for example: from 2026-02-01 to 2026-02-09).";
+  }
+
+  const limit = clampAssistantInteger(requestedLimit, 1, 30, 10);
+  const filtered = [...rows]
+    .filter((row) => Number.isFinite(row.createdAt) && row.createdAt > 0)
+    .filter((row) => isAssistantTimestampInRange(getAssistantUtcDayStartFromTimestamp(row.createdAt), range))
+    .sort((left, right) => right.createdAt - left.createdAt);
+
+  if (!filtered.length) {
+    return isRussian
+      ? `Новых клиентов за период ${formatAssistantDateRangeLabel(range, true)} нет.`
+      : `No new clients in ${formatAssistantDateRangeLabel(range, false)}.`;
+  }
+
+  if (byManager) {
+    const managerMap = new Map();
+    for (const row of filtered) {
+      const key = row.managerComparable || "__unassigned__";
+      const current = managerMap.get(key) || {
+        managerName: resolveAssistantManagerLabel(row.managerName, isRussian),
+        clientsCount: 0,
+      };
+      current.clientsCount += 1;
+      managerMap.set(key, current);
+    }
+
+    const items = [...managerMap.values()].sort((left, right) => right.clientsCount - left.clientsCount);
+    const lines = [
+      isRussian
+        ? `Новые клиенты по менеджерам за период ${formatAssistantDateRangeLabel(range, true)}: ${filtered.length}`
+        : `New clients by manager in ${formatAssistantDateRangeLabel(range, false)}: ${filtered.length}`,
+    ];
+    items.slice(0, limit).forEach((item, index) => {
+      lines.push(`${index + 1}. ${item.managerName} - ${item.clientsCount}`);
+    });
+    if (items.length > limit) {
+      lines.push(isRussian ? `И еще: ${items.length - limit}` : `And ${items.length - limit} more.`);
+    }
+    return lines.join("\n");
+  }
+
+  const lines = [
+    isRussian
+      ? `Новых клиентов за период ${formatAssistantDateRangeLabel(range, true)}: ${filtered.length}`
+      : `New clients in ${formatAssistantDateRangeLabel(range, false)}: ${filtered.length}`,
+  ];
+  filtered.slice(0, limit).forEach((row, index) => {
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "дата" : "date"} ${formatAssistantDateTimestamp(
+        getAssistantUtcDayStartFromTimestamp(row.createdAt),
+      )} - ${isRussian ? "менеджер" : "manager"} ${resolveAssistantManagerLabel(row.managerName, isRussian)}`,
+    );
+  });
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantFirstPaymentEntriesFromEvents(paymentEvents) {
+  const firstPaymentByClient = new Map();
+
+  for (const event of Array.isArray(paymentEvents) ? paymentEvents : []) {
+    if (!event?.clientComparable || !Number.isFinite(event?.dateTimestamp)) {
+      continue;
+    }
+
+    const current = firstPaymentByClient.get(event.clientComparable);
+    if (!current || event.dateTimestamp < current.dateTimestamp) {
+      firstPaymentByClient.set(event.clientComparable, {
+        clientName: event.clientName,
+        managerName: event.managerName || "",
+        dateTimestamp: event.dateTimestamp,
+        amount: event.amount,
+      });
+    }
+  }
+
+  return [...firstPaymentByClient.values()];
+}
+
+function buildAssistantFirstPaymentsInRangeReply(rows, paymentEvents, range, isRussian, requestedLimit = 10, byManager = false) {
+  if (!range) {
+    return isRussian
+      ? "Уточните период для первого платежа (например: с 2026-02-01 по 2026-02-09)."
+      : "Please specify a period for first payment (for example: from 2026-02-01 to 2026-02-09).";
+  }
+
+  const limit = clampAssistantInteger(requestedLimit, 1, 30, 10);
+  const entries = buildAssistantFirstPaymentEntriesFromEvents(paymentEvents)
+    .filter((item) => isAssistantTimestampInRange(item.dateTimestamp, range))
+    .sort((left, right) => right.dateTimestamp - left.dateTimestamp);
+
+  if (!entries.length) {
+    return isRussian
+      ? `Клиентов с первым платежом за период ${formatAssistantDateRangeLabel(range, true)} не найдено.`
+      : `No clients with first payment in ${formatAssistantDateRangeLabel(range, false)}.`;
+  }
+
+  if (byManager) {
+    const managerMap = new Map();
+    for (const item of entries) {
+      const comparable = normalizeAssistantComparableText(item.managerName, 220);
+      const key = comparable || "__unassigned__";
+      const current = managerMap.get(key) || {
+        managerName: resolveAssistantManagerLabel(item.managerName, isRussian),
+        clientsCount: 0,
+      };
+      current.clientsCount += 1;
+      managerMap.set(key, current);
+    }
+
+    const summaryItems = [...managerMap.values()].sort((left, right) => right.clientsCount - left.clientsCount);
+    const lines = [
+      isRussian
+        ? `Первые платежи по менеджерам за период ${formatAssistantDateRangeLabel(range, true)}: ${entries.length}`
+        : `First payments by manager in ${formatAssistantDateRangeLabel(range, false)}: ${entries.length}`,
+    ];
+    summaryItems.slice(0, limit).forEach((item, index) => {
+      lines.push(`${index + 1}. ${item.managerName} - ${item.clientsCount}`);
+    });
+    if (summaryItems.length > limit) {
+      lines.push(isRussian ? `И еще: ${summaryItems.length - limit}` : `And ${summaryItems.length - limit} more.`);
+    }
+    return lines.join("\n");
+  }
+
+  const lines = [
+    isRussian
+      ? `Клиентов с первым платежом за период ${formatAssistantDateRangeLabel(range, true)}: ${entries.length}`
+      : `Clients with first payment in ${formatAssistantDateRangeLabel(range, false)}: ${entries.length}`,
+  ];
+  entries.slice(0, limit).forEach((item, index) => {
+    lines.push(
+      `${index + 1}. ${item.clientName} - ${isRussian ? "дата" : "date"} ${formatAssistantDateTimestamp(item.dateTimestamp)} - ${
+        isRussian ? "сумма" : "amount"
+      } ${formatAssistantMoney(item.amount)} - ${isRussian ? "менеджер" : "manager"} ${resolveAssistantManagerLabel(item.managerName, isRussian)}`,
+    );
+  });
+  if (entries.length > limit) {
+    lines.push(isRussian ? `И еще: ${entries.length - limit}` : `And ${entries.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantRevenueByPeriodReply(paymentEvents, range, isRussian, granularity = "day", requestedLimit = 30) {
+  if (!range) {
+    return isRussian
+      ? "Уточните период по выручке (например: за последние 30 дней)."
+      : "Please specify the revenue period (for example: last 30 days).";
+  }
+
+  const limit = clampAssistantInteger(requestedLimit, 1, 90, 30);
+  const filteredEvents = paymentEvents
+    .filter((event) => Number.isFinite(event?.dateTimestamp))
+    .filter((event) => isAssistantTimestampInRange(event.dateTimestamp, range));
+  if (!filteredEvents.length) {
+    return isRussian
+      ? `Нет платежей за период ${formatAssistantDateRangeLabel(range, true)}.`
+      : `No payments in ${formatAssistantDateRangeLabel(range, false)}.`;
+  }
+
+  const periodMap = new Map();
+  for (const event of filteredEvents) {
+    const bucketStart = getAssistantPeriodBucketStart(event.dateTimestamp, granularity);
+    if (bucketStart === null) {
+      continue;
+    }
+    const current = periodMap.get(bucketStart) || {
+      bucketStart,
+      amount: 0,
+      txCount: 0,
+    };
+    current.amount += event.amount;
+    current.txCount += 1;
+    periodMap.set(bucketStart, current);
+  }
+
+  const buckets = [...periodMap.values()].sort((left, right) => left.bucketStart - right.bucketStart);
+  const totalAmount = buckets.reduce((sum, bucket) => sum + bucket.amount, 0);
+  const visibleBuckets = buckets.length > limit ? buckets.slice(-limit) : buckets;
+
+  const lines = [
+    isRussian
+      ? `Выручка за период ${formatAssistantDateRangeLabel(range, true)} (${granularity}): ${formatAssistantMoney(totalAmount)}`
+      : `Revenue in ${formatAssistantDateRangeLabel(range, false)} (${granularity}): ${formatAssistantMoney(totalAmount)}`,
+  ];
+  visibleBuckets.forEach((bucket) => {
+    lines.push(
+      `${formatAssistantPeriodLabel(bucket.bucketStart, granularity, isRussian)}: ${formatAssistantMoney(bucket.amount)} (${
+        bucket.txCount
+      })`,
+    );
+  });
+  if (buckets.length > visibleBuckets.length) {
+    const omitted = buckets.length - visibleBuckets.length;
+    lines.push(isRussian ? `Скрыто периодов: ${omitted}` : `Hidden periods: ${omitted}`);
+  }
+  return lines.join("\n");
+}
+
+function buildAssistantDebtMovementByPeriodReply(rows, paymentEvents, range, isRussian, granularity = "week", requestedLimit = 30) {
+  if (!range) {
+    return isRussian
+      ? "Уточните период для динамики долга (например: за последние 3 месяца)."
+      : "Please specify period for debt dynamics (for example: last 3 months).";
+  }
+
+  const limit = clampAssistantInteger(requestedLimit, 1, 90, 30);
+  const periodMap = new Map();
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!Number.isFinite(row?.createdAt) || row.createdAt <= 0 || row.contractAmount <= ASSISTANT_ZERO_TOLERANCE) {
+      continue;
+    }
+    const createdDayStart = getAssistantUtcDayStartFromTimestamp(row.createdAt);
+    if (!isAssistantTimestampInRange(createdDayStart, range)) {
+      continue;
+    }
+
+    const bucketStart = getAssistantPeriodBucketStart(createdDayStart, granularity);
+    if (bucketStart === null) {
+      continue;
+    }
+
+    const current = periodMap.get(bucketStart) || {
+      bucketStart,
+      contractsAdded: 0,
+      paymentsCollected: 0,
+    };
+    current.contractsAdded += row.contractAmount;
+    periodMap.set(bucketStart, current);
+  }
+
+  for (const event of Array.isArray(paymentEvents) ? paymentEvents : []) {
+    if (!Number.isFinite(event?.dateTimestamp) || !isAssistantTimestampInRange(event.dateTimestamp, range)) {
+      continue;
+    }
+
+    const bucketStart = getAssistantPeriodBucketStart(event.dateTimestamp, granularity);
+    if (bucketStart === null) {
+      continue;
+    }
+
+    const current = periodMap.get(bucketStart) || {
+      bucketStart,
+      contractsAdded: 0,
+      paymentsCollected: 0,
+    };
+    current.paymentsCollected += event.amount;
+    periodMap.set(bucketStart, current);
+  }
+
+  const buckets = [...periodMap.values()].sort((left, right) => left.bucketStart - right.bucketStart);
+  if (!buckets.length) {
+    return isRussian
+      ? `Нет данных для динамики долга за период ${formatAssistantDateRangeLabel(range, true)}.`
+      : `No debt-dynamics data in ${formatAssistantDateRangeLabel(range, false)}.`;
+  }
+
+  let totalContractsAdded = 0;
+  let totalCollected = 0;
+  buckets.forEach((bucket) => {
+    totalContractsAdded += bucket.contractsAdded;
+    totalCollected += bucket.paymentsCollected;
+  });
+
+  const estimatedDebtDelta = totalContractsAdded - totalCollected;
+  const visibleBuckets = buckets.length > limit ? buckets.slice(-limit) : buckets;
+
+  const lines = [
+    isRussian
+      ? `Оценочная динамика долга за период ${formatAssistantDateRangeLabel(range, true)} (новые договоры - оплаты): ${formatAssistantMoney(
+          estimatedDebtDelta,
+        )}`
+      : `Estimated debt movement in ${formatAssistantDateRangeLabel(range, false)} (new contracts - payments): ${formatAssistantMoney(
+          estimatedDebtDelta,
+        )}`,
+  ];
+  visibleBuckets.forEach((bucket) => {
+    const periodDelta = bucket.contractsAdded - bucket.paymentsCollected;
+    lines.push(
+      `${formatAssistantPeriodLabel(bucket.bucketStart, granularity, isRussian)}: +${formatAssistantMoney(
+        bucket.contractsAdded,
+      )} / -${formatAssistantMoney(bucket.paymentsCollected)} => ${formatAssistantMoney(periodDelta)}`,
+    );
+  });
+  if (buckets.length > visibleBuckets.length) {
+    lines.push(isRussian ? `Скрыто периодов: ${buckets.length - visibleBuckets.length}` : `Hidden periods: ${buckets.length - visibleBuckets.length}`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildAssistantStoppedPayingAfterDateReply(rows, cutoffTimestamp, isRussian, requestedLimit = 20) {
+  const cutoffDayStart = getAssistantUtcDayStartFromTimestamp(cutoffTimestamp);
+  if (cutoffDayStart === null) {
+    return isRussian
+      ? "Уточните дату (например: после 2025-10-01)."
+      : "Please specify a date (for example: after 2025-10-01).";
+  }
+
+  const limit = clampAssistantInteger(requestedLimit, 1, 30, 20);
+  const filtered = [...rows]
+    .filter((row) => row.balanceAmount > ASSISTANT_ZERO_TOLERANCE && !row.status.isWrittenOff)
+    .filter((row) => {
+      if (row.latestPaymentTimestamp === null) {
+        return Number.isFinite(row.createdAt) && row.createdAt > 0 && getAssistantUtcDayStartFromTimestamp(row.createdAt) <= cutoffDayStart;
+      }
+      return row.latestPaymentTimestamp < cutoffDayStart;
+    })
+    .sort((left, right) => {
+      const leftTimestamp = left.latestPaymentTimestamp === null ? 0 : left.latestPaymentTimestamp;
+      const rightTimestamp = right.latestPaymentTimestamp === null ? 0 : right.latestPaymentTimestamp;
+      return leftTimestamp - rightTimestamp;
+    });
+
+  if (!filtered.length) {
+    return isRussian
+      ? `Не найдено клиентов, которые перестали платить после ${formatAssistantDateTimestamp(cutoffDayStart)}.`
+      : `No clients seem to have stopped paying after ${formatAssistantDateTimestamp(cutoffDayStart)}.`;
+  }
+
+  const lines = [
+    isRussian
+      ? `Клиенты, у которых нет платежей после ${formatAssistantDateTimestamp(cutoffDayStart)}: ${filtered.length}`
+      : `Clients with no payments after ${formatAssistantDateTimestamp(cutoffDayStart)}: ${filtered.length}`,
+  ];
+  filtered.slice(0, limit).forEach((row, index) => {
+    const latestPaymentLabel =
+      row.latestPaymentTimestamp === null ? (isRussian ? "нет данных" : "no data") : formatAssistantDateTimestamp(row.latestPaymentTimestamp);
+    const daysSince =
+      row.latestPaymentTimestamp === null ? null : getAssistantDaysSinceTimestamp(row.latestPaymentTimestamp);
+    lines.push(
+      `${index + 1}. ${row.clientName} - ${isRussian ? "последний платеж" : "latest payment"} ${latestPaymentLabel}${
+        daysSince !== null ? ` (${daysSince} ${isRussian ? "дн. назад" : "days ago"})` : ""
+      } - ${isRussian ? "долг" : "debt"} ${formatAssistantMoney(row.balanceAmount)} - ${
+        isRussian ? "менеджер" : "manager"
+      } ${resolveAssistantManagerLabel(row.managerName, isRussian)}`,
+    );
+  });
+  if (filtered.length > limit) {
+    lines.push(isRussian ? `И еще: ${filtered.length - limit}` : `And ${filtered.length - limit} more.`);
+  }
+  return lines.join("\n");
+}
+
 function buildAssistantReplyPayload(message, records, updatedAt) {
   const normalizedMessage = normalizeAssistantSearchText(message);
   const isRussian = /[а-яё]/i.test(normalizedMessage);
@@ -3508,6 +4257,15 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
   const wantsCompare = /(compare|сравни|versus|vs|против)/i.test(normalizedMessage);
   const wantsAnomaly = /(anomal|ошиб|аномал|некоррект|проверь|inconsisten|mismatch)/i.test(normalizedMessage);
   const wantsCallList = /(call list|обзвон|позвон|follow[\s-]*up)/i.test(normalizedMessage);
+  const wantsRevenue =
+    /(revenue|выручк|cash flow)/i.test(normalizedMessage) ||
+    (/(собрано|collected|поступлен|доход)/i.test(normalizedMessage) &&
+      /(by|по|period|период|week|недел|month|месяц|day|день|динам)/i.test(normalizedMessage));
+  const wantsDebtDynamics = /(debt dynamics|debt movement|динам.*долг|измен.*долг)/i.test(normalizedMessage);
+  const wantsNewClients = /(new clients?|нов(ых|ые).*(клиент|клиентов)|пришл.*клиент|создан.*клиент)/i.test(normalizedMessage);
+  const wantsFirstPayment = /(first payment|перв.*плат(е|ё)ж|перв.*оплат)/i.test(normalizedMessage);
+  const wantsByManager = /(by manager|по менеджер|по каждому менеджеру|каждого менеджера)/i.test(normalizedMessage);
+  const wantsStoppedPaying = /(stopped paying|перестал.*плат|не плат.*после|нет платеж.*после)/i.test(normalizedMessage);
   const wantsMostRecent = /(most recent|newest|сам(ый|ая).*(последн|недавн))/i.test(normalizedMessage);
   const wantsOldest = /(oldest|earliest|сам(ый|ая).*(давн|ранн))/i.test(normalizedMessage);
   const wantsRecentWindow = /(in the last|за последн|в последн|within)/i.test(normalizedMessage);
@@ -3537,9 +4295,70 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
   const dayRange = wantsOverdue ? extractAssistantDayRange(message) : null;
   const dayThreshold = extractAssistantDayThreshold(message, 30);
   const amountThreshold = extractAssistantAmountThreshold(message);
+  const parsedDateRange = parseAssistantDateRangeFromMessage(message);
+  const periodGranularity = resolveAssistantGranularity(message, parsedDateRange);
+  const needsPaymentEvents = wantsRevenue || wantsDebtDynamics || wantsFirstPayment;
+  const paymentEvents = needsPaymentEvents ? buildAssistantPaymentEvents(visibleRecords) : [];
 
   if (wantsCompare && wantsManager && primaryManager && secondaryManager) {
     return respond(buildAssistantManagerComparisonReply(analyzedRows, primaryManager, secondaryManager, isRussian));
+  }
+
+  if (wantsNewClients) {
+    if (!parsedDateRange) {
+      return respond(
+        isRussian
+          ? "Для новых клиентов нужен период. Пример: сколько новых клиентов с 2026-02-01 по 2026-02-09?"
+          : "A date range is required for new clients. Example: how many new clients from 2026-02-01 to 2026-02-09?",
+      );
+    }
+
+    return respond(buildAssistantNewClientsInRangeReply(analyzedRows, parsedDateRange, isRussian, topLimit, wantsByManager || wantsManager));
+  }
+
+  if (wantsFirstPayment) {
+    if (!parsedDateRange) {
+      return respond(
+        isRussian
+          ? "Для первого платежа нужен период. Пример: сколько клиентов сделали первый платеж за последние 30 дней?"
+          : "A date range is required for first-payment analytics. Example: how many clients made first payment in the last 30 days?",
+      );
+    }
+
+    return respond(
+      buildAssistantFirstPaymentsInRangeReply(
+        analyzedRows,
+        paymentEvents,
+        parsedDateRange,
+        isRussian,
+        topLimit,
+        wantsByManager || wantsManager,
+      ),
+    );
+  }
+
+  if (wantsRevenue) {
+    const rangeForRevenue =
+      parsedDateRange || buildAssistantDateRange(getAssistantCurrentUtcDayStart() - 29 * ASSISTANT_DAY_IN_MS, getAssistantCurrentUtcDayStart(), "default_30_days");
+    return respond(buildAssistantRevenueByPeriodReply(paymentEvents, rangeForRevenue, isRussian, periodGranularity, 40));
+  }
+
+  if (wantsDebtDynamics) {
+    const rangeForDebtDynamics =
+      parsedDateRange || buildAssistantDateRange(getAssistantCurrentUtcDayStart() - 89 * ASSISTANT_DAY_IN_MS, getAssistantCurrentUtcDayStart(), "default_90_days");
+    return respond(buildAssistantDebtMovementByPeriodReply(analyzedRows, paymentEvents, rangeForDebtDynamics, isRussian, periodGranularity, 40));
+  }
+
+  if (wantsStoppedPaying) {
+    if (!parsedDateRange) {
+      return respond(
+        isRussian
+          ? "Для этого запроса укажи дату: например, кто перестал платить после 2025-10-01?"
+          : "Please provide a date for this query, for example: who stopped paying after 2025-10-01?",
+      );
+    }
+
+    return respond(buildAssistantStoppedPayingAfterDateReply(analyzedRows, parsedDateRange.fromTimestamp, isRussian, topLimit));
   }
 
   if (wantsAnomaly || wantsPaidGtContractHint || wantsNegativeHint || (wantsOverdue && wantsZeroBalance) || (wantsDebt && wantsNoOverdue)) {
