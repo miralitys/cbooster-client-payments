@@ -353,6 +353,11 @@ const MODERATION_FILES_TABLE_NAME = resolveTableName(
   process.env.DB_MODERATION_FILES_TABLE_NAME,
   DEFAULT_MODERATION_FILES_TABLE_NAME,
 );
+const DEFAULT_CLIENT_RECORDS_V2_TABLE_NAME = "client_records_v2";
+const CLIENT_RECORDS_V2_TABLE_NAME = resolveTableName(
+  process.env.DB_CLIENT_RECORDS_V2_TABLE_NAME,
+  DEFAULT_CLIENT_RECORDS_V2_TABLE_NAME,
+);
 const DEFAULT_QUICKBOOKS_TRANSACTIONS_TABLE_NAME = "quickbooks_transactions";
 const QUICKBOOKS_TRANSACTIONS_TABLE_NAME = resolveTableName(
   process.env.DB_QUICKBOOKS_TRANSACTIONS_TABLE_NAME,
@@ -392,6 +397,7 @@ const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
 const MODERATION_FILES_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_FILES_TABLE_NAME);
+const CLIENT_RECORDS_V2_TABLE = qualifyTableName(DB_SCHEMA, CLIENT_RECORDS_V2_TABLE_NAME);
 const QUICKBOOKS_TRANSACTIONS_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_TRANSACTIONS_TABLE_NAME);
 const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME);
 const QUICKBOOKS_AUTH_STATE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_AUTH_STATE_TABLE_NAME);
@@ -14784,6 +14790,92 @@ async function ensureDatabaseReady() {
         `,
         [STATE_ROW_ID],
       );
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE} (
+          id TEXT PRIMARY KEY,
+          record JSONB NOT NULL,
+          record_hash TEXT NOT NULL,
+          client_name TEXT NOT NULL DEFAULT '',
+          company_name TEXT NOT NULL DEFAULT '',
+          closed_by TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ,
+          source_state_updated_at TIMESTAMPTZ,
+          source_state_row_id BIGINT NOT NULL DEFAULT ${STATE_ROW_ID},
+          inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS record_hash TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS client_name TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS company_name TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS closed_by TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS source_state_updated_at TIMESTAMPTZ
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS source_state_row_id BIGINT NOT NULL DEFAULT ${STATE_ROW_ID}
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_client_name_idx
+        ON ${CLIENT_RECORDS_V2_TABLE} (client_name)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_created_at_idx
+        ON ${CLIENT_RECORDS_V2_TABLE} (created_at DESC NULLS LAST)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_updated_at_idx
+        ON ${CLIENT_RECORDS_V2_TABLE} (updated_at DESC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_state_updated_at_idx
+        ON ${CLIENT_RECORDS_V2_TABLE} (source_state_updated_at DESC NULLS LAST)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_record_gin_idx
+        ON ${CLIENT_RECORDS_V2_TABLE} USING GIN (record)
+      `);
 
       await pool.query(`
         CREATE TABLE IF NOT EXISTS ${MODERATION_TABLE} (
