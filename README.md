@@ -32,7 +32,7 @@ npm start
 4. В переменных Render добавьте:
    - `WEB_AUTH_USERNAME` = логин для входа на веб-сайт;
    - `WEB_AUTH_PASSWORD` = пароль для входа на веб-сайт;
-   - `WEB_AUTH_OWNER_USERNAME` = username владельца с полными правами (по умолчанию `ramisi@creditbooster.com`);
+   - `WEB_AUTH_OWNER_USERNAME` = username владельца с полными правами (по умолчанию `owner`);
    - `WEB_AUTH_USERS_JSON` = JSON-массив пользователей с ролями/департаментами (опционально);
    - `WEB_AUTH_SESSION_SECRET` = длинный случайный секрет для подписи cookie-сессии;
    - `WEB_AUTH_SESSION_TTL_SEC` = TTL сессии в секундах (по умолчанию `43200` = 12 часов);

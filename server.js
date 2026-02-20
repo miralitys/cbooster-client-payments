@@ -17,9 +17,9 @@ const TELEGRAM_INIT_DATA_TTL_SEC = parsePositiveInteger(process.env.TELEGRAM_INI
 const TELEGRAM_REQUIRED_CHAT_ID = parseOptionalTelegramChatId(process.env.TELEGRAM_REQUIRED_CHAT_ID);
 const TELEGRAM_NOTIFY_CHAT_ID = (process.env.TELEGRAM_NOTIFY_CHAT_ID || "").toString().trim();
 const TELEGRAM_NOTIFY_THREAD_ID = parseOptionalPositiveInteger(process.env.TELEGRAM_NOTIFY_THREAD_ID);
-const DEFAULT_WEB_AUTH_USERNAME = "ramisi@creditbooster.com";
-const DEFAULT_WEB_AUTH_PASSWORD = "Ringo@123Qwerty";
-const DEFAULT_WEB_AUTH_OWNER_USERNAME = "ramisi@creditbooster.com";
+const DEFAULT_WEB_AUTH_USERNAME = "owner";
+const DEFAULT_WEB_AUTH_PASSWORD = "ChangeMe!12345";
+const DEFAULT_WEB_AUTH_OWNER_USERNAME = "owner";
 const WEB_AUTH_USERNAME = normalizeWebAuthConfigValue(process.env.WEB_AUTH_USERNAME) || DEFAULT_WEB_AUTH_USERNAME;
 const WEB_AUTH_PASSWORD = normalizeWebAuthConfigValue(process.env.WEB_AUTH_PASSWORD) || DEFAULT_WEB_AUTH_PASSWORD;
 const WEB_AUTH_OWNER_USERNAME =
@@ -31,7 +31,8 @@ const WEB_AUTH_SESSION_COOKIE_NAME = "cbooster_auth_session";
 const WEB_AUTH_MOBILE_SESSION_HEADER = "x-cbooster-session";
 const WEB_AUTH_SESSION_TTL_SEC = parsePositiveInteger(process.env.WEB_AUTH_SESSION_TTL_SEC, 12 * 60 * 60);
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
-const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(process.env.WEB_AUTH_SESSION_SECRET);
+const WEB_AUTH_SESSION_SECRET_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_SESSION_SECRET);
+const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW);
 const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
 const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
 const WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS = "manage_client_payments";
@@ -656,6 +657,7 @@ const WEB_AUTH_USERS_DIRECTORY = resolveWebAuthUsersDirectory({
 });
 const WEB_AUTH_USERS_BY_USERNAME = WEB_AUTH_USERS_DIRECTORY.usersByUsername;
 seedWebAuthBootstrapUsers();
+validateWebAuthSecurityConfiguration();
 
 const app = express();
 app.set("trust proxy", 1);
@@ -803,14 +805,74 @@ function resolveOptionalBoolean(rawValue) {
 
 function resolveWebAuthSessionSecret(rawSecret) {
   const explicit = normalizeWebAuthConfigValue(rawSecret);
-  if (explicit.length >= 16) {
+  if (explicit.length >= 32) {
     return explicit;
   }
 
-  return crypto
-    .createHash("sha256")
-    .update(`cbooster-web-auth:${WEB_AUTH_USERNAME}:${WEB_AUTH_PASSWORD}`)
-    .digest("hex");
+  if (IS_PRODUCTION) {
+    return "";
+  }
+
+  // Local/dev fallback only: random per-process value avoids predictable tokens.
+  return crypto.randomBytes(48).toString("hex");
+}
+
+function isWebAuthUsingDefaultCredentials() {
+  return WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME && WEB_AUTH_PASSWORD === DEFAULT_WEB_AUTH_PASSWORD;
+}
+
+function isWeakWebAuthSessionSecret(rawSecret) {
+  const normalized = normalizeWebAuthConfigValue(rawSecret);
+  if (!normalized || normalized.length < 32) {
+    return true;
+  }
+
+  const lowered = normalized.toLowerCase();
+  const blockedValues = new Set([
+    "replace_with_a_long_random_secret",
+    "replace_with_64_char_random_secret",
+    "replace_with_random_secret",
+    "replace-me",
+    "changeme",
+    "change_me",
+    "secret",
+    "default",
+  ]);
+
+  if (blockedValues.has(lowered)) {
+    return true;
+  }
+
+  return false;
+}
+
+function validateWebAuthSecurityConfiguration() {
+  const issues = [];
+
+  if (isWebAuthUsingDefaultCredentials()) {
+    issues.push("WEB_AUTH_USERNAME/WEB_AUTH_PASSWORD are using insecure defaults.");
+  }
+
+  if (isWeakWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW)) {
+    issues.push("WEB_AUTH_SESSION_SECRET must be explicitly set to a strong random value (>= 32 chars).");
+  }
+
+  if (!issues.length) {
+    return;
+  }
+
+  if (IS_PRODUCTION) {
+    throw new Error(
+      `Refusing to start in production due to insecure web auth configuration:\n- ${issues.join("\n- ")}`,
+    );
+  }
+
+  for (const issue of issues) {
+    console.warn(`[security] ${issue}`);
+  }
+  console.warn(
+    "[security] Development fallback mode is active. Configure explicit WEB_AUTH_* credentials and WEB_AUTH_SESSION_SECRET.",
+  );
 }
 
 function createHttpError(message, status = 400) {
@@ -14519,11 +14581,7 @@ app.listen(PORT, () => {
       `SIMULATE_SLOW_RECORDS is enabled. GET/PUT /api/records return simulated 200 responses after ${SIMULATE_SLOW_RECORDS_DELAY_MS}ms.`,
     );
   }
-  if (
-    !WEB_AUTH_USERS_JSON &&
-    WEB_AUTH_USERNAME === DEFAULT_WEB_AUTH_USERNAME &&
-    WEB_AUTH_PASSWORD === DEFAULT_WEB_AUTH_PASSWORD
-  ) {
+  if (isWebAuthUsingDefaultCredentials()) {
     console.warn("Using default web auth credentials. Set WEB_AUTH_USERNAME and WEB_AUTH_PASSWORD in environment.");
   }
   if (!pool) {
