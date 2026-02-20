@@ -114,6 +114,18 @@ npm start
   - `teamUsernames` (опционально, массив или строка через запятую; для `middle_manager` в `client_service`),
   - `isOwner` (`true/false`, опционально).
 - В production plaintext-пароли в конфиге (`WEB_AUTH_PASSWORD`, `WEB_AUTH_USERS_JSON[].password`) запрещены: используйте только bcrypt-хеши.
+- Быстрая миграция `WEB_AUTH_USERS_JSON` (чтобы заменить все `password` на `passwordHash`):
+  1. Скопируйте текущее значение `WEB_AUTH_USERS_JSON` из Render.
+  2. Выполните:
+     ```bash
+     cd "/Users/ramisyaparov/Desktop/Project/CBooster Client Payments"
+     pbpaste | npm run auth:hash-users-json -- --stdin --compact > /tmp/users.hashed.json
+     cat /tmp/users.hashed.json | pbcopy
+     ```
+  3. Вставьте результат обратно в Render в переменную `WEB_AUTH_USERS_JSON`.
+  4. Удалите (или оставьте пустой) `WEB_AUTH_PASSWORD` в production.
+  5. Сделайте redeploy.
+  6. Если `WEB_AUTH_USERS_JSON` у вас не используется, миграция этого поля не требуется.
 - Департаменты и роли (на английском):
   - `Accounting Department`: `Department Head`, `Manager`
   - `Client Service Department`: `Department Head`, `Middle Manager`, `Manager`
