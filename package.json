@@ -8,6 +8,7 @@
     "dev": "node --watch server.js",
     "build": "npm --prefix webapp run build",
     "lint": "npm --prefix webapp run lint",
+    "auth:hash-users-json": "node scripts/hash-web-auth-users-json.js",
     "postinstall": "npm --prefix webapp install && npm --prefix webapp run build",
     "webapp:dev": "npm --prefix webapp run dev",
     "webapp:build": "npm --prefix webapp run build",
@@ -17,6 +18,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "express": "^4.21.2",
     "multer": "^2.0.2",
     "pg": "^8.13.3"
