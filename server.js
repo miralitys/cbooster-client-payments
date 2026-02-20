@@ -12869,6 +12869,76 @@ app.post(
   },
 );
 
+app.get(
+  "/api/ghl/client-basic-notes/missing",
+  requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
+  async (_req, res) => {
+    if (!pool) {
+      res.status(503).json({
+        error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+      });
+      return;
+    }
+
+    try {
+      const state = await getStoredRecords();
+      const clientNames = getUniqueClientNamesFromRecords(state.records);
+      const cachedRows = await listCachedGhlBasicNoteRowsByClientNames(clientNames);
+      const cacheByClientName = new Map();
+      for (const row of cachedRows) {
+        if (!row?.clientName) {
+          continue;
+        }
+        cacheByClientName.set(row.clientName, row);
+      }
+
+      const missingItems = [];
+      for (const clientName of clientNames) {
+        const cachedRow = cacheByClientName.get(clientName) || null;
+        if (!cachedRow) {
+          missingItems.push({
+            clientName,
+            reason: "no_cache_row",
+          });
+          continue;
+        }
+
+        const status = sanitizeTextValue(cachedRow.status, 40).toLowerCase() || "unknown";
+        const noteBody = sanitizeTextValue(cachedRow.noteBody, 12000);
+
+        if (status !== "found") {
+          missingItems.push({
+            clientName,
+            reason: `status_${status}`,
+          });
+          continue;
+        }
+
+        if (!noteBody) {
+          missingItems.push({
+            clientName,
+            reason: "empty_basic_info",
+          });
+        }
+      }
+
+      res.json({
+        ok: true,
+        source: "cache-only",
+        totalClients: clientNames.length,
+        cachedRowsCount: cachedRows.length,
+        missingCount: missingItems.length,
+        missingItems,
+      });
+    } catch (error) {
+      console.error("GET /api/ghl/client-basic-notes/missing failed:", error);
+      res.status(error.httpStatus || 500).json({
+        error: sanitizeTextValue(error?.message, 600) || "Failed to load missing BasicInfo clients from cache.",
+      });
+    }
+  },
+);
+
 app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   const clientName = sanitizeTextValue(req.query.clientName, 300);
   if (!clientName) {
