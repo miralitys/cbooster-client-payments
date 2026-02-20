@@ -3855,7 +3855,7 @@ function buildAssistantManagerComparisonReply(rows, leftManagerEntry, rightManag
   ].join("\n");
 }
 
-function buildAssistantNewClientsInRangeReply(rows, range, isRussian, requestedLimit = 10, byManager = false) {
+function buildAssistantNewClientsInRangeReply(paymentEvents, range, isRussian, requestedLimit = 10, byManager = false) {
   if (!range) {
     return isRussian
       ? "Уточните период (например: с 2026-02-01 по 2026-02-09)."
@@ -3863,23 +3863,23 @@ function buildAssistantNewClientsInRangeReply(rows, range, isRussian, requestedL
   }
 
   const limit = clampAssistantInteger(requestedLimit, 1, 30, 10);
-  const filtered = [...rows]
-    .filter((row) => Number.isFinite(row.createdAt) && row.createdAt > 0)
-    .filter((row) => isAssistantTimestampInRange(getAssistantUtcDayStartFromTimestamp(row.createdAt), range))
-    .sort((left, right) => right.createdAt - left.createdAt);
+  const filtered = buildAssistantFirstPaymentEntriesFromEvents(paymentEvents)
+    .filter((item) => isAssistantTimestampInRange(item.dateTimestamp, range))
+    .sort((left, right) => right.dateTimestamp - left.dateTimestamp);
 
   if (!filtered.length) {
     return isRussian
-      ? `Новых клиентов за период ${formatAssistantDateRangeLabel(range, true)} нет.`
-      : `No new clients in ${formatAssistantDateRangeLabel(range, false)}.`;
+      ? `Новых клиентов (по дате первого платежа) за период ${formatAssistantDateRangeLabel(range, true)} нет.`
+      : `No new clients (by first payment date) in ${formatAssistantDateRangeLabel(range, false)}.`;
   }
 
   if (byManager) {
     const managerMap = new Map();
-    for (const row of filtered) {
-      const key = row.managerComparable || "__unassigned__";
+    for (const item of filtered) {
+      const comparable = normalizeAssistantComparableText(item.managerName, 220);
+      const key = comparable || "__unassigned__";
       const current = managerMap.get(key) || {
-        managerName: resolveAssistantManagerLabel(row.managerName, isRussian),
+        managerName: resolveAssistantManagerLabel(item.managerName, isRussian),
         clientsCount: 0,
       };
       current.clientsCount += 1;
@@ -3889,8 +3889,8 @@ function buildAssistantNewClientsInRangeReply(rows, range, isRussian, requestedL
     const items = [...managerMap.values()].sort((left, right) => right.clientsCount - left.clientsCount);
     const lines = [
       isRussian
-        ? `Новые клиенты по менеджерам за период ${formatAssistantDateRangeLabel(range, true)}: ${filtered.length}`
-        : `New clients by manager in ${formatAssistantDateRangeLabel(range, false)}: ${filtered.length}`,
+        ? `Новые клиенты по менеджерам (по первому платежу) за период ${formatAssistantDateRangeLabel(range, true)}: ${filtered.length}`
+        : `New clients by manager (by first payment) in ${formatAssistantDateRangeLabel(range, false)}: ${filtered.length}`,
     ];
     items.slice(0, limit).forEach((item, index) => {
       lines.push(`${index + 1}. ${item.managerName} - ${item.clientsCount}`);
@@ -3903,14 +3903,14 @@ function buildAssistantNewClientsInRangeReply(rows, range, isRussian, requestedL
 
   const lines = [
     isRussian
-      ? `Новых клиентов за период ${formatAssistantDateRangeLabel(range, true)}: ${filtered.length}`
-      : `New clients in ${formatAssistantDateRangeLabel(range, false)}: ${filtered.length}`,
+      ? `Новых клиентов (по дате первого платежа) за период ${formatAssistantDateRangeLabel(range, true)}: ${filtered.length}`
+      : `New clients (by first payment date) in ${formatAssistantDateRangeLabel(range, false)}: ${filtered.length}`,
   ];
-  filtered.slice(0, limit).forEach((row, index) => {
+  filtered.slice(0, limit).forEach((item, index) => {
     lines.push(
-      `${index + 1}. ${row.clientName} - ${isRussian ? "дата" : "date"} ${formatAssistantDateTimestamp(
-        getAssistantUtcDayStartFromTimestamp(row.createdAt),
-      )} - ${isRussian ? "менеджер" : "manager"} ${resolveAssistantManagerLabel(row.managerName, isRussian)}`,
+      `${index + 1}. ${item.clientName} - ${isRussian ? "дата" : "date"} ${formatAssistantDateTimestamp(item.dateTimestamp)} - ${
+        isRussian ? "сумма" : "amount"
+      } ${formatAssistantMoney(item.amount)} - ${isRussian ? "менеджер" : "manager"} ${resolveAssistantManagerLabel(item.managerName, isRussian)}`,
     );
   });
   if (filtered.length > limit) {
@@ -4297,7 +4297,7 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
   const amountThreshold = extractAssistantAmountThreshold(message);
   const parsedDateRange = parseAssistantDateRangeFromMessage(message);
   const periodGranularity = resolveAssistantGranularity(message, parsedDateRange);
-  const needsPaymentEvents = wantsRevenue || wantsDebtDynamics || wantsFirstPayment;
+  const needsPaymentEvents = wantsRevenue || wantsDebtDynamics || wantsFirstPayment || wantsNewClients;
   const paymentEvents = needsPaymentEvents ? buildAssistantPaymentEvents(visibleRecords) : [];
 
   if (wantsCompare && wantsManager && primaryManager && secondaryManager) {
@@ -4313,7 +4313,7 @@ function buildAssistantReplyPayload(message, records, updatedAt) {
       );
     }
 
-    return respond(buildAssistantNewClientsInRangeReply(analyzedRows, parsedDateRange, isRussian, topLimit, wantsByManager || wantsManager));
+    return respond(buildAssistantNewClientsInRangeReply(paymentEvents, parsedDateRange, isRussian, topLimit, wantsByManager || wantsManager));
   }
 
   if (wantsFirstPayment) {
