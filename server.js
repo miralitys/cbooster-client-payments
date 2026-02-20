@@ -482,6 +482,10 @@ const RECORD_DATE_FIELDS = [
   "dateWhenWrittenOff",
 ];
 const RECORD_CHECKBOX_FIELDS = ["afterResult", "writtenOff"];
+const RECORD_META_FIELDS = ["id", "createdAt"];
+const RECORD_EXTRA_TEXT_FIELDS = ["purchasedService", "address", "creditMonitoringLogin", "creditMonitoringPassword"];
+const RECORD_EXTRA_DATE_FIELDS = ["dateOfBirth", "dateWhenFullyPaid"];
+const RECORD_CHECKBOX_FIELD_SET = new Set(RECORD_CHECKBOX_FIELDS);
 const MINI_EXTRA_TEXT_FIELDS = ["leadSource", "ssn", "clientPhoneNumber", "futurePayment", "identityIq", "clientEmailAddress"];
 const MINI_EXTRA_FIELD_SET = new Set(MINI_EXTRA_TEXT_FIELDS);
 const MINI_EXTRA_MAX_LENGTH = {
@@ -492,6 +496,73 @@ const MINI_EXTRA_MAX_LENGTH = {
   identityIq: 2000,
   clientEmailAddress: 320,
 };
+const RECORDS_ALLOWED_FIELDS_SET = new Set([
+  ...RECORD_META_FIELDS,
+  ...RECORD_TEXT_FIELDS,
+  ...RECORD_DATE_FIELDS,
+  ...RECORD_CHECKBOX_FIELDS,
+  ...RECORD_EXTRA_TEXT_FIELDS,
+  ...MINI_EXTRA_TEXT_FIELDS,
+  ...RECORD_EXTRA_DATE_FIELDS,
+]);
+const RECORDS_DATE_VALIDATION_FIELD_SET = new Set([...RECORD_DATE_FIELDS, ...RECORD_EXTRA_DATE_FIELDS]);
+const RECORDS_PUT_MAX_COUNT = Math.min(Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_COUNT, 5000), 1), 20000);
+const RECORDS_PUT_MAX_RECORD_KEYS = Math.min(
+  Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_RECORD_KEYS, 64), 8),
+  200,
+);
+const RECORDS_PUT_MAX_RECORD_CHARS = Math.min(
+  Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_RECORD_CHARS, 24000), 500),
+  200000,
+);
+const RECORDS_PUT_MAX_TOTAL_CHARS = Math.min(
+  Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_TOTAL_CHARS, 2500000), 10000),
+  20000000,
+);
+const RECORDS_PUT_DEFAULT_FIELD_MAX_LENGTH = 4000;
+const RECORDS_PUT_FIELD_MAX_LENGTH = Object.freeze({
+  id: 180,
+  createdAt: 120,
+  clientName: 300,
+  closedBy: 220,
+  companyName: 320,
+  serviceType: 220,
+  purchasedService: 220,
+  address: 600,
+  dateOfBirth: 40,
+  ssn: 64,
+  creditMonitoringLogin: 260,
+  creditMonitoringPassword: 260,
+  contractTotals: 120,
+  totalPayments: 120,
+  payment1: 120,
+  payment2: 120,
+  payment3: 120,
+  payment4: 120,
+  payment5: 120,
+  payment6: 120,
+  payment7: 120,
+  payment1Date: 40,
+  payment2Date: 40,
+  payment3Date: 40,
+  payment4Date: 40,
+  payment5Date: 40,
+  payment6Date: 40,
+  payment7Date: 40,
+  futurePayments: 120,
+  afterResult: 10,
+  writtenOff: 10,
+  notes: 8000,
+  collection: 120,
+  dateOfCollection: 40,
+  dateWhenWrittenOff: 40,
+  dateWhenFullyPaid: 40,
+  leadSource: MINI_EXTRA_MAX_LENGTH.leadSource,
+  clientPhoneNumber: MINI_EXTRA_MAX_LENGTH.clientPhoneNumber,
+  futurePayment: MINI_EXTRA_MAX_LENGTH.futurePayment,
+  identityIq: MINI_EXTRA_MAX_LENGTH.identityIq,
+  clientEmailAddress: MINI_EXTRA_MAX_LENGTH.clientEmailAddress,
+});
 const MINI_REQUIRED_FIELDS = ["clientName"];
 const ASSISTANT_MAX_MESSAGE_LENGTH = 2000;
 const ASSISTANT_REVIEW_MAX_TEXT_LENGTH = 8000;
@@ -12962,8 +13033,196 @@ function startGhlBasicNoteAutoRefreshScheduler() {
   return true;
 }
 
-function isValidRecordsPayload(value) {
-  return Array.isArray(value);
+function buildInvalidRecordsPayloadResult(message, code = "invalid_records_payload", httpStatus = 400) {
+  return {
+    ok: false,
+    message,
+    code,
+    httpStatus,
+  };
+}
+
+function normalizeRecordFieldValue(rawValue, options = {}) {
+  const { allowBoolean = false } = options;
+
+  if (rawValue === null || rawValue === undefined) {
+    return "";
+  }
+
+  if (typeof rawValue === "string") {
+    return rawValue.trim();
+  }
+
+  if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+    return String(rawValue);
+  }
+
+  if (allowBoolean && typeof rawValue === "boolean") {
+    return rawValue ? "Yes" : "";
+  }
+
+  return null;
+}
+
+function isValidCheckboxInput(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === "" || rawValue === false || rawValue === 0) {
+    return true;
+  }
+
+  if (rawValue === true || rawValue === 1) {
+    return true;
+  }
+
+  if (typeof rawValue === "boolean") {
+    return true;
+  }
+
+  if (typeof rawValue === "number") {
+    return rawValue === 0 || rawValue === 1;
+  }
+
+  if (typeof rawValue === "string") {
+    const normalized = rawValue.trim().toLowerCase();
+    return (
+      normalized === "" ||
+      normalized === "yes" ||
+      normalized === "true" ||
+      normalized === "1" ||
+      normalized === "no" ||
+      normalized === "false" ||
+      normalized === "0"
+    );
+  }
+
+  return false;
+}
+
+function validateRecordsPayload(value) {
+  if (!Array.isArray(value)) {
+    return buildInvalidRecordsPayloadResult("Payload must include `records` as an array.");
+  }
+
+  if (value.length > RECORDS_PUT_MAX_COUNT) {
+    return buildInvalidRecordsPayloadResult(
+      `Records payload is too large. Maximum allowed records: ${RECORDS_PUT_MAX_COUNT}.`,
+      "records_payload_too_many_items",
+      413,
+    );
+  }
+
+  let totalChars = 0;
+  const normalizedRecords = [];
+
+  for (let recordIndex = 0; recordIndex < value.length; recordIndex += 1) {
+    const record = value[recordIndex];
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      return buildInvalidRecordsPayloadResult(
+        `Record at index ${recordIndex} must be an object.`,
+        "records_payload_invalid_record",
+      );
+    }
+
+    const entries = Object.entries(record);
+    if (entries.length > RECORDS_PUT_MAX_RECORD_KEYS) {
+      return buildInvalidRecordsPayloadResult(
+        `Record at index ${recordIndex} contains too many fields.`,
+        "records_payload_record_too_wide",
+        413,
+      );
+    }
+
+    const normalizedRecord = {};
+    let recordChars = 0;
+
+    for (const [fieldName, rawFieldValue] of entries) {
+      if (!RECORDS_ALLOWED_FIELDS_SET.has(fieldName)) {
+        return buildInvalidRecordsPayloadResult(
+          `Record at index ${recordIndex} contains unsupported field "${fieldName}".`,
+          "records_payload_unknown_field",
+        );
+      }
+
+      let normalizedValue = "";
+      if (RECORD_CHECKBOX_FIELD_SET.has(fieldName)) {
+        if (!isValidCheckboxInput(rawFieldValue)) {
+          return buildInvalidRecordsPayloadResult(
+            `Record at index ${recordIndex} has invalid checkbox value for "${fieldName}".`,
+            "records_payload_invalid_checkbox",
+          );
+        }
+        normalizedValue = toCheckboxValue(rawFieldValue);
+      } else {
+        normalizedValue = normalizeRecordFieldValue(rawFieldValue);
+        if (normalizedValue === null) {
+          return buildInvalidRecordsPayloadResult(
+            `Record at index ${recordIndex} has invalid type for "${fieldName}".`,
+            "records_payload_invalid_field_type",
+          );
+        }
+      }
+
+      const fieldLimit =
+        Object.prototype.hasOwnProperty.call(RECORDS_PUT_FIELD_MAX_LENGTH, fieldName)
+          ? RECORDS_PUT_FIELD_MAX_LENGTH[fieldName]
+          : RECORDS_PUT_DEFAULT_FIELD_MAX_LENGTH;
+      if (normalizedValue.length > fieldLimit) {
+        return buildInvalidRecordsPayloadResult(
+          `Record at index ${recordIndex} exceeds allowed length for "${fieldName}".`,
+          "records_payload_field_too_long",
+          413,
+        );
+      }
+
+      if (fieldName === "createdAt" && normalizedValue) {
+        const createdAtTimestamp = Date.parse(normalizedValue);
+        if (!Number.isFinite(createdAtTimestamp)) {
+          return buildInvalidRecordsPayloadResult(
+            `Record at index ${recordIndex} has invalid createdAt value.`,
+            "records_payload_invalid_created_at",
+          );
+        }
+        normalizedValue = new Date(createdAtTimestamp).toISOString();
+      }
+
+      if (RECORDS_DATE_VALIDATION_FIELD_SET.has(fieldName) && normalizedValue) {
+        const normalizedDate = normalizeDateForStorage(normalizedValue);
+        if (normalizedDate === null) {
+          return buildInvalidRecordsPayloadResult(
+            `Record at index ${recordIndex} has invalid date in "${fieldName}". Use MM/DD/YYYY.`,
+            "records_payload_invalid_date",
+          );
+        }
+        normalizedValue = normalizedDate;
+      }
+
+      recordChars += normalizedValue.length + fieldName.length;
+      if (recordChars > RECORDS_PUT_MAX_RECORD_CHARS) {
+        return buildInvalidRecordsPayloadResult(
+          `Record at index ${recordIndex} is too large.`,
+          "records_payload_record_too_large",
+          413,
+        );
+      }
+
+      totalChars += normalizedValue.length + fieldName.length;
+      if (totalChars > RECORDS_PUT_MAX_TOTAL_CHARS) {
+        return buildInvalidRecordsPayloadResult(
+          "Records payload is too large.",
+          "records_payload_too_large",
+          413,
+        );
+      }
+
+      normalizedRecord[fieldName] = normalizedValue;
+    }
+
+    normalizedRecords.push(normalizedRecord);
+  }
+
+  return {
+    ok: true,
+    records: normalizedRecords,
+  };
 }
 
 function mapModerationRow(row) {
@@ -15346,9 +15605,11 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
   }
 
   const nextRecords = req.body?.records;
-  if (!isValidRecordsPayload(nextRecords)) {
-    res.status(400).json({
-      error: "Payload must include `records` as an array.",
+  const validationResult = validateRecordsPayload(nextRecords);
+  if (!validationResult.ok) {
+    res.status(validationResult.httpStatus || 400).json({
+      error: validationResult.message,
+      code: validationResult.code,
     });
     return;
   }
@@ -15402,7 +15663,7 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
   }
 
   try {
-    const updatedAt = await saveStoredRecords(nextRecords, {
+    const updatedAt = await saveStoredRecords(validationResult.records, {
       expectedUpdatedAt,
     });
     res.json({
