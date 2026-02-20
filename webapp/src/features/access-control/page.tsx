@@ -194,6 +194,32 @@ export default function AccessControlPage() {
     void loadAccessModel();
   }, [loadAccessModel]);
 
+  const openEditModal = useCallback(
+    (user: AuthUser) => {
+      if (!canManageAccess || user.isOwner) {
+        return;
+      }
+
+      const next = ensureFormDefaults(
+        {
+          username: user.username || "",
+          password: "",
+          displayName: user.displayName || user.username || "",
+          departmentId: user.departmentId || "",
+          roleId: user.roleId || "",
+          teamUsernames: (user.teamUsernames || []).join(", "),
+        },
+        departments,
+      );
+
+      setEditingOriginalUsername(user.username);
+      setEditForm(next);
+      setEditStatusText(`Editing "${user.displayName || user.username}".`);
+      setEditStatusError(false);
+    },
+    [canManageAccess, departments],
+  );
+
   const userColumns = useMemo<TableColumn<AuthUser>[]>(() => {
     return [
       {
@@ -244,30 +270,7 @@ export default function AccessControlPage() {
         cell: (item) => (item.isOwner ? "Yes" : "No"),
       },
     ];
-  }, [canManageAccess]);
-
-  function openEditModal(user: AuthUser) {
-    if (!canManageAccess || user.isOwner) {
-      return;
-    }
-
-    const next = ensureFormDefaults(
-      {
-        username: user.username || "",
-        password: "",
-        displayName: user.displayName || user.username || "",
-        departmentId: user.departmentId || "",
-        roleId: user.roleId || "",
-        teamUsernames: (user.teamUsernames || []).join(", "),
-      },
-      departments,
-    );
-
-    setEditingOriginalUsername(user.username);
-    setEditForm(next);
-    setEditStatusText(`Editing "${user.displayName || user.username}".`);
-    setEditStatusError(false);
-  }
+  }, [canManageAccess, openEditModal]);
 
   function closeEditModal() {
     setEditingOriginalUsername("");

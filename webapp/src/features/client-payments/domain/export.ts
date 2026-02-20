@@ -30,7 +30,7 @@ const COLUMN_LABELS: Record<string, string> = {
   dateOfCollection: "Date of collection",
   dateWhenWrittenOff: "Date when written off",
 };
-const SPREADSHEET_FORMULA_PREFIX = /^[\u0009\u000a\u000d ]*[=+\-@]/;
+const SPREADSHEET_FORMULA_PREFIX = /^\s*[=+\-@]/;
 
 export function exportRecordsToXls(records: ClientRecord[]): void {
   const html = buildExportHtml(records, "Client Payments Export", {
