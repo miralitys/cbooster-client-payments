@@ -74,7 +74,12 @@ npm start
 - `GET /api/auth/access-model`
 - `GET /api/auth/users`
 - `POST /api/auth/users`
-- `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD[&sync=1][&fullSync=1]`
+- `GET /api/quickbooks/payments/recent?from=YYYY-MM-DD&to=YYYY-MM-DD`
+- `POST /api/quickbooks/payments/recent/sync` (body: `{ from, to, fullSync? }`)
+- `GET /api/ghl/client-managers`
+- `POST /api/ghl/client-managers/refresh` (body: `{ refresh: "incremental" | "full" }`)
+- `GET /api/ghl/client-basic-note?clientName=...` (cache read-only)
+- `POST /api/ghl/client-basic-note/refresh` (body: `{ clientName, writtenOff? }`)
 - `GET /api/health`
 - `GET /api/records`
 - `PUT /api/records`
@@ -87,6 +92,8 @@ npm start
 - `GET /api/moderation/submissions/:id/files/:fileId`
 - `POST /api/moderation/submissions/:id/approve`
 - `POST /api/moderation/submissions/:id/reject`
+
+Для cookie-сессий state-changing API (`POST/PUT` на `/api/*`) требуют CSRF-заголовок `X-CSRF-Token` (значение из cookie `cbooster_auth_csrf`).
 
 Таблица в Supabase создается автоматически при первом обращении:
 - `client_records_state(id, records, updated_at)`.
@@ -155,8 +162,9 @@ npm start
 - Колонки: `Client Name`, `Phone`, `Email`, `Payment Amount`, `Payment Date`.
 - При открытии страницы читаются только сохраненные данные из базы (без запроса в QuickBooks).
 - Фоновый авто-sync работает каждый час только в окне `08:00-22:00` по времени `America/Chicago` (вне этого времени автоматических обновлений нет).
-- Для ручного обновления нажмите `Refresh`: выполняется sync с QuickBooks только от последней сохраненной даты и добавляются новые транзакции.
-- Кнопка `Total Refresh` выполняет полный sync за весь диапазон `2026-01-01` -> текущая дата и пересчитывает кеш целиком.
+- `GET /api/quickbooks/payments/recent` теперь строго read-only (только кеш).
+- Для ручного обновления нажмите `Refresh`: UI вызывает `POST /api/quickbooks/payments/recent/sync` и подгружает только новые транзакции.
+- Кнопка `Total Refresh` вызывает `POST /api/quickbooks/payments/recent/sync` с `fullSync=true` за весь диапазон `2026-01-01` -> текущая дата.
 - Для поиска введите имя клиента в поле `Search by client` (поиск выполняется по подстроке).
 - Чекбокс `Only refunds` показывает только транзакции с возвратами (`RefundReceipt`).
 - Интеграция строго read-only: мы только читаем данные из QuickBooks и не отправляем туда изменения.
