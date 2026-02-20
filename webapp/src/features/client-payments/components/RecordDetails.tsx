@@ -31,6 +31,8 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const paidDisplay = useMemo(() => formatMoneyCell(record.totalPayments), [record.totalPayments]);
   const debtDisplay = useMemo(() => formatMoneyCell(record.futurePayments), [record.futurePayments]);
   const companyDisplay = useMemo(() => (record.companyName || "").trim() || "-", [record.companyName]);
+  const avatarSource = useMemo(() => resolveAvatarSource(record, ghlBasicNote), [ghlBasicNote, record]);
+  const avatarInitials = useMemo(() => buildAvatarInitials(normalizedClientName), [normalizedClientName]);
 
   const detailsFields = useMemo(
     () => FIELD_DEFINITIONS.filter((field) => !HEADER_FIELD_KEYS.has(field.key)),
@@ -87,19 +89,27 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   return (
     <div className="record-details-stack">
       <section className="record-profile-header">
-        <h4 className="record-profile-header__name">{normalizedClientName || "Unnamed client"}</h4>
-        <p className="record-profile-header__contract">
-          Contract: <strong>{contractDisplay}</strong>
-        </p>
-
-        <div className="record-profile-header__money-row">
-          <div className="record-profile-header__money-item">
-            <span className="record-profile-header__money-label">Paid</span>
-            <strong className="record-profile-header__money-value">{paidDisplay}</strong>
+        <div className="record-profile-header__identity">
+          <div className="record-profile-header__avatar" aria-hidden="true">
+            {avatarSource ? (
+              <img src={avatarSource} alt="" className="record-profile-header__avatar-image" />
+            ) : (
+              <span className="record-profile-header__avatar-fallback">{avatarInitials}</span>
+            )}
           </div>
-          <div className="record-profile-header__money-item">
-            <span className="record-profile-header__money-label">Debt</span>
-            <strong className="record-profile-header__money-value">{debtDisplay}</strong>
+          <div className="record-profile-header__identity-main">
+            <h4 className="record-profile-header__name">{normalizedClientName || "Unnamed client"}</h4>
+            <p className="record-profile-header__summary-line">
+              <span>
+                Contract: <strong>{contractDisplay}</strong>
+              </span>
+              <span>
+                Paid: <strong>{paidDisplay}</strong>
+              </span>
+              <span>
+                Debt: <strong>{debtDisplay}</strong>
+              </span>
+            </p>
           </div>
         </div>
 
@@ -252,4 +262,68 @@ function extractFirstMatch(value: string, pattern: RegExp): string {
 function isWrittenOffRecord(record: ClientRecord): boolean {
   const value = (record.writtenOff || "").toString().trim().toLowerCase();
   return value === "yes" || value === "true" || value === "1" || value === "on";
+}
+
+function resolveAvatarSource(record: ClientRecord, ghlBasicNote: GhlClientBasicNotePayload | null): string {
+  const recordMap = record as unknown as Record<string, unknown>;
+  const noteMap = (ghlBasicNote || {}) as unknown as Record<string, unknown>;
+  const candidates = [
+    recordMap.avatarUrl,
+    recordMap.photoUrl,
+    recordMap.profilePhotoUrl,
+    recordMap.clientPhotoUrl,
+    recordMap.imageUrl,
+    recordMap.photo,
+    noteMap.contactAvatarUrl,
+    noteMap.contactPhotoUrl,
+    noteMap.contactImageUrl,
+  ];
+
+  for (const candidate of candidates) {
+    const normalizedUrl = normalizeAvatarUrl(candidate);
+    if (normalizedUrl) {
+      return normalizedUrl;
+    }
+  }
+
+  return "";
+}
+
+function normalizeAvatarUrl(rawValue: unknown): string {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return "";
+  }
+
+  if (/^https?:\/\/\S+$/i.test(value)) {
+    return value;
+  }
+
+  if (/^data:image\//i.test(value)) {
+    return value;
+  }
+
+  return "";
+}
+
+function buildAvatarInitials(clientName: string): string {
+  const normalized = (clientName || "").trim();
+  if (!normalized) {
+    return "NA";
+  }
+
+  const tokens = normalized
+    .split(/\s+/)
+    .map((token) => token.replace(/[^A-Za-zА-Яа-яЁё0-9]/g, ""))
+    .filter(Boolean);
+
+  if (!tokens.length) {
+    return "NA";
+  }
+
+  if (tokens.length === 1) {
+    return tokens[0].slice(0, 2).toUpperCase();
+  }
+
+  return `${tokens[0][0]}${tokens[tokens.length - 1][0]}`.toUpperCase();
 }
