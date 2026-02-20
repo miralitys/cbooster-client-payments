@@ -2,11 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getGhlLeads, getSession } from "@/shared/api";
 import type { GhlLeadRow, GhlLeadsSummary } from "@/shared/types/ghlLeads";
-import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageShell, Panel, SegmentedControl, Table } from "@/shared/ui";
+import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
-
-type RefreshMode = "none" | "incremental";
-type LeadsFilter = "all" | "today" | "week" | "month";
 
 const EMPTY_SUMMARY: GhlLeadsSummary = {
   total: 0,
@@ -15,23 +12,6 @@ const EMPTY_SUMMARY: GhlLeadsSummary = {
   month: 0,
   timezone: "",
   generatedAt: "",
-};
-const DEFAULT_TIME_ZONE = "America/Chicago";
-const FILTER_OPTIONS = [
-  { key: "all", label: "All" },
-  { key: "today", label: "Today" },
-  { key: "week", label: "This Week" },
-  { key: "month", label: "This Month" },
-];
-const WEEK_START_DAY = 1;
-const WEEKDAY_INDEX_BY_LABEL: Record<string, number> = {
-  sun: 0,
-  mon: 1,
-  tue: 2,
-  wed: 3,
-  thu: 4,
-  fri: 5,
-  sat: 6,
 };
 const SPREADSHEET_FORMULA_PREFIX = /^\s*[=+\-@]/;
 
@@ -42,51 +22,32 @@ export default function LeadsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [canSync, setCanSync] = useState(false);
-  const [currentMode, setCurrentMode] = useState<RefreshMode>("none");
-  const [activeFilter, setActiveFilter] = useState<LeadsFilter>("all");
   const [lastSyncedCount, setLastSyncedCount] = useState(0);
-  const activeTimeZone = summary.timezone || DEFAULT_TIME_ZONE;
-
-  const visibleItems = useMemo(() => {
-    return filterLeadsByDateWindow(items, activeFilter, activeTimeZone);
-  }, [activeFilter, activeTimeZone, items]);
 
   const statusText = useMemo(() => {
     if (isLoading) {
-      if (currentMode === "incremental") {
-        return "Refreshing only new leads from GoHighLevel...";
-      }
-      return "Loading leads from local cache...";
+      return "Refreshing only today's leads from GoHighLevel...";
     }
 
     if (loadError) {
       return loadError;
     }
 
-    if (!summary.total) {
-      return "No leads found in local cache. Press Refresh to sync new data.";
+    if (!items.length) {
+      return "Press Refresh to load today's leads.";
     }
 
-    return `Showing ${visibleItems.length} of ${summary.total} leads. Today: ${summary.today}. This week: ${summary.week}. This month: ${summary.month}. Last sync added/updated: ${lastSyncedCount}.`;
-  }, [
-    currentMode,
-    isLoading,
-    lastSyncedCount,
-    loadError,
-    summary.month,
-    summary.today,
-    summary.total,
-    summary.week,
-    visibleItems.length,
-  ]);
+    return `Loaded ${items.length} leads for today. Last sync added/updated: ${lastSyncedCount}.`;
+  }, [isLoading, items.length, lastSyncedCount, loadError]);
 
-  const loadLeads = useCallback(async (mode: RefreshMode = "none") => {
+  const loadLeads = useCallback(async () => {
     setIsLoading(true);
     setLoadError("");
-    setCurrentMode(mode);
 
     try {
-      const payload = await getGhlLeads(mode);
+      const payload = await getGhlLeads("incremental", {
+        todayOnly: true,
+      });
       const nextItems = Array.isArray(payload.items) ? payload.items : [];
 
       setItems(nextItems);
@@ -105,6 +66,7 @@ export default function LeadsPage() {
   }, []);
 
   useEffect(() => {
+    setIsLoading(false);
     void getSession()
       .then((session) => {
         setCanSync(Boolean(session?.permissions?.sync_client_managers));
@@ -112,9 +74,7 @@ export default function LeadsPage() {
       .catch(() => {
         setCanSync(false);
       });
-
-    void loadLeads("none");
-  }, [loadLeads]);
+  }, []);
 
   const columns = useMemo<TableColumn<GhlLeadRow>[]>(() => {
     return [
@@ -188,11 +148,11 @@ export default function LeadsPage() {
   }, []);
 
   const handleExportCsv = useCallback(() => {
-    if (!visibleItems.length) {
+    if (!items.length) {
       return;
     }
-    exportLeadsToCsv(visibleItems, activeFilter);
-  }, [activeFilter, visibleItems]);
+    exportLeadsToCsv(items, "today");
+  }, [items]);
 
   return (
     <PageShell className="leads-react-page">
@@ -201,26 +161,21 @@ export default function LeadsPage() {
         title={`Leads (${pipelineName})`}
         actions={
           <div className="leads-toolbar-react">
-            <SegmentedControl
-              value={activeFilter}
-              options={FILTER_OPTIONS}
-              onChange={(value) => setActiveFilter(value as LeadsFilter)}
-            />
             <Button
               type="button"
               size="sm"
               variant="secondary"
               onClick={handleExportCsv}
-              disabled={isLoading || !visibleItems.length}
+              disabled={isLoading || !items.length}
             >
               Export CSV
             </Button>
             <Button
               type="button"
               size="sm"
-              onClick={() => void loadLeads("incremental")}
+              onClick={() => void loadLeads()}
               disabled={isLoading || !canSync}
-              isLoading={isLoading && currentMode === "incremental"}
+              isLoading={isLoading}
             >
               Refresh
             </Button>
@@ -230,9 +185,7 @@ export default function LeadsPage() {
         {!loadError ? <p className="dashboard-message leads-status">{statusText}</p> : null}
 
         <div className="leads-summary-react" aria-live="polite">
-          <SummaryCard title="Today" value={summary.today} />
-          <SummaryCard title="This Week" value={summary.week} />
-          <SummaryCard title="This Month" value={summary.month} />
+          <SummaryCard title="Today" value={summary.today || items.length} />
         </div>
 
         {isLoading ? <LoadingSkeleton rows={8} /> : null}
@@ -242,19 +195,19 @@ export default function LeadsPage() {
             title="Failed to load leads"
             description={loadError}
             actionLabel="Retry"
-            onAction={() => void loadLeads("none")}
+            onAction={() => void loadLeads()}
           />
         ) : null}
 
-        {!isLoading && !loadError && !visibleItems.length ? (
-          <EmptyState title={items.length ? "No leads in selected period." : "No leads found."} />
+        {!isLoading && !loadError && !items.length ? (
+          <EmptyState title="Press Refresh to load today's leads." />
         ) : null}
 
-        {!isLoading && !loadError && visibleItems.length ? (
+        {!isLoading && !loadError && items.length ? (
           <Table
             className="leads-react-table-wrap"
             columns={columns}
-            rows={visibleItems}
+            rows={items}
             rowKey={(item, index) => item.leadId || `${item.createdOn}-${index}`}
             density="compact"
           />
@@ -331,171 +284,7 @@ function formatStatus(statusValue: string): string {
     .replace(/\b\w/g, (symbol) => symbol.toUpperCase());
 }
 
-function filterLeadsByDateWindow(items: GhlLeadRow[], filter: LeadsFilter, timeZone: string): GhlLeadRow[] {
-  if (filter === "all") {
-    return items;
-  }
-
-  const boundaries = buildTimeBoundaries(timeZone, new Date());
-  if (!boundaries) {
-    return items;
-  }
-
-  return items.filter((item) => {
-    const createdTimestamp = Date.parse(item.createdOn || "");
-    if (!Number.isFinite(createdTimestamp)) {
-      return false;
-    }
-
-    if (filter === "today") {
-      return createdTimestamp >= boundaries.todayStart && createdTimestamp < boundaries.tomorrowStart;
-    }
-
-    if (filter === "week") {
-      return createdTimestamp >= boundaries.weekStart && createdTimestamp < boundaries.tomorrowStart;
-    }
-
-    if (filter === "month") {
-      return createdTimestamp >= boundaries.monthStart && createdTimestamp < boundaries.tomorrowStart;
-    }
-
-    return true;
-  });
-}
-
-function buildTimeBoundaries(timeZone: string, dateValue = new Date()) {
-  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
-  const nowParts = getClockParts(timeZone, date);
-  if (!nowParts) {
-    return null;
-  }
-
-  const todayStart = buildUtcDateFromTimeZoneLocalParts(timeZone, nowParts.year, nowParts.month, nowParts.day, 0, 0).getTime();
-
-  const tomorrow = addDaysToCalendarDate(nowParts.year, nowParts.month, nowParts.day, 1);
-  const tomorrowStart = buildUtcDateFromTimeZoneLocalParts(timeZone, tomorrow.year, tomorrow.month, tomorrow.day, 0, 0).getTime();
-
-  const monthStart = buildUtcDateFromTimeZoneLocalParts(timeZone, nowParts.year, nowParts.month, 1, 0, 0).getTime();
-
-  const weekdayIndex = getWeekdayIndexForTimeZone(timeZone, date);
-  const offsetToWeekStart = (weekdayIndex - WEEK_START_DAY + 7) % 7;
-  const weekStartCalendar = addDaysToCalendarDate(nowParts.year, nowParts.month, nowParts.day, -offsetToWeekStart);
-  const weekStart = buildUtcDateFromTimeZoneLocalParts(
-    timeZone,
-    weekStartCalendar.year,
-    weekStartCalendar.month,
-    weekStartCalendar.day,
-    0,
-    0,
-  ).getTime();
-
-  return {
-    todayStart,
-    tomorrowStart,
-    weekStart,
-    monthStart,
-  };
-}
-
-function getClockParts(timeZone: string, dateValue = new Date()) {
-  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const values: Record<string, string> = {};
-  for (const part of formatter.formatToParts(date)) {
-    if (part.type !== "literal") {
-      values[part.type] = part.value;
-    }
-  }
-
-  const year = Number.parseInt(values.year || "", 10);
-  const month = Number.parseInt(values.month || "", 10);
-  const day = Number.parseInt(values.day || "", 10);
-
-  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
-    return null;
-  }
-
-  return {
-    year,
-    month,
-    day,
-  };
-}
-
-function getWeekdayIndexForTimeZone(timeZone: string, dateValue = new Date()): number {
-  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
-  const label = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    weekday: "short",
-  })
-    .format(date)
-    .slice(0, 3)
-    .toLowerCase();
-  return WEEKDAY_INDEX_BY_LABEL[label] ?? 0;
-}
-
-function getTimeZoneOffsetMinutes(timeZone: string, dateValue: Date): number {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "shortOffset",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const parts = formatter.formatToParts(dateValue);
-  const offsetPart = parts.find((part) => part.type === "timeZoneName");
-  const value = (offsetPart?.value || "").toString();
-  const match = value.match(/^GMT([+-]\d{1,2})(?::?(\d{2}))?$/i);
-  if (!match) {
-    return 0;
-  }
-
-  const hours = Number.parseInt(match[1], 10);
-  const minutes = Number.parseInt(match[2] || "0", 10);
-  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) {
-    return 0;
-  }
-
-  return hours * 60 + (hours >= 0 ? minutes : -minutes);
-}
-
-function buildUtcDateFromTimeZoneLocalParts(
-  timeZone: string,
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-): Date {
-  let utcTimestamp = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const offsetMinutes = getTimeZoneOffsetMinutes(timeZone, new Date(utcTimestamp));
-    const candidateTimestamp = Date.UTC(year, month - 1, day, hour, minute, 0, 0) - offsetMinutes * 60 * 1000;
-    if (candidateTimestamp === utcTimestamp) {
-      break;
-    }
-    utcTimestamp = candidateTimestamp;
-  }
-
-  return new Date(utcTimestamp);
-}
-
-function addDaysToCalendarDate(year: number, month: number, day: number, dayOffset: number) {
-  const date = new Date(Date.UTC(year, month - 1, day + dayOffset, 12, 0, 0, 0));
-  return {
-    year: date.getUTCFullYear(),
-    month: date.getUTCMonth() + 1,
-    day: date.getUTCDate(),
-  };
-}
-
-function exportLeadsToCsv(rows: GhlLeadRow[], filter: LeadsFilter): void {
+function exportLeadsToCsv(rows: GhlLeadRow[], filter: string): void {
   const headers = [
     "Created On",
     "Lead",
