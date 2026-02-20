@@ -669,19 +669,6 @@ const webAppDistRoot = path.join(__dirname, "webapp", "dist");
 const webAppIndexFile = path.join(webAppDistRoot, "index.html");
 const webAppDistAvailable = fs.existsSync(webAppIndexFile);
 const WEB_STATIC_ASSET_ALLOWLIST = new Map([
-  ["/styles.css", "styles.css"],
-  ["/dashboard.css", "dashboard.css"],
-  ["/assistant-legacy.css", "assistant-legacy.css"],
-  ["/assistant-legacy.js", "assistant-legacy.js"],
-  ["/assistant-avatar.svg", "assistant-avatar.svg"],
-  ["/dashboard.js", "dashboard.js"],
-  ["/quickbooks-payments.js", "quickbooks-payments.js"],
-  ["/client-managers.js", "client-managers.js"],
-  ["/ghl-contracts.js", "ghl-contracts.js"],
-  ["/app.js", "app.js"],
-  ["/access-control.js", "access-control.js"],
-  ["/user-registration.js", "user-registration.js"],
-  ["/seed-client-data.js", "seed-client-data.js"],
   ["/mini.js", "mini.js"],
 ]);
 
@@ -14705,30 +14692,6 @@ app.get("/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_
 
 app.get("/client-score", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
   res.redirect(302, "/app/client-score");
-});
-
-app.get("/legacy/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "quickbooks-payments.html"));
-});
-
-app.get("/legacy/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "client-managers.html"));
-});
-
-app.get("/legacy/ghl-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "ghl-contracts.html"));
-});
-
-app.get("/legacy/access-control", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_ACCESS_CONTROL), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "access-control.html"));
-});
-
-app.get("/legacy/client-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "client-payments.html"));
-});
-
-app.get("/legacy/dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
-  res.sendFile(path.join(staticRoot, "index.html"));
 });
 
 app.get("/moderation", (_req, res) => {
