@@ -437,6 +437,14 @@ const GHL_LEADS_MAX_ROWS_RESPONSE = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LEADS_MAX_ROWS_RESPONSE, 5000), 100),
   30000,
 );
+const GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS, 3500), 1000),
+  GHL_REQUEST_TIMEOUT_MS,
+);
+const GHL_LEADS_SYNC_MAX_DURATION_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_SYNC_MAX_DURATION_MS, 18000), 3000),
+  120000,
+);
 const GHL_LEADS_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: GHL_LEADS_SYNC_TIME_ZONE,
   year: "numeric",
@@ -8358,11 +8366,15 @@ async function requestGhlApi(pathname, options = {}) {
   const headers = buildGhlRequestHeaders(includeJsonBody);
   const query = options.query && typeof options.query === "object" ? options.query : {};
   const tolerateNotFound = Boolean(options.tolerateNotFound);
+  const timeoutMs = Math.min(
+    Math.max(parsePositiveInteger(options.timeoutMs, GHL_REQUEST_TIMEOUT_MS), 500),
+    120000,
+  );
   const url = buildGhlUrl(pathname, query);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {
     controller.abort();
-  }, GHL_REQUEST_TIMEOUT_MS);
+  }, timeoutMs);
 
   let response;
   try {
@@ -8376,7 +8388,7 @@ async function requestGhlApi(pathname, options = {}) {
     clearTimeout(timeoutId);
     const errorMessage = sanitizeTextValue(error?.message, 300) || "Unknown network error.";
     if (error?.name === "AbortError") {
-      throw createHttpError(`GHL request timed out after ${GHL_REQUEST_TIMEOUT_MS}ms (${pathname}).`, 504);
+      throw createHttpError(`GHL request timed out after ${timeoutMs}ms (${pathname}).`, 504);
     }
     throw createHttpError(`GHL request failed (${pathname}): ${errorMessage}`, 503);
   }
@@ -11637,70 +11649,11 @@ async function listGhlOpportunityPipelines() {
 
 async function resolveGhlLeadsPipelineContext() {
   const preferredPipelineName = sanitizeTextValue(GHL_LEADS_PIPELINE_NAME, 320);
-  const preferredPipelineNameLookup = normalizeGhlPipelineNameForLookup(preferredPipelineName);
   const configuredPipelineId = sanitizeTextValue(GHL_LEADS_PIPELINE_ID, 180);
-  const fallbackContext = {
+  return {
     pipelineId: configuredPipelineId,
     pipelineName: preferredPipelineName || "SALES 3 LINE",
   };
-
-  let pipelines = [];
-  try {
-    pipelines = await listGhlOpportunityPipelines();
-  } catch (error) {
-    if (configuredPipelineId) {
-      return fallbackContext;
-    }
-    console.warn(
-      `[ghl leads] pipeline list lookup failed, using pipeline-name fallback: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`,
-    );
-    return fallbackContext;
-  }
-
-  if (configuredPipelineId) {
-    const matchedById = pipelines.find((item) => sanitizeTextValue(item?.pipelineId, 180) === configuredPipelineId);
-    if (matchedById) {
-      return {
-        pipelineId: configuredPipelineId,
-        pipelineName: sanitizeTextValue(matchedById.pipelineName, 320) || preferredPipelineName || configuredPipelineId,
-      };
-    }
-
-    return {
-      pipelineId: configuredPipelineId,
-      pipelineName: preferredPipelineName || configuredPipelineId,
-    };
-  }
-
-  if (!pipelines.length) {
-    return fallbackContext;
-  }
-
-  const exactMatch = pipelines.find(
-    (item) => normalizeGhlPipelineNameForLookup(item?.pipelineName) === preferredPipelineNameLookup,
-  );
-  if (exactMatch) {
-    return {
-      pipelineId: sanitizeTextValue(exactMatch.pipelineId, 180),
-      pipelineName: sanitizeTextValue(exactMatch.pipelineName, 320) || preferredPipelineName,
-    };
-  }
-
-  const looseMatch = pipelines.find((item) => {
-    const candidate = normalizeGhlPipelineNameForLookup(item?.pipelineName);
-    if (!candidate || !preferredPipelineNameLookup) {
-      return false;
-    }
-    return candidate.includes(preferredPipelineNameLookup) || preferredPipelineNameLookup.includes(candidate);
-  });
-  if (looseMatch) {
-    return {
-      pipelineId: sanitizeTextValue(looseMatch.pipelineId, 180),
-      pipelineName: sanitizeTextValue(looseMatch.pipelineName, 320) || preferredPipelineName,
-    };
-  }
-
-  return fallbackContext;
 }
 
 function extractGhlOpportunitiesFromPayload(payload) {
@@ -12109,6 +12062,7 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
           method: "POST",
           body,
           tolerateNotFound: true,
+          timeoutMs: GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS,
         }),
     });
   }
@@ -12123,6 +12077,7 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
             method: "GET",
             query,
             tolerateNotFound: true,
+            timeoutMs: GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS,
           }),
       },
       {
@@ -12132,6 +12087,7 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
             method: "GET",
             query,
             tolerateNotFound: true,
+            timeoutMs: GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS,
           }),
       },
       {
@@ -12141,6 +12097,7 @@ async function requestGhlOpportunitiesPage(pipelineContext, page = 1, limit = GH
             method: "GET",
             query,
             tolerateNotFound: true,
+            timeoutMs: GHL_LEADS_SINGLE_REQUEST_TIMEOUT_MS,
           }),
       },
     );
@@ -12193,6 +12150,7 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
   const incrementalCutoffTimestamp = Number.isFinite(options?.incrementalCutoffTimestamp)
     ? Math.max(0, Math.trunc(options.incrementalCutoffTimestamp))
     : 0;
+  const startedAt = Date.now();
 
   const rowsById = new Map();
   let page = 1;
@@ -12201,9 +12159,23 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
   let skippedByCutoff = 0;
   let hasMore = true;
   let lastSource = "";
+  let stoppedByTimeBudget = false;
+  let lastError = "";
 
   while (hasMore && page <= GHL_LEADS_MAX_PAGES) {
-    const pagePayload = await requestGhlOpportunitiesPage(pipelineContext, page, GHL_LEADS_PAGE_LIMIT);
+    if (Date.now() - startedAt >= GHL_LEADS_SYNC_MAX_DURATION_MS) {
+      stoppedByTimeBudget = true;
+      break;
+    }
+
+    let pagePayload;
+    try {
+      pagePayload = await requestGhlOpportunitiesPage(pipelineContext, page, GHL_LEADS_PAGE_LIMIT);
+    } catch (error) {
+      lastError = sanitizeTextValue(error?.message, 500) || "Failed to sync leads page.";
+      break;
+    }
+
     pagesFetched += 1;
     hasMore = pagePayload.hasMore;
     lastSource = sanitizeTextValue(pagePayload.source, 140) || lastSource;
@@ -12281,6 +12253,8 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
     leadsFetched,
     skippedByCutoff,
     source: lastSource || "gohighlevel",
+    stoppedByTimeBudget,
+    lastError,
   };
 }
 
@@ -16991,6 +16965,9 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
     syncedLeadsCount: 0,
     writtenRows: 0,
     incrementalCutoff: null,
+    stoppedByTimeBudget: false,
+    warning: "",
+    error: "",
   };
 
   try {
@@ -17019,19 +16996,25 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
           : latestCursorTimestamp > 0
             ? Math.max(0, latestCursorTimestamp - GHL_LEADS_INCREMENTAL_LOOKBACK_MS)
             : 0;
-      const syncResult = await fetchGhlLeadsFromPipeline(pipelineContext, {
-        refreshMode,
-        incrementalCutoffTimestamp,
-      });
-      const writtenRows = await upsertGhlLeadsCacheRows(syncResult.rows);
+      try {
+        const syncResult = await fetchGhlLeadsFromPipeline(pipelineContext, {
+          refreshMode,
+          incrementalCutoffTimestamp,
+        });
+        const writtenRows = await upsertGhlLeadsCacheRows(syncResult.rows);
 
-      refreshMeta.performed = true;
-      refreshMeta.pagesFetched = syncResult.pagesFetched;
-      refreshMeta.leadsFetched = syncResult.leadsFetched;
-      refreshMeta.skippedByCutoff = syncResult.skippedByCutoff;
-      refreshMeta.syncedLeadsCount = syncResult.rows.length;
-      refreshMeta.writtenRows = writtenRows;
-      refreshMeta.incrementalCutoff = incrementalCutoffTimestamp > 0 ? new Date(incrementalCutoffTimestamp).toISOString() : null;
+        refreshMeta.performed = true;
+        refreshMeta.pagesFetched = syncResult.pagesFetched;
+        refreshMeta.leadsFetched = syncResult.leadsFetched;
+        refreshMeta.skippedByCutoff = syncResult.skippedByCutoff;
+        refreshMeta.syncedLeadsCount = syncResult.rows.length;
+        refreshMeta.writtenRows = writtenRows;
+        refreshMeta.incrementalCutoff = incrementalCutoffTimestamp > 0 ? new Date(incrementalCutoffTimestamp).toISOString() : null;
+        refreshMeta.stoppedByTimeBudget = Boolean(syncResult.stoppedByTimeBudget);
+        refreshMeta.warning = sanitizeTextValue(syncResult.lastError, 500);
+      } catch (syncError) {
+        refreshMeta.error = sanitizeTextValue(syncError?.message, 500) || "Leads sync failed.";
+      }
     }
 
     const items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE);
