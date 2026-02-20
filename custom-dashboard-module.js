@@ -80,6 +80,10 @@ const CUSTOM_DASHBOARD_GHL_CONTACT_MAX_PAGES = Math.min(
   Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_CONTACT_MAX_PAGES, 500), 1),
   2000,
 );
+const CUSTOM_DASHBOARD_GHL_CONTACT_MAX_STALE_PAGES = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_CONTACT_MAX_STALE_PAGES, 2), 1),
+  10,
+);
 const CUSTOM_DASHBOARD_GHL_TASKS_SYNC_CONCURRENCY = Math.min(
   Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASKS_SYNC_CONCURRENCY, 6), 1),
   20,
@@ -542,8 +546,10 @@ function registerCustomDashboardModule(config) {
   }
 
   async function listAllGhlContacts() {
-    const allContacts = [];
+    const contactsByKey = new Map();
     let page = 1;
+    let stalePages = 0;
+    let fallbackIndex = 0;
 
     while (page <= CUSTOM_DASHBOARD_GHL_CONTACT_MAX_PAGES) {
       const response = await requestGhlApi("/contacts/search", {
@@ -561,14 +567,44 @@ function registerCustomDashboardModule(config) {
         break;
       }
 
-      allContacts.push(...contacts);
-      if (contacts.length < CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT) {
+      let addedOnPage = 0;
+      for (const contact of contacts) {
+        const contactId = sanitizeTextValue(pickValueFromObject(contact, GHL_CONTACT_ID_FIELDS), 160);
+        const key = contactId || `fallback:${page}:${fallbackIndex++}`;
+        if (!contactsByKey.has(key)) {
+          addedOnPage += 1;
+        }
+        contactsByKey.set(key, contact);
+      }
+
+      if (addedOnPage === 0) {
+        stalePages += 1;
+      } else {
+        stalePages = 0;
+      }
+
+      const hasMoreHint = resolveGhlContactsHasMore(response.body, page, CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT);
+      const likelyLastPageBySize = contacts.length < CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT;
+      const shouldStopByStalePages = stalePages >= CUSTOM_DASHBOARD_GHL_CONTACT_MAX_STALE_PAGES;
+
+      if (shouldStopByStalePages) {
+        console.warn(
+          `[custom-dashboard] GHL contacts pagination produced ${stalePages} stale page(s). Stopping at page ${page}.`,
+        );
         break;
       }
+
+      if (hasMoreHint === false) {
+        break;
+      }
+      if (likelyLastPageBySize && hasMoreHint !== true) {
+        break;
+      }
+
       page += 1;
     }
 
-    return allContacts;
+    return [...contactsByKey.values()];
   }
 
   async function listGhlContactTasks(contactId) {
@@ -2641,6 +2677,37 @@ function buildFullName(firstName, lastName) {
   const first = sanitizeTextValue(firstName, 120);
   const last = sanitizeTextValue(lastName, 120);
   return [first, last].filter(Boolean).join(" ").trim();
+}
+
+function resolveGhlContactsHasMore(payload, currentPage, pageLimit) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const normalizedPage = Math.max(1, toSafeInteger(currentPage, 1));
+  const normalizedLimit = Math.max(1, toSafeInteger(pageLimit, 1));
+
+  const nextPageCandidate = toSafeInteger(
+    pickValueFromObject(source, ["meta.nextPage", "nextPage", "pagination.nextPage", "meta.next_page"]),
+    0,
+  );
+  if (nextPageCandidate > normalizedPage) {
+    return true;
+  }
+
+  const hasMoreRaw = resolveOptionalBoolean(
+    pickValueFromObject(source, ["meta.hasMore", "hasMore", "pagination.hasMore", "meta.has_more"]),
+  );
+  if (hasMoreRaw !== null) {
+    return hasMoreRaw;
+  }
+
+  const totalCountCandidate = toSafeInteger(
+    pickValueFromObject(source, ["meta.total", "total", "pagination.total", "meta.count", "count"]),
+    0,
+  );
+  if (totalCountCandidate > 0) {
+    return normalizedPage * normalizedLimit < totalCountCandidate;
+  }
+
+  return null;
 }
 
 function normalizeVisibleNames(rawValues) {
