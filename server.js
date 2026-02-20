@@ -1216,7 +1216,11 @@ function resolveSafeNextPath(rawValue) {
     return "/";
   }
 
-  if (candidate.startsWith("/login") || candidate.startsWith("/logout")) {
+  if (
+    candidate.startsWith("/login") ||
+    candidate.startsWith("/logout") ||
+    candidate.startsWith("/first-password")
+  ) {
     return "/";
   }
 
@@ -1313,6 +1317,7 @@ function seedWebAuthBootstrapUsers() {
         departmentId,
         roleId,
         teamUsernames: [],
+        mustChangePassword: true,
       },
       WEB_AUTH_OWNER_USERNAME,
     );
@@ -5717,6 +5722,7 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   let roleId = normalizeWebAuthRoleId(rawUser.roleId || rawUser.role, departmentId);
   const teamUsernames = normalizeWebAuthTeamUsernames(rawUser.teamUsernames || rawUser.team);
   const isOwner = explicitOwner || roleId === WEB_AUTH_ROLE_OWNER || username === ownerUsername;
+  const mustChangePassword = !isOwner && resolveOptionalBoolean(rawUser.mustChangePassword) === true;
 
   if (isOwner) {
     roleId = WEB_AUTH_ROLE_OWNER;
@@ -5741,6 +5747,7 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     departmentId,
     roleId,
     teamUsernames,
+    mustChangePassword,
   };
 }
 
@@ -5753,6 +5760,7 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   let roleId = isOwner ? WEB_AUTH_ROLE_OWNER : normalizeWebAuthRoleId(rawUser?.roleId, departmentId);
   const teamUsernames = normalizeWebAuthTeamUsernames(rawUser?.teamUsernames || rawUser?.team)
     .filter((teamUsername) => teamUsername !== username);
+  const mustChangePassword = !isOwner && resolveOptionalBoolean(rawUser?.mustChangePassword) === true;
 
   if (!isOwner) {
     if (!departmentId) {
@@ -5776,6 +5784,7 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     roleId,
     roleName: getWebAuthRoleName(roleId),
     teamUsernames: isOwner ? [] : teamUsernames,
+    mustChangePassword,
   };
   userProfile.permissions = buildWebAuthPermissionsForUser(userProfile);
   return userProfile;
@@ -5918,6 +5927,7 @@ function buildWebAuthPublicUser(userProfile) {
       departmentName: "",
       isOwner: false,
       teamUsernames: [],
+      mustChangePassword: false,
     };
   }
 
@@ -5930,6 +5940,7 @@ function buildWebAuthPublicUser(userProfile) {
     departmentName: sanitizeTextValue(userProfile.departmentName, 140),
     isOwner: Boolean(userProfile.isOwner),
     teamUsernames: normalizeWebAuthTeamUsernames(userProfile.teamUsernames),
+    mustChangePassword: !userProfile.isOwner && resolveOptionalBoolean(userProfile.mustChangePassword) === true,
   };
 }
 
@@ -5980,6 +5991,7 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     departmentId,
     roleId,
     teamUsernames,
+    mustChangePassword: true,
   };
 }
 
@@ -6004,10 +6016,12 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
     throw createHttpError("Owner account cannot be assigned.", 400);
   }
 
+  const hasPasswordInPayload = Object.prototype.hasOwnProperty.call(payload, "password");
   let password = normalizeWebAuthConfigValue(payload.password);
   if (password && password.length < 8) {
     throw createHttpError("Password must be at least 8 characters.", 400);
   }
+  const isPasswordUpdateRequested = hasPasswordInPayload && Boolean(password);
   if (!password) {
     password = normalizeWebAuthConfigValue(existing.password);
   }
@@ -6019,6 +6033,7 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
   const hasDepartmentInPayload = Object.prototype.hasOwnProperty.call(payload, "departmentId") || Object.prototype.hasOwnProperty.call(payload, "department");
   const hasRoleInPayload = Object.prototype.hasOwnProperty.call(payload, "roleId") || Object.prototype.hasOwnProperty.call(payload, "role");
   const hasTeamInPayload = Object.prototype.hasOwnProperty.call(payload, "teamUsernames") || Object.prototype.hasOwnProperty.call(payload, "team");
+  const hasMustChangePasswordInPayload = Object.prototype.hasOwnProperty.call(payload, "mustChangePassword");
 
   const departmentId = hasDepartmentInPayload
     ? normalizeWebAuthDepartmentId(payload.departmentId || payload.department)
@@ -6041,6 +6056,12 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
   const teamUsernames = hasTeamInPayload
     ? normalizeWebAuthTeamUsernames(payload.teamUsernames || payload.team)
     : normalizeWebAuthTeamUsernames(existing.teamUsernames);
+  let mustChangePassword = hasMustChangePasswordInPayload
+    ? resolveOptionalBoolean(payload.mustChangePassword) === true
+    : resolveOptionalBoolean(existing.mustChangePassword) === true;
+  if (isPasswordUpdateRequested) {
+    mustChangePassword = true;
+  }
 
   return {
     username,
@@ -6050,6 +6071,7 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
     departmentId,
     roleId,
     teamUsernames: roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER ? teamUsernames : [],
+    mustChangePassword,
   };
 }
 
@@ -6081,6 +6103,88 @@ function updateWebAuthUserInDirectory(existingUsername, rawBody) {
     WEB_AUTH_USERS_BY_USERNAME.set(normalizedExistingUsername, existingUser);
     throw error;
   }
+}
+
+function isWebAuthPasswordChangeRequired(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return false;
+  }
+
+  if (userProfile.isOwner) {
+    return false;
+  }
+
+  return resolveOptionalBoolean(userProfile.mustChangePassword) === true;
+}
+
+function setWebAuthUserPassword(username, nextPassword, options = {}) {
+  const normalizedUsername = normalizeWebAuthUsername(username);
+  if (!normalizedUsername) {
+    throw createHttpError("Username is required.", 400);
+  }
+
+  const password = normalizeWebAuthConfigValue(nextPassword);
+  if (!password || password.length < 8) {
+    throw createHttpError("Password must be at least 8 characters.", 400);
+  }
+
+  const existingUser = getWebAuthUserByUsername(normalizedUsername);
+  if (!existingUser) {
+    throw createHttpError("User not found.", 404);
+  }
+
+  let mustChangePassword = isWebAuthPasswordChangeRequired(existingUser);
+  if (resolveOptionalBoolean(options.mustChangePassword) === true) {
+    mustChangePassword = true;
+  }
+  if (resolveOptionalBoolean(options.clearMustChangePassword) === true) {
+    mustChangePassword = false;
+  }
+
+  return upsertWebAuthUserInDirectory({
+    ...existingUser,
+    username: existingUser.username,
+    password,
+    mustChangePassword: !existingUser.isOwner && mustChangePassword,
+  });
+}
+
+function normalizeWebAuthFirstPasswordPayload(rawBody, userProfile) {
+  const payload = rawBody && typeof rawBody === "object" ? rawBody : {};
+  const nextPassword = normalizeWebAuthConfigValue(payload.newPassword || payload.password);
+  const confirmPassword = normalizeWebAuthConfigValue(payload.confirmPassword || payload.confirm);
+  const currentPassword = normalizeWebAuthConfigValue(userProfile?.password);
+
+  if (!nextPassword || nextPassword.length < 8) {
+    throw createHttpError("New password must be at least 8 characters.", 400);
+  }
+
+  if (!confirmPassword) {
+    throw createHttpError("Please confirm the new password.", 400);
+  }
+
+  if (!safeEqual(nextPassword, confirmPassword)) {
+    throw createHttpError("Password confirmation does not match.", 400);
+  }
+
+  if (currentPassword && safeEqual(nextPassword, currentPassword)) {
+    throw createHttpError("New password must be different from the temporary password.", 400);
+  }
+
+  return {
+    password: nextPassword,
+  };
+}
+
+function applyWebAuthFirstPasswordChange(userProfile, rawBody) {
+  if (!isWebAuthPasswordChangeRequired(userProfile)) {
+    throw createHttpError("Password change is not required.", 409);
+  }
+
+  const normalizedPayload = normalizeWebAuthFirstPasswordPayload(rawBody, userProfile);
+  return setWebAuthUserPassword(userProfile.username, normalizedPayload.password, {
+    clearMustChangePassword: true,
+  });
 }
 
 function buildWebAuthAccessModel() {
@@ -6199,6 +6303,22 @@ function isPublicWebAuthPath(pathname) {
   }
 
   return false;
+}
+
+function isWebAuthPasswordChangeAllowedPath(pathname) {
+  if (!pathname) {
+    return false;
+  }
+
+  return (
+    pathname === "/first-password" ||
+    pathname === "/logout" ||
+    pathname === "/api/auth/session" ||
+    pathname === "/api/auth/logout" ||
+    pathname === "/api/mobile/auth/logout" ||
+    pathname === "/api/auth/first-password" ||
+    pathname === "/api/mobile/auth/first-password"
+  );
 }
 
 function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
@@ -6373,6 +6493,177 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
 </html>`;
 }
 
+function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
+  const safeNextPath = resolveSafeNextPath(nextPath);
+  const safeError = sanitizeTextValue(errorMessage, 200);
+  const messageBlock = safeError
+    ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
+    : `<p class="auth-help">For security, create a new password before you continue.</p>`;
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Set New Password | Credit Booster</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --color-bg: #f3f4f6;
+        --color-surface: #ffffff;
+        --color-border: #d6dde6;
+        --color-text: #0f172a;
+        --color-text-muted: #475569;
+        --color-primary: #102a56;
+        --color-primary-hover: #0b1f45;
+        --color-primary-contrast: #ffffff;
+        --color-danger: #991b1b;
+        --font-family-base: "Avenir Next", "Avenir", "Segoe UI", Helvetica, sans-serif;
+        --font-family-heading: "Avenir Next Demi Bold", "Avenir Next", "Avenir", "Segoe UI", Helvetica, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font-family: var(--font-family-base);
+        color: var(--color-text);
+        background: var(--color-bg);
+      }
+
+      .auth-shell {
+        width: min(460px, 100%);
+        border: 1px solid var(--color-border);
+        border-radius: 18px;
+        background: var(--color-surface);
+        box-shadow: 0 20px 48px -28px rgba(15, 23, 42, 0.42);
+        padding: 24px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .auth-eyebrow {
+        margin: 0;
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--color-text-muted);
+        font-weight: 600;
+      }
+
+      h1 {
+        margin: 0;
+        font-family: var(--font-family-heading);
+        font-size: 1.62rem;
+        line-height: 1.2;
+        font-weight: 700;
+      }
+
+      .auth-subtitle {
+        margin: 0;
+        color: var(--color-text-muted);
+        font-size: 0.78rem;
+      }
+
+      form {
+        display: grid;
+        gap: 12px;
+        margin-top: 4px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--color-text-muted);
+      }
+
+      input {
+        width: 100%;
+        border: 1px solid var(--color-border);
+        border-radius: 10px;
+        min-height: 38px;
+        padding: 10px 12px;
+        font-size: 0.88rem;
+        background: #ffffff;
+        color: var(--color-text);
+      }
+
+      input:focus {
+        outline: none;
+        border-color: var(--color-primary);
+        box-shadow: 0 0 0 3px rgba(27, 63, 122, 0.2);
+      }
+
+      button {
+        border: 1px solid var(--color-primary);
+        border-radius: 10px;
+        min-height: 38px;
+        padding: 10px 12px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: var(--color-primary-contrast);
+        background: var(--color-primary);
+        cursor: pointer;
+        transition: background-color 0.16s ease, border-color 0.16s ease;
+      }
+
+      button:hover {
+        background: var(--color-primary-hover);
+        border-color: var(--color-primary-hover);
+      }
+
+      .auth-help,
+      .auth-error {
+        margin: 0;
+        font-size: 0.78rem;
+      }
+
+      .auth-help {
+        color: var(--color-text-muted);
+      }
+
+      .auth-error {
+        color: var(--color-danger);
+        background: #fef2f2;
+        border: 1px solid #fecaca;
+        border-radius: 10px;
+        padding: 8px 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="auth-shell">
+      <p class="auth-eyebrow">Credit Booster</p>
+      <h1>Create New Password</h1>
+      <p class="auth-subtitle">Required on first sign in</p>
+      ${messageBlock}
+      <form method="post" action="/first-password" novalidate>
+        <input type="hidden" name="next" value="${escapeHtml(safeNextPath)}" />
+        <label>
+          New Password
+          <input type="password" name="newPassword" autocomplete="new-password" required minlength="8" />
+        </label>
+        <label>
+          Confirm New Password
+          <input type="password" name="confirmPassword" autocomplete="new-password" required minlength="8" />
+        </label>
+        <button type="submit">Save Password</button>
+      </form>
+    </main>
+  </body>
+</html>`;
+}
+
 function escapeHtml(value) {
   return (value || "")
     .toString()
@@ -6409,6 +6700,23 @@ function requireWebAuth(req, res, next) {
 
     req.webAuthUser = userProfile.username;
     req.webAuthProfile = userProfile;
+
+    if (isWebAuthPasswordChangeRequired(userProfile) && !isWebAuthPasswordChangeAllowedPath(pathname)) {
+      const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
+      if (pathname.startsWith("/api/")) {
+        res.status(403).json({
+          error: "Password change required.",
+          code: "password_change_required",
+          mustChangePassword: true,
+          next: `/first-password?next=${encodeURIComponent(nextPath)}`,
+        });
+        return;
+      }
+
+      res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
+      return;
+    }
+
     next();
     return;
   }
@@ -12858,6 +13166,10 @@ app.get("/login", (req, res) => {
   const currentSessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
   const currentUser = getWebAuthUserByUsername(parseWebAuthSessionToken(currentSessionToken));
   if (currentUser) {
+    if (isWebAuthPasswordChangeRequired(currentUser)) {
+      res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
+      return;
+    }
     res.redirect(302, nextPath);
     return;
   }
@@ -12888,6 +13200,10 @@ app.post("/login", (req, res) => {
   }
 
   setWebAuthSessionCookie(req, res, authUser.username);
+  if (isWebAuthPasswordChangeRequired(authUser)) {
+    res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
+    return;
+  }
   res.redirect(302, nextPath);
 });
 
@@ -12905,11 +13221,14 @@ function handleApiAuthLogin(req, res) {
   }
 
   const sessionToken = createWebAuthSessionToken(authUser.username);
+  const mustChangePassword = isWebAuthPasswordChangeRequired(authUser);
   setWebAuthSessionCookie(req, res, authUser.username, sessionToken);
   res.setHeader("Cache-Control", "no-store, private");
   res.json({
     ok: true,
     sessionToken,
+    mustChangePassword,
+    passwordChangePath: mustChangePassword ? "/first-password" : "",
     user: buildWebAuthPublicUser(authUser),
     permissions: authUser.permissions || {},
   });
@@ -12941,6 +13260,97 @@ app.use(express.static(staticRoot));
 if (webAppDistAvailable) {
   app.use("/app", express.static(webAppDistRoot, { index: false }));
 }
+
+app.get("/first-password", (req, res) => {
+  const nextPath = resolveSafeNextPath(req.query.next);
+  const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
+  if (!userProfile) {
+    clearWebAuthSessionCookie(req, res);
+    res.redirect(302, `/login?next=${encodeURIComponent("/first-password")}`);
+    return;
+  }
+
+  if (!isWebAuthPasswordChangeRequired(userProfile)) {
+    res.redirect(302, nextPath);
+    return;
+  }
+
+  res.setHeader("Cache-Control", "no-store, private");
+  res.status(200).type("html").send(
+    buildWebFirstPasswordPageHtml({
+      nextPath,
+      errorMessage: "",
+    }),
+  );
+});
+
+app.post("/first-password", (req, res) => {
+  const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
+  const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
+  if (!userProfile) {
+    clearWebAuthSessionCookie(req, res);
+    res.redirect(302, `/login?next=${encodeURIComponent(nextPath)}`);
+    return;
+  }
+
+  if (!isWebAuthPasswordChangeRequired(userProfile)) {
+    res.redirect(302, nextPath);
+    return;
+  }
+
+  try {
+    const updatedUser = applyWebAuthFirstPasswordChange(userProfile, req.body);
+    const sessionToken = createWebAuthSessionToken(updatedUser.username);
+    setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
+    req.webAuthUser = updatedUser.username;
+    req.webAuthProfile = updatedUser;
+    res.redirect(302, nextPath);
+  } catch (error) {
+    res.setHeader("Cache-Control", "no-store, private");
+    res
+      .status(error.httpStatus || 400)
+      .type("html")
+      .send(
+        buildWebFirstPasswordPageHtml({
+          nextPath,
+          errorMessage: sanitizeTextValue(error?.message, 260) || "Failed to update password.",
+        }),
+      );
+  }
+});
+
+function handleApiAuthFirstPassword(req, res) {
+  const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
+  if (!userProfile) {
+    clearWebAuthSessionCookie(req, res);
+    res.status(401).json({
+      error: "Authentication required.",
+    });
+    return;
+  }
+
+  try {
+    const updatedUser = applyWebAuthFirstPasswordChange(userProfile, req.body);
+    const sessionToken = createWebAuthSessionToken(updatedUser.username);
+    setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
+    req.webAuthUser = updatedUser.username;
+    req.webAuthProfile = updatedUser;
+    res.setHeader("Cache-Control", "no-store, private");
+    res.json({
+      ok: true,
+      sessionToken,
+      user: buildWebAuthPublicUser(updatedUser),
+      permissions: updatedUser.permissions || {},
+    });
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 260) || "Failed to update password.",
+    });
+  }
+}
+
+app.post("/api/auth/first-password", handleApiAuthFirstPassword);
+app.post("/api/mobile/auth/first-password", handleApiAuthFirstPassword);
 
 app.get("/api/auth/session", (req, res) => {
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);

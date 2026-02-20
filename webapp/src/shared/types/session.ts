@@ -9,6 +9,7 @@ export interface AuthUser {
   departmentName: string;
   isOwner: boolean;
   teamUsernames: string[];
+  mustChangePassword?: boolean;
 }
 
 export interface Session {
