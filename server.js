@@ -11906,12 +11906,8 @@ function normalizeGhlLeadStatus(rawValue) {
   return value.toLowerCase();
 }
 
-function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", pipelineContext = null) {
-  if (!rawOpportunity || typeof rawOpportunity !== "object") {
-    return null;
-  }
-
-  const leadId = sanitizeTextValue(
+function resolveGhlLeadId(rawOpportunity) {
+  return sanitizeTextValue(
     rawOpportunity?.id ||
       rawOpportunity?._id ||
       rawOpportunity?.opportunityId ||
@@ -11920,6 +11916,35 @@ function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", 
       rawOpportunity?.deal_id,
     180,
   );
+}
+
+function isMissedCallRawOpportunity(rawOpportunity) {
+  if (!rawOpportunity || typeof rawOpportunity !== "object") {
+    return false;
+  }
+
+  const rawName = sanitizeTextValue(
+    rawOpportunity?.opportunityName ||
+      rawOpportunity?.title ||
+      rawOpportunity?.opportunity_title ||
+      rawOpportunity?.dealName ||
+      rawOpportunity?.name,
+    320,
+  );
+
+  if (!rawName) {
+    return false;
+  }
+
+  return isMissedCallLeadName(rawName);
+}
+
+function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", pipelineContext = null) {
+  if (!rawOpportunity || typeof rawOpportunity !== "object") {
+    return null;
+  }
+
+  const leadId = resolveGhlLeadId(rawOpportunity);
   if (!leadId) {
     return null;
   }
@@ -12332,6 +12357,7 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
   let lastSource = "";
   let stoppedByTimeBudget = false;
   let lastError = "";
+  const missedLeadIds = new Set();
 
   while (hasMore && page <= GHL_LEADS_MAX_PAGES) {
     if (Date.now() - startedAt >= GHL_LEADS_SYNC_MAX_DURATION_MS) {
@@ -12361,6 +12387,15 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
     let pageHasAnyKnownActivityTimestamp = false;
 
     for (const rawItem of rawItems) {
+      if (isMissedCallRawOpportunity(rawItem)) {
+        const missedLeadId = resolveGhlLeadId(rawItem);
+        if (missedLeadId) {
+          missedLeadIds.add(missedLeadId);
+        }
+        pageHasOnlyOldRows = false;
+        continue;
+      }
+
       const normalized = normalizeGhlOpportunityLeadRow(rawItem, pagePayload.source, pipelineContext);
       if (!normalized) {
         pageHasOnlyOldRows = false;
@@ -12426,6 +12461,7 @@ async function fetchGhlLeadsFromPipeline(pipelineContext, options = {}) {
     source: lastSource || "gohighlevel",
     stoppedByTimeBudget,
     lastError,
+    missedLeadIds: [...missedLeadIds],
   };
 }
 
@@ -12653,6 +12689,27 @@ async function upsertGhlLeadsCacheRows(rows) {
   }
 
   return writtenCount;
+}
+
+async function deleteGhlLeadsCacheRowsByLeadIds(leadIds) {
+  await ensureDatabaseReady();
+
+  const ids = (Array.isArray(leadIds) ? leadIds : [])
+    .map((value) => sanitizeTextValue(value, 180))
+    .filter(Boolean);
+  if (!ids.length) {
+    return 0;
+  }
+
+  const uniqueIds = [...new Set(ids)];
+  const result = await pool.query(
+    `
+      DELETE FROM ${GHL_LEADS_CACHE_TABLE}
+      WHERE lead_id = ANY($1::text[])
+    `,
+    [uniqueIds],
+  );
+  return result.rowCount || 0;
 }
 
 async function deleteMissedCallGhlLeadsCacheRows() {
@@ -17304,6 +17361,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
     stoppedByTimeBudget: false,
     warning: "",
     error: "",
+    removedMissedCallCount: 0,
   };
 
   try {
@@ -17345,6 +17403,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
         refreshMeta.skippedByCutoff = syncResult.skippedByCutoff;
         refreshMeta.syncedLeadsCount = syncResult.rows.length;
         refreshMeta.writtenRows = writtenRows;
+        refreshMeta.removedMissedCallCount = await deleteGhlLeadsCacheRowsByLeadIds(syncResult.missedLeadIds);
         refreshMeta.incrementalCutoff = incrementalCutoffTimestamp > 0 ? new Date(incrementalCutoffTimestamp).toISOString() : null;
         refreshMeta.stoppedByTimeBudget = Boolean(syncResult.stoppedByTimeBudget);
         refreshMeta.warning = sanitizeTextValue(syncResult.lastError, 500);
