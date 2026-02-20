@@ -1715,6 +1715,46 @@ function filterClientRecordsForWebAuthUser(records, userProfile) {
   return items.filter((record) => canWebAuthUserViewClientRecord(userProfile, record));
 }
 
+function resolveVisibleClientNamesForWebAuthUser(records, userProfile) {
+  const visibleRecords = filterClientRecordsForWebAuthUser(records, userProfile);
+  const visibleClientNames = getUniqueClientNamesFromRecords(visibleRecords);
+  const visibleClientNameSet = new Set(visibleClientNames);
+  const visibleClientNamesByComparable = new Map();
+
+  for (const clientName of visibleClientNames) {
+    const comparableName = normalizeAssistantComparableText(clientName, 220);
+    if (!comparableName || visibleClientNamesByComparable.has(comparableName)) {
+      continue;
+    }
+    visibleClientNamesByComparable.set(comparableName, clientName);
+  }
+
+  return {
+    visibleRecords,
+    visibleClientNames,
+    visibleClientNameSet,
+    visibleClientNamesByComparable,
+  };
+}
+
+function resolveVisibleClientNameByRequest(clientName, visibilityContext) {
+  const requestedClientName = sanitizeTextValue(clientName, 300);
+  if (!requestedClientName) {
+    return "";
+  }
+
+  if (visibilityContext?.visibleClientNameSet?.has(requestedClientName)) {
+    return requestedClientName;
+  }
+
+  const requestedComparable = normalizeAssistantComparableText(requestedClientName, 220);
+  if (!requestedComparable) {
+    return "";
+  }
+
+  return sanitizeTextValue(visibilityContext?.visibleClientNamesByComparable?.get(requestedComparable), 300);
+}
+
 function normalizeAssistantSearchText(rawValue, maxLength = ASSISTANT_MAX_MESSAGE_LENGTH) {
   return sanitizeTextValue(rawValue, maxLength).toLowerCase().replace(/\s+/g, " ").trim();
 }
@@ -13890,7 +13930,8 @@ app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIE
 
   try {
     const state = await getStoredRecords();
-    const clientNames = getUniqueClientNamesFromRecords(state.records);
+    const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
+    const clientNames = visibilityContext.visibleClientNames;
     let cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
     let refreshedClientsCount = 0;
     let refreshedRowsWritten = 0;
@@ -13968,7 +14009,8 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
 
   try {
     const state = await getStoredRecords();
-    const clientNames = getFirstUniqueClientNamesFromRecords(state.records, limit);
+    const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
+    const clientNames = getFirstUniqueClientNamesFromRecords(visibilityContext.visibleRecords, limit);
     const items = await buildGhlClientContractLookupRows(clientNames);
     res.json({
       ok: true,
@@ -14037,7 +14079,7 @@ app.post(
 app.get(
   "/api/ghl/client-basic-notes/missing",
   requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
-  async (_req, res) => {
+  async (req, res) => {
     if (!pool) {
       res.status(503).json({
         error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -14047,7 +14089,8 @@ app.get(
 
     try {
       const state = await getStoredRecords();
-      const clientNames = getUniqueClientNamesFromRecords(state.records);
+      const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
+      const clientNames = visibilityContext.visibleClientNames;
       const cachedRows = await listCachedGhlBasicNoteRowsByClientNames(clientNames);
       const cacheByClientName = new Map();
       for (const row of cachedRows) {
@@ -14105,8 +14148,8 @@ app.get(
 );
 
 app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
-  const clientName = sanitizeTextValue(req.query.clientName, 300);
-  if (!clientName) {
+  const requestedClientName = sanitizeTextValue(req.query.clientName, 300);
+  if (!requestedClientName) {
     res.status(400).json({
       error: "Query parameter `clientName` is required.",
     });
@@ -14120,10 +14163,20 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
     return;
   }
 
+  let clientName = "";
   try {
     const state = await getStoredRecords();
+    const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
+    clientName = resolveVisibleClientNameByRequest(requestedClientName, visibilityContext);
+    if (!clientName) {
+      res.status(403).json({
+        error: "Access denied. This client is outside your visible scope.",
+      });
+      return;
+    }
+
     const writtenOffQueryFlag = resolveOptionalBoolean(req.query.writtenOff);
-    const isWrittenOffInRecords = resolveGhlBasicNoteWrittenOffStateFromRecords(clientName, state.records);
+    const isWrittenOffInRecords = resolveGhlBasicNoteWrittenOffStateFromRecords(clientName, visibilityContext.visibleRecords);
     const isWrittenOff = writtenOffQueryFlag === true || isWrittenOffInRecords;
 
     const cachedRow = await getCachedGhlBasicNoteByClientName(clientName);
@@ -14174,18 +14227,20 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
   } catch (error) {
     console.error("GET /api/ghl/client-basic-note failed:", error);
     try {
-      const cachedRow = await getCachedGhlBasicNoteByClientName(clientName);
-      if (cachedRow) {
-        res.json({
-          ok: true,
-          clientName,
-          ...buildGhlBasicNoteApiPayloadFromCacheRow(cachedRow, {
-            fromCache: true,
-            stale: true,
-            errorMessage: sanitizeTextValue(error?.message, 600) || "Failed to refresh BASIC note from GHL.",
-          }),
-        });
-        return;
+      if (clientName) {
+        const cachedRow = await getCachedGhlBasicNoteByClientName(clientName);
+        if (cachedRow) {
+          res.json({
+            ok: true,
+            clientName,
+            ...buildGhlBasicNoteApiPayloadFromCacheRow(cachedRow, {
+              fromCache: true,
+              stale: true,
+              errorMessage: sanitizeTextValue(error?.message, 600) || "Failed to refresh BASIC note from GHL.",
+            }),
+          });
+          return;
+        }
       }
     } catch (cacheError) {
       console.error("GET /api/ghl/client-basic-note cache fallback failed:", cacheError);
