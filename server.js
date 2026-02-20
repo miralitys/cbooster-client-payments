@@ -14598,7 +14598,7 @@ app.get("/api/health", async (_req, res) => {
   if (!pool) {
     res.status(503).json({
       ok: false,
-      error: "DATABASE_URL is not configured",
+      status: "unhealthy",
     });
     return;
   }
@@ -14608,12 +14608,13 @@ app.get("/api/health", async (_req, res) => {
     await pool.query("SELECT 1");
     res.json({
       ok: true,
+      status: "healthy",
     });
   } catch (error) {
     console.error("GET /api/health failed:", error);
     res.status(resolveDbHttpStatus(error, 503)).json({
       ok: false,
-      ...buildPublicErrorPayload(error, "Database connection failed"),
+      status: "unhealthy",
     });
   }
 });
