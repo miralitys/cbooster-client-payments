@@ -156,6 +156,12 @@ const RATE_LIMIT_PROFILE_API_CHAT = Object.freeze({
   maxHitsUser: 35,
   blockMs: 2 * 60 * 1000,
 });
+const RATE_LIMIT_PROFILE_API_ASSISTANT_TTS = Object.freeze({
+  windowMs: 10 * 60 * 1000,
+  maxHitsIp: 12,
+  maxHitsUser: 8,
+  blockMs: 30 * 60 * 1000,
+});
 const RATE_LIMIT_PROFILE_API_MINI_ACCESS = Object.freeze({
   windowMs: 60 * 1000,
   maxHitsIp: 90,
@@ -484,6 +490,8 @@ const ELEVENLABS_TTS_TIMEOUT_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.ELEVENLABS_TTS_TIMEOUT_MS, 15000), 3000),
   60000,
 );
+const ASSISTANT_TTS_ENDPOINT_ENABLED = resolveOptionalBoolean(process.env.ASSISTANT_TTS_ENDPOINT_ENABLED) === true;
+const ASSISTANT_TTS_ENDPOINT_OWNER_ONLY = resolveOptionalBoolean(process.env.ASSISTANT_TTS_ENDPOINT_OWNER_ONLY) !== false;
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const TELEGRAM_HTTP_RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const TELEGRAM_HTTP_RETRYABLE_ERROR_CODES = new Set([
@@ -24821,18 +24829,32 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 });
 
 app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (!ASSISTANT_TTS_ENDPOINT_ENABLED) {
+    res.status(404).json({
+      error: "API route not found",
+    });
+    return;
+  }
+
+  if (ASSISTANT_TTS_ENDPOINT_OWNER_ONLY && !req.webAuthProfile?.isOwner) {
+    res.status(403).json({
+      error: "Access denied. Owner role is required.",
+    });
+    return;
+  }
+
   if (
     !enforceRateLimit(req, res, {
       scope: "api.assistant.tts",
       ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_CHAT.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_CHAT.blockMs,
+        windowMs: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.blockMs,
       },
       userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_CHAT.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_CHAT.blockMs,
+        windowMs: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.blockMs,
       },
       message: "Assistant audio request limit reached. Please wait before retrying.",
       code: "assistant_tts_rate_limited",
@@ -26430,10 +26452,14 @@ function logServerStartupSummary(port) {
   } else {
     console.warn("Assistant LLM is disabled. Set OPENAI_API_KEY to enable OpenAI responses.");
   }
-  if (isElevenLabsConfigured()) {
-    console.log(`Assistant voice is enabled via ElevenLabs voice: ${ELEVENLABS_VOICE_ID}.`);
+  if (!ASSISTANT_TTS_ENDPOINT_ENABLED) {
+    console.log("Assistant backend TTS endpoint is disabled (ASSISTANT_TTS_ENDPOINT_ENABLED=false).");
+  } else if (!isElevenLabsConfigured()) {
+    console.warn("Assistant backend TTS endpoint is enabled but ElevenLabs is not configured.");
+  } else if (ASSISTANT_TTS_ENDPOINT_OWNER_ONLY) {
+    console.log(`Assistant backend TTS endpoint is enabled (owner-only) via ElevenLabs voice: ${ELEVENLABS_VOICE_ID}.`);
   } else {
-    console.warn("Assistant voice is running in browser fallback mode. Set ELEVENLABS_API_KEY to enable ElevenLabs TTS.");
+    console.log(`Assistant backend TTS endpoint is enabled via ElevenLabs voice: ${ELEVENLABS_VOICE_ID}.`);
   }
 }
 

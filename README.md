@@ -62,6 +62,8 @@ npm start
    - `ELEVENLABS_API_BASE_URL` = base URL ElevenLabs API (по умолчанию `https://api.elevenlabs.io`);
    - `ELEVENLABS_OUTPUT_FORMAT` = формат аудио ответа (по умолчанию `mp3_44100_128`);
    - `ELEVENLABS_TTS_TIMEOUT_MS` = timeout TTS-запроса к ElevenLabs в ms (по умолчанию `15000`);
+   - `ASSISTANT_TTS_ENDPOINT_ENABLED` = `true`/`false` (по умолчанию `false`, отключает `/api/assistant/tts`);
+   - `ASSISTANT_TTS_ENDPOINT_OWNER_ONLY` = `true`/`false` (по умолчанию `true`, ограничивает `/api/assistant/tts` только для owner);
    - `DATABASE_URL` = строка подключения Supabase;
    - `DB_TABLE_NAME` = `client_records_state`;
    - `DB_MODERATION_TABLE_NAME` = `mini_client_submissions`;
@@ -90,7 +92,7 @@ npm start
 - `GET /api/records`
 - `PUT /api/records`
 - `POST /api/assistant/chat`
-- `POST /api/assistant/tts`
+- `POST /api/assistant/tts` (опционально, только если `ASSISTANT_TTS_ENDPOINT_ENABLED=true`)
 - `POST /api/mini/access`
 - `POST /api/mini/clients`
 - `GET /api/moderation/submissions`
