@@ -19960,6 +19960,94 @@ async function mirrorLegacyStateRecordsBestEffort(client, records, updatedAt, op
   };
 }
 
+async function prependSingleRecordToLegacyState(client, record, options = {}) {
+  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.writeTimestamp) || new Date().toISOString();
+  await client.query(
+    `
+      INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+      VALUES ($1, jsonb_build_array($2::jsonb), $3::timestamptz)
+      ON CONFLICT (id)
+      DO UPDATE SET
+        records = jsonb_build_array($2::jsonb) || COALESCE(records, '[]'::jsonb),
+        updated_at = EXCLUDED.updated_at
+    `,
+    [STATE_ROW_ID, JSON.stringify(record || {}), writeTimestamp],
+  );
+  return writeTimestamp;
+}
+
+function shouldWriteLegacyStateOnMiniApproval(options = {}) {
+  const writeV2Enabled = options?.writeV2Enabled === true;
+  const readV2Enabled = options?.readV2Enabled === true;
+  const legacyMirrorEnabled = options?.legacyMirrorEnabled === true;
+
+  if (!writeV2Enabled) {
+    return true;
+  }
+
+  // Keep moderation approve visible in the active read path during mixed-mode rollout.
+  if (!readV2Enabled) {
+    return true;
+  }
+
+  return legacyMirrorEnabled;
+}
+
+async function upsertSingleRecordToV2(client, record, options = {}) {
+  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.writeTimestamp) || new Date().toISOString();
+  const snapshot = normalizeLegacyRecordsSnapshot([record], {
+    sourceStateUpdatedAt: writeTimestamp,
+    sourceStateRowId: STATE_ROW_ID,
+  });
+  const row = snapshot.rows[0];
+  if (!row) {
+    throw createHttpError(
+      "Cannot approve submission. Record payload is invalid.",
+      400,
+      "invalid_submission_record",
+    );
+  }
+
+  await client.query(
+    `
+      INSERT INTO ${CLIENT_RECORDS_V2_TABLE}
+        (id, record, record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id, inserted_at, updated_at)
+      VALUES
+        ($1, $2::jsonb, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9, $10::timestamptz, $10::timestamptz)
+      ON CONFLICT (id)
+      DO UPDATE SET
+        record = EXCLUDED.record,
+        record_hash = EXCLUDED.record_hash,
+        client_name = EXCLUDED.client_name,
+        company_name = EXCLUDED.company_name,
+        closed_by = EXCLUDED.closed_by,
+        created_at = EXCLUDED.created_at,
+        source_state_updated_at = EXCLUDED.source_state_updated_at,
+        source_state_row_id = EXCLUDED.source_state_row_id,
+        updated_at = EXCLUDED.updated_at
+      WHERE
+        (record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id)
+        IS DISTINCT FROM
+        (EXCLUDED.record_hash, EXCLUDED.client_name, EXCLUDED.company_name, EXCLUDED.closed_by, EXCLUDED.created_at, EXCLUDED.source_state_updated_at, EXCLUDED.source_state_row_id)
+    `,
+    [
+      row.id,
+      JSON.stringify(row.record),
+      row.recordHash,
+      row.clientName,
+      row.companyName,
+      row.closedBy,
+      row.createdAt,
+      row.sourceStateUpdatedAt,
+      row.sourceStateRowId,
+      writeTimestamp,
+    ],
+  );
+
+  return {
+    writeTimestamp,
+  };
+}
 async function listCurrentRecordsFromV2ForWrite(client) {
   const result = await client.query(
     `
@@ -22979,18 +23067,27 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
         [STATE_ROW_ID],
       );
 
-      const currentRecords = Array.isArray(stateResult.rows[0]?.records) ? stateResult.rows[0].records : [];
-      currentRecords.unshift(submission.record);
-
-      await client.query(
-        `
-          INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-          VALUES ($1, $2::jsonb, NOW())
-          ON CONFLICT (id)
-          DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
-        `,
-        [STATE_ROW_ID, JSON.stringify(currentRecords)],
-      );
+      const approveWriteTimestamp = new Date().toISOString();
+      const shouldWriteLegacyState = shouldWriteLegacyStateOnMiniApproval({
+        writeV2Enabled: WRITE_V2_ENABLED,
+        readV2Enabled: READ_V2_ENABLED,
+        legacyMirrorEnabled: LEGACY_MIRROR_ENABLED,
+      });
+      if (WRITE_V2_ENABLED) {
+        const v2WriteResult = await upsertSingleRecordToV2(client, submission.record, {
+          writeTimestamp: approveWriteTimestamp,
+        });
+        await upsertLegacyStateRevisionPointer(client, v2WriteResult.writeTimestamp);
+        if (shouldWriteLegacyState) {
+          await prependSingleRecordToLegacyState(client, submission.record, {
+            writeTimestamp: v2WriteResult.writeTimestamp,
+          });
+        }
+      } else {
+        await prependSingleRecordToLegacyState(client, submission.record, {
+          writeTimestamp: approveWriteTimestamp,
+        });
+      }
     }
 
     const updateResult = await client.query(
