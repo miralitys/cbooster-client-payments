@@ -5,6 +5,19 @@ export interface QuickBooksPaymentRow {
   paymentAmount: number;
   paymentDate: string;
   transactionType: string;
+  transactionDescription?: string;
+}
+
+export interface QuickBooksTransactionInsightRequest {
+  companyName: string;
+  amount: number;
+  date: string;
+  description?: string;
+}
+
+export interface QuickBooksTransactionInsightPayload {
+  ok: boolean;
+  insight: string;
 }
 
 export interface QuickBooksSyncMeta {

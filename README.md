@@ -51,6 +51,11 @@ npm start
    - `OPENAI_API_BASE_URL` = base URL OpenAI API (по умолчанию `https://api.openai.com`);
    - `OPENAI_ASSISTANT_TIMEOUT_MS` = timeout запроса к OpenAI в ms (по умолчанию `15000`);
    - `OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS` = лимит токенов ответа (по умолчанию `420`);
+   - `ASSISTANT_REVIEW_PII_MODE` = режим хранения вопросов/ответов в очереди ревью (`minimal` по умолчанию; варианты: `minimal`, `redact`, `full`);
+   - `ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED` = `true`/`false` (по умолчанию `true`, автоочистка старых записей review-очереди);
+   - `ASSISTANT_REVIEW_RETENTION_DAYS` = срок хранения записей review-очереди в днях (по умолчанию `90`);
+   - `ASSISTANT_REVIEW_RETENTION_SWEEP_INTERVAL_MS` = интервал sweep review-очереди в ms (по умолчанию `14400000`, т.е. 4 часа);
+   - `ASSISTANT_REVIEW_RETENTION_SWEEP_BATCH_LIMIT` = сколько старых review-записей удалять за один sweep (по умолчанию `500`);
    - `ELEVENLABS_API_KEY` = API key ElevenLabs для озвучки ответов ассистента голосом;
    - `ELEVENLABS_VOICE_ID` = voice id в ElevenLabs (по умолчанию `ARyC2bwXA7I797b7vxmB`);
    - `ELEVENLABS_MODEL_ID` = модель ElevenLabs для TTS (по умолчанию `eleven_multilingual_v2`);

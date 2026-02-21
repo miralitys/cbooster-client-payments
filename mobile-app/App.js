@@ -18,10 +18,43 @@ import {
 const API_BASE_URL = (
   process.env.EXPO_PUBLIC_API_BASE_URL || "https://cbooster-client-payments.onrender.com"
 ).replace(/\/+$/, "");
-const MOBILE_SESSION_HEADER_NAME = "X-CBooster-Session";
+const MOBILE_AUTHORIZATION_SCHEME = "Bearer";
+const MOBILE_DEVICE_ID_HEADER_NAME = "X-CBooster-Device-Id";
+const MOBILE_REQUEST_ID_HEADER_NAME = "X-CBooster-Request-Id";
 const AUTH_STATE_CHECKING = "checking";
 const AUTH_STATE_SIGNED_OUT = "signedOut";
 const AUTH_STATE_SIGNED_IN = "signedIn";
+const API_REQUEST_TIMEOUT_MS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_REQUEST_TIMEOUT_MS,
+  15000,
+  3000,
+  120000,
+);
+const API_GET_RETRY_ATTEMPTS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_GET_RETRY_ATTEMPTS,
+  2,
+  0,
+  5,
+);
+const API_GET_RETRY_BASE_DELAY_MS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_GET_RETRY_BASE_DELAY_MS,
+  450,
+  100,
+  5000,
+);
+const API_GET_RETRY_MAX_DELAY_MS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_GET_RETRY_MAX_DELAY_MS,
+  3000,
+  200,
+  12000,
+);
+const API_IN_FLIGHT_MAX_KEYS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_IN_FLIGHT_MAX_KEYS,
+  120,
+  20,
+  1000,
+);
+const inFlightRequestPromisesByKey = new Map();
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const ZERO_TOLERANCE = 0.005;
@@ -289,12 +322,16 @@ export default function App() {
   const [sensitiveAuthError, setSensitiveAuthError] = useState("");
   const [isSensitiveAuthSubmitting, setIsSensitiveAuthSubmitting] = useState(false);
   const sensitiveRevealTimeoutRef = useRef(null);
+  const mobileDeviceIdRef = useRef(createClientEntropyId("mob"));
 
   const isAuthenticated = authState === AUTH_STATE_SIGNED_IN;
 
   const requestApiJson = useCallback(
     (path, options = {}) => {
-      return requestJson(path, options, mobileSessionToken);
+      return requestJson(path, options, {
+        sessionToken: mobileSessionToken,
+        deviceId: mobileDeviceIdRef.current,
+      });
     },
     [mobileSessionToken],
   );
@@ -349,7 +386,10 @@ export default function App() {
     setAuthError("");
     setAuthState(AUTH_STATE_CHECKING);
     try {
-      const body = await requestJson("/api/auth/session", {}, mobileSessionToken);
+      const body = await requestJson("/api/mobile/auth/session", {}, {
+        sessionToken: mobileSessionToken,
+        deviceId: mobileDeviceIdRef.current,
+      });
       const username = (body?.user?.username || "").toString();
       setAuthUser(username);
       setAuthState(AUTH_STATE_SIGNED_IN);
@@ -376,7 +416,7 @@ export default function App() {
     setAuthError("");
 
     try {
-      const body = await requestJson("/api/auth/login", {
+      const body = await requestJson("/api/mobile/auth/login", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -385,6 +425,8 @@ export default function App() {
           username,
           password,
         }),
+      }, {
+        deviceId: mobileDeviceIdRef.current,
       });
 
       const sessionToken = (body?.sessionToken || "").toString();
@@ -406,7 +448,7 @@ export default function App() {
 
   const handleSignOut = useCallback(async () => {
     try {
-      await requestApiJson("/api/auth/logout", {
+      await requestApiJson("/api/mobile/auth/logout", {
         method: "POST",
       });
     } catch {
@@ -471,7 +513,7 @@ export default function App() {
     setSensitiveAuthError("");
 
     try {
-      const body = await requestJson("/api/auth/login", {
+      const body = await requestJson("/api/mobile/auth/login", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -480,6 +522,8 @@ export default function App() {
           username,
           password,
         }),
+      }, {
+        deviceId: mobileDeviceIdRef.current,
       });
 
       const nextToken = (body?.sessionToken || "").toString();
@@ -509,6 +553,28 @@ export default function App() {
       setIsSensitiveAuthSubmitting(false);
     }
   }, [applyUnauthorizedState, authUser, sensitiveAuthPassword]);
+
+  const openTrustedAttachmentUrl = useCallback(async (pathOrUrl) => {
+    const url = toAbsoluteApiUrl(pathOrUrl);
+    if (!url) {
+      Alert.alert(
+        "Blocked unsafe link",
+        "Attachment link is not trusted. Contact administrator.",
+      );
+      return;
+    }
+
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        Alert.alert("Unable to open link", "This link cannot be opened on this device.");
+        return;
+      }
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert("Unable to open link", "Failed to open attachment link.");
+    }
+  }, []);
 
   const loadRecords = useCallback(async () => {
     setRecordsError("");
@@ -1070,8 +1136,7 @@ export default function App() {
                                 <Pressable
                                   style={styles.secondaryActionButton}
                                   onPress={() => {
-                                    const url = toAbsoluteApiUrl(item.previewUrl);
-                                    void Linking.openURL(url);
+                                    void openTrustedAttachmentUrl(item.previewUrl);
                                   }}
                                 >
                                   <Text style={styles.secondaryActionButtonText}>Preview</Text>
@@ -1082,8 +1147,7 @@ export default function App() {
                                 <Pressable
                                   style={styles.secondaryActionButton}
                                   onPress={() => {
-                                    const url = toAbsoluteApiUrl(item.downloadUrl);
-                                    void Linking.openURL(url);
+                                    void openTrustedAttachmentUrl(item.downloadUrl);
                                   }}
                                 >
                                   <Text style={styles.secondaryActionButtonText}>Download</Text>
@@ -1175,8 +1239,12 @@ function ClientsScreen({
       <View style={styles.sectionCard}>
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionTitle}>Records</Text>
-          <Pressable style={styles.secondaryActionButton} onPress={() => void onRefresh()}>
-            <Text style={styles.secondaryActionButtonText}>Refresh</Text>
+          <Pressable
+            style={[styles.secondaryActionButton, isLoadingRecords && styles.disabledButton]}
+            disabled={isLoadingRecords}
+            onPress={() => void onRefresh()}
+          >
+            <Text style={styles.secondaryActionButtonText}>{isLoadingRecords ? "Refreshing..." : "Refresh"}</Text>
           </Pressable>
         </View>
 
@@ -1394,8 +1462,12 @@ function ModerationScreen({
       <View style={styles.sectionCard}>
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionTitle}>Moderation Queue</Text>
-          <Pressable style={styles.secondaryActionButton} onPress={() => void onRefresh()}>
-            <Text style={styles.secondaryActionButtonText}>Refresh</Text>
+          <Pressable
+            style={[styles.secondaryActionButton, isLoadingModeration && styles.disabledButton]}
+            disabled={isLoadingModeration}
+            onPress={() => void onRefresh()}
+          >
+            <Text style={styles.secondaryActionButtonText}>{isLoadingModeration ? "Refreshing..." : "Refresh"}</Text>
           </Pressable>
         </View>
 
@@ -2596,58 +2668,326 @@ function generateId() {
   return `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 }
 
-function toAbsoluteApiUrl(pathOrUrl) {
-  const value = (pathOrUrl || "").toString().trim();
-  if (!value) {
-    return API_BASE_URL;
-  }
-
-  if (/^https?:\/\//i.test(value)) {
-    return value;
-  }
-
-  if (value.startsWith("/")) {
-    return `${API_BASE_URL}${value}`;
-  }
-
-  return `${API_BASE_URL}/${value}`;
+function createClientEntropyId(prefix = "id") {
+  const normalizedPrefix = (prefix || "id").toString().replace(/[^a-z0-9_-]/gi, "").slice(0, 12) || "id";
+  const randomChunkA = Math.random().toString(36).slice(2, 12);
+  const randomChunkB = Math.random().toString(36).slice(2, 12);
+  return `${normalizedPrefix}-${Date.now().toString(36)}-${randomChunkA}${randomChunkB}`;
 }
 
-async function requestJson(path, options = {}, sessionToken = "") {
-  const url = toAbsoluteApiUrl(path);
-  const nextHeaders = {
-    ...(options.headers || {}),
-    [MOBILE_SESSION_HEADER_NAME]: sessionToken || "",
-  };
-  if (!sessionToken) {
-    delete nextHeaders[MOBILE_SESSION_HEADER_NAME];
+function toAbsoluteApiUrl(pathOrUrl) {
+  let apiBaseUrl;
+  try {
+    apiBaseUrl = new URL(API_BASE_URL);
+  } catch {
+    return null;
   }
 
-  const response = await fetch(url, {
-    ...options,
-    credentials: "include",
-    headers: nextHeaders,
-  });
-  const text = await response.text();
+  const value = (pathOrUrl || "").toString().trim();
+  let candidateUrl;
 
-  let body = {};
-  if (text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = {};
+  try {
+    candidateUrl = new URL(value || "/", apiBaseUrl);
+  } catch {
+    return null;
+  }
+
+  const scheme = candidateUrl.protocol.toLowerCase();
+  if (scheme !== "https:" && scheme !== "http:") {
+    return null;
+  }
+
+  if (candidateUrl.origin !== apiBaseUrl.origin) {
+    return null;
+  }
+
+  return candidateUrl.toString();
+}
+
+function clampPositiveInteger(rawValue, fallbackValue, minValue = 1, maxValue = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number.parseInt(rawValue, 10);
+  const baseValue = Number.isFinite(parsed) ? parsed : fallbackValue;
+  return Math.min(Math.max(baseValue, minValue), maxValue);
+}
+
+function normalizeRequestMethod(rawMethod) {
+  const method = (rawMethod || "GET").toString().trim().toUpperCase();
+  return method || "GET";
+}
+
+function shouldRetryHttpStatus(statusCode) {
+  return statusCode === 408 || statusCode === 429 || (statusCode >= 500 && statusCode <= 599);
+}
+
+function shouldRetryFetchError(error) {
+  if (!error) {
+    return false;
+  }
+
+  const errorName = (error.name || "").toString().toLowerCase();
+  if (errorName === "aborterror") {
+    return false;
+  }
+
+  const message = (error.message || "").toString().toLowerCase();
+  return (
+    errorName === "typeerror" ||
+    message.includes("network request failed") ||
+    message.includes("network error") ||
+    message.includes("failed to fetch") ||
+    message.includes("timed out")
+  );
+}
+
+function resolveRequestBodyKeyPart(rawBody) {
+  if (!rawBody) {
+    return "";
+  }
+
+  if (typeof rawBody === "string") {
+    if (rawBody.length <= 700) {
+      return rawBody;
     }
+    return `${rawBody.slice(0, 700)}..${rawBody.length}`;
   }
 
-  if (!response.ok) {
-    const error = new Error(
-      body.error || body.details || `Request failed (${response.status})`,
-    );
-    error.status = response.status;
-    throw error;
+  try {
+    const serialized = JSON.stringify(rawBody);
+    if (!serialized) {
+      return "";
+    }
+    if (serialized.length <= 700) {
+      return serialized;
+    }
+    return `${serialized.slice(0, 700)}..${serialized.length}`;
+  } catch {
+    return Object.prototype.toString.call(rawBody);
+  }
+}
+
+function buildInFlightRequestKey({ method, url, sessionToken, body, dedupeKey = "" }) {
+  const explicitKey = (dedupeKey || "").toString().trim();
+  if (explicitKey) {
+    return `custom:${explicitKey}`;
   }
 
-  return body;
+  const methodPart = normalizeRequestMethod(method);
+  const sessionPart = sessionToken ? `${sessionToken.length}:${sessionToken.slice(-16)}` : "";
+  const bodyPart = resolveRequestBodyKeyPart(body);
+  return `${methodPart}::${url}::${sessionPart}::${bodyPart}`;
+}
+
+function computeRetryDelayMs(nextAttemptNumber) {
+  const normalizedAttempt = Math.max(1, Number.parseInt(nextAttemptNumber, 10) || 1);
+  const exponentialDelay = API_GET_RETRY_BASE_DELAY_MS * 2 ** (normalizedAttempt - 1);
+  const cappedDelay = Math.min(exponentialDelay, API_GET_RETRY_MAX_DELAY_MS);
+  const jitterMs = Math.floor(Math.random() * Math.max(80, Math.round(cappedDelay * 0.2)));
+  return cappedDelay + jitterMs;
+}
+
+function waitForDelay(ms, abortSignal) {
+  const duration = Math.max(0, Number.parseInt(ms, 10) || 0);
+  if (!duration) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let timerId = null;
+    const cleanup = () => {
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+      if (abortSignal && typeof abortSignal.removeEventListener === "function") {
+        abortSignal.removeEventListener("abort", handleAbort);
+      }
+    };
+    const handleAbort = () => {
+      cleanup();
+      const canceledError = new Error("Request was canceled.");
+      canceledError.name = "AbortError";
+      canceledError.status = 499;
+      reject(canceledError);
+    };
+
+    if (abortSignal?.aborted) {
+      handleAbort();
+      return;
+    }
+
+    if (abortSignal && typeof abortSignal.addEventListener === "function") {
+      abortSignal.addEventListener("abort", handleAbort, { once: true });
+    }
+
+    timerId = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, duration);
+  });
+}
+
+async function requestJson(path, options = {}, authContext = {}) {
+  const url = toAbsoluteApiUrl(path);
+  if (!url) {
+    throw new Error("Blocked unsafe request URL.");
+  }
+
+  const context =
+    authContext && typeof authContext === "object"
+      ? authContext
+      : {
+          sessionToken: authContext,
+        };
+  const sessionToken = (context.sessionToken || "").toString().trim();
+  const deviceId = (context.deviceId || "").toString().trim();
+  const normalizedOptions = options && typeof options === "object" ? options : {};
+  const {
+    timeoutMs: optionTimeoutMs,
+    retryAttempts: optionRetryAttempts,
+    dedupeKey: optionDedupeKey,
+    disableInFlightDedupe,
+    signal: optionSignal,
+    ...fetchOptions
+  } = normalizedOptions;
+  const method = normalizeRequestMethod(fetchOptions.method);
+  const timeoutMs = clampPositiveInteger(optionTimeoutMs, API_REQUEST_TIMEOUT_MS, 1000, 180000);
+  const retryAttempts = method === "GET"
+    ? clampPositiveInteger(optionRetryAttempts, API_GET_RETRY_ATTEMPTS, 0, 6)
+    : 0;
+
+  const baseHeaders = {
+    ...(fetchOptions.headers || {}),
+  };
+  if (sessionToken) {
+    baseHeaders.Authorization = `${MOBILE_AUTHORIZATION_SCHEME} ${sessionToken}`;
+  }
+  if (deviceId) {
+    baseHeaders[MOBILE_DEVICE_ID_HEADER_NAME] = deviceId;
+  }
+
+  const executeRequest = async () => {
+    for (let attempt = 0; attempt <= retryAttempts; attempt += 1) {
+      const attemptController = new AbortController();
+      let didTimeout = false;
+      const handleTimeout = setTimeout(() => {
+        didTimeout = true;
+        attemptController.abort();
+      }, timeoutMs);
+      const handleExternalAbort = () => {
+        attemptController.abort();
+      };
+      if (optionSignal && typeof optionSignal.addEventListener === "function") {
+        if (optionSignal.aborted) {
+          attemptController.abort();
+        } else {
+          optionSignal.addEventListener("abort", handleExternalAbort, { once: true });
+        }
+      }
+
+      try {
+        const response = await fetch(url, {
+          ...fetchOptions,
+          method,
+          credentials: "include",
+          headers: {
+            ...baseHeaders,
+            [MOBILE_REQUEST_ID_HEADER_NAME]: createClientEntropyId("req"),
+          },
+          signal: attemptController.signal,
+        });
+        const text = await response.text();
+
+        let body = {};
+        if (text) {
+          try {
+            body = JSON.parse(text);
+          } catch {
+            body = {};
+          }
+        }
+
+        if (!response.ok) {
+          const error = new Error(
+            body.error || body.details || `Request failed (${response.status})`,
+          );
+          error.status = response.status;
+          if (method === "GET" && attempt < retryAttempts && shouldRetryHttpStatus(response.status)) {
+            await waitForDelay(computeRetryDelayMs(attempt + 1), optionSignal);
+            continue;
+          }
+          throw error;
+        }
+
+        return body;
+      } catch (error) {
+        if (didTimeout) {
+          if (method === "GET" && attempt < retryAttempts) {
+            await waitForDelay(computeRetryDelayMs(attempt + 1), optionSignal);
+            continue;
+          }
+          const timeoutError = new Error("Request timed out. Check your connection and try again.");
+          timeoutError.status = 408;
+          timeoutError.code = "request_timeout";
+          throw timeoutError;
+        }
+
+        if (optionSignal?.aborted) {
+          const canceledError = new Error("Request was canceled.");
+          canceledError.status = 499;
+          canceledError.code = "request_aborted";
+          throw canceledError;
+        }
+
+        if (method === "GET" && attempt < retryAttempts && shouldRetryFetchError(error)) {
+          await waitForDelay(computeRetryDelayMs(attempt + 1), optionSignal);
+          continue;
+        }
+
+        throw error;
+      } finally {
+        clearTimeout(handleTimeout);
+        if (optionSignal && typeof optionSignal.removeEventListener === "function") {
+          optionSignal.removeEventListener("abort", handleExternalAbort);
+        }
+      }
+    }
+
+    throw new Error("Request failed.");
+  };
+
+  if (disableInFlightDedupe) {
+    return executeRequest();
+  }
+
+  const inFlightKey = buildInFlightRequestKey({
+    method,
+    url,
+    sessionToken,
+    dedupeKey: optionDedupeKey,
+    body: fetchOptions.body,
+  });
+  const existingRequest = inFlightRequestPromisesByKey.get(inFlightKey);
+  if (existingRequest) {
+    return existingRequest;
+  }
+
+  let requestPromise;
+  requestPromise = executeRequest().finally(() => {
+    if (inFlightRequestPromisesByKey.get(inFlightKey) === requestPromise) {
+      inFlightRequestPromisesByKey.delete(inFlightKey);
+    }
+  });
+  inFlightRequestPromisesByKey.set(inFlightKey, requestPromise);
+
+  while (inFlightRequestPromisesByKey.size > API_IN_FLIGHT_MAX_KEYS) {
+    const oldestKey = inFlightRequestPromisesByKey.keys().next().value;
+    if (!oldestKey || oldestKey === inFlightKey) {
+      break;
+    }
+    inFlightRequestPromisesByKey.delete(oldestKey);
+  }
+
+  return requestPromise;
 }
 
 const styles = StyleSheet.create({

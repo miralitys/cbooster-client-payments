@@ -2,6 +2,7 @@
 
 const form = document.querySelector("#mini-client-form");
 const message = document.querySelector("#mini-message");
+const accessRetryButton = document.querySelector("#mini-access-retry-button");
 const submitButton = document.querySelector("#mini-submit-button");
 const submitButtonLabel = submitButton?.querySelector(".button-label") || null;
 const payment1DateInput = document.querySelector("#payment1Date");
@@ -23,6 +24,9 @@ const REQUIRED_MINI_FIELDS = [
   { id: "payment1Date", label: "Payment 1 Date" },
 ];
 const DEFAULT_SUBMIT_BUTTON_LABEL = "Add Client";
+const MINI_ACCESS_RETRY_BASE_DELAY_MS = 1200;
+const MINI_ACCESS_RETRY_MAX_DELAY_MS = 12000;
+const MINI_ACCESS_RETRY_MAX_ATTEMPTS = 4;
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
   ".html",
   ".htm",
@@ -52,13 +56,15 @@ let isMiniAccessAllowed = false;
 let isSubmitting = false;
 let isAccessCheckInProgress = true;
 let miniUploadToken = "";
+let hasRecoverableAccessError = false;
+let miniAccessRetryAttempt = 0;
+let miniAccessRetryTimeoutId = 0;
 
 initializeDateField(payment1DateInput);
 initializeSsnField(ssnInput);
 initializePhoneField(clientPhoneInput);
 initializeEmailField(clientEmailInput);
 initializeRequiredFieldValidation();
-setDefaultDateIfEmpty(payment1DateInput);
 initializeAttachmentsInput();
 updateFormInteractivity();
 void initializeTelegramContext();
@@ -74,6 +80,10 @@ if (form) {
     }
 
     if (!isMiniAccessAllowed) {
+      if (hasRecoverableAccessError) {
+        setMessage("Access check is temporarily unavailable. Tap Retry access.", "error");
+        return;
+      }
       setMessage("Access denied. Only members of the allowed Telegram group can submit clients.", "error");
       return;
     }
@@ -81,6 +91,10 @@ if (form) {
     if (!miniUploadToken) {
       await verifyMiniAccess({ quiet: true });
       if (!miniUploadToken) {
+        if (hasRecoverableAccessError) {
+          setMessage("Access check is temporarily unavailable. Tap Retry access.", "error");
+          return;
+        }
         setMessage("Session expired. Reopen Mini App and try again.", "error");
         return;
       }
@@ -154,7 +168,6 @@ if (form) {
 
       form.reset();
       clearMiniValidationStates();
-      setDefaultDateIfEmpty(payment1DateInput);
       renderAttachmentsPreview([]);
       setMessage("Submitted for moderation. Client will appear after approval.", "success");
       showSubmissionPopup();
@@ -165,6 +178,18 @@ if (form) {
     } finally {
       setSubmittingState(false);
     }
+  });
+}
+
+if (accessRetryButton instanceof HTMLButtonElement) {
+  accessRetryButton.addEventListener("click", () => {
+    if (isAccessCheckInProgress || isSubmitting || !initData) {
+      return;
+    }
+
+    clearMiniAccessRetryTimer();
+    miniAccessRetryAttempt = 0;
+    void verifyMiniAccess();
   });
 }
 
@@ -213,7 +238,10 @@ async function verifyMiniAccess(options = {}) {
 
     const responseBody = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(responseBody.error || `Access check failed (${response.status})`);
+      const accessError = new Error(responseBody.error || `Access check failed (${response.status})`);
+      accessError.httpStatus = response.status;
+      accessError.code = normalizeValue(responseBody?.code);
+      throw accessError;
     }
 
     miniUploadToken = normalizeValue(responseBody?.uploadToken);
@@ -222,17 +250,94 @@ async function verifyMiniAccess(options = {}) {
     }
 
     isMiniAccessAllowed = true;
+    if (hasRecoverableAccessError) {
+      setMessage("", "");
+    }
+    clearMiniAccessRetryTimer();
+    hasRecoverableAccessError = false;
+    miniAccessRetryAttempt = 0;
     isAccessCheckInProgress = false;
     updateFormInteractivity();
   } catch (error) {
     miniUploadToken = "";
     isMiniAccessAllowed = false;
     isAccessCheckInProgress = false;
+    const recoverableError = isRecoverableMiniAccessFailure(error);
+    if (recoverableError) {
+      hasRecoverableAccessError = true;
+      scheduleMiniAccessRetry();
+    } else {
+      clearMiniAccessRetryTimer();
+      hasRecoverableAccessError = false;
+      miniAccessRetryAttempt = 0;
+    }
     updateFormInteractivity();
     if (!quiet) {
-      setMessage(error.message || "Access denied for Mini App.", "error");
+      if (recoverableError) {
+        setMessage("Temporary access issue. We will retry automatically. Tap Retry access to try now.", "error");
+      } else {
+        setMessage(error.message || "Access denied for Mini App.", "error");
+      }
     }
   }
+}
+
+function clearMiniAccessRetryTimer() {
+  if (miniAccessRetryTimeoutId) {
+    clearTimeout(miniAccessRetryTimeoutId);
+    miniAccessRetryTimeoutId = 0;
+  }
+}
+
+function scheduleMiniAccessRetry() {
+  if (!hasRecoverableAccessError || isMiniAccessAllowed || isAccessCheckInProgress) {
+    return;
+  }
+  if (miniAccessRetryAttempt >= MINI_ACCESS_RETRY_MAX_ATTEMPTS) {
+    return;
+  }
+
+  clearMiniAccessRetryTimer();
+  miniAccessRetryAttempt += 1;
+  const delayMs = resolveMiniAccessRetryDelayMs(miniAccessRetryAttempt);
+  miniAccessRetryTimeoutId = setTimeout(() => {
+    miniAccessRetryTimeoutId = 0;
+    if (isMiniAccessAllowed || isAccessCheckInProgress || isSubmitting) {
+      return;
+    }
+    void verifyMiniAccess({ quiet: true });
+  }, delayMs);
+}
+
+function resolveMiniAccessRetryDelayMs(attemptNumber) {
+  const safeAttempt = Math.max(1, Number.parseInt(attemptNumber, 10) || 1);
+  const exponentialDelay = Math.min(
+    MINI_ACCESS_RETRY_MAX_DELAY_MS,
+    MINI_ACCESS_RETRY_BASE_DELAY_MS * 2 ** (safeAttempt - 1),
+  );
+  const jitterMax = Math.max(40, Math.floor(exponentialDelay * 0.25));
+  const jitter = Math.floor(Math.random() * jitterMax);
+  return Math.min(MINI_ACCESS_RETRY_MAX_DELAY_MS, exponentialDelay + jitter);
+}
+
+function isRecoverableMiniAccessFailure(error) {
+  const status = Number.parseInt(error?.httpStatus, 10);
+  if (new Set([408, 425, 429, 500, 502, 503, 504]).has(status)) {
+    return true;
+  }
+
+  const errorCode = normalizeValue(error?.code);
+  if (new Set(["failed_to_fetch", "networkerror"]).has(errorCode)) {
+    return true;
+  }
+
+  const errorName = normalizeValue(error?.name);
+  if (errorName === "typeerror") {
+    return true;
+  }
+
+  const errorMessage = normalizeValue(error?.message);
+  return errorMessage.includes("network") || errorMessage.includes("failed to fetch") || errorMessage.includes("load failed");
 }
 
 function initializeDateField(input) {
@@ -263,8 +368,6 @@ function initializeDateField(input) {
     const currentDate = parseUsDateToIso(input.value);
     if (currentDate) {
       proxy.value = currentDate;
-    } else if (!proxy.value) {
-      proxy.value = getTodayDateIso();
     }
 
     if (typeof proxy.showPicker === "function") {
@@ -285,18 +388,6 @@ function initializeDateField(input) {
     input.value = formatIsoToUsDate(dateValue);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
-}
-
-function setDefaultDateIfEmpty(input) {
-  if (!(input instanceof HTMLInputElement)) {
-    return;
-  }
-
-  if (input.value.trim()) {
-    return;
-  }
-
-  input.value = formatIsoToUsDate(getTodayDateIso());
 }
 
 function formatDateInputValue(rawValue) {
@@ -335,14 +426,6 @@ function parseUsDateToIso(usDate) {
   }
 
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-}
-
-function getTodayDateIso() {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  const year = String(now.getFullYear());
-  return `${year}-${month}-${day}`;
 }
 
 function isValidDateParts(year, month, day) {
@@ -865,6 +948,7 @@ function setSubmittingState(nextSubmittingState) {
 function updateFormInteractivity() {
   const canSubmit =
     !isSubmitting && !isAccessCheckInProgress && isMiniAccessAllowed && hasAllRequiredMiniFields();
+  const showAccessRetryButton = !isMiniAccessAllowed && hasRecoverableAccessError;
 
   if (submitButton) {
     submitButton.disabled = !canSubmit;
@@ -882,6 +966,11 @@ function updateFormInteractivity() {
 
   if (attachmentsUploadButton instanceof HTMLButtonElement) {
     attachmentsUploadButton.disabled = isSubmitting;
+  }
+
+  if (accessRetryButton instanceof HTMLButtonElement) {
+    accessRetryButton.hidden = !showAccessRetryButton;
+    accessRetryButton.disabled = isSubmitting || isAccessCheckInProgress;
   }
 }
 

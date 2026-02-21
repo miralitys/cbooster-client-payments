@@ -1,14 +1,20 @@
 export { ApiError, apiRequest } from "@/shared/api/fetcher";
 export { getSession } from "@/shared/api/session";
 export { getRecords, patchRecords, putRecords } from "@/shared/api/records";
-export { resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api/assistant";
+export { queueAssistantSessionContextResetBeacon, resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api/assistant";
 export {
   approveModerationSubmission,
   getModerationSubmissionFiles,
   getModerationSubmissions,
   rejectModerationSubmission,
 } from "@/shared/api/moderation";
-export { createQuickBooksSyncJob, getQuickBooksPayments, getQuickBooksSyncJob } from "@/shared/api/quickbooks";
+export {
+  createQuickBooksSyncJob,
+  getQuickBooksOutgoingPayments,
+  getQuickBooksPayments,
+  getQuickBooksSyncJob,
+  getQuickBooksTransactionInsight,
+} from "@/shared/api/quickbooks";
 export { getClientManagers } from "@/shared/api/clientManagers";
 export { getGhlLeads } from "@/shared/api/ghlLeads";
 export { getGhlClientDocuments } from "@/shared/api/ghlDocuments";

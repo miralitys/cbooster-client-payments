@@ -1,17 +1,32 @@
 import { apiRequest } from "@/shared/api/fetcher";
-import type { QuickBooksPaymentsPayload, QuickBooksSyncJobPayload } from "@/shared/types/quickbooks";
+import type {
+  QuickBooksPaymentsPayload,
+  QuickBooksSyncJobPayload,
+  QuickBooksTransactionInsightPayload,
+  QuickBooksTransactionInsightRequest,
+} from "@/shared/types/quickbooks";
 
-interface GetQuickBooksPaymentsOptions {
+interface GetQuickBooksTransactionsOptions {
   from: string;
   to: string;
 }
 
-export async function getQuickBooksPayments(options: GetQuickBooksPaymentsOptions): Promise<QuickBooksPaymentsPayload> {
+export async function getQuickBooksPayments(options: GetQuickBooksTransactionsOptions): Promise<QuickBooksPaymentsPayload> {
   const query = new URLSearchParams({
     from: options.from,
     to: options.to,
   });
   return apiRequest<QuickBooksPaymentsPayload>(`/api/quickbooks/payments/recent?${query.toString()}`);
+}
+
+export async function getQuickBooksOutgoingPayments(
+  options: GetQuickBooksTransactionsOptions,
+): Promise<QuickBooksPaymentsPayload> {
+  const query = new URLSearchParams({
+    from: options.from,
+    to: options.to,
+  });
+  return apiRequest<QuickBooksPaymentsPayload>(`/api/quickbooks/payments/outgoing?${query.toString()}`);
 }
 
 interface CreateQuickBooksSyncJobOptions {
@@ -38,4 +53,16 @@ export async function getQuickBooksSyncJob(jobId: string): Promise<QuickBooksSyn
   return apiRequest<QuickBooksSyncJobPayload>(
     `/api/quickbooks/payments/recent/sync-jobs/${encodeURIComponent(String(jobId || "").trim())}`,
   );
+}
+
+export async function getQuickBooksTransactionInsight(
+  payload: QuickBooksTransactionInsightRequest,
+): Promise<QuickBooksTransactionInsightPayload> {
+  return apiRequest<QuickBooksTransactionInsightPayload>("/api/quickbooks/transaction-insight", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
 }

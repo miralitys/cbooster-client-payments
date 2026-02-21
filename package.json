@@ -7,6 +7,10 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test:backend": "node --test tests/*.test.js",
+    "test:mini:backend": "node --test tests/mini-*.test.js",
+    "test:mini:backend:coverage": "c8 --all --exclude='**/node_modules/**' --include='**/tests/mini-*.test.js' --check-coverage --lines=95 --functions=99 --branches=78 --statements=95 --reporter=text-summary --reporter=lcov node --test tests/mini-*.test.js",
+    "test:mini:frontend": "npm --prefix webapp run test -- src/features/mini-form",
+    "test:mini:frontend:coverage": "c8 --all --exclude='**/node_modules/**' --include=mini.js --check-coverage --lines=60 --functions=80 --branches=50 --statements=60 --reporter=text-summary --reporter=lcov node webapp/scripts/mini-coverage-smoke.mjs",
     "build": "npm --prefix webapp run build",
     "lint": "npm --prefix webapp run lint",
     "quality:gate": "npm --prefix webapp run lint -- --max-warnings=0 && npm --prefix webapp run test && npm --prefix webapp run build",
@@ -28,5 +32,8 @@
     "helmet": "^8.1.0",
     "multer": "^2.0.2",
     "pg": "^8.13.3"
+  },
+  "devDependencies": {
+    "c8": "^10.1.3"
   }
 }

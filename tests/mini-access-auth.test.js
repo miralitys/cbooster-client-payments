@@ -71,6 +71,7 @@ async function startServer(envOverrides = {}) {
   const env = {
     ...process.env,
     NODE_ENV: "test",
+    SERVER_AUTOSTART_IN_TEST: "true",
     PORT: String(port),
     DATABASE_URL: "",
     TELEGRAM_ALLOWED_USER_IDS: "",

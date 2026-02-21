@@ -2,9 +2,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
 import { withStableRowKeys, type RowWithKey } from "@/shared/lib/stableRowKeys";
-import { createQuickBooksSyncJob, getQuickBooksPayments, getQuickBooksSyncJob, getSession } from "@/shared/api";
+import {
+  createQuickBooksSyncJob,
+  getQuickBooksOutgoingPayments,
+  getQuickBooksPayments,
+  getQuickBooksSyncJob,
+  getQuickBooksTransactionInsight,
+  getSession,
+} from "@/shared/api";
 import type { QuickBooksPaymentRow, QuickBooksSyncJob, QuickBooksSyncMeta } from "@/shared/types/quickbooks";
-import { Button, EmptyState, ErrorState, Input, LoadingSkeleton, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  Input,
+  LoadingSkeleton,
+  Modal,
+  PageHeader,
+  PageShell,
+  Panel,
+  SegmentedControl,
+  Table,
+} from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const QUICKBOOKS_FROM_DATE = "2026-01-01";
@@ -22,38 +41,165 @@ interface LoadOptions {
   fullSync?: boolean;
 }
 
+const QUICKBOOKS_MONEY_FLOW_TABS = [
+  {
+    key: "incoming",
+    label: "Входящие деньги",
+  },
+  {
+    key: "outgoing",
+    label: "Исходящие деньги",
+  },
+] as const;
+
+type QuickBooksTab = (typeof QUICKBOOKS_MONEY_FLOW_TABS)[number]["key"];
 type QuickBooksViewRow = RowWithKey<QuickBooksPaymentRow>;
 
 export default function QuickBooksPage() {
+  const [activeTab, setActiveTab] = useState<QuickBooksTab>("incoming");
   const [canSync, setCanSync] = useState(false);
-  const [allTransactions, setAllTransactions] = useState<QuickBooksViewRow[]>([]);
+  const [incomingTransactions, setIncomingTransactions] = useState<QuickBooksViewRow[]>([]);
+  const [outgoingTransactions, setOutgoingTransactions] = useState<QuickBooksViewRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [syncWarning, setSyncWarning] = useState("");
-  const [statusText, setStatusText] = useState("Loading saved transactions...");
+  const [statusText, setStatusText] = useState("Loading incoming transactions...");
   const [rangeText, setRangeText] = useState("");
   const [lastLoadPrefix, setLastLoadPrefix] = useState("");
+  const [insightModalRow, setInsightModalRow] = useState<QuickBooksViewRow | null>(null);
+  const [insightText, setInsightText] = useState("");
+  const [insightError, setInsightError] = useState("");
+  const [isInsightLoading, setIsInsightLoading] = useState(false);
 
   const [search, setSearch] = useState("");
   const [refundOnly, setRefundOnly] = useState(false);
-  const transactionsRef = useRef<QuickBooksViewRow[]>([]);
+  const incomingTransactionsRef = useRef<QuickBooksViewRow[]>([]);
+  const outgoingTransactionsRef = useRef<QuickBooksViewRow[]>([]);
   const rowKeySequenceRef = useRef(0);
+  const allTransactions = activeTab === "incoming" ? incomingTransactions : outgoingTransactions;
+  const showOnlyRefunds = activeTab === "incoming" && refundOnly;
 
   const filteredTransactions = useMemo(
-    () => filterTransactions(allTransactions, search, refundOnly),
-    [allTransactions, refundOnly, search],
+    () => filterTransactions(allTransactions, search, showOnlyRefunds),
+    [allTransactions, search, showOnlyRefunds],
   );
 
+  const openInsightModal = useCallback((row: QuickBooksViewRow) => {
+    setInsightModalRow(row);
+    setInsightText("");
+    setInsightError("");
+    setIsInsightLoading(false);
+  }, []);
+
+  const closeInsightModal = useCallback(() => {
+    setInsightModalRow(null);
+    setInsightText("");
+    setInsightError("");
+    setIsInsightLoading(false);
+  }, []);
+
+  const askQuickBooksInsight = useCallback(async () => {
+    if (!insightModalRow) {
+      return;
+    }
+
+    setIsInsightLoading(true);
+    setInsightError("");
+
+    try {
+      const payload = await getQuickBooksTransactionInsight({
+        companyName: formatQuickBooksPayeeLabel(insightModalRow.clientName),
+        amount: Number(insightModalRow.paymentAmount) || 0,
+        date: String(insightModalRow.paymentDate || "").trim(),
+        description: buildQuickBooksInsightDescription(insightModalRow),
+      });
+
+      const nextInsight = String(payload?.insight || "").trim();
+      if (!nextInsight) {
+        throw new Error("GPT returned an empty response.");
+      }
+
+      setInsightText(nextInsight);
+      showToast({
+        type: "success",
+        message: "Insight received from GPT.",
+        dedupeKey: "quickbooks-insight-success",
+        cooldownMs: 2200,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to get GPT insight.";
+      setInsightError(message);
+      showToast({
+        type: "error",
+        message,
+        dedupeKey: `quickbooks-insight-error-${message}`,
+        cooldownMs: 2200,
+      });
+    } finally {
+      setIsInsightLoading(false);
+    }
+  }, [insightModalRow]);
+
   const tableColumns = useMemo<TableColumn<QuickBooksViewRow>[]>(() => {
+    if (activeTab === "outgoing") {
+      return [
+        {
+          key: "clientName",
+          label: "Payee",
+          align: "left",
+          cell: (item) => (
+            <div className="quickbooks-client-cell">
+              <span>{formatQuickBooksPayeeLabel(item.clientName)}</span>
+              <button
+                type="button"
+                className="quickbooks-info-button"
+                onClick={() => openInsightModal(item)}
+                aria-label={`Open transaction insight for ${formatQuickBooksPayeeLabel(item.clientName)}`}
+              >
+                i
+              </button>
+            </div>
+          ),
+        },
+        {
+          key: "transactionType",
+          label: "Type",
+          align: "center",
+          cell: (item) => formatQuickBooksOutgoingTypeLabel(item.transactionType),
+        },
+        {
+          key: "paymentAmount",
+          label: "Outgoing Amount",
+          align: "right",
+          cell: (item) => CURRENCY_FORMATTER.format(Number(item.paymentAmount) || 0),
+        },
+        {
+          key: "paymentDate",
+          label: "Date",
+          align: "center",
+          cell: (item) => formatDate(item.paymentDate),
+        },
+      ];
+    }
+
     return [
       {
         key: "clientName",
         label: "Client Name",
         align: "left",
-        cell: (item) => {
-          const amount = Number(item.paymentAmount) || 0;
-          return formatQuickBooksClientLabel(item.clientName, item.transactionType, amount);
-        },
+        cell: (item) => (
+          <div className="quickbooks-client-cell">
+            <span>{formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0)}</span>
+            <button
+              type="button"
+              className="quickbooks-info-button"
+              onClick={() => openInsightModal(item)}
+              aria-label={`Open transaction insight for ${formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0)}`}
+            >
+              i
+            </button>
+          </div>
+        ),
       },
       {
         key: "clientPhone",
@@ -80,7 +226,7 @@ export default function QuickBooksPage() {
         cell: (item) => formatDate(item.paymentDate),
       },
     ];
-  }, []);
+  }, [activeTab, openInsightModal]);
 
   const pollQuickBooksSyncJob = useCallback(async (jobId: string, shouldTotalRefresh: boolean) => {
     const normalizedJobId = String(jobId || "").trim();
@@ -103,11 +249,11 @@ export default function QuickBooksPage() {
     throw new Error("QuickBooks sync is taking too long. Please check again in a minute.");
   }, []);
 
-  const loadRecentQuickBooksPayments = useCallback(async (options: LoadOptions = {}) => {
+  const loadIncomingQuickBooksPayments = useCallback(async (options: LoadOptions = {}) => {
     const shouldSync = Boolean(options.sync);
     const shouldTotalRefresh = Boolean(options.fullSync);
     const rangeTo = formatDateForApi(new Date());
-    const previousItems = [...transactionsRef.current];
+    const previousItems = [...incomingTransactionsRef.current];
     setIsLoading(true);
     setLoadError("");
     setSyncWarning("");
@@ -141,9 +287,9 @@ export default function QuickBooksPage() {
         to: rangeTo,
       });
       const items = Array.isArray(payload.items) ? payload.items : [];
-      setAllTransactions(
+      setIncomingTransactions(
         withStableRowKeys(items, previousItems, rowKeySequenceRef, {
-          prefix: "qb",
+          prefix: "qb-in",
           signature: quickBooksRowSignature,
         }),
       );
@@ -156,22 +302,68 @@ export default function QuickBooksPage() {
         setLoadError(message);
         setStatusText(message);
         setSyncWarning("");
-        setAllTransactions([]);
+        setIncomingTransactions([]);
         setRangeText("");
       } else {
         setLoadError("");
         setSyncWarning(message);
         setStatusText(`Saved data is shown. QuickBooks sync failed: ${message}`);
-        setAllTransactions(previousItems);
+        setIncomingTransactions(previousItems);
       }
     } finally {
       setIsLoading(false);
     }
   }, [pollQuickBooksSyncJob]);
 
+  const loadOutgoingQuickBooksPayments = useCallback(async () => {
+    const rangeTo = formatDateForApi(new Date());
+    const previousItems = [...outgoingTransactionsRef.current];
+    setIsLoading(true);
+    setLoadError("");
+    setSyncWarning("");
+    setStatusText("Loading outgoing transactions from QuickBooks...");
+
+    try {
+      const payload = await getQuickBooksOutgoingPayments({
+        from: QUICKBOOKS_FROM_DATE,
+        to: rangeTo,
+      });
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      setOutgoingTransactions(
+        withStableRowKeys(items, previousItems, rowKeySequenceRef, {
+          prefix: "qb-out",
+          signature: quickBooksRowSignature,
+        }),
+      );
+      setRangeText(payload.range?.from && payload.range?.to ? `Range: ${payload.range.from} -> ${payload.range.to}` : "");
+      setLastLoadPrefix(buildOutgoingLoadPrefixFromPayload(payload));
+      setSyncWarning("");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load outgoing transactions.";
+      if (!previousItems.length) {
+        setLoadError(message);
+        setStatusText(message);
+        setSyncWarning("");
+        setOutgoingTransactions([]);
+        setRangeText("");
+      } else {
+        setLoadError("");
+        setSyncWarning(message);
+        setStatusText(`Previous outgoing data is shown. Latest QuickBooks read failed: ${message}`);
+        setOutgoingTransactions(previousItems);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    transactionsRef.current = allTransactions;
-  }, [allTransactions]);
+    incomingTransactionsRef.current = incomingTransactions;
+  }, [incomingTransactions]);
+
+  useEffect(() => {
+    outgoingTransactionsRef.current = outgoingTransactions;
+  }, [outgoingTransactions]);
 
   useEffect(() => {
     void getSession()
@@ -181,12 +373,38 @@ export default function QuickBooksPage() {
       .catch(() => {
         setCanSync(false);
       });
-    void loadRecentQuickBooksPayments();
-  }, [loadRecentQuickBooksPayments]);
+  }, []);
 
   useEffect(() => {
-    setStatusText(buildFilterStatusMessage(allTransactions.length, filteredTransactions.length, search, refundOnly, lastLoadPrefix));
-  }, [allTransactions.length, filteredTransactions.length, search, refundOnly, lastLoadPrefix]);
+    if (activeTab === "incoming") {
+      void loadIncomingQuickBooksPayments();
+      return;
+    }
+
+    setRefundOnly(false);
+    void loadOutgoingQuickBooksPayments();
+  }, [activeTab, loadIncomingQuickBooksPayments, loadOutgoingQuickBooksPayments]);
+
+  useEffect(() => {
+    setStatusText(
+      buildFilterStatusMessage(
+        allTransactions.length,
+        filteredTransactions.length,
+        search,
+        showOnlyRefunds,
+        lastLoadPrefix,
+        activeTab,
+      ),
+    );
+  }, [activeTab, allTransactions.length, filteredTransactions.length, lastLoadPrefix, search, showOnlyRefunds]);
+
+  const retryLoad = useCallback(() => {
+    if (activeTab === "incoming") {
+      void loadIncomingQuickBooksPayments();
+      return;
+    }
+    void loadOutgoingQuickBooksPayments();
+  }, [activeTab, loadIncomingQuickBooksPayments, loadOutgoingQuickBooksPayments]);
 
   useEffect(() => {
     if (!loadError || allTransactions.length > 0) {
@@ -196,45 +414,56 @@ export default function QuickBooksPage() {
     showToast({
       type: "error",
       message: loadError,
-      dedupeKey: `quickbooks-load-error-${loadError}`,
+      dedupeKey: `quickbooks-load-error-${activeTab}-${loadError}`,
       cooldownMs: 3200,
-      action: canSync
-        ? {
-            label: "Retry",
-            onClick: () => {
-              void loadRecentQuickBooksPayments();
-            },
-          }
-        : undefined,
+      action: {
+        label: "Retry",
+        onClick: retryLoad,
+      },
     });
-  }, [allTransactions.length, canSync, loadError, loadRecentQuickBooksPayments]);
+  }, [activeTab, allTransactions.length, loadError, retryLoad]);
 
   return (
     <PageShell className="quickbooks-react-page">
       <PageHeader
         actions={
           <div className="cb-page-header-toolbar">
-            <Button
-              id="refresh-button"
-              type="button"
-              size="sm"
-              onClick={() => void loadRecentQuickBooksPayments({ sync: true })}
-              isLoading={isLoading}
-              disabled={isLoading || !canSync}
-            >
-              Refresh
-            </Button>
-            <Button
-              id="total-refresh-button"
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() => void loadRecentQuickBooksPayments({ sync: true, fullSync: true })}
-              isLoading={isLoading}
-              disabled={isLoading || !canSync}
-            >
-              Total Refresh
-            </Button>
+            {activeTab === "incoming" ? (
+              <>
+                <Button
+                  id="refresh-button"
+                  type="button"
+                  size="sm"
+                  onClick={() => void loadIncomingQuickBooksPayments({ sync: true })}
+                  isLoading={isLoading}
+                  disabled={isLoading || !canSync}
+                >
+                  Refresh
+                </Button>
+                <Button
+                  id="total-refresh-button"
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void loadIncomingQuickBooksPayments({ sync: true, fullSync: true })}
+                  isLoading={isLoading}
+                  disabled={isLoading || !canSync}
+                >
+                  Total Refresh
+                </Button>
+              </>
+            ) : (
+              <Button
+                id="outgoing-reload-button"
+                type="button"
+                size="sm"
+                onClick={() => void loadOutgoingQuickBooksPayments()}
+                isLoading={isLoading}
+                disabled={isLoading}
+              >
+                Reload
+              </Button>
+            )}
           </div>
         }
         meta={rangeText ? <p className="quickbooks-range">{rangeText}</p> : null}
@@ -242,32 +471,50 @@ export default function QuickBooksPage() {
 
       <Panel
         className="table-panel quickbooks-table-panel"
-        title="Transactions"
+        title={activeTab === "incoming" ? "Incoming Transactions" : "Outgoing Transactions"}
         actions={
           <div className="quickbooks-toolbar-react">
+            <div className="quickbooks-tabs-wrap">
+              <p className="search-label quickbooks-search-field__label">Денежный поток</p>
+              <div id="quickbooks-money-flow-tab" className="quickbooks-money-flow-segmented">
+                <SegmentedControl
+                  value={activeTab}
+                  options={QUICKBOOKS_MONEY_FLOW_TABS.map((tab) => ({
+                    key: tab.key,
+                    label: tab.label,
+                  }))}
+                  onChange={(rawNextTab) => {
+                    const nextTab: QuickBooksTab = rawNextTab === "outgoing" ? "outgoing" : "incoming";
+                    setActiveTab(nextTab);
+                  }}
+                />
+              </div>
+            </div>
             <div className="quickbooks-search-field">
               <label htmlFor="quickbooks-client-search" className="search-label quickbooks-search-field__label">
-                Search by client
+                {activeTab === "incoming" ? "Search by client" : "Search by payee"}
               </label>
               <Input
                 id="quickbooks-client-search"
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Type client name"
+                placeholder={activeTab === "incoming" ? "Type client name" : "Type payee name"}
                 autoComplete="off"
                 spellCheck={false}
               />
             </div>
-            <label htmlFor="quickbooks-refund-only" className="cb-checkbox-row quickbooks-refund-filter">
-              <input
-                id="quickbooks-refund-only"
-                type="checkbox"
-                checked={refundOnly}
-                onChange={(event) => setRefundOnly(event.target.checked)}
-              />
-              Only refunds
-            </label>
+            {activeTab === "incoming" ? (
+              <label htmlFor="quickbooks-refund-only" className="cb-checkbox-row quickbooks-refund-filter">
+                <input
+                  id="quickbooks-refund-only"
+                  type="checkbox"
+                  checked={refundOnly}
+                  onChange={(event) => setRefundOnly(event.target.checked)}
+                />
+                Only refunds
+              </label>
+            ) : null}
           </div>
         }
       >
@@ -278,22 +525,26 @@ export default function QuickBooksPage() {
         {isLoading ? <LoadingSkeleton rows={7} /> : null}
         {!isLoading && loadError && !filteredTransactions.length ? (
           <ErrorState
-            title="Failed to load transactions"
+            title={activeTab === "incoming" ? "Failed to load incoming transactions" : "Failed to load outgoing transactions"}
             description={loadError}
-            actionLabel={canSync ? "Retry" : undefined}
-            onAction={canSync ? () => void loadRecentQuickBooksPayments() : undefined}
+            actionLabel="Retry"
+            onAction={retryLoad}
           />
         ) : null}
         {!isLoading && !loadError && !filteredTransactions.length ? (
           <EmptyState
             title={
-              search.trim()
-                ? refundOnly
-                  ? `No refunds found for "${search.trim()}".`
-                  : `No transactions found for "${search.trim()}".`
-                : refundOnly
-                  ? "No refunds found for the selected period."
-                  : "No transactions found for the selected period."
+              activeTab === "incoming"
+                ? search.trim()
+                  ? refundOnly
+                    ? `No refunds found for "${search.trim()}".`
+                    : `No transactions found for "${search.trim()}".`
+                  : refundOnly
+                    ? "No refunds found for the selected period."
+                    : "No transactions found for the selected period."
+                : search.trim()
+                  ? `No outgoing transactions found for "${search.trim()}".`
+                  : "No outgoing transactions found for the selected period."
             }
           />
         ) : null}
@@ -308,6 +559,41 @@ export default function QuickBooksPage() {
           />
         ) : null}
       </Panel>
+
+      <Modal
+        open={Boolean(insightModalRow)}
+        title="Transaction Insight"
+        onClose={closeInsightModal}
+        footer={
+          <div className="quickbooks-insight-actions">
+            <Button type="button" variant="secondary" size="sm" onClick={closeInsightModal} disabled={isInsightLoading}>
+              Close
+            </Button>
+            <Button type="button" size="sm" onClick={() => void askQuickBooksInsight()} isLoading={isInsightLoading}>
+              Ask GPT
+            </Button>
+          </div>
+        }
+      >
+        <div className="quickbooks-insight-summary">
+          <p>
+            <strong>Company:</strong> {insightModalRow ? formatQuickBooksPayeeLabel(insightModalRow.clientName) : "-"}
+          </p>
+          <p>
+            <strong>Amount:</strong>{" "}
+            {insightModalRow ? CURRENCY_FORMATTER.format(Number(insightModalRow.paymentAmount) || 0) : "-"}
+          </p>
+          <p>
+            <strong>Date:</strong> {insightModalRow ? formatDate(insightModalRow.paymentDate) : "-"}
+          </p>
+        </div>
+
+        {!insightText && !insightError ? (
+          <p className="quickbooks-insight-empty">Click "Ask GPT" to generate a transaction explanation.</p>
+        ) : null}
+        {insightError ? <p className="quickbooks-insight-error">{insightError}</p> : null}
+        {insightText ? <pre className="quickbooks-insight-result">{insightText}</pre> : null}
+      </Modal>
     </PageShell>
   );
 }
@@ -346,9 +632,23 @@ function buildFilterStatusMessage(
   query: string,
   showOnlyRefunds: boolean,
   prefix = "",
+  tab: QuickBooksTab = "incoming",
 ): string {
   const normalizedQuery = query.trim();
   const normalizedPrefix = prefix.trim();
+
+  if (tab === "outgoing") {
+    let outgoingMessage = "";
+    if (!normalizedQuery) {
+      outgoingMessage = `Loaded ${totalCount} outgoing transaction${totalCount === 1 ? "" : "s"}.`;
+    } else if (visibleCount === 0) {
+      outgoingMessage = `No outgoing transactions found for "${normalizedQuery}".`;
+    } else {
+      outgoingMessage = `Showing ${visibleCount} of ${totalCount} outgoing transactions for "${normalizedQuery}".`;
+    }
+    return normalizedPrefix ? `${normalizedPrefix} ${outgoingMessage}` : outgoingMessage;
+  }
+
   let mainMessage = "";
 
   if (!normalizedQuery) {
@@ -471,6 +771,14 @@ function buildLoadPrefixFromPayload(
   return "Refresh: no new.";
 }
 
+function buildOutgoingLoadPrefixFromPayload(payload: { source?: string }): string {
+  const source = String(payload?.source || "").trim().toLowerCase();
+  if (source === "quickbooks_live") {
+    return "QuickBooks live data:";
+  }
+  return "Outgoing data:";
+}
+
 function formatQuickBooksClientLabel(clientName: string, transactionType: string, amount: number): string {
   const normalizedName = String(clientName || "Unknown client").trim() || "Unknown client";
   const normalizedType = String(transactionType || "").trim().toLowerCase();
@@ -481,6 +789,34 @@ function formatQuickBooksClientLabel(clientName: string, transactionType: string
     return `${normalizedName} (Write-off)`;
   }
   return normalizedName;
+}
+
+function formatQuickBooksPayeeLabel(payeeName: string): string {
+  const normalizedName = String(payeeName || "").trim();
+  return normalizedName || "Unknown payee";
+}
+
+function formatQuickBooksOutgoingTypeLabel(transactionType: string): string {
+  const normalizedType = String(transactionType || "").trim().toLowerCase();
+  if (normalizedType === "billpayment") {
+    return "Bill Payment";
+  }
+  if (normalizedType === "purchase") {
+    return "Purchase";
+  }
+  if (normalizedType === "check") {
+    return "Check";
+  }
+  return normalizedType ? normalizedType.charAt(0).toUpperCase() + normalizedType.slice(1) : "-";
+}
+
+function buildQuickBooksInsightDescription(item: QuickBooksPaymentRow): string {
+  const rawDescription = String(item.transactionDescription || "").trim();
+  if (rawDescription) {
+    return rawDescription;
+  }
+  const rawType = String(item.transactionType || "").trim();
+  return rawType || "-";
 }
 
 function formatContactCellValue(value: string): string {

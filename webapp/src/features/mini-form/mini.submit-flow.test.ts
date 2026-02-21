@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MINI_JS_PATH = path.resolve(TEST_DIR, "../../../../mini.js");
@@ -32,6 +32,7 @@ const MINI_HTML = `
   </form>
   <div id="attachments-preview"></div>
   <div id="mini-message"></div>
+  <button id="mini-access-retry-button" type="button" hidden>Retry access</button>
 `;
 
 type FetchResponseConfig = {
@@ -108,6 +109,8 @@ afterEach(() => {
 
   delete windowWithTelegram.Telegram;
   window.alert = ORIGINAL_WINDOW_ALERT;
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   document.body.innerHTML = "";
 });
 
@@ -275,7 +278,7 @@ function loadMiniApp(options: LoadMiniAppOptions = {}): MiniAppHarness {
   sandbox.globalThis = sandbox;
 
   vm.runInNewContext(miniSource, sandbox, {
-    filename: "mini.submit-flow.test.vm.js",
+    filename: MINI_JS_PATH,
   });
 
   return {
@@ -287,6 +290,12 @@ async function flushAsync(iterations = 4) {
   for (let index = 0; index < iterations; index += 1) {
     await Promise.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+async function flushMicrotasks(iterations = 6) {
+  for (let index = 0; index < iterations; index += 1) {
+    await Promise.resolve();
   }
 }
 
@@ -318,6 +327,15 @@ function getSubmitButton() {
   return submitButton;
 }
 
+function getAccessRetryButton() {
+  const retryButton = document.querySelector("#mini-access-retry-button");
+  if (!(retryButton instanceof HTMLButtonElement)) {
+    throw new Error("#mini-access-retry-button was not found");
+  }
+
+  return retryButton;
+}
+
 function getSubmitButtonLabel() {
   const label = document.querySelector("#mini-submit-button .button-label");
   if (!(label instanceof HTMLElement)) {
@@ -336,10 +354,24 @@ function getRequiredClientNameInput() {
   return input;
 }
 
-function fillRequiredClientName(value = "John Doe") {
-  const input = getRequiredClientNameInput();
+function setMiniInputValue(inputId: string, value: string) {
+  const input = document.querySelector(`#${inputId}`);
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error(`#${inputId} was not found`);
+  }
+
   input.value = value;
   input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function fillRequiredClientName(value = "John Doe") {
+  setMiniInputValue("clientName", value);
+  setMiniInputValue("closedBy", "Closer");
+  setMiniInputValue("companyName", "Company");
+  setMiniInputValue("serviceType", "Service");
+  setMiniInputValue("contractTotals", "200");
+  setMiniInputValue("payment1", "100");
+  setMiniInputValue("payment1Date", "02/18/2026");
 }
 
 describe("mini.js submit flow", () => {
@@ -366,8 +398,7 @@ describe("mini.js submit flow", () => {
     expect(telegram.expandCalls).toBe(1);
     expect(getMessageText()).toBe("Telegram auth data is missing. Reopen Mini App from bot menu.");
 
-    const clientName = document.querySelector("#clientName") as HTMLInputElement;
-    clientName.value = "John";
+    fillRequiredClientName("John");
     await submitForm();
 
     expect(getMessageText()).toBe("Open this page from Telegram Mini App.");
@@ -387,13 +418,69 @@ describe("mini.js submit flow", () => {
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]?.url).toBe("/api/mini/access");
 
-    const clientName = document.querySelector("#clientName") as HTMLInputElement;
-    clientName.value = "John";
+    fillRequiredClientName("John");
     await submitForm();
 
     expect(getMessageText()).toBe("Access denied. Only members of the allowed Telegram group can submit clients.");
     expect(fetchCalls).toHaveLength(1);
     expect(telegram.hapticCalls).toEqual([]);
+  });
+
+  it("shows Retry access button for recoverable access errors and retries on click", async () => {
+    const telegram = createTelegramWebApp("auth_payload");
+    const { fetchCalls } = loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchResponses: [
+        { ok: false, status: 503, body: { error: "Temporary upstream outage." } },
+        { ok: true, status: 200, body: { ok: true, uploadToken: "token-retry-click" } },
+      ],
+    });
+
+    fillRequiredClientName("John");
+    await flushAsync();
+
+    const retryButton = getAccessRetryButton();
+    expect(getMessageText()).toBe("Temporary access issue. We will retry automatically. Tap Retry access to try now.");
+    expect(retryButton.hidden).toBe(false);
+    expect(retryButton.disabled).toBe(false);
+    expect(fetchCalls).toHaveLength(1);
+
+    retryButton.click();
+    await flushAsync();
+
+    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls[1]?.url).toBe("/api/mini/access");
+    expect(getSubmitButton().disabled).toBe(false);
+    expect(retryButton.hidden).toBe(true);
+  });
+
+  it("automatically retries recoverable access failure with delay", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const telegram = createTelegramWebApp("auth_payload");
+    const { fetchCalls } = loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchResponses: [
+        { ok: false, status: 503, body: { error: "Temporary outage." } },
+        { ok: true, status: 200, body: { ok: true, uploadToken: "token-auto-retry" } },
+      ],
+    });
+
+    fillRequiredClientName("John");
+    await flushMicrotasks();
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(getAccessRetryButton().hidden).toBe(false);
+    expect(getSubmitButton().disabled).toBe(true);
+
+    vi.advanceTimersByTime(2000);
+    await flushMicrotasks();
+
+    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls[1]?.url).toBe("/api/mini/access");
+    expect(getAccessRetryButton().hidden).toBe(true);
+    expect(getSubmitButton().disabled).toBe(false);
   });
 
   it("shows API error and triggers error haptic on submit failure", async () => {
@@ -408,8 +495,7 @@ describe("mini.js submit flow", () => {
 
     await flushAsync();
 
-    const clientName = document.querySelector("#clientName") as HTMLInputElement;
-    clientName.value = "  John Doe  ";
+    fillRequiredClientName("  John Doe  ");
 
     await submitForm();
 
@@ -450,11 +536,9 @@ describe("mini.js submit flow", () => {
 
     await flushAsync();
 
-    const clientName = document.querySelector("#clientName") as HTMLInputElement;
     const paymentDate = document.querySelector("#payment1Date") as HTMLInputElement;
 
-    clientName.value = "  Jane Smith  ";
-    paymentDate.value = "";
+    fillRequiredClientName("  Jane Smith  ");
 
     await submitForm();
 
@@ -462,8 +546,8 @@ describe("mini.js submit flow", () => {
     expect(telegram.hapticCalls).toContain("success");
     expect(telegram.popupCalls.length).toBeGreaterThanOrEqual(1);
 
-    expect(clientName.value).toBe("");
-    expect(paymentDate.value).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
+    expect(getRequiredClientNameInput().value).toBe("");
+    expect(paymentDate.value).toBe("");
 
     const payload = fetchCalls[1]?.init?.body;
     if (!(payload instanceof FormData)) {
@@ -483,7 +567,7 @@ describe("mini.js submit flow", () => {
     };
 
     expect(parsedClient.clientName).toBe("Jane Smith");
-    expect(parsedClient.payment1Date).toBe("");
+    expect(parsedClient.payment1Date).toBe("02/18/2026");
   });
 
   it("keeps submit button disabled while mini access check is in progress", async () => {

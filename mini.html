@@ -455,6 +455,34 @@
         color: var(--ok);
       }
 
+      .access-retry-button {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #12203a;
+        color: #bfdbfe;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1;
+        padding: 9px 12px;
+        margin: 8px 2px 0;
+        cursor: pointer;
+        transition: background-color 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+      }
+
+      .access-retry-button:hover {
+        border-color: var(--brand);
+        background: #16294a;
+      }
+
+      .access-retry-button:disabled {
+        opacity: 0.58;
+        cursor: not-allowed;
+      }
+
+      .access-retry-button[hidden] {
+        display: none;
+      }
+
       @media (max-width: 420px) {
         .payment-grid {
           grid-template-columns: 1fr;
@@ -462,7 +490,7 @@
       }
     </style>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/mini.js?v=20260221-required-contract-v1" defer></script>
+    <script src="/mini.js?v=20260221-access-retry-v1" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -623,6 +651,9 @@
       </form>
 
       <p id="mini-message" class="message" role="status" aria-live="polite"></p>
+      <button id="mini-access-retry-button" class="access-retry-button" type="button" hidden>
+        Retry access
+      </button>
     </main>
   </body>
 </html>

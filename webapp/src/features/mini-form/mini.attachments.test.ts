@@ -80,7 +80,7 @@ function loadMiniUi(options: { dataTransfer?: unknown } = {}) {
   sandbox.globalThis = sandbox;
 
   vm.runInNewContext(miniSource, sandbox, {
-    filename: "mini.attachments.test.vm.js",
+    filename: MINI_JS_PATH,
   });
 }
 

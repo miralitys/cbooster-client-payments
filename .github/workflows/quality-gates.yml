@@ -61,7 +61,20 @@ jobs:
         run: npm --prefix webapp ci
 
       - name: Mini App | Backend tests
-        run: node --test tests/mini-*.test.js
+        run: npm run test:mini:backend
 
       - name: Mini App | Frontend tests
-        run: npm --prefix webapp run test -- src/features/mini-form
+        run: npm run test:mini:frontend
+
+      - name: Mini App | Frontend anti-flake (3x)
+        run: |
+          for run in 1 2 3; do
+            echo "Mini frontend anti-flake run #${run}"
+            npm run test:mini:frontend
+          done
+
+      - name: Mini App | Backend coverage gate
+        run: npm run test:mini:backend:coverage
+
+      - name: Mini App | Frontend coverage gate
+        run: npm run test:mini:frontend:coverage
