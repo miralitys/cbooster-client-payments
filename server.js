@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const bcrypt = require("bcryptjs");
 const fs = require("fs");
+const { Transform, Writable, pipeline } = require("stream");
 const express = require("express");
 const compression = require("compression");
 const helmet = require("helmet");
@@ -1042,6 +1043,7 @@ const ASSISTANT_PREPARED_DATA_CACHE_TTL_MS = Math.min(
 );
 const ASSISTANT_SESSION_SCOPE_MAX_CLIENTS = 1200;
 const ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY = "default";
+const ASSISTANT_SESSION_SCOPE_CLEAR_TOMBSTONE_COMPARABLE = "__assistant_scope_cleared__";
 const ASSISTANT_LLM_MAX_CONTEXT_RECORDS = 18;
 const ASSISTANT_LLM_MAX_NOTES_LENGTH = 220;
 const ASSISTANT_PAYMENT_FIELDS = ["payment1", "payment2", "payment3", "payment4", "payment5", "payment6", "payment7"];
@@ -1363,6 +1365,7 @@ const webAuthMobileSessionById = new Map();
 const webAuthMobileReplayByKey = new Map();
 let miniUploadParseInFlight = 0;
 const miniUploadParseWaiters = [];
+const MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL = Symbol("miniUploadTrackedTotalBytes");
 let miniTelegramNotificationQueue = Promise.resolve();
 let miniTelegramNotificationQueueDepth = 0;
 let assistantRecordsSnapshotCache = null;
@@ -2954,6 +2957,140 @@ async function withMiniUploadParseSlot(task) {
   }
 }
 
+function resetMiniUploadTrackedTotalBytes(req) {
+  if (!req || typeof req !== "object") {
+    return;
+  }
+  req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL] = 0;
+}
+
+function trackMiniUploadChunkBytes(req, chunk) {
+  if (!req || typeof req !== "object") {
+    return 0;
+  }
+
+  const chunkLength = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk || "");
+  const safeChunkLength = Number.isFinite(chunkLength) && chunkLength > 0 ? chunkLength : 0;
+  const currentTotal =
+    Number.isFinite(req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL]) && req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL] > 0
+      ? req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL]
+      : 0;
+  const nextTotal = currentTotal + safeChunkLength;
+  req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL] = nextTotal;
+  return nextTotal;
+}
+
+function createMiniMultipartTotalSizeExceededError() {
+  return createHttpError(
+    `Total attachment size must not exceed ${Math.floor(MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES / (1024 * 1024))} MB.`,
+    413,
+    "mini_multipart_too_large",
+  );
+}
+
+function createMiniAttachmentBudgetTransform(req) {
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      const totalBytes = trackMiniUploadChunkBytes(req, chunk);
+      if (totalBytes > MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES) {
+        callback(createMiniMultipartTotalSizeExceededError());
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
+
+function createMiniAttachmentsUploadStorageEngine(options = {}) {
+  const useDisk = options.useDisk === true;
+
+  return {
+    _handleFile(req, file, callback) {
+      let completed = false;
+      const finish = (error, fileInfo) => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        callback(error, fileInfo);
+      };
+
+      let size = 0;
+      const budgetTransform = createMiniAttachmentBudgetTransform(req);
+      budgetTransform.on("data", (chunk) => {
+        const chunkLength = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk || "");
+        if (Number.isFinite(chunkLength) && chunkLength > 0) {
+          size += chunkLength;
+        }
+      });
+
+      if (useDisk) {
+        const fileName = `upload-${generateId()}`;
+        const filePath = path.join(ATTACHMENTS_UPLOAD_TMP_DIR, fileName);
+        const writeStream = fs.createWriteStream(filePath, {
+          flags: "wx",
+          mode: 0o600,
+        });
+
+        pipeline(file.stream, budgetTransform, writeStream, (error) => {
+          if (error) {
+            void removeFileIfExists(filePath);
+            finish(error);
+            return;
+          }
+
+          finish(null, {
+            destination: ATTACHMENTS_UPLOAD_TMP_DIR,
+            filename: fileName,
+            path: filePath,
+            size,
+          });
+        });
+        return;
+      }
+
+      const chunks = [];
+      const sink = new Writable({
+        write(chunk, _encoding, done) {
+          chunks.push(Buffer.from(chunk));
+          done();
+        },
+      });
+
+      pipeline(file.stream, budgetTransform, sink, (error) => {
+        if (error) {
+          finish(error);
+          return;
+        }
+
+        finish(null, {
+          buffer: Buffer.concat(chunks),
+          size,
+        });
+      });
+    },
+
+    _removeFile(_req, file, callback) {
+      const tempPath = sanitizeUploadedTempPath(file?.path);
+      if (tempPath) {
+        fs.unlink(tempPath, (error) => {
+          if (error && error.code !== "ENOENT") {
+            callback(error);
+            return;
+          }
+          callback(null);
+        });
+        return;
+      }
+
+      if (file && Object.prototype.hasOwnProperty.call(file, "buffer")) {
+        delete file.buffer;
+      }
+      callback(null);
+    },
+  };
+}
+
 function createMiniAttachmentsUploadMiddleware(options = {}) {
   const useDisk = options.useDisk === true;
   const multerOptions = {
@@ -2961,26 +3098,17 @@ function createMiniAttachmentsUploadMiddleware(options = {}) {
       files: MINI_MAX_ATTACHMENTS_COUNT,
       fileSize: MINI_MAX_ATTACHMENT_SIZE_BYTES,
     },
+    storage: createMiniAttachmentsUploadStorageEngine({
+      useDisk,
+    }),
   };
-
-  if (useDisk) {
-    multerOptions.storage = multer.diskStorage({
-      destination: (_req, _file, callback) => {
-        callback(null, ATTACHMENTS_UPLOAD_TMP_DIR);
-      },
-      filename: (_req, _file, callback) => {
-        callback(null, `upload-${generateId()}`);
-      },
-    });
-  } else {
-    multerOptions.storage = multer.memoryStorage();
-  }
 
   return multer(multerOptions).array("attachments", MINI_MAX_ATTACHMENTS_COUNT);
 }
 
 function parseMiniMultipartRequest(req, res) {
   return new Promise((resolve, reject) => {
+    resetMiniUploadTrackedTotalBytes(req);
     const uploadMiddleware =
       ATTACHMENTS_STREAMING_ENABLED && miniAttachmentsUploadDiskMiddleware
         ? miniAttachmentsUploadDiskMiddleware
@@ -5095,6 +5223,20 @@ function normalizeAssistantSessionId(rawValue) {
   return normalized.toLowerCase();
 }
 
+function normalizeAssistantClientMessageSeq(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 40);
+  if (!normalized) {
+    return 0;
+  }
+
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+
+  return Math.min(parsed, Number.MAX_SAFE_INTEGER);
+}
+
 function normalizeAssistantDateRange(rawRange) {
   if (!rawRange || typeof rawRange !== "object") {
     return null;
@@ -5174,6 +5316,14 @@ function buildAssistantScopeFromRows(rows, range = null, scopeEstablished = true
     clientComparables.push(row.clientComparable);
   }
   return buildAssistantScopeFromComparableList(clientComparables, range, scopeEstablished);
+}
+
+function buildAssistantScopeClearTombstonePayload() {
+  return buildAssistantScopeStoragePayload({
+    clientComparables: [ASSISTANT_SESSION_SCOPE_CLEAR_TOMBSTONE_COMPARABLE],
+    scopeEstablished: false,
+    range: null,
+  });
 }
 
 function normalizeAssistantScopeTenantKey(rawValue) {
@@ -5439,6 +5589,11 @@ async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId)
       return null;
     }
 
+    if (normalizedScope.scopeEstablished !== true) {
+      recordAssistantSessionScopeMetricMiss(performanceObservability);
+      return null;
+    }
+
     recordAssistantSessionScopeMetricHit(performanceObservability);
     return normalizedScope;
   } catch (error) {
@@ -5448,14 +5603,19 @@ async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId)
   }
 }
 
-async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, rawScope) {
+async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, rawScope, options = {}) {
   const scopeStoragePayload = buildAssistantScopeStoragePayload(rawScope);
   if (!scopeStoragePayload || !pool) {
-    return;
+    return {
+      applied: false,
+      stale: false,
+      clientMessageSeq: normalizeAssistantClientMessageSeq(options?.clientMessageSeq),
+    };
   }
 
   const { scope, scopeJson, scopeBytes, truncated } = scopeStoragePayload;
   const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
+  const clientMessageSeq = normalizeAssistantClientMessageSeq(options?.clientMessageSeq);
   const expiresAt = new Date(Date.now() + ASSISTANT_SESSION_SCOPE_TTL_MS).toISOString();
   let client = null;
 
@@ -5464,30 +5624,81 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
     client = await pool.connect();
     await client.query("BEGIN");
 
-    await client.query(
-      `
-        INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
-          cache_key,
-          tenant_key,
-          user_key,
-          session_key,
-          scope,
-          scope_bytes,
-          updated_at,
-          expires_at
-        )
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW(), $7::timestamptz)
-        ON CONFLICT (cache_key) DO UPDATE
-        SET tenant_key = EXCLUDED.tenant_key,
-            user_key = EXCLUDED.user_key,
-            session_key = EXCLUDED.session_key,
-            scope = EXCLUDED.scope,
-            scope_bytes = EXCLUDED.scope_bytes,
-            updated_at = NOW(),
-            expires_at = EXCLUDED.expires_at
-      `,
-      [identity.cacheKey, identity.tenantKey, identity.userKey, identity.sessionKey, scopeJson, scopeBytes, expiresAt],
-    );
+    const upsertResult =
+      clientMessageSeq > 0
+        ? await client.query(
+            `
+              INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
+                cache_key,
+                tenant_key,
+                user_key,
+                session_key,
+                scope,
+                last_seq,
+                scope_bytes,
+                updated_at,
+                expires_at
+              )
+              VALUES ($1, $2, $3, $4, $5::jsonb, $6::bigint, $7, NOW(), $8::timestamptz)
+              ON CONFLICT (cache_key) DO UPDATE
+              SET tenant_key = EXCLUDED.tenant_key,
+                  user_key = EXCLUDED.user_key,
+                  session_key = EXCLUDED.session_key,
+                  scope = EXCLUDED.scope,
+                  last_seq = EXCLUDED.last_seq,
+                  scope_bytes = EXCLUDED.scope_bytes,
+                  updated_at = NOW(),
+                  expires_at = EXCLUDED.expires_at
+              WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq < EXCLUDED.last_seq
+            `,
+            [
+              identity.cacheKey,
+              identity.tenantKey,
+              identity.userKey,
+              identity.sessionKey,
+              scopeJson,
+              clientMessageSeq,
+              scopeBytes,
+              expiresAt,
+            ],
+          )
+        : await client.query(
+            `
+              INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
+                cache_key,
+                tenant_key,
+                user_key,
+                session_key,
+                scope,
+                last_seq,
+                scope_bytes,
+                updated_at,
+                expires_at
+              )
+              VALUES ($1, $2, $3, $4, $5::jsonb, 0, $6, NOW(), $7::timestamptz)
+              ON CONFLICT (cache_key) DO UPDATE
+              SET tenant_key = EXCLUDED.tenant_key,
+                  user_key = EXCLUDED.user_key,
+                  session_key = EXCLUDED.session_key,
+                  scope = EXCLUDED.scope,
+                  last_seq = EXCLUDED.last_seq,
+                  scope_bytes = EXCLUDED.scope_bytes,
+                  updated_at = NOW(),
+                  expires_at = EXCLUDED.expires_at
+              WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq <= 0
+            `,
+            [identity.cacheKey, identity.tenantKey, identity.userKey, identity.sessionKey, scopeJson, scopeBytes, expiresAt],
+          );
+
+    const applied = parseAssistantSessionScopeStoreCount(upsertResult?.rowCount) > 0;
+    if (!applied) {
+      await client.query("COMMIT");
+      return {
+        applied: false,
+        stale: clientMessageSeq > 0,
+        clientMessageSeq,
+      };
+    }
 
     const perUserMaintenance = await pruneAssistantSessionScopeStoreForUser(identity, client);
     const maintenance = await pruneAssistantSessionScopeStore(client);
@@ -5504,6 +5715,11 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
         `[assistant][scope-store] scope payload truncated to ${scope.clientComparables.length} clients for user=${identity.userKey} session=${identity.sessionKey}`,
       );
     }
+    return {
+      applied: true,
+      stale: false,
+      clientMessageSeq,
+    };
   } catch (error) {
     if (client) {
       try {
@@ -5514,6 +5730,11 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
     }
     recordAssistantSessionScopeMetricError(performanceObservability, error);
     console.warn(`[assistant][scope-store] upsert failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
+    return {
+      applied: false,
+      stale: false,
+      clientMessageSeq,
+    };
   } finally {
     if (client) {
       client.release();
@@ -5521,32 +5742,101 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
   }
 }
 
-async function clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId) {
+async function clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, options = {}) {
+  const clientMessageSeq = normalizeAssistantClientMessageSeq(options?.clientMessageSeq);
   if (!pool) {
     recordAssistantSessionScopeMetricSize(performanceObservability, 0);
     recordAssistantSessionScopeMetricBytes(performanceObservability, 0);
-    return;
+    return {
+      applied: false,
+      stale: false,
+      clientMessageSeq,
+    };
   }
 
   const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
   try {
     await ensureDatabaseReady();
-    await pool.query(
-      `
-        DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
-        WHERE cache_key = $1
-      `,
-      [identity.cacheKey],
-    );
+    let applied = false;
+
+    if (clientMessageSeq > 0) {
+      const tombstonePayload = buildAssistantScopeClearTombstonePayload();
+      if (!tombstonePayload) {
+        return {
+          applied: false,
+          stale: false,
+          clientMessageSeq,
+        };
+      }
+
+      const expiresAt = new Date(Date.now() + ASSISTANT_SESSION_SCOPE_TTL_MS).toISOString();
+      const clearResult = await pool.query(
+        `
+          INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
+            cache_key,
+            tenant_key,
+            user_key,
+            session_key,
+            scope,
+            last_seq,
+            scope_bytes,
+            updated_at,
+            expires_at
+          )
+          VALUES ($1, $2, $3, $4, $5::jsonb, $6::bigint, $7, NOW(), $8::timestamptz)
+          ON CONFLICT (cache_key) DO UPDATE
+          SET tenant_key = EXCLUDED.tenant_key,
+              user_key = EXCLUDED.user_key,
+              session_key = EXCLUDED.session_key,
+              scope = EXCLUDED.scope,
+              last_seq = EXCLUDED.last_seq,
+              scope_bytes = EXCLUDED.scope_bytes,
+              updated_at = NOW(),
+              expires_at = EXCLUDED.expires_at
+          WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq < EXCLUDED.last_seq
+        `,
+        [
+          identity.cacheKey,
+          identity.tenantKey,
+          identity.userKey,
+          identity.sessionKey,
+          tombstonePayload.scopeJson,
+          clientMessageSeq,
+          tombstonePayload.scopeBytes,
+          expiresAt,
+        ],
+      );
+      applied = parseAssistantSessionScopeStoreCount(clearResult?.rowCount) > 0;
+    } else {
+      const clearResult = await pool.query(
+        `
+          DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+          WHERE cache_key = $1
+        `,
+        [identity.cacheKey],
+      );
+      applied = parseAssistantSessionScopeStoreCount(clearResult?.rowCount) > 0;
+    }
+
     const maintenance = await pruneAssistantSessionScopeStore(pool);
     recordAssistantSessionScopeMetricSize(performanceObservability, maintenance.size);
     recordAssistantSessionScopeMetricBytes(performanceObservability, maintenance.totalBytes);
     if (maintenance.evictions > 0) {
       recordAssistantSessionScopeMetricEvictions(performanceObservability, maintenance.evictions);
     }
+    return {
+      applied,
+      stale: clientMessageSeq > 0 && !applied,
+      clientMessageSeq,
+    };
   } catch (error) {
     recordAssistantSessionScopeMetricError(performanceObservability, error);
     console.warn(`[assistant][scope-store] clear failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
+    return {
+      applied: false,
+      stale: false,
+      clientMessageSeq,
+    };
   }
 }
 
@@ -9508,6 +9798,124 @@ async function requestOpenAiAssistantReply(message, mode, records, updatedAt) {
   }
 
   return normalizeAssistantReplyForDisplay(reply);
+}
+
+function normalizeQuickBooksInsightAmount(rawValue) {
+  const numericValue = Number.parseFloat(rawValue);
+  if (Number.isFinite(numericValue)) {
+    return numericValue.toFixed(2);
+  }
+
+  return sanitizeTextValue(rawValue, 60) || "-";
+}
+
+function buildQuickBooksTransactionInsightPrompt(details) {
+  const companyName = sanitizeTextValue(details?.companyName, 300) || "Unknown company";
+  const amount = normalizeQuickBooksInsightAmount(details?.amount);
+  const date = sanitizeTextValue(details?.date, 80) || "-";
+  const description = sanitizeTextValue(details?.description, 1200) || "-";
+
+  return [
+    "You are a financial research assistant helping a US-based business categorize transactions correctly for bookkeeping (QuickBooks).",
+    "",
+    "Your task:",
+    "",
+    "1. Identify what the company does based on its name.",
+    "2. Determine the most likely type of product or service.",
+    "3. Suggest the most appropriate accounting category (US GAAP style).",
+    "4. If the amount is small (under $100), assume it is most likely a subscription or service unless strong evidence suggests otherwise.",
+    "5. Provide 2–3 possible categories ranked by likelihood.",
+    "6. Keep the response structured and concise.",
+    "",
+    "Transaction details:",
+    `Company name: ${companyName}`,
+    `Amount: ${amount}`,
+    `Date: ${date}`,
+    `Transaction description (if available): ${description}`,
+    "",
+    "Return response in this format:",
+    "",
+    "Company Activity:",
+    "Short explanation of what the company does.",
+    "",
+    "Most Likely Expense Type:",
+    "(Explain reasoning briefly)",
+    "",
+    "Suggested QuickBooks Category (ranked):",
+    "1.",
+    "2.",
+    "3.",
+    "",
+    "Confidence Level:",
+    "Low / Medium / High",
+  ].join("\n");
+}
+
+async function requestOpenAiQuickBooksInsight(details) {
+  if (!isOpenAiAssistantConfigured()) {
+    throw createHttpError("OpenAI is not configured. Set OPENAI_API_KEY to use Ask GPT.", 503, "openai_not_configured");
+  }
+
+  const input = buildQuickBooksTransactionInsightPrompt(details);
+  const requestBody = {
+    model: OPENAI_MODEL,
+    input,
+    max_output_tokens: Math.min(OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS, 900),
+  };
+
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    abortController.abort("timeout");
+  }, OPENAI_ASSISTANT_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(`${OPENAI_API_BASE_URL}/v1/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+      signal: abortController.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (abortController.signal.aborted) {
+      throw createHttpError(`OpenAI request timed out after ${OPENAI_ASSISTANT_TIMEOUT_MS}ms.`, 504, "openai_timeout");
+    }
+    throw createHttpError(
+      `OpenAI request failed: ${sanitizeTextValue(error?.message, 320) || "network error"}.`,
+      503,
+      "openai_network_error",
+    );
+  }
+
+  clearTimeout(timeoutId);
+
+  const rawResponseText = await response.text();
+  if (!response.ok) {
+    const safeErrorText = sanitizeTextValue(rawResponseText, 600) || "No details.";
+    throw createHttpError(
+      `OpenAI request failed with status ${response.status}. ${safeErrorText}`,
+      502,
+      "openai_http_error",
+    );
+  }
+
+  let payload = null;
+  try {
+    payload = JSON.parse(rawResponseText);
+  } catch {
+    throw createHttpError("OpenAI returned a non-JSON response.", 502, "openai_invalid_response");
+  }
+
+  const insight = sanitizeTextValue(extractOpenAiAssistantText(payload), 8000);
+  if (!insight) {
+    throw createHttpError("OpenAI returned an empty response.", 502, "openai_empty_response");
+  }
+
+  return insight;
 }
 
 async function requestElevenLabsSpeech(rawText) {
@@ -18159,6 +18567,7 @@ async function ensureDatabaseReady() {
           user_key TEXT NOT NULL DEFAULT 'unknown',
           session_key TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_SESSION_ID}',
           scope JSONB NOT NULL,
+          last_seq BIGINT NOT NULL DEFAULT 0,
           scope_bytes INTEGER NOT NULL DEFAULT 0,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           expires_at TIMESTAMPTZ NOT NULL
@@ -18168,6 +18577,11 @@ async function ensureDatabaseReady() {
       await pool.query(`
         ALTER TABLE ${ASSISTANT_SESSION_SCOPE_TABLE}
         ADD COLUMN IF NOT EXISTS scope_bytes INTEGER NOT NULL DEFAULT 0
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${ASSISTANT_SESSION_SCOPE_TABLE}
+        ADD COLUMN IF NOT EXISTS last_seq BIGINT NOT NULL DEFAULT 0
       `);
 
       await pool.query(`
@@ -23005,14 +23419,17 @@ app.all("/api/quickbooks/*", (req, res, next) => {
   const isAllowedSyncPost =
     req.method === "POST" &&
     (pathname === "/api/quickbooks/payments/recent/sync" || pathname === "/payments/recent/sync");
-  if (req.method === "GET" || isAllowedSyncPost) {
+  const isAllowedInsightPost =
+    req.method === "POST" &&
+    (pathname === "/api/quickbooks/transaction-insight" || pathname === "/transaction-insight");
+  if (req.method === "GET" || isAllowedSyncPost || isAllowedInsightPost) {
     next();
     return;
   }
 
   res.status(405).json({
     error:
-      "QuickBooks integration is read-only toward QuickBooks. Use GET for reads and POST /api/quickbooks/payments/recent/sync for internal sync.",
+      "QuickBooks integration is read-only toward QuickBooks. Use GET for reads and POST /api/quickbooks/payments/recent/sync (sync) or POST /api/quickbooks/transaction-insight (Ask GPT).",
   });
 });
 
@@ -23308,6 +23725,69 @@ app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission
   });
 });
 
+app.post("/api/quickbooks/transaction-insight", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.quickbooks.read",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "QuickBooks request limit reached. Please wait before retrying.",
+      code: "quickbooks_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const companyName = sanitizeTextValue(req.body?.companyName, 300);
+  if (!companyName) {
+    res.status(400).json({
+      error: "companyName is required.",
+      code: "quickbooks_insight_invalid_payload",
+    });
+    return;
+  }
+
+  const amount = Number.parseFloat(req.body?.amount);
+  if (!Number.isFinite(amount)) {
+    res.status(400).json({
+      error: "amount must be a valid number.",
+      code: "quickbooks_insight_invalid_payload",
+    });
+    return;
+  }
+
+  const date = sanitizeTextValue(req.body?.date, 80) || "-";
+  const description = sanitizeTextValue(req.body?.description, 1200) || "-";
+
+  try {
+    const insight = await requestOpenAiQuickBooksInsight({
+      companyName,
+      amount,
+      date,
+      description,
+    });
+
+    res.json({
+      ok: true,
+      insight,
+    });
+  } catch (error) {
+    console.error("POST /api/quickbooks/transaction-insight failed:", error);
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to generate transaction insight.",
+      code: sanitizeTextValue(error?.code, 80) || "quickbooks_insight_failed",
+    });
+  }
+});
+
 app.get("/api/health", async (_req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -23439,6 +23919,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 
   const mode = normalizeAssistantChatMode(req.body?.mode);
   const sessionId = normalizeAssistantSessionId(req.body?.sessionId) || ASSISTANT_DEFAULT_SESSION_ID;
+  const clientMessageSeq = normalizeAssistantClientMessageSeq(req.body?.clientMessageSeq);
   const tenantKey = resolveAssistantSessionScopeTenantKeyFromRequest(req);
   const shouldResetContext = /(reset context|clear context|forget context|сбрось контекст|очисти контекст|забудь контекст)/i.test(
     normalizeAssistantSearchText(message),
@@ -23482,10 +23963,25 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     let scopeSource = "none";
 
     if (shouldResetContext) {
-      await clearAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
+      const clearResult = await clearAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, {
+        clientMessageSeq,
+      });
+      if (clearResult.stale) {
+        console.info(
+          `[assistant][scope-store] stale clear ignored user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} session=${sessionId} seq=${clientMessageSeq}`,
+        );
+      }
     } else if (fallbackScope && fallbackScope.scopeEstablished === true) {
-      await upsertAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, fallbackScope);
-      scopeSource = "explicit";
+      const upsertResult = await upsertAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, fallbackScope, {
+        clientMessageSeq,
+      });
+      if (upsertResult.applied) {
+        scopeSource = "explicit";
+      } else if (upsertResult.stale) {
+        console.info(
+          `[assistant][scope-store] stale upsert ignored user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} session=${sessionId} seq=${clientMessageSeq}`,
+        );
+      }
     } else if (mentionScope && mentionScope.scopeEstablished === true) {
       scopeSource = "mention";
     }
@@ -23508,7 +24004,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     }
 
     console.info(
-      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} scope_source=${scopeSource}`,
+      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} seq=${clientMessageSeq || 0} scope_source=${scopeSource}`,
     );
 
     res.json({
@@ -25170,5 +25666,6 @@ module.exports = {
     resolveAssistantReviewPiiMode,
     buildAssistantReviewRetentionCutoffIso,
     resolveAssistantSessionScopeTenantKeyFromRequest,
+    normalizeAssistantClientMessageSeq,
   },
 };

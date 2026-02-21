@@ -42,3 +42,12 @@ test("assistant scope tenant key ignores tenant headers when auth profile has no
 
   assert.equal(tenantKey, "default");
 });
+
+test("assistant client message seq normalization accepts positive integers only", () => {
+  assert.equal(__assistantInternals.normalizeAssistantClientMessageSeq(1), 1);
+  assert.equal(__assistantInternals.normalizeAssistantClientMessageSeq("42"), 42);
+  assert.equal(__assistantInternals.normalizeAssistantClientMessageSeq("0007"), 7);
+  assert.equal(__assistantInternals.normalizeAssistantClientMessageSeq("0"), 0);
+  assert.equal(__assistantInternals.normalizeAssistantClientMessageSeq("-5"), 0);
+  assert.equal(__assistantInternals.normalizeAssistantClientMessageSeq("abc"), 0);
+});

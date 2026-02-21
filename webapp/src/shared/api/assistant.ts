@@ -20,6 +20,7 @@ export async function sendAssistantMessage(
   mode: AssistantMode = "text",
   signal?: AbortSignal,
   sessionId?: string,
+  clientMessageSeq?: number,
 ): Promise<AssistantChatResponse> {
   const payload: AssistantChatRequest = {
     message,
@@ -27,6 +28,9 @@ export async function sendAssistantMessage(
   };
   if (sessionId) {
     payload.sessionId = sessionId;
+  }
+  if (Number.isFinite(clientMessageSeq) && Number(clientMessageSeq) > 0) {
+    payload.clientMessageSeq = Math.min(Number(clientMessageSeq), Number.MAX_SAFE_INTEGER);
   }
 
   return apiRequest<AssistantChatResponse>("/api/assistant/chat", {

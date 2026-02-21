@@ -5,6 +5,7 @@ export interface AssistantChatRequest {
   message: string;
   mode?: AssistantMode;
   sessionId?: string;
+  clientMessageSeq?: number;
 }
 
 export interface AssistantChatSource {

@@ -105,6 +105,7 @@ const FEMALE_VOICE_HINTS = [
 const MALE_VOICE_HINTS = ["male", "man", "alex", "david", "daniel", "george", "sergey", "pavel"];
 const NATURAL_VOICE_HINTS = ["natural", "neural", "premium", "enhanced", "wavenet", "online"];
 const ASSISTANT_CHAT_SESSION_STORAGE_KEY = "cbooster_assistant_chat_session_id";
+const ASSISTANT_CHAT_SESSION_SEQ_STORAGE_KEY = "cbooster_assistant_chat_session_seq_state";
 const ASSISTANT_CONTEXT_RESET_MAX_ATTEMPTS = 2;
 const ASSISTANT_CONTEXT_RESET_RETRY_DELAY_MS = 350;
 const ASSISTANT_CONTEXT_RESET_TIMEOUT_MS = 4_000;
@@ -188,6 +189,73 @@ function persistAssistantSessionId(sessionId: string): void {
   }
 }
 
+function readAssistantSessionSeqState(): { sessionId: string; lastSeq: number } | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(ASSISTANT_CHAT_SESSION_SEQ_STORAGE_KEY) || "";
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as { sessionId?: unknown; lastSeq?: unknown };
+    const sessionId = normalizeOutgoingMessage(String(parsed?.sessionId || ""));
+    const lastSeq = Number.parseInt(String(parsed?.lastSeq || "0"), 10);
+    if (!/^[a-z0-9_.:-]{8,120}$/i.test(sessionId)) {
+      return null;
+    }
+    if (!Number.isFinite(lastSeq) || lastSeq < 0) {
+      return null;
+    }
+
+    return {
+      sessionId,
+      lastSeq: Math.min(lastSeq, Number.MAX_SAFE_INTEGER),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistAssistantSessionSeqState(sessionId: string, lastSeq: number): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const safeSessionId = normalizeOutgoingMessage(sessionId);
+  if (!/^[a-z0-9_.:-]{8,120}$/i.test(safeSessionId)) {
+    return;
+  }
+
+  const parsedLastSeq = Number.parseInt(String(lastSeq), 10);
+  const safeLastSeq = Number.isFinite(parsedLastSeq) && parsedLastSeq >= 0 ? Math.min(parsedLastSeq, Number.MAX_SAFE_INTEGER) : 0;
+  const payload = JSON.stringify({
+    sessionId: safeSessionId,
+    lastSeq: safeLastSeq,
+  });
+
+  try {
+    window.localStorage.setItem(ASSISTANT_CHAT_SESSION_SEQ_STORAGE_KEY, payload);
+  } catch {
+    // Ignore localStorage write failures.
+  }
+}
+
+function nextAssistantClientMessageSeq(sessionId: string): number {
+  const safeSessionId = normalizeOutgoingMessage(sessionId);
+  if (!/^[a-z0-9_.:-]{8,120}$/i.test(safeSessionId)) {
+    return 1;
+  }
+
+  const currentState = readAssistantSessionSeqState();
+  const lastSeq = currentState?.sessionId === safeSessionId ? currentState.lastSeq : 0;
+  const nextSeq = Math.min(Math.max(lastSeq + 1, 1), Number.MAX_SAFE_INTEGER);
+  persistAssistantSessionSeqState(safeSessionId, nextSeq);
+  return nextSeq;
+}
+
 function resolveAssistantSessionId(): string {
   if (typeof window === "undefined") {
     return generateAssistantSessionId();
@@ -196,6 +264,10 @@ function resolveAssistantSessionId(): string {
   try {
     const stored = normalizeOutgoingMessage(window.localStorage.getItem(ASSISTANT_CHAT_SESSION_STORAGE_KEY) || "");
     if (/^[a-z0-9_.:-]{8,120}$/i.test(stored)) {
+      const seqState = readAssistantSessionSeqState();
+      if (!seqState || seqState.sessionId !== stored) {
+        persistAssistantSessionSeqState(stored, 0);
+      }
       return stored;
     }
   } catch {
@@ -204,6 +276,7 @@ function resolveAssistantSessionId(): string {
 
   const nextSessionId = generateAssistantSessionId();
   persistAssistantSessionId(nextSessionId);
+  persistAssistantSessionSeqState(nextSessionId, 0);
   return nextSessionId;
 }
 
@@ -528,6 +601,7 @@ export function AssistantWidget() {
     const nextSessionId = generateAssistantSessionId();
     chatSessionIdRef.current = nextSessionId;
     persistAssistantSessionId(nextSessionId);
+    persistAssistantSessionSeqState(nextSessionId, 0);
   }
 
   async function resetAssistantServerContextOnClose(sessionId: string): Promise<void> {
@@ -803,7 +877,14 @@ export function AssistantWidget() {
     abortControllerRef.current = controller;
 
     try {
-      const response = await sendAssistantMessage(outgoingText, mode, controller.signal, chatSessionIdRef.current);
+      const clientMessageSeq = nextAssistantClientMessageSeq(chatSessionIdRef.current);
+      const response = await sendAssistantMessage(
+        outgoingText,
+        mode,
+        controller.signal,
+        chatSessionIdRef.current,
+        clientMessageSeq,
+      );
       const replyText = normalizeDisplayMessage(response.reply || "");
 
       if (replyText) {
