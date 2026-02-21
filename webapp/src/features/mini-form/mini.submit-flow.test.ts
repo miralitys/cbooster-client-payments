@@ -71,6 +71,11 @@ type MiniAppHarness = {
 type LoadMiniAppOptions = {
   telegramWebApp?: TelegramWebAppStub | null;
   fetchResponses?: FetchResponseConfig[];
+  fetchMock?: (input: RequestInfo | URL, init?: RequestInit) => Promise<{
+    ok: boolean;
+    status: number;
+    json: () => Promise<unknown>;
+  }>;
 };
 
 type VmSandbox = Record<string, unknown> & {
@@ -156,6 +161,40 @@ function createFetchMock(fetchResponses: FetchResponseConfig[]) {
   };
 }
 
+function toFetchResponse(response: FetchResponseConfig) {
+  return {
+    ok: response.ok,
+    status: response.status,
+    json: async () => response.body ?? {},
+  };
+}
+
+function createDeferredFetchMock() {
+  const fetchCalls: FetchCall[] = [];
+  const pendingResolvers: Array<(response: ReturnType<typeof toFetchResponse>) => void> = [];
+
+  const fetchMock = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    fetchCalls.push({ url, init });
+
+    return await new Promise<ReturnType<typeof toFetchResponse>>((resolve) => {
+      pendingResolvers.push(resolve);
+    });
+  };
+
+  return {
+    fetchCalls,
+    fetchMock,
+    resolveNext(response: FetchResponseConfig) {
+      const resolver = pendingResolvers.shift();
+      if (!resolver) {
+        throw new Error("No pending fetch calls to resolve");
+      }
+      resolver(toFetchResponse(response));
+    },
+  };
+}
+
 function loadMiniApp(options: LoadMiniAppOptions = {}): MiniAppHarness {
   document.body.innerHTML = MINI_HTML;
 
@@ -173,7 +212,8 @@ function loadMiniApp(options: LoadMiniAppOptions = {}): MiniAppHarness {
     delete windowWithTelegram.Telegram;
   }
 
-  const { fetchCalls, fetchMock } = createFetchMock(options.fetchResponses ?? []);
+  const staticFetch = createFetchMock(options.fetchResponses ?? []);
+  const fetchMock = options.fetchMock ?? staticFetch.fetchMock;
 
   const sandbox: VmSandbox = {
     module: { exports: {} },
@@ -211,7 +251,7 @@ function loadMiniApp(options: LoadMiniAppOptions = {}): MiniAppHarness {
   });
 
   return {
-    fetchCalls,
+    fetchCalls: staticFetch.fetchCalls,
   };
 }
 
@@ -239,6 +279,39 @@ function getMessageText() {
   }
 
   return message.textContent || "";
+}
+
+function getSubmitButton() {
+  const submitButton = document.querySelector("#mini-submit-button");
+  if (!(submitButton instanceof HTMLButtonElement)) {
+    throw new Error("#mini-submit-button was not found");
+  }
+
+  return submitButton;
+}
+
+function getSubmitButtonLabel() {
+  const label = document.querySelector("#mini-submit-button .button-label");
+  if (!(label instanceof HTMLElement)) {
+    throw new Error("Submit button label was not found");
+  }
+
+  return label;
+}
+
+function getRequiredClientNameInput() {
+  const input = document.querySelector("#clientName");
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error("#clientName was not found");
+  }
+
+  return input;
+}
+
+function fillRequiredClientName(value = "John Doe") {
+  const input = getRequiredClientNameInput();
+  input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 describe("mini.js submit flow", () => {
@@ -383,5 +456,108 @@ describe("mini.js submit flow", () => {
 
     expect(parsedClient.clientName).toBe("Jane Smith");
     expect(parsedClient.payment1Date).toBe("");
+  });
+
+  it("keeps submit button disabled while mini access check is in progress", async () => {
+    const telegram = createTelegramWebApp("auth_payload");
+    const deferredFetch = createDeferredFetchMock();
+    loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchMock: deferredFetch.fetchMock,
+    });
+
+    fillRequiredClientName("John");
+    await flushAsync();
+
+    const submitButton = getSubmitButton();
+    expect(submitButton.disabled).toBe(true);
+    expect(submitButton.getAttribute("aria-busy")).toBe("false");
+
+    deferredFetch.resolveNext({
+      ok: true,
+      status: 200,
+      body: { ok: true, uploadToken: "token-access-ready" },
+    });
+    await flushAsync();
+
+    expect(submitButton.disabled).toBe(false);
+    expect(getSubmitButtonLabel().textContent).toBe("Add Client");
+  });
+
+  it("disables submit button during in-flight submit and restores it afterwards", async () => {
+    const telegram = createTelegramWebApp("auth_payload");
+    const deferredFetch = createDeferredFetchMock();
+    loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchMock: deferredFetch.fetchMock,
+    });
+
+    fillRequiredClientName("John");
+    await flushAsync();
+
+    deferredFetch.resolveNext({
+      ok: true,
+      status: 200,
+      body: { ok: true, uploadToken: "token-submit" },
+    });
+    await flushAsync();
+
+    const submitButton = getSubmitButton();
+    expect(submitButton.disabled).toBe(false);
+
+    submitButton.click();
+    await flushAsync(1);
+
+    expect(submitButton.disabled).toBe(true);
+    expect(submitButton.getAttribute("aria-busy")).toBe("true");
+    expect(submitButton.classList.contains("is-loading")).toBe(true);
+    expect(getSubmitButtonLabel().textContent).toBe("Submitting...");
+
+    deferredFetch.resolveNext({
+      ok: false,
+      status: 500,
+      body: { error: "Submit failed." },
+    });
+    await flushAsync();
+
+    expect(submitButton.disabled).toBe(false);
+    expect(submitButton.getAttribute("aria-busy")).toBe("false");
+    expect(submitButton.classList.contains("is-loading")).toBe(false);
+    expect(getSubmitButtonLabel().textContent).toBe("Add Client");
+    expect(getMessageText()).toBe("Submit failed.");
+  });
+
+  it("prevents duplicate submit requests on rapid double-click", async () => {
+    const telegram = createTelegramWebApp("auth_payload");
+    const deferredFetch = createDeferredFetchMock();
+    loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchMock: deferredFetch.fetchMock,
+    });
+
+    fillRequiredClientName("John");
+    await flushAsync();
+
+    deferredFetch.resolveNext({
+      ok: true,
+      status: 200,
+      body: { ok: true, uploadToken: "token-double-click" },
+    });
+    await flushAsync();
+
+    const submitButton = getSubmitButton();
+    submitButton.click();
+    submitButton.click();
+    await flushAsync(1);
+
+    const submitCalls = deferredFetch.fetchCalls.filter((call) => call.url === "/api/mini/clients");
+    expect(submitCalls).toHaveLength(1);
+
+    deferredFetch.resolveNext({
+      ok: true,
+      status: 201,
+      body: { ok: true },
+    });
+    await flushAsync();
   });
 });
