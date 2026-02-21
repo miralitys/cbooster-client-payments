@@ -156,12 +156,9 @@ export default function QuickBooksPage() {
     if (!showOnlyUncategorized) {
       return baseTransactions;
     }
-    return baseTransactions.filter(
-      (item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap, expenseCategoryFingerprintMap),
-    );
+    return baseTransactions.filter((item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap));
   }, [
     allTransactions,
-    expenseCategoryFingerprintMap,
     expenseCategoryMap,
     search,
     showOnlyRefunds,
@@ -171,10 +168,8 @@ export default function QuickBooksPage() {
     if (activeTab !== "outgoing") {
       return 0;
     }
-    return allTransactions.filter(
-      (item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap, expenseCategoryFingerprintMap),
-    ).length;
-  }, [activeTab, allTransactions, expenseCategoryFingerprintMap, expenseCategoryMap]);
+    return allTransactions.filter((item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap)).length;
+  }, [activeTab, allTransactions, expenseCategoryMap]);
   const filteredOutgoingSelectionKeys = useMemo(() => {
     if (activeTab !== "outgoing") {
       return [];
@@ -216,14 +211,8 @@ export default function QuickBooksPage() {
     [expenseCategoryFingerprintMap, expenseCategoryMap, outgoingTransactions, savedExpenseCategories],
   );
   const expenseCategorySummaryRows = useMemo(
-    () =>
-      buildQuickBooksExpenseCategorySummaryRows(
-        outgoingTransactions,
-        expenseCategoryMap,
-        expenseCategoryFingerprintMap,
-        expenseCategoryOptions,
-      ),
-    [expenseCategoryFingerprintMap, expenseCategoryMap, expenseCategoryOptions, outgoingTransactions],
+    () => buildQuickBooksExpenseCategorySummaryRows(outgoingTransactions, expenseCategoryMap, expenseCategoryOptions),
+    [expenseCategoryMap, expenseCategoryOptions, outgoingTransactions],
   );
 
   useEffect(() => {
@@ -397,6 +386,18 @@ export default function QuickBooksPage() {
     }
   }, [bulkExpenseCategory, outgoingTransactions, selectedOutgoingKeys, setQuickBooksExpenseCategory]);
 
+  const confirmSuggestedQuickBooksExpenseCategory = useCallback((row: QuickBooksViewRow) => {
+    const suggestedCategory = resolveQuickBooksSuggestedExpenseCategoryForRow(
+      row,
+      expenseCategoryMap,
+      expenseCategoryFingerprintMap,
+    );
+    if (!suggestedCategory) {
+      return;
+    }
+    setQuickBooksExpenseCategory(row, suggestedCategory);
+  }, [expenseCategoryFingerprintMap, expenseCategoryMap, setQuickBooksExpenseCategory]);
+
   const fetchQuickBooksInsight = useCallback(async (
     row: QuickBooksViewRow,
     options: {
@@ -539,37 +540,56 @@ export default function QuickBooksPage() {
           key: "expenseCategory",
           label: "Expense Category",
           align: "left",
-          cell: (item) => (
-            <div className="quickbooks-expense-category-control">
-              <Select
-                value={
-                  resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap, expenseCategoryFingerprintMap) ||
-                  QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE
-                }
-                onChange={(event) => {
-                  const nextCategory = sanitizeQuickBooksExpenseCategorySelectValue(event.target.value);
-                  setQuickBooksExpenseCategory(item, nextCategory);
-                }}
-                className="quickbooks-expense-category-input"
-              >
-                <option value={QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE}>Not selected</option>
-                {expenseCategoryOptions.map((categoryOption) => (
-                  <option key={categoryOption} value={categoryOption}>
-                    {categoryOption}
-                  </option>
-                ))}
-              </Select>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="quickbooks-expense-category-add"
-                onClick={() => addQuickBooksExpenseCategoryFromPrompt(item)}
-              >
-                Add
-              </Button>
-            </div>
-          ),
+          cell: (item) => {
+            const confirmedCategory = resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap);
+            const suggestedCategory = resolveQuickBooksSuggestedExpenseCategoryForRow(
+              item,
+              expenseCategoryMap,
+              expenseCategoryFingerprintMap,
+            );
+            const hasSuggestion = Boolean(suggestedCategory);
+
+            return (
+              <div className="quickbooks-expense-category-control">
+                <Select
+                  value={confirmedCategory || QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE}
+                  onChange={(event) => {
+                    const nextCategory = sanitizeQuickBooksExpenseCategorySelectValue(event.target.value);
+                    setQuickBooksExpenseCategory(item, nextCategory);
+                  }}
+                  className="quickbooks-expense-category-input"
+                >
+                  <option value={QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE}>Not selected</option>
+                  {expenseCategoryOptions.map((categoryOption) => (
+                    <option key={categoryOption} value={categoryOption}>
+                      {categoryOption}
+                    </option>
+                  ))}
+                </Select>
+                {hasSuggestion ? <p className="quickbooks-expense-category-suggestion">Предположительно: {suggestedCategory}</p> : null}
+                <div className="quickbooks-expense-category-actions">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="quickbooks-expense-category-add"
+                    onClick={() => addQuickBooksExpenseCategoryFromPrompt(item)}
+                  >
+                    Add
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="quickbooks-expense-category-confirm"
+                    onClick={() => confirmSuggestedQuickBooksExpenseCategory(item)}
+                    disabled={!hasSuggestion}
+                  >
+                    Подтвердить
+                  </Button>
+                </div>
+              </div>
+            );
+          },
         },
         {
           key: "clientName",
@@ -654,6 +674,7 @@ export default function QuickBooksPage() {
     expenseCategoryFingerprintMap,
     expenseCategoryMap,
     expenseCategoryOptions,
+    confirmSuggestedQuickBooksExpenseCategory,
     selectedOutgoingKeySet,
     openInsightModal,
     setQuickBooksExpenseCategory,
@@ -1317,7 +1338,9 @@ function buildQuickBooksExpenseCategoryOptions(
     combined.push(defaultCategory);
   }
   for (const row of Array.isArray(rows) ? rows : []) {
-    const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap, categoryFingerprintMap);
+    const resolvedCategory =
+      resolveQuickBooksExpenseCategoryForRow(row, categoryMap) ||
+      resolveQuickBooksSuggestedExpenseCategoryForRow(row, categoryMap, categoryFingerprintMap);
     if (!resolvedCategory) {
       continue;
     }
@@ -1351,7 +1374,6 @@ function prependQuickBooksExpenseCategory(categories: string[], category: string
 function resolveQuickBooksExpenseCategoryForRow(
   row: QuickBooksPaymentRow,
   categoryMap: QuickBooksExpenseCategoryMap,
-  categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
 ): string {
   const transactionId = sanitizeQuickBooksTransactionId(row?.transactionId);
   if (transactionId) {
@@ -1360,7 +1382,18 @@ function resolveQuickBooksExpenseCategoryForRow(
       return directCategory;
     }
   }
+  return "";
+}
 
+function resolveQuickBooksSuggestedExpenseCategoryForRow(
+  row: QuickBooksPaymentRow,
+  categoryMap: QuickBooksExpenseCategoryMap,
+  categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
+): string {
+  const confirmedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap);
+  if (confirmedCategory) {
+    return "";
+  }
   const fingerprint = buildQuickBooksExpenseFingerprint(row);
   if (!fingerprint) {
     return "";
@@ -1371,7 +1404,6 @@ function resolveQuickBooksExpenseCategoryForRow(
 function buildQuickBooksExpenseCategorySummaryRows(
   rows: QuickBooksPaymentRow[],
   categoryMap: QuickBooksExpenseCategoryMap,
-  categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap,
   orderedCategories: string[],
 ): QuickBooksExpenseCategorySummaryRow[] {
   const totals = new Map<string, number>();
@@ -1384,7 +1416,7 @@ function buildQuickBooksExpenseCategorySummaryRows(
     if (!Number.isFinite(amount) || amount <= 0) {
       continue;
     }
-    const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap, categoryFingerprintMap);
+    const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap);
     const category = resolvedCategory || QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL;
     totals.set(category, (totals.get(category) || 0) + amount);
   }
