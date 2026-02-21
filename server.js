@@ -28925,7 +28925,7 @@ app.get("/api/ghl/client-contracts/download", requireWebPermission(WEB_AUTH_PERM
 
     const lookupRow = await resolveGhlClientContractDownloadRow(matchedClientName, {
       preferredContactId: requestedContactId,
-      debugEnabled: debugMode,
+      debugEnabled: false,
     });
     const lookupStatus = normalizeGhlClientContractDownloadStatus(lookupRow?.status);
     if (lookupStatus === "error") {
