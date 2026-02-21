@@ -1695,6 +1695,16 @@ a {
   min-width: 220px;
 }
 
+.quickbooks-expense-category-control {
+  display: grid;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.quickbooks-expense-category-add {
+  justify-self: flex-start;
+}
+
 .dashboard-react-page .table-panel,
 .dashboard-react-page .period-dashboard-shell-react {
   grid-column: 1 / -1;
