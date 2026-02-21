@@ -1,5 +1,6 @@
 import { apiRequest } from "@/shared/api/fetcher";
 import type {
+  CustomDashboardCallsSyncResponse,
   CustomDashboardPayload,
   CustomDashboardTaskMovementsResponse,
   CustomDashboardTasksSourceKind,
@@ -61,6 +62,17 @@ export async function syncCustomDashboardTasks(mode: "delta" | "full"): Promise<
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ mode }),
+  });
+}
+
+export async function syncCustomDashboardCalls(mode: "delta" | "full" = "delta"): Promise<CustomDashboardCallsSyncResponse> {
+  return apiRequest<CustomDashboardCallsSyncResponse>("/api/custom-dashboard/calls-sync", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ mode }),
+    timeoutMs: 180_000,
   });
 }
 

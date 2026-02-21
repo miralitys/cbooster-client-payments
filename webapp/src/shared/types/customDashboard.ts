@@ -46,6 +46,34 @@ export interface CustomDashboardTasksSourceState {
   };
 }
 
+export interface CustomDashboardCallsSyncState {
+  configured: boolean;
+  syncInFlight: boolean;
+  lastAttemptedAt: string;
+  lastSyncedAt: string;
+  lastMode: "" | "delta" | "full";
+  lastError: string;
+  cursorUpdatedAt: string;
+  stats: {
+    pagesFetched: number;
+    scannedMessages: number;
+    importedCalls: number;
+    storedCalls: number;
+  };
+  autoSync: {
+    enabled: boolean;
+    timeZone: string;
+    hour: number;
+    minute: number;
+    inFlight: boolean;
+    nextRunAt: string;
+    lastStartedAt: string;
+    lastFinishedAt: string;
+    lastSuccessAt: string;
+    lastError: string;
+  };
+}
+
 export interface CustomDashboardManagerTaskRow {
   managerName: string;
   open: number;
@@ -182,6 +210,7 @@ export interface CustomDashboardPayload {
     calls: CustomDashboardUploadMeta;
   };
   tasksSource: CustomDashboardTasksSourceState;
+  callsSync: CustomDashboardCallsSyncState;
   options: {
     managerTasks: string[];
     specialistTasks: string[];
@@ -248,6 +277,22 @@ export interface CustomDashboardTasksSyncResponse {
     tasksTotal: number;
   };
   tasksSource: CustomDashboardTasksSourceState;
+}
+
+export interface CustomDashboardCallsSyncResponse {
+  ok: boolean;
+  mode: "delta" | "full";
+  requestedMode: "delta" | "full";
+  uploadedAt: string;
+  count: number;
+  archiveKey: string;
+  stats: {
+    pagesFetched: number;
+    scannedMessages: number;
+    importedCalls: number;
+    storedCalls: number;
+  };
+  callsSync: CustomDashboardCallsSyncState;
 }
 
 export interface CustomDashboardTaskMovementRow {

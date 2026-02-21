@@ -5,6 +5,7 @@ import {
   getCustomDashboard,
   getCustomDashboardUsers,
   saveCustomDashboardUsers,
+  syncCustomDashboardCalls,
   uploadCustomDashboardFile,
 } from "@/shared/api";
 import { getCustomDashboardTaskMovements } from "@/shared/api/customDashboard";
@@ -87,6 +88,7 @@ export default function CustomDashboardPage() {
   const [selectedCallsManager, setSelectedCallsManager] = useState("");
 
   const [uploadingType, setUploadingType] = useState<UploadType | "">("");
+  const [callsSyncLoading, setCallsSyncLoading] = useState(false);
   const [taskMovements, setTaskMovements] = useState<CustomDashboardTaskMovementsResponse | null>(null);
   const [taskMovementsLoading, setTaskMovementsLoading] = useState(false);
   const [taskMovementsError, setTaskMovementsError] = useState("");
@@ -753,6 +755,37 @@ export default function CustomDashboardPage() {
     [refreshEverything],
   );
 
+  const onSyncCallsFromGhl = useCallback(async (mode: "delta" | "full" = "delta") => {
+    if (!canManage) {
+      return;
+    }
+
+    setCallsSyncLoading(true);
+    try {
+      const payload = await syncCustomDashboardCalls(mode);
+      showToast({
+        type: "success",
+        message:
+          payload.mode === "full"
+            ? `Calls full sync completed: ${payload.count} stored.`
+            : `Calls sync completed: ${payload.count} stored.`,
+        dedupeKey: `custom-dashboard-calls-sync-${payload.mode}-${payload.uploadedAt}`,
+        cooldownMs: 2500,
+      });
+      await refreshEverything();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to sync calls from GoHighLevel.";
+      showToast({
+        type: "error",
+        message,
+        dedupeKey: `custom-dashboard-calls-sync-error-${message}`,
+        cooldownMs: 3000,
+      });
+    } finally {
+      setCallsSyncLoading(false);
+    }
+  }, [canManage, refreshEverything]);
+
   const onLoadTaskMovements = useCallback(async (options: { refresh?: boolean; silent?: boolean } = {}) => {
     if (!canManage) {
       return;
@@ -1044,6 +1077,19 @@ export default function CustomDashboardPage() {
                     ) : null}
                   </div>
                   {uploadStateLabel ? <p className="dashboard-message">{uploadStateLabel}</p> : null}
+                  {dashboard.callsSync.configured ? (
+                    <p className="dashboard-message">
+                      Calls sync: last synced {formatDateTimeOrDash(dashboard.callsSync.lastSyncedAt)}. Next auto sync:{" "}
+                      {formatDateTimeOrDash(dashboard.callsSync.autoSync.nextRunAt)} ({dashboard.callsSync.autoSync.timeZone}).
+                    </p>
+                  ) : (
+                    <p className="dashboard-message error">
+                      GoHighLevel is not configured for calls sync. Add `GHL_API_KEY` and `GHL_LOCATION_ID`.
+                    </p>
+                  )}
+                  {dashboard.callsSync.lastError ? (
+                    <p className="dashboard-message error">Last calls sync error: {dashboard.callsSync.lastError}</p>
+                  ) : null}
 
                   <div className="custom-dashboard-upload-grid">
                     <UploadCard
@@ -1059,6 +1105,15 @@ export default function CustomDashboardPage() {
                       disabled={Boolean(uploadingType)}
                       loading={uploadingType === "calls"}
                       onUploadClick={() => callsFileInputRef.current?.click()}
+                      secondaryActionLabel="Sync from GHL"
+                      onSecondaryAction={() => void onSyncCallsFromGhl("delta")}
+                      secondaryDisabled={
+                        Boolean(uploadingType) ||
+                        callsSyncLoading ||
+                        dashboard.callsSync.syncInFlight ||
+                        !dashboard.callsSync.configured
+                      }
+                      secondaryLoading={callsSyncLoading || dashboard.callsSync.syncInFlight}
                     />
                   </div>
 
@@ -1462,9 +1517,24 @@ interface UploadCardProps {
   loading: boolean;
   onUploadClick: () => void;
   actionLabel?: string;
+  secondaryActionLabel?: string;
+  onSecondaryAction?: () => void;
+  secondaryDisabled?: boolean;
+  secondaryLoading?: boolean;
 }
 
-function UploadCard({ title, meta, disabled, loading, onUploadClick, actionLabel }: UploadCardProps) {
+function UploadCard({
+  title,
+  meta,
+  disabled,
+  loading,
+  onUploadClick,
+  actionLabel,
+  secondaryActionLabel,
+  onSecondaryAction,
+  secondaryDisabled,
+  secondaryLoading,
+}: UploadCardProps) {
   return (
     <div className="custom-dashboard-upload-card">
       <h3>{title}</h3>
@@ -1473,16 +1543,30 @@ function UploadCard({ title, meta, disabled, loading, onUploadClick, actionLabel
       </p>
       <p className="dashboard-message">File: {meta.fileName || "-"}</p>
       <p className="dashboard-message">Uploaded: {formatDateTimeOrDash(meta.uploadedAt)}</p>
-      <Button
-        type="button"
-        size="sm"
-        variant="secondary"
-        onClick={onUploadClick}
-        disabled={disabled}
-        isLoading={loading}
-      >
-        {actionLabel || "Upload File"}
-      </Button>
+      <div className="custom-dashboard-upload-actions">
+        {onSecondaryAction && secondaryActionLabel ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            onClick={onSecondaryAction}
+            disabled={Boolean(secondaryDisabled)}
+            isLoading={Boolean(secondaryLoading)}
+          >
+            {secondaryActionLabel}
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          onClick={onUploadClick}
+          disabled={disabled}
+          isLoading={loading}
+        >
+          {actionLabel || "Upload File"}
+        </Button>
+      </div>
     </div>
   );
 }
