@@ -1,5 +1,6 @@
 "use strict";
 
+const fs = require("node:fs");
 const Module = require("node:module");
 
 if (process.env.TEST_USE_FAKE_PG !== "1") {
@@ -11,6 +12,7 @@ const state = {
   submissions: new Map(),
   submissionFiles: [],
 };
+const captureFile = String(process.env.TEST_PG_CAPTURE_FILE || "").trim();
 
 function normalizeSql(rawSql) {
   return String(rawSql || "")
@@ -38,6 +40,18 @@ function queryResult(rows = [], rowCount = rows.length) {
   };
 }
 
+function captureEvent(payload) {
+  if (!captureFile) {
+    return;
+  }
+
+  try {
+    fs.appendFileSync(`${captureFile}`, `${JSON.stringify(payload)}\n`, "utf8");
+  } catch {
+    // Best-effort capture for tests.
+  }
+}
+
 function executeFakeQuery(rawSql, rawParams) {
   const sql = normalizeSql(rawSql);
   const params = Array.isArray(rawParams) ? rawParams : [];
@@ -52,6 +66,7 @@ function executeFakeQuery(rawSql, rawParams) {
 
   if (sql.includes("insert into") && sql.includes("mini_client_submissions")) {
     const id = String(params[0] || "").trim() || "sub-fake";
+    const record = safeJsonParse(params[1], {});
     const miniData = safeJsonParse(params[2], {});
     const row = {
       id,
@@ -60,14 +75,29 @@ function executeFakeQuery(rawSql, rawParams) {
       mini_data: miniData && typeof miniData === "object" ? miniData : {},
     };
     state.submissions.set(id, row);
+    captureEvent({
+      type: "submission_insert",
+      id,
+      record,
+      miniData,
+    });
     return queryResult([row], 1);
   }
 
   if (sql.includes("insert into") && sql.includes("mini_submission_files")) {
-    state.submissionFiles.push({
+    const fileEvent = {
+      type: "file_insert",
       id: String(params[0] || "").trim(),
-      submission_id: String(params[1] || "").trim(),
+      submissionId: String(params[1] || "").trim(),
+      fileName: String(params[2] || "").trim(),
+      mimeType: String(params[3] || "").trim(),
+      sizeBytes: Number.parseInt(params[4], 10) || 0,
+    };
+    state.submissionFiles.push({
+      id: fileEvent.id,
+      submission_id: fileEvent.submissionId,
     });
+    captureEvent(fileEvent);
     return queryResult([], 1);
   }
 
@@ -117,4 +147,3 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
   return originalLoad(request, parent, isMain);
 };
-
