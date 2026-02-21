@@ -342,7 +342,14 @@ test("POST /api/mini/access keeps stable response contract for auth fail/success
         const body = await response.json();
 
         assert.equal(response.status, 200);
-        assertObjectContainsKeys(body, ["ok", "user", "uploadToken", "uploadTokenExpiresAt", "uploadTokenTtlSec"]);
+        assertObjectContainsKeys(body, [
+          "ok",
+          "user",
+          "uploadToken",
+          "uploadTokenExpiresAt",
+          "uploadTokenTtlSec",
+          "miniConfig",
+        ]);
         assert.equal(body.ok, true);
         assert.ok(body.user && typeof body.user === "object" && !Array.isArray(body.user));
         assertExactObjectKeys(body.user, ["id", "username"]);
@@ -354,6 +361,11 @@ test("POST /api/mini/access keeps stable response contract for auth fail/success
         assert.ok(Number.isFinite(body.uploadTokenTtlSec));
         assert.equal(typeof body.uploadTokenExpiresAt, "string");
         assert.ok(!Number.isNaN(Date.parse(body.uploadTokenExpiresAt)));
+        assert.ok(body.miniConfig && typeof body.miniConfig === "object" && !Array.isArray(body.miniConfig));
+        assert.ok(body.miniConfig.attachments && typeof body.miniConfig.attachments === "object");
+        assert.equal(typeof body.miniConfig.attachments.maxCount, "number");
+        assert.ok(Array.isArray(body.miniConfig.attachments.allowedExtensions));
+        assert.ok(body.miniConfig.attachments.allowedExtensions.includes(".pdf"));
       });
     },
   );

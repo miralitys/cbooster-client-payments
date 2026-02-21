@@ -850,6 +850,16 @@ const MINI_ATTACHMENT_ALLOWLIST_BY_EXTENSION = new Map(
     },
   ]),
 );
+const MINI_ATTACHMENT_ALLOWLIST_EXTENSIONS = Object.freeze(
+  [...new Set(MINI_ATTACHMENT_ALLOWLIST_DEFINITIONS.map((entry) => sanitizeTextValue(entry.extension, 12).toLowerCase()))]
+    .filter(Boolean)
+    .sort(),
+);
+const MINI_CLIENT_ATTACHMENTS_CONFIG = Object.freeze({
+  maxCount: MINI_MAX_ATTACHMENTS_COUNT,
+  allowedExtensions: MINI_ATTACHMENT_ALLOWLIST_EXTENSIONS,
+  allowedFormatsHelpText: MINI_ATTACHMENT_ALLOWED_FORMATS_HELP_TEXT,
+});
 const MINI_ATTACHMENT_AV_SCAN_ENABLED = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_ENABLED) === true;
 const MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN) === true;
 const MINI_ATTACHMENT_AV_SCAN_BIN = sanitizeTextValue(process.env.MINI_ATTACHMENT_AV_SCAN_BIN, 260);
@@ -26094,6 +26104,9 @@ app.post("/api/mini/access", async (req, res) => {
     uploadTokenExpiresAt: uploadToken.expiresAtMs ? new Date(uploadToken.expiresAtMs).toISOString() : null,
     uploadTokenTtlSec: MINI_UPLOAD_TOKEN_TTL_SEC,
     writeInitDataTtlSec: TELEGRAM_INIT_DATA_WRITE_TTL_SEC,
+    miniConfig: {
+      attachments: MINI_CLIENT_ATTACHMENTS_CONFIG,
+    },
   });
 });
 
