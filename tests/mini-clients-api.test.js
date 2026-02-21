@@ -1444,7 +1444,7 @@ test("POST /api/mini/clients fails closed when AV scan is enabled but unavailabl
   );
 });
 
-test("POST /api/mini/clients enforces AV scan by default in production", async () => {
+test("POST /api/mini/clients keeps uploads available in production when AV is not explicitly enabled", async () => {
   await withServer(
     {
       DATABASE_URL: "postgres://fake/fake",
@@ -1479,14 +1479,14 @@ test("POST /api/mini/clients enforces AV scan by default in production", async (
       });
       const body = await response.json();
 
-      assert.equal(response.status, 503);
-      assert.equal(typeof body.error, "string");
-      assert.ok(body.error.includes("security scan is unavailable"));
+      assert.equal(response.status, 201);
+      assert.equal(body.ok, true);
+      assert.equal(body.status, "pending");
     },
   );
 });
 
-test("POST /api/mini/clients ignores AV fail-open mode in production", async () => {
+test("POST /api/mini/clients allows fail-open mode in production when AV scanner is unavailable", async () => {
   await withServer(
     {
       DATABASE_URL: "postgres://fake/fake",
@@ -1522,9 +1522,9 @@ test("POST /api/mini/clients ignores AV fail-open mode in production", async () 
       });
       const body = await response.json();
 
-      assert.equal(response.status, 503);
-      assert.equal(typeof body.error, "string");
-      assert.ok(body.error.includes("security scan is unavailable"));
+      assert.equal(response.status, 201);
+      assert.equal(body.ok, true);
+      assert.equal(body.status, "pending");
     },
   );
 });
