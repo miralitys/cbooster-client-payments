@@ -7,8 +7,12 @@ import type { TableColumn } from "@/shared/ui";
 
 const DEFAULT_LIMIT = 10;
 
+type GhlClientDocumentsTableRow = GhlClientDocumentsRow & {
+  rowKey: string;
+};
+
 export default function GhlContractsPage() {
-  const [items, setItems] = useState<GhlClientDocumentsRow[]>([]);
+  const [items, setItems] = useState<GhlClientDocumentsTableRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [statusText, setStatusText] = useState("Loading first 10 clients from database and all documents from GoHighLevel...");
@@ -20,7 +24,7 @@ export default function GhlContractsPage() {
 
     try {
       const payload = await getGhlClientDocuments(DEFAULT_LIMIT);
-      const nextItems = Array.isArray(payload.items) ? payload.items : [];
+      const nextItems = withStableRowKeys(Array.isArray(payload.items) ? payload.items : []);
       const clientsWithDocuments = nextItems.filter((item) => (item.status || "").toLowerCase() === "found").length;
       const totalDocuments = nextItems.reduce((sum, item) => sum + (Number(item.documentsCount) || 0), 0);
 
@@ -42,7 +46,7 @@ export default function GhlContractsPage() {
     void loadDocuments();
   }, [loadDocuments]);
 
-  const columns = useMemo<TableColumn<GhlClientDocumentsRow>[]>(() => {
+  const columns = useMemo<TableColumn<GhlClientDocumentsTableRow>[]>(() => {
     return [
       {
         key: "clientName",
@@ -108,13 +112,61 @@ export default function GhlContractsPage() {
             className="ghl-documents-react-table-wrap"
             columns={columns}
             rows={items}
-            rowKey={(item, index) => `${item.clientName || "client"}-${index}`}
+            rowKey={(item) => item.rowKey}
             density="compact"
           />
         ) : null}
       </Panel>
     </PageShell>
   );
+}
+
+function withStableRowKeys(rows: GhlClientDocumentsRow[]): GhlClientDocumentsTableRow[] {
+  const duplicateCounters = new Map<string, number>();
+  return rows.map((row) => {
+    const signature = buildRowSignature(row);
+    const nextCount = (duplicateCounters.get(signature) || 0) + 1;
+    duplicateCounters.set(signature, nextCount);
+    return {
+      ...row,
+      rowKey: `ghl-${hashStableSignature(signature)}-${nextCount}`,
+    };
+  });
+}
+
+function buildRowSignature(row: GhlClientDocumentsRow): string {
+  const documentsSignature = (Array.isArray(row.documents) ? row.documents : [])
+    .map((item) =>
+      [
+        normalizeKeyPart(item?.contactId),
+        normalizeKeyPart(item?.url),
+        normalizeKeyPart(item?.title),
+        item?.isContractMatch ? "1" : "0",
+      ].join("|"),
+    )
+    .sort()
+    .join("::");
+
+  return [
+    normalizeKeyPart(row.clientName),
+    normalizeKeyPart(row.contactName),
+    normalizeKeyPart(row.contractTitle),
+    normalizeKeyPart(row.status),
+    String(Number(row.documentsCount) || 0),
+    documentsSignature || "no-documents",
+  ].join("##");
+}
+
+function normalizeKeyPart(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function hashStableSignature(input: string): string {
+  let hash = 5381;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 33) ^ input.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function DocumentsCell({ documents, fallback }: { documents: GhlClientDocument[]; fallback: string }) {
