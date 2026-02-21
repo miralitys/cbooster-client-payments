@@ -1023,46 +1023,36 @@ export default function CustomDashboardPage() {
                 </Panel>
               ) : null}
 
-              <Panel title="Manager Tasks" className="custom-dashboard-widget-panel">
-                {!dashboard.managerTasks.enabled ? (
-                  <EmptyState title="Widget is disabled for your account." />
-                ) : !dashboard.managerTasks.rows.length ? (
-                  <EmptyState title="No manager tasks available." />
-                ) : (
-                  <>
-                    <div className="custom-dashboard-kpi-row">
-                      <KpiCard label="Managers" value={String(dashboard.managerTasks.totals.managers)} />
-                      <KpiCard label="Tasks" value={String(dashboard.managerTasks.totals.tasks)} />
-                      <KpiCard label="Open" value={String(dashboard.managerTasks.totals.open)} />
-                      <KpiCard label="Overdue" value={String(dashboard.managerTasks.totals.overdue)} />
-                      <KpiCard label="Due Today" value={String(dashboard.managerTasks.totals.dueToday)} />
-                      <KpiCard
-                        label="Completed Yesterday"
-                        value={String(dashboard.managerTasks.totals.completedYesterday)}
-                      />
-                    </div>
-                    <Table
-                      className="custom-dashboard-table-wrap"
-                      columns={managerTasksColumns}
-                      rows={dashboard.managerTasks.rows}
-                      rowKey={(row) => row.managerName}
-                      density="compact"
+              {dashboard.managerTasks.enabled && dashboard.managerTasks.rows.length ? (
+                <Panel title="Manager Tasks" className="custom-dashboard-widget-panel">
+                  <div className="custom-dashboard-kpi-row">
+                    <KpiCard label="Managers" value={String(dashboard.managerTasks.totals.managers)} />
+                    <KpiCard label="Tasks" value={String(dashboard.managerTasks.totals.tasks)} />
+                    <KpiCard label="Open" value={String(dashboard.managerTasks.totals.open)} />
+                    <KpiCard label="Overdue" value={String(dashboard.managerTasks.totals.overdue)} />
+                    <KpiCard label="Due Today" value={String(dashboard.managerTasks.totals.dueToday)} />
+                    <KpiCard
+                      label="Completed Yesterday"
+                      value={String(dashboard.managerTasks.totals.completedYesterday)}
                     />
-                  </>
-                )}
-              </Panel>
+                  </div>
+                  <Table
+                    className="custom-dashboard-table-wrap"
+                    columns={managerTasksColumns}
+                    rows={dashboard.managerTasks.rows}
+                    rowKey={(row) => row.managerName}
+                    density="compact"
+                  />
+                </Panel>
+              ) : null}
 
-              <Panel
-                title="Specialist Tasks"
-                className="custom-dashboard-widget-panel"
-                actions={
-                  dashboard.specialistTasks.enabled ? (
+              {dashboard.specialistTasks.enabled && dashboard.specialistTasks.specialistOptions.length ? (
+                <Panel
+                  title="Specialist Tasks"
+                  className="custom-dashboard-widget-panel"
+                  actions={
                     <div className="custom-dashboard-specialist-toolbar">
-                      <Select
-                        value={selectedSpecialist}
-                        onChange={(event) => setSelectedSpecialist(event.target.value)}
-                        disabled={!dashboard.specialistTasks.specialistOptions.length}
-                      >
+                      <Select value={selectedSpecialist} onChange={(event) => setSelectedSpecialist(event.target.value)}>
                         {dashboard.specialistTasks.specialistOptions.map((option) => (
                           <option key={option} value={option}>
                             {option}
@@ -1070,81 +1060,73 @@ export default function CustomDashboardPage() {
                         ))}
                       </Select>
                     </div>
-                  ) : undefined
-                }
-              >
-                {!dashboard.specialistTasks.enabled ? (
-                  <EmptyState title="Widget is disabled for your account." />
-                ) : !dashboard.specialistTasks.specialistOptions.length ? (
-                  <EmptyState title="No specialist tasks available." />
-                ) : (
-                  <>
-                    <SegmentedControl
-                      value={tasksView}
-                      options={TASK_VIEW_OPTIONS.map((option) => ({
-                        key: option.key,
-                        label: option.label,
-                      }))}
-                      onChange={(value) => {
-                        if (value === "totals" || value === "all" || value === "overdue" || value === "dueToday") {
-                          setTasksView(value);
-                        }
-                      }}
-                    />
+                  }
+                >
+                  <SegmentedControl
+                    value={tasksView}
+                    options={TASK_VIEW_OPTIONS.map((option) => ({
+                      key: option.key,
+                      label: option.label,
+                    }))}
+                    onChange={(value) => {
+                      if (value === "totals" || value === "all" || value === "overdue" || value === "dueToday") {
+                        setTasksView(value);
+                      }
+                    }}
+                  />
 
-                    {tasksView === "totals" ? (
-                      <div className="custom-dashboard-kpi-row custom-dashboard-kpi-row--four">
-                        <KpiCard label="All Tasks" value={String(specialistTotals.all)} />
-                        <KpiCard label="Open" value={String(specialistTotals.open)} />
-                        <KpiCard label="Overdue" value={String(specialistTotals.overdue)} />
-                        <KpiCard label="Due Today" value={String(specialistTotals.dueToday)} />
-                      </div>
-                    ) : null}
+                  {tasksView === "totals" ? (
+                    <div className="custom-dashboard-kpi-row custom-dashboard-kpi-row--four">
+                      <KpiCard label="All Tasks" value={String(specialistTotals.all)} />
+                      <KpiCard label="Open" value={String(specialistTotals.open)} />
+                      <KpiCard label="Overdue" value={String(specialistTotals.overdue)} />
+                      <KpiCard label="Due Today" value={String(specialistTotals.dueToday)} />
+                    </div>
+                  ) : null}
 
-                    {tasksView === "all" ? (
-                      specialistTasksScoped.length ? (
-                        <Table
-                          className="custom-dashboard-table-wrap"
-                          columns={specialistTaskColumns}
-                          rows={specialistTasksScoped}
-                          rowKey={(row, index) => `${row.id}-${index}`}
-                          density="compact"
-                        />
-                      ) : (
-                        <EmptyState title="No tasks for selected specialist." />
-                      )
-                    ) : null}
+                  {tasksView === "all" ? (
+                    specialistTasksScoped.length ? (
+                      <Table
+                        className="custom-dashboard-table-wrap"
+                        columns={specialistTaskColumns}
+                        rows={specialistTasksScoped}
+                        rowKey={(row, index) => `${row.id}-${index}`}
+                        density="compact"
+                      />
+                    ) : (
+                      <EmptyState title="No tasks for selected specialist." />
+                    )
+                  ) : null}
 
-                    {tasksView === "overdue" ? (
-                      specialistOverdueTasks.length ? (
-                        <Table
-                          className="custom-dashboard-table-wrap"
-                          columns={specialistTaskColumns}
-                          rows={specialistOverdueTasks}
-                          rowKey={(row, index) => `${row.id}-${index}`}
-                          density="compact"
-                        />
-                      ) : (
-                        <EmptyState title="No overdue tasks for selected specialist." />
-                      )
-                    ) : null}
+                  {tasksView === "overdue" ? (
+                    specialistOverdueTasks.length ? (
+                      <Table
+                        className="custom-dashboard-table-wrap"
+                        columns={specialistTaskColumns}
+                        rows={specialistOverdueTasks}
+                        rowKey={(row, index) => `${row.id}-${index}`}
+                        density="compact"
+                      />
+                    ) : (
+                      <EmptyState title="No overdue tasks for selected specialist." />
+                    )
+                  ) : null}
 
-                    {tasksView === "dueToday" ? (
-                      specialistDueTodayTasks.length ? (
-                        <Table
-                          className="custom-dashboard-table-wrap"
-                          columns={specialistTaskColumns}
-                          rows={specialistDueTodayTasks}
-                          rowKey={(row, index) => `${row.id}-${index}`}
-                          density="compact"
-                        />
-                      ) : (
-                        <EmptyState title="No tasks due today for selected specialist." />
-                      )
-                    ) : null}
-                  </>
-                )}
-              </Panel>
+                  {tasksView === "dueToday" ? (
+                    specialistDueTodayTasks.length ? (
+                      <Table
+                        className="custom-dashboard-table-wrap"
+                        columns={specialistTaskColumns}
+                        rows={specialistDueTodayTasks}
+                        rowKey={(row, index) => `${row.id}-${index}`}
+                        density="compact"
+                      />
+                    ) : (
+                      <EmptyState title="No tasks due today for selected specialist." />
+                    )
+                  ) : null}
+                </Panel>
+              ) : null}
 
               <Panel title="Sales Report" className="custom-dashboard-widget-panel">
                 {!dashboard.salesReport.enabled ? (
