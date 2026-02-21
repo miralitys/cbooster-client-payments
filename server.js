@@ -26043,6 +26043,51 @@ function pickBestGhlContractDownloadCandidate(candidates, context = {}, options 
   };
 }
 
+function rankGhlContractDownloadCandidates(candidates, context = {}, options = {}) {
+  const normalizedCandidates = dedupeGhlContractCandidates(candidates);
+  if (!normalizedCandidates.length) {
+    return [];
+  }
+  const requireUrl = Boolean(options?.requireUrl);
+  const ranked = [];
+
+  for (const candidate of normalizedCandidates) {
+    const normalizedUrl = extractGhlUrlsFromText(candidate?.url)[0] || "";
+    const normalizedCandidateId = extractLikelyGhlEntityId(candidate?.candidateId);
+    if (requireUrl && !normalizedUrl) {
+      continue;
+    }
+
+    const enrichedCandidate = {
+      ...candidate,
+      url: normalizedUrl,
+      candidateId: normalizedCandidateId,
+    };
+    if (!isGhlContractDownloadCandidate(enrichedCandidate, context)) {
+      continue;
+    }
+
+    ranked.push({
+      ...enrichedCandidate,
+      score: computeGhlContractDownloadCandidateScore(enrichedCandidate, context),
+    });
+  }
+
+  ranked.sort((left, right) => {
+    const scoreDiff = Number(right?.score || 0) - Number(left?.score || 0);
+    if (scoreDiff !== 0) {
+      return scoreDiff;
+    }
+    const urlDiff = Number(Boolean(right?.url)) - Number(Boolean(left?.url));
+    if (urlDiff !== 0) {
+      return urlDiff;
+    }
+    return (left?.title || "").localeCompare(right?.title || "", "en", { sensitivity: "base" });
+  });
+
+  return ranked;
+}
+
 async function probeGhlContractDownloadUrlByCandidateId(candidateId, context = {}, debugTrace = null) {
   const normalizedCandidateId = extractLikelyGhlEntityId(candidateId);
   if (!normalizedCandidateId) {
@@ -27012,6 +27057,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
             selectedMethod: "",
             selectedCandidate: null,
             resolveById: null,
+            resolveByIdBatch: null,
           }
         : null;
       if (diagnostics) {
@@ -27116,15 +27162,23 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         });
       }
       if (!contactBestCandidate) {
-        const contactResolvableCandidate = pickBestGhlContractDownloadCandidate(candidates, {
+        const rankedResolvableCandidates = rankGhlContractDownloadCandidates(candidates, {
           contactName,
           contactId,
           clientName: normalizedClientName,
         });
-        if (contactResolvableCandidate) {
+        const seenResolvableIds = new Set();
+        const resolveTraces = [];
+        for (const rankedCandidate of rankedResolvableCandidates) {
+          const rankedCandidateId = extractLikelyGhlEntityId(rankedCandidate?.candidateId);
+          if (!rankedCandidateId || seenResolvableIds.has(rankedCandidateId)) {
+            continue;
+          }
+          seenResolvableIds.add(rankedCandidateId);
+
           const resolveTrace = contactDiagnostics ? {} : null;
-          contactBestCandidate = await resolveGhlContractDownloadCandidateViaId(
-            contactResolvableCandidate,
+          const resolvedCandidate = await resolveGhlContractDownloadCandidateViaId(
+            rankedCandidate,
             {
               contactName,
               contactId,
@@ -27133,15 +27187,35 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
             resolveTrace,
           );
           if (contactDiagnostics) {
-            contactDiagnostics.resolveById = resolveTrace;
-            if (contactBestCandidate?.url) {
-              contactDiagnostics.selectedMethod = "resolved_by_id";
-              contactDiagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(contactBestCandidate, {
-                contactName,
-                contactId,
-                clientName: normalizedClientName,
-              });
+            resolveTraces.push({
+              candidateId: rankedCandidateId,
+              score: Number.isFinite(rankedCandidate?.score) ? rankedCandidate.score : 0,
+              trace: resolveTrace,
+            });
+          }
+
+          if (resolvedCandidate?.url) {
+            contactBestCandidate = resolvedCandidate;
+            if (contactDiagnostics) {
+              contactDiagnostics.resolveById = resolveTrace;
             }
+            break;
+          }
+
+          if (seenResolvableIds.size >= 12) {
+            break;
+          }
+        }
+
+        if (contactDiagnostics) {
+          contactDiagnostics.resolveByIdBatch = resolveTraces;
+          if (contactBestCandidate?.url) {
+            contactDiagnostics.selectedMethod = "resolved_by_id";
+            contactDiagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(contactBestCandidate, {
+              contactName,
+              contactId,
+              clientName: normalizedClientName,
+            });
           }
         }
       }
@@ -27188,6 +27262,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
             selectedMethod: "",
             selectedCandidate: null,
             resolveById: null,
+            resolveByIdBatch: null,
             trace: byNameTrace,
           }
         : null;
@@ -27211,15 +27286,23 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         });
       }
       if (!byNameBestCandidate) {
-        const byNameResolvableCandidate = pickBestGhlContractDownloadCandidate(byNameCandidates, {
+        const rankedByNameResolvableCandidates = rankGhlContractDownloadCandidates(byNameCandidates, {
           contactName: normalizedClientName,
           contactId: "",
           clientName: normalizedClientName,
         });
-        if (byNameResolvableCandidate) {
+        const seenByNameIds = new Set();
+        const byNameResolveTraces = [];
+        for (const rankedCandidate of rankedByNameResolvableCandidates) {
+          const rankedCandidateId = extractLikelyGhlEntityId(rankedCandidate?.candidateId);
+          if (!rankedCandidateId || seenByNameIds.has(rankedCandidateId)) {
+            continue;
+          }
+          seenByNameIds.add(rankedCandidateId);
+
           const resolveTrace = byNameDiagnostics ? {} : null;
-          byNameBestCandidate = await resolveGhlContractDownloadCandidateViaId(
-            byNameResolvableCandidate,
+          const resolvedCandidate = await resolveGhlContractDownloadCandidateViaId(
+            rankedCandidate,
             {
               contactName: normalizedClientName,
               contactId: "",
@@ -27228,15 +27311,35 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
             resolveTrace,
           );
           if (byNameDiagnostics) {
-            byNameDiagnostics.resolveById = resolveTrace;
-            if (byNameBestCandidate?.url) {
-              byNameDiagnostics.selectedMethod = "resolved_by_id";
-              byNameDiagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(byNameBestCandidate, {
-                contactName: normalizedClientName,
-                contactId: "",
-                clientName: normalizedClientName,
-              });
+            byNameResolveTraces.push({
+              candidateId: rankedCandidateId,
+              score: Number.isFinite(rankedCandidate?.score) ? rankedCandidate.score : 0,
+              trace: resolveTrace,
+            });
+          }
+
+          if (resolvedCandidate?.url) {
+            byNameBestCandidate = resolvedCandidate;
+            if (byNameDiagnostics) {
+              byNameDiagnostics.resolveById = resolveTrace;
             }
+            break;
+          }
+
+          if (seenByNameIds.size >= 12) {
+            break;
+          }
+        }
+
+        if (byNameDiagnostics) {
+          byNameDiagnostics.resolveByIdBatch = byNameResolveTraces;
+          if (byNameBestCandidate?.url) {
+            byNameDiagnostics.selectedMethod = "resolved_by_id";
+            byNameDiagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(byNameBestCandidate, {
+              contactName: normalizedClientName,
+              contactId: "",
+              clientName: normalizedClientName,
+            });
           }
         }
       }
@@ -27582,7 +27685,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-6",
+      matcherVersion: "ghl-contract-download-v2026-02-21-7",
       debugMode,
     });
   } catch (error) {
