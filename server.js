@@ -1,6 +1,7 @@
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
 const bcrypt = require("bcryptjs");
 const fs = require("fs");
 const express = require("express");
@@ -710,41 +711,109 @@ const MINI_RETENTION_SWEEP_BATCH_LIMIT = Math.min(
   Math.max(parsePositiveInteger(process.env.MINI_RETENTION_SWEEP_BATCH_LIMIT, 250), 1),
   5000,
 );
-const MINI_BLOCKED_FILE_EXTENSIONS = new Set([
-  ".html",
-  ".htm",
-  ".xhtml",
-  ".shtml",
-  ".js",
-  ".mjs",
-  ".cjs",
-  ".jsx",
-  ".ts",
-  ".tsx",
-  ".sh",
-  ".bash",
-  ".zsh",
-  ".bat",
-  ".cmd",
-  ".ps1",
-  ".psm1",
-  ".py",
-  ".rb",
-  ".php",
-  ".pl",
-  ".cgi",
+const MINI_ATTACHMENT_ALLOWED_FORMATS_HELP_TEXT =
+  "Allowed formats: images, PDF, DOC/DOCX, XLS/XLSX, PPT/PPTX, TXT, CSV, RTF.";
+const MINI_ATTACHMENT_MAGIC_SNIFF_BYTES = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_ATTACHMENT_MAGIC_SNIFF_BYTES, 512), 64),
+  4096,
+);
+const MINI_ATTACHMENT_ALLOWLIST_DEFINITIONS = Object.freeze([
+  { extension: ".pdf", mimeTypes: ["application/pdf"], magicTypes: ["pdf"] },
+  { extension: ".png", mimeTypes: ["image/png"], magicTypes: ["png"] },
+  { extension: ".jpg", mimeTypes: ["image/jpeg"], magicTypes: ["jpeg"] },
+  { extension: ".jpeg", mimeTypes: ["image/jpeg"], magicTypes: ["jpeg"] },
+  { extension: ".gif", mimeTypes: ["image/gif"], magicTypes: ["gif"] },
+  { extension: ".webp", mimeTypes: ["image/webp"], magicTypes: ["webp"] },
+  { extension: ".bmp", mimeTypes: ["image/bmp"], magicTypes: ["bmp"] },
+  { extension: ".tif", mimeTypes: ["image/tiff"], magicTypes: ["tiff"] },
+  { extension: ".tiff", mimeTypes: ["image/tiff"], magicTypes: ["tiff"] },
+  {
+    extension: ".heic",
+    mimeTypes: ["image/heic", "image/heif", "application/octet-stream"],
+    magicTypes: ["heic"],
+  },
+  {
+    extension: ".heif",
+    mimeTypes: ["image/heif", "image/heic", "application/octet-stream"],
+    magicTypes: ["heic"],
+  },
+  {
+    extension: ".avif",
+    mimeTypes: ["image/avif", "application/octet-stream"],
+    magicTypes: ["avif"],
+  },
+  { extension: ".txt", mimeTypes: ["text/plain", "application/octet-stream"], magicTypes: ["text"] },
+  {
+    extension: ".csv",
+    mimeTypes: ["text/csv", "application/csv", "text/plain", "application/vnd.ms-excel", "application/octet-stream"],
+    magicTypes: ["text"],
+  },
+  {
+    extension: ".rtf",
+    mimeTypes: ["application/rtf", "text/rtf", "text/plain", "application/octet-stream"],
+    magicTypes: ["rtf", "text"],
+  },
+  {
+    extension: ".doc",
+    mimeTypes: ["application/msword", "application/octet-stream"],
+    magicTypes: ["ole"],
+  },
+  {
+    extension: ".docx",
+    mimeTypes: [
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/zip",
+      "application/octet-stream",
+    ],
+    magicTypes: ["zip"],
+  },
+  {
+    extension: ".xls",
+    mimeTypes: ["application/vnd.ms-excel", "application/octet-stream"],
+    magicTypes: ["ole"],
+  },
+  {
+    extension: ".xlsx",
+    mimeTypes: [
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/zip",
+      "application/octet-stream",
+    ],
+    magicTypes: ["zip"],
+  },
+  {
+    extension: ".ppt",
+    mimeTypes: ["application/vnd.ms-powerpoint", "application/octet-stream"],
+    magicTypes: ["ole"],
+  },
+  {
+    extension: ".pptx",
+    mimeTypes: [
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "application/zip",
+      "application/octet-stream",
+    ],
+    magicTypes: ["zip"],
+  },
 ]);
-const MINI_BLOCKED_MIME_TYPES = new Set([
-  "text/html",
-  "application/xhtml+xml",
-  "application/javascript",
-  "text/javascript",
-  "application/ecmascript",
-  "text/ecmascript",
-  "application/x-javascript",
-  "application/x-httpd-php",
-]);
-const MINI_BLOCKED_MIME_PATTERNS = [/javascript/i, /ecmascript/i, /x-sh/i, /shellscript/i, /python/i, /xhtml/i];
+const MINI_ATTACHMENT_ALLOWLIST_BY_EXTENSION = new Map(
+  MINI_ATTACHMENT_ALLOWLIST_DEFINITIONS.map((entry) => [
+    entry.extension,
+    {
+      mimeTypes: new Set(entry.mimeTypes.map((value) => sanitizeTextValue(value, 120).toLowerCase())),
+      magicTypes: new Set(entry.magicTypes.map((value) => sanitizeTextValue(value, 40).toLowerCase())),
+    },
+  ]),
+);
+const MINI_ATTACHMENT_AV_SCAN_ENABLED = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_ENABLED) === true;
+const MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN) === true;
+const MINI_ATTACHMENT_AV_SCAN_BIN = sanitizeTextValue(process.env.MINI_ATTACHMENT_AV_SCAN_BIN, 260);
+const MINI_ATTACHMENT_AV_SCAN_ARGS = parseCommaSeparatedStringList(process.env.MINI_ATTACHMENT_AV_SCAN_ARGS, 24, 240);
+const MINI_ATTACHMENT_AV_SCAN_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_ATTACHMENT_AV_SCAN_TIMEOUT_MS, 15000), 1000),
+  5 * 60 * 1000,
+);
+const MINI_ATTACHMENT_AV_SCAN_OUTPUT_PREVIEW_MAX_CHARS = 1200;
 if (ATTACHMENTS_STREAMING_REQUESTED && !ATTACHMENTS_STREAMING_ENABLED) {
   console.warn(
     "[attachments] ATTACHMENTS_STREAMING is enabled, but storage is not fully configured. Falling back to BYTEA storage.",
@@ -1318,6 +1387,19 @@ function parseTelegramAllowedUserIds(rawValue) {
       .map((value) => value.trim())
       .filter(Boolean),
   );
+}
+
+function parseCommaSeparatedStringList(rawValue, maxItems = 30, maxItemLength = 260) {
+  const value = sanitizeTextValue(rawValue, 20000);
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((item) => sanitizeTextValue(item, maxItemLength))
+    .filter(Boolean)
+    .slice(0, maxItems);
 }
 
 function parseTelegramNotificationFieldAllowlist(rawValue, knownFields) {
@@ -2953,30 +3035,361 @@ function sanitizeAttachmentFileName(rawFileName) {
 }
 
 function normalizeAttachmentMimeType(rawMimeType) {
-  const normalized = sanitizeTextValue(rawMimeType, 120).toLowerCase();
-  return normalized || "application/octet-stream";
+  const normalized = sanitizeTextValue(rawMimeType, 180).toLowerCase();
+  if (!normalized) {
+    return "application/octet-stream";
+  }
+  const mimeWithoutParameters = normalized.split(";")[0]?.trim();
+  if (!mimeWithoutParameters) {
+    return "application/octet-stream";
+  }
+  const safeMime = sanitizeTextValue(mimeWithoutParameters, 120).toLowerCase();
+  if (!safeMime) {
+    return "application/octet-stream";
+  }
+  return safeMime;
 }
 
-function getMiniAttachmentBlockReason(fileName, mimeType) {
-  const extension = path.extname(fileName).toLowerCase();
-  if (MINI_BLOCKED_FILE_EXTENSIONS.has(extension)) {
-    return `File "${fileName}" is not allowed. Script and HTML files are blocked.`;
+function startsWithBytes(buffer, signature) {
+  if (!Buffer.isBuffer(buffer) || !Array.isArray(signature) || buffer.length < signature.length) {
+    return false;
   }
 
-  if (MINI_BLOCKED_MIME_TYPES.has(mimeType)) {
-    return `File "${fileName}" is not allowed. Script and HTML files are blocked.`;
-  }
-
-  for (const pattern of MINI_BLOCKED_MIME_PATTERNS) {
-    if (pattern.test(mimeType)) {
-      return `File "${fileName}" is not allowed. Script and HTML files are blocked.`;
+  for (let index = 0; index < signature.length; index += 1) {
+    if (buffer[index] !== signature[index]) {
+      return false;
     }
+  }
+
+  return true;
+}
+
+function isLikelyTextAttachmentContent(headerBuffer) {
+  if (!Buffer.isBuffer(headerBuffer) || !headerBuffer.length) {
+    return false;
+  }
+
+  let controlChars = 0;
+  for (const byte of headerBuffer) {
+    if (byte === 0) {
+      return false;
+    }
+
+    const isAllowedWhitespace = byte === 9 || byte === 10 || byte === 13;
+    const isAsciiPrintable = byte >= 32 && byte <= 126;
+    const isUtf8Byte = byte >= 128;
+    if (isAllowedWhitespace || isAsciiPrintable || isUtf8Byte) {
+      continue;
+    }
+
+    controlChars += 1;
+  }
+
+  return controlChars / headerBuffer.length <= 0.02;
+}
+
+function detectMiniAttachmentMagicType(headerBuffer) {
+  if (!Buffer.isBuffer(headerBuffer) || !headerBuffer.length) {
+    return "unknown";
+  }
+
+  if (startsWithBytes(headerBuffer, [0x25, 0x50, 0x44, 0x46, 0x2d])) {
+    return "pdf";
+  }
+  if (startsWithBytes(headerBuffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return "png";
+  }
+  if (startsWithBytes(headerBuffer, [0xff, 0xd8, 0xff])) {
+    return "jpeg";
+  }
+  if (headerBuffer.length >= 6) {
+    const gifHeader = headerBuffer.subarray(0, 6).toString("ascii");
+    if (gifHeader === "GIF87a" || gifHeader === "GIF89a") {
+      return "gif";
+    }
+  }
+  if (
+    headerBuffer.length >= 12 &&
+    headerBuffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    headerBuffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "webp";
+  }
+  if (startsWithBytes(headerBuffer, [0x42, 0x4d])) {
+    return "bmp";
+  }
+  if (
+    startsWithBytes(headerBuffer, [0x49, 0x49, 0x2a, 0x00]) ||
+    startsWithBytes(headerBuffer, [0x4d, 0x4d, 0x00, 0x2a])
+  ) {
+    return "tiff";
+  }
+  if (
+    headerBuffer.length >= 12 &&
+    headerBuffer.subarray(4, 8).toString("ascii").toLowerCase() === "ftyp"
+  ) {
+    const brand = headerBuffer.subarray(8, 12).toString("ascii").toLowerCase();
+    if (["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"].includes(brand)) {
+      return "heic";
+    }
+    if (["avif", "avis"].includes(brand)) {
+      return "avif";
+    }
+  }
+  if (
+    startsWithBytes(headerBuffer, [0x50, 0x4b, 0x03, 0x04]) ||
+    startsWithBytes(headerBuffer, [0x50, 0x4b, 0x05, 0x06]) ||
+    startsWithBytes(headerBuffer, [0x50, 0x4b, 0x07, 0x08])
+  ) {
+    return "zip";
+  }
+  if (startsWithBytes(headerBuffer, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) {
+    return "ole";
+  }
+  if (headerBuffer.length >= 5 && headerBuffer.subarray(0, 5).toString("ascii").toLowerCase() === "{\\rtf") {
+    return "rtf";
+  }
+  if (isLikelyTextAttachmentContent(headerBuffer)) {
+    return "text";
+  }
+
+  return "unknown";
+}
+
+async function readMiniAttachmentHeaderBuffer(file, maxBytes = MINI_ATTACHMENT_MAGIC_SNIFF_BYTES) {
+  const normalizedMaxBytes = Math.min(Math.max(Number.parseInt(maxBytes, 10) || 0, 1), 64 * 1024);
+  const buffer = Buffer.isBuffer(file?.buffer) ? file.buffer : null;
+  if (buffer?.length) {
+    return buffer.subarray(0, Math.min(normalizedMaxBytes, buffer.length));
+  }
+
+  const tempPath = sanitizeUploadedTempPath(file?.path);
+  if (!tempPath) {
+    return Buffer.from([]);
+  }
+
+  let handle = null;
+  try {
+    handle = await fs.promises.open(tempPath, "r");
+    const chunk = Buffer.alloc(normalizedMaxBytes);
+    const readResult = await handle.read(chunk, 0, normalizedMaxBytes, 0);
+    const bytesRead = Number.isFinite(readResult?.bytesRead) ? readResult.bytesRead : 0;
+    return bytesRead > 0 ? chunk.subarray(0, bytesRead) : Buffer.from([]);
+  } catch {
+    return Buffer.from([]);
+  } finally {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch {
+        // Best-effort close.
+      }
+    }
+  }
+}
+
+function getMiniAttachmentAllowlistPolicy(fileName) {
+  const extension = path.extname(fileName).toLowerCase();
+  const policy = MINI_ATTACHMENT_ALLOWLIST_BY_EXTENSION.get(extension);
+  return {
+    extension,
+    policy,
+  };
+}
+
+function getMiniAttachmentBlockReason(fileName, mimeType, magicType) {
+  const { extension, policy } = getMiniAttachmentAllowlistPolicy(fileName);
+  if (!policy) {
+    return `File "${fileName}" is not allowed. ${MINI_ATTACHMENT_ALLOWED_FORMATS_HELP_TEXT}`;
+  }
+
+  if (!policy.mimeTypes.has(mimeType)) {
+    return `File "${fileName}" is not allowed. MIME type does not match "${extension}" files.`;
+  }
+
+  if (!policy.magicTypes.has(magicType)) {
+    return `File "${fileName}" is not allowed. File content does not match "${extension}" format.`;
   }
 
   return "";
 }
 
-function buildMiniSubmissionAttachments(rawFiles) {
+async function runMiniAttachmentAvScanCommand(scanPath) {
+  if (!scanPath || !MINI_ATTACHMENT_AV_SCAN_BIN) {
+    return {
+      ok: false,
+      code: "mini_attachment_av_scan_not_configured",
+    };
+  }
+
+  return await new Promise((resolve) => {
+    const args = [...MINI_ATTACHMENT_AV_SCAN_ARGS, scanPath];
+    let finished = false;
+    let stdout = "";
+    let stderr = "";
+
+    function appendOutput(target, chunk) {
+      if (target.length >= MINI_ATTACHMENT_AV_SCAN_OUTPUT_PREVIEW_MAX_CHARS) {
+        return target;
+      }
+      const nextChunk = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
+      return `${target}${nextChunk}`.slice(0, MINI_ATTACHMENT_AV_SCAN_OUTPUT_PREVIEW_MAX_CHARS);
+    }
+
+    let child = null;
+    try {
+      child = spawn(MINI_ATTACHMENT_AV_SCAN_BIN, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (spawnError) {
+      resolve({
+        ok: false,
+        code: "mini_attachment_av_scan_spawn_failed",
+        details: sanitizeTextValue(spawnError?.message, 260),
+      });
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Best-effort kill.
+      }
+      resolve({
+        ok: false,
+        code: "mini_attachment_av_scan_timeout",
+      });
+    }, MINI_ATTACHMENT_AV_SCAN_TIMEOUT_MS);
+
+    child.stdout?.on("data", (chunk) => {
+      stdout = appendOutput(stdout, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = appendOutput(stderr, chunk);
+    });
+    child.on("error", (error) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(timeoutId);
+      resolve({
+        ok: false,
+        code: "mini_attachment_av_scan_runtime_error",
+        details: sanitizeTextValue(error?.message, 260),
+      });
+    });
+    child.on("close", (exitCode, signal) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(timeoutId);
+      resolve({
+        ok: exitCode === 0,
+        code: exitCode === 0 ? "ok" : "mini_attachment_av_scan_failed",
+        exitCode: Number.isFinite(exitCode) ? exitCode : null,
+        signal: sanitizeTextValue(signal, 40),
+        output: sanitizeTextValue(`${stdout}\n${stderr}`.trim(), MINI_ATTACHMENT_AV_SCAN_OUTPUT_PREVIEW_MAX_CHARS),
+      });
+    });
+  });
+}
+
+async function runMiniAttachmentAvScan(fileName, attachment) {
+  if (!MINI_ATTACHMENT_AV_SCAN_ENABLED) {
+    return {
+      ok: true,
+    };
+  }
+
+  if (!MINI_ATTACHMENT_AV_SCAN_BIN) {
+    if (MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN) {
+      console.error("[mini attachments] AV scan is enabled but MINI_ATTACHMENT_AV_SCAN_BIN is missing; fail-open is active.");
+      return {
+        ok: true,
+      };
+    }
+    return {
+      ok: false,
+      status: 503,
+      error: "Attachment security scan is unavailable. Please try again later.",
+    };
+  }
+
+  let scanPath = sanitizeUploadedTempPath(attachment?.tempPath);
+  let shouldDeleteScanPath = false;
+  if (!scanPath) {
+    const contentBuffer = Buffer.isBuffer(attachment?.content) ? attachment.content : Buffer.from([]);
+    if (!contentBuffer.length) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Failed to read "${fileName}". Please try uploading the file again.`,
+      };
+    }
+
+    const scanDir = path.resolve(path.join(os.tmpdir(), "cbooster-mini-av-scan"));
+    await fs.promises.mkdir(scanDir, { recursive: true });
+    scanPath = path.join(scanDir, `scan-${generateId()}`);
+    await fs.promises.writeFile(scanPath, contentBuffer);
+    shouldDeleteScanPath = true;
+  }
+
+  try {
+    const scanResult = await runMiniAttachmentAvScanCommand(scanPath);
+    if (scanResult.ok) {
+      return {
+        ok: true,
+      };
+    }
+
+    if (MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN) {
+      console.error("[mini attachments] AV scan failed in fail-open mode:", {
+        fileName,
+        code: scanResult.code,
+        exitCode: scanResult.exitCode,
+        signal: scanResult.signal,
+        details: scanResult.details,
+        output: scanResult.output,
+      });
+      return {
+        ok: true,
+      };
+    }
+
+    const unavailableCodes = new Set([
+      "mini_attachment_av_scan_not_configured",
+      "mini_attachment_av_scan_spawn_failed",
+      "mini_attachment_av_scan_runtime_error",
+      "mini_attachment_av_scan_timeout",
+    ]);
+    if (unavailableCodes.has(scanResult.code)) {
+      return {
+        ok: false,
+        status: 503,
+        error: "Attachment security scan is unavailable. Please try again later.",
+      };
+    }
+
+    return {
+      ok: false,
+      status: 400,
+      error: `File "${fileName}" failed security scan.`,
+    };
+  } finally {
+    if (shouldDeleteScanPath) {
+      await removeFileIfExists(scanPath);
+    }
+  }
+}
+
+async function buildMiniSubmissionAttachments(rawFiles) {
   const files = Array.isArray(rawFiles) ? rawFiles : [];
   if (!files.length) {
     return {
@@ -3013,7 +3426,7 @@ function buildMiniSubmissionAttachments(rawFiles) {
     }
     if (!normalizedSize && tempPath) {
       try {
-        const stats = fs.statSync(tempPath);
+        const stats = await fs.promises.stat(tempPath);
         normalizedSize = Number.isFinite(stats.size) && stats.size > 0 ? stats.size : 0;
       } catch {
         normalizedSize = 0;
@@ -3041,7 +3454,15 @@ function buildMiniSubmissionAttachments(rawFiles) {
       };
     }
 
-    const blockedReason = getMiniAttachmentBlockReason(fileName, mimeType);
+    const headerBuffer = await readMiniAttachmentHeaderBuffer(file);
+    if (!headerBuffer.length) {
+      return {
+        error: `Failed to read "${fileName}". Please try uploading the file again.`,
+        status: 400,
+      };
+    }
+    const magicType = detectMiniAttachmentMagicType(headerBuffer);
+    const blockedReason = getMiniAttachmentBlockReason(fileName, mimeType, magicType);
     if (blockedReason) {
       return {
         error: blockedReason,
@@ -3049,14 +3470,23 @@ function buildMiniSubmissionAttachments(rawFiles) {
       };
     }
 
-    attachments.push({
+    const attachment = {
       id: `file-${generateId()}`,
       fileName,
       mimeType,
       sizeBytes: normalizedSize,
       content: buffer?.length ? buffer : null,
       tempPath,
-    });
+    };
+    const avScanResult = await runMiniAttachmentAvScan(fileName, attachment);
+    if (!avScanResult.ok) {
+      return {
+        error: avScanResult.error || `File "${fileName}" failed security scan.`,
+        status: avScanResult.status || 400,
+      };
+    }
+
+    attachments.push(attachment);
   }
 
   return {
@@ -23644,7 +24074,7 @@ app.post("/api/mini/clients", async (req, res) => {
     return;
   }
 
-  const attachmentsResult = buildMiniSubmissionAttachments(req.files);
+  const attachmentsResult = await buildMiniSubmissionAttachments(req.files);
   if (attachmentsResult.error) {
     await cleanupTemporaryUploadFiles(req.files);
     res.status(attachmentsResult.status || 400).json({
@@ -24069,6 +24499,23 @@ function logServerStartupSummary(port) {
   }
   if (TELEGRAM_NOTIFY_THREAD_ID && !TELEGRAM_NOTIFY_CHAT_ID) {
     console.warn("TELEGRAM_NOTIFY_THREAD_ID is ignored because TELEGRAM_NOTIFY_CHAT_ID is not set.");
+  }
+  if (MINI_ATTACHMENT_AV_SCAN_ENABLED) {
+    if (!MINI_ATTACHMENT_AV_SCAN_BIN) {
+      if (MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN) {
+        console.warn(
+          "Mini attachment AV scan is enabled but MINI_ATTACHMENT_AV_SCAN_BIN is missing. Fail-open mode is active.",
+        );
+      } else {
+        console.warn(
+          "Mini attachment AV scan is enabled but MINI_ATTACHMENT_AV_SCAN_BIN is missing. Uploads may fail closed until scanner is configured.",
+        );
+      }
+    } else {
+      console.log(
+        `Mini attachment AV scan is enabled: bin=${MINI_ATTACHMENT_AV_SCAN_BIN}, timeout=${MINI_ATTACHMENT_AV_SCAN_TIMEOUT_MS}ms, fail_open=${MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN ? "on" : "off"}.`,
+      );
+    }
   }
   if (!MINI_REVIEW_PURGE_ENABLED) {
     console.warn("Reviewed Mini submissions are NOT purged (MINI_REVIEW_PURGE_ENABLED=false).");

@@ -286,6 +286,14 @@ function makeBytes(size, fillValue = 65) {
   return array;
 }
 
+function makePdfBytes(size = 64) {
+  const safeSize = Math.max(8, Number.parseInt(size, 10) || 8);
+  const bytes = makeBytes(safeSize, 32);
+  const header = Buffer.from("%PDF-1.7\n", "utf8");
+  bytes.set(header.subarray(0, Math.min(header.length, bytes.length)), 0);
+  return bytes;
+}
+
 function buildValidMiniClient(overrides = {}) {
   return {
     clientName: "Test Client",
@@ -1021,27 +1029,27 @@ test("POST /api/mini/clients enforces attachment security before DB write", asyn
             {
               fileName: "bulk-1.pdf",
               mimeType: "application/pdf",
-              bytes: makeBytes(nearMaxPerFile),
+              bytes: makePdfBytes(nearMaxPerFile),
             },
             {
               fileName: "bulk-2.pdf",
               mimeType: "application/pdf",
-              bytes: makeBytes(nearMaxPerFile),
+              bytes: makePdfBytes(nearMaxPerFile),
             },
             {
               fileName: "bulk-3.pdf",
               mimeType: "application/pdf",
-              bytes: makeBytes(nearMaxPerFile),
+              bytes: makePdfBytes(nearMaxPerFile),
             },
             {
               fileName: "bulk-4.pdf",
               mimeType: "application/pdf",
-              bytes: makeBytes(nearMaxPerFile),
+              bytes: makePdfBytes(nearMaxPerFile),
             },
             {
               fileName: "bulk-5.pdf",
               mimeType: "application/pdf",
-              bytes: makeBytes(5000),
+              bytes: makePdfBytes(5000),
             },
           ];
           await expectAttachmentError(attachments, 400, "40 MB");
@@ -1071,7 +1079,7 @@ test("POST /api/mini/clients enforces attachment security before DB write", asyn
               },
             ],
             400,
-            "not allowed",
+            "MIME type does not match",
           );
         });
 
@@ -1085,7 +1093,21 @@ test("POST /api/mini/clients enforces attachment security before DB write", asyn
               },
             ],
             400,
-            "not allowed",
+            "MIME type does not match",
+          );
+        });
+
+        await t.test("blocks extension/MIME spoofing with mismatched magic bytes", async () => {
+          await expectAttachmentError(
+            [
+              {
+                fileName: "invoice.pdf",
+                mimeType: "application/pdf",
+                bytes: makeBytes(256, 65),
+              },
+            ],
+            400,
+            "content does not match",
           );
         });
 
@@ -1112,7 +1134,7 @@ test("POST /api/mini/clients enforces attachment security before DB write", asyn
               {
                 fileName: "../unsafe<>name?.pdf",
                 mimeType: "application/pdf",
-                bytes: makeBytes(128),
+                bytes: makePdfBytes(128),
               },
             ],
           });
@@ -1215,6 +1237,45 @@ test("POST /api/mini/clients maps multer limit errors to safe 400 responses", as
           "You can upload up to 10 files.",
         );
       });
+    },
+  );
+});
+
+test("POST /api/mini/clients fails closed when AV scan is enabled but unavailable", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      MINI_ATTACHMENT_AV_SCAN_ENABLED: "true",
+      MINI_ATTACHMENT_AV_SCAN_BIN: "",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const initData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 706, username: "av_scan_user" },
+      });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+      const response = await postMiniClientsMultipart(baseUrl, {
+        initData,
+        uploadToken,
+        client: buildValidMiniClient({ clientName: "AV Scan Client" }),
+        attachments: [
+          {
+            fileName: "scan.pdf",
+            mimeType: "application/pdf",
+            bytes: makePdfBytes(256),
+          },
+        ],
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 503);
+      assert.equal(typeof body.error, "string");
+      assert.ok(body.error.includes("security scan is unavailable"));
     },
   );
 });
