@@ -1440,7 +1440,7 @@ function buildQuickBooksExpenseCategoryPayeeSuggestionMap(
   categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
 ): QuickBooksExpenseCategoryPayeeSuggestionMap {
   const normalizedFingerprintMap = normalizeQuickBooksExpenseCategoryFingerprintMap(categoryFingerprintMap);
-  const uniqueCategoryByPayee = new Map<string, string | null>();
+  const voteMapByPayee = new Map<string, Map<string, { category: string; count: number }>>();
 
   for (const [rawFingerprint, rawCategory] of Object.entries(normalizedFingerprintMap)) {
     const normalizedFingerprint = normalizeQuickBooksExpenseFingerprintValue(rawFingerprint);
@@ -1459,23 +1459,44 @@ function buildQuickBooksExpenseCategoryPayeeSuggestionMap(
       continue;
     }
 
-    const previousCategory = uniqueCategoryByPayee.get(payeeFingerprint);
-    if (previousCategory === undefined) {
-      uniqueCategoryByPayee.set(payeeFingerprint, normalizedCategory);
-      continue;
+    const categoryKey = normalizedCategory.toLocaleLowerCase("en-US");
+    const payeeVotes = voteMapByPayee.get(payeeFingerprint) || new Map<string, { category: string; count: number }>();
+    const previousVote = payeeVotes.get(categoryKey);
+    if (previousVote) {
+      previousVote.count += 1;
+      payeeVotes.set(categoryKey, previousVote);
+    } else {
+      payeeVotes.set(categoryKey, {
+        category: normalizedCategory,
+        count: 1,
+      });
     }
-
-    if (previousCategory && previousCategory.toLocaleLowerCase("en-US") !== normalizedCategory.toLocaleLowerCase("en-US")) {
-      uniqueCategoryByPayee.set(payeeFingerprint, null);
-    }
+    voteMapByPayee.set(payeeFingerprint, payeeVotes);
   }
 
   const payeeSuggestionMap: QuickBooksExpenseCategoryPayeeSuggestionMap = {};
-  for (const [payeeFingerprint, category] of uniqueCategoryByPayee.entries()) {
-    if (!category) {
+  for (const [payeeFingerprint, payeeVotes] of voteMapByPayee.entries()) {
+    if (!payeeVotes.size) {
       continue;
     }
-    payeeSuggestionMap[payeeFingerprint] = category;
+
+    let bestVote: { category: string; count: number } | null = null;
+    let hasTie = false;
+    for (const vote of payeeVotes.values()) {
+      if (!bestVote || vote.count > bestVote.count) {
+        bestVote = vote;
+        hasTie = false;
+        continue;
+      }
+      if (bestVote && vote.count === bestVote.count && vote.category.toLocaleLowerCase("en-US") !== bestVote.category.toLocaleLowerCase("en-US")) {
+        hasTie = true;
+      }
+    }
+
+    if (!bestVote || hasTie) {
+      continue;
+    }
+    payeeSuggestionMap[payeeFingerprint] = bestVote.category;
   }
   return payeeSuggestionMap;
 }
