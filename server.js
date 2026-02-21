@@ -11309,24 +11309,32 @@ async function fetchGhlContactById(contactId) {
   }
 
   const encodedContactId = encodeURIComponent(normalizedContactId);
-  const attempts = [
-    () =>
+  const queryVariants = [
+    {
+      locationId: GHL_LOCATION_ID,
+    },
+    {
+      location_id: GHL_LOCATION_ID,
+    },
+    {},
+  ];
+  const attempts = [];
+  for (const query of queryVariants) {
+    attempts.push(() =>
       requestGhlApi(`/contacts/${encodedContactId}`, {
         method: "GET",
-        query: {
-          locationId: GHL_LOCATION_ID,
-        },
+        query,
         tolerateNotFound: true,
       }),
-    () =>
+    );
+    attempts.push(() =>
       requestGhlApi(`/contacts/${encodedContactId}/`, {
         method: "GET",
-        query: {
-          locationId: GHL_LOCATION_ID,
-        },
+        query,
         tolerateNotFound: true,
       }),
-  ];
+    );
+  }
 
   for (const attempt of attempts) {
     let response;
@@ -12619,6 +12627,93 @@ function shouldResolveGhlLeadAssignedName(rawValue) {
   return looksLikeGhlIdentifier(value);
 }
 
+function extractTextFromGhlFieldCandidate(candidate, maxLength, preferredKeys = []) {
+  if (candidate === null || candidate === undefined) {
+    return "";
+  }
+
+  if (typeof candidate === "string" || typeof candidate === "number") {
+    return sanitizeTextValue(candidate, maxLength);
+  }
+
+  if (Array.isArray(candidate)) {
+    for (const item of candidate) {
+      const value = extractTextFromGhlFieldCandidate(item, maxLength, preferredKeys);
+      if (value) {
+        return value;
+      }
+    }
+    return "";
+  }
+
+  if (typeof candidate !== "object") {
+    return "";
+  }
+
+  const lookupKeys = [
+    ...preferredKeys,
+    "value",
+    "number",
+    "phone",
+    "phoneNumber",
+    "phone_number",
+    "mobile",
+    "email",
+    "emailAddress",
+    "email_address",
+    "address",
+    "name",
+  ];
+
+  for (const key of lookupKeys) {
+    const value = extractTextFromGhlFieldCandidate(candidate?.[key], maxLength, preferredKeys);
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function isLikelyPhoneNumber(rawValue) {
+  const value = sanitizeTextValue(rawValue, 120);
+  if (!value) {
+    return false;
+  }
+
+  const digits = value.replace(/\D/g, "");
+  return digits.length >= 7;
+}
+
+function extractPhoneNumberFromText(rawValue) {
+  const value = sanitizeTextValue(rawValue, 500);
+  if (!value) {
+    return "";
+  }
+
+  const match = value.match(/(\+?\d[\d()\s-]{6,}\d)/);
+  if (!match || !match[1]) {
+    return "";
+  }
+
+  const candidate = sanitizeTextValue(match[1], 80);
+  return isLikelyPhoneNumber(candidate) ? candidate : "";
+}
+
+function extractEmailFromText(rawValue) {
+  const value = sanitizeTextValue(rawValue, 500);
+  if (!value) {
+    return "";
+  }
+
+  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if (!match || !match[0]) {
+    return "";
+  }
+
+  return sanitizeTextValue(match[0], 320).toLowerCase();
+}
+
 function resolveGhlLeadPhone(opportunity) {
   const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
   const candidates = [
@@ -12628,16 +12723,48 @@ function resolveGhlLeadPhone(opportunity) {
     opportunity?.contactPhone,
     opportunity?.contact_phone,
     opportunity?.mobile,
+    opportunity?.phones,
+    opportunity?.phoneNumbers,
+    opportunity?.phone_numbers,
+    opportunity?.additionalPhones,
+    opportunity?.additional_phones,
     nestedContact?.phone,
     nestedContact?.phoneNumber,
     nestedContact?.phone_number,
     nestedContact?.mobile,
     nestedContact?.contactPhone,
     nestedContact?.contact_phone,
+    nestedContact?.phones,
+    nestedContact?.phoneNumbers,
+    nestedContact?.phone_numbers,
+    nestedContact?.additionalPhones,
+    nestedContact?.additional_phones,
   ];
 
   for (const candidate of candidates) {
-    const value = sanitizeTextValue(candidate, 80);
+    const value = extractTextFromGhlFieldCandidate(candidate, 80, [
+      "phone",
+      "phoneNumber",
+      "phone_number",
+      "number",
+      "mobile",
+      "value",
+    ]);
+    if (isLikelyPhoneNumber(value)) {
+      return value;
+    }
+  }
+
+  const textCandidates = [
+    opportunity?.opportunityName,
+    opportunity?.title,
+    opportunity?.name,
+    opportunity?.contactName,
+    nestedContact?.name,
+    nestedContact?.fullName,
+  ];
+  for (const candidate of textCandidates) {
+    const value = extractPhoneNumberFromText(candidate);
     if (value) {
       return value;
     }
@@ -12654,15 +12781,42 @@ function resolveGhlLeadEmail(opportunity) {
     opportunity?.email_address,
     opportunity?.contactEmail,
     opportunity?.contact_email,
+    opportunity?.emails,
+    opportunity?.emailAddresses,
+    opportunity?.email_addresses,
     nestedContact?.email,
     nestedContact?.emailAddress,
     nestedContact?.email_address,
     nestedContact?.contactEmail,
     nestedContact?.contact_email,
+    nestedContact?.emails,
+    nestedContact?.emailAddresses,
+    nestedContact?.email_addresses,
   ];
 
   for (const candidate of candidates) {
-    const value = sanitizeTextValue(candidate, 320);
+    const value = extractTextFromGhlFieldCandidate(candidate, 320, [
+      "email",
+      "emailAddress",
+      "email_address",
+      "address",
+      "value",
+    ]);
+    if (value.includes("@")) {
+      return value.toLowerCase();
+    }
+  }
+
+  const textCandidates = [
+    opportunity?.opportunityName,
+    opportunity?.title,
+    opportunity?.name,
+    opportunity?.contactName,
+    nestedContact?.name,
+    nestedContact?.fullName,
+  ];
+  for (const candidate of textCandidates) {
+    const value = extractEmailFromText(candidate);
     if (value) {
       return value;
     }
