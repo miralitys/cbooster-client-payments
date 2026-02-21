@@ -95,7 +95,26 @@ const WEB_AUTH_SESSION_COOKIE_NAME = "cbooster_auth_session";
 const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
 const WEB_AUTH_CSRF_HEADER_NAME = "x-csrf-token";
 const WEB_AUTH_MOBILE_SESSION_HEADER = "x-cbooster-session";
+const WEB_AUTH_MOBILE_DEVICE_HEADER = "x-cbooster-device-id";
+const WEB_AUTH_MOBILE_REQUEST_ID_HEADER = "x-cbooster-request-id";
+const WEB_AUTH_MOBILE_AUTHORIZATION_SCHEME = "bearer";
 const WEB_AUTH_SESSION_TTL_SEC = parsePositiveInteger(process.env.WEB_AUTH_SESSION_TTL_SEC, 12 * 60 * 60);
+const WEB_AUTH_MOBILE_SESSION_TTL_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_MOBILE_SESSION_TTL_SEC, 20 * 60), 60),
+  WEB_AUTH_SESSION_TTL_SEC,
+);
+const WEB_AUTH_MOBILE_REPLAY_TTL_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_MOBILE_REPLAY_TTL_SEC, 10 * 60), 30),
+  WEB_AUTH_MOBILE_SESSION_TTL_SEC,
+);
+const WEB_AUTH_MOBILE_SESSION_MAX_KEYS = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_MOBILE_SESSION_MAX_KEYS, 20000), 200),
+  200000,
+);
+const WEB_AUTH_MOBILE_REPLAY_MAX_KEYS = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_MOBILE_REPLAY_MAX_KEYS, 100000), 1000),
+  500000,
+);
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
 const WEB_AUTH_SESSION_SECRET_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_SESSION_SECRET);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW);
@@ -1343,6 +1362,8 @@ let rateLimitSweepCounter = 0;
 const rateLimitRequestBuckets = new Map();
 const loginFailureByAccountKey = new Map();
 const loginFailureByIpAccountKey = new Map();
+const webAuthMobileSessionById = new Map();
+const webAuthMobileReplayByKey = new Map();
 let miniUploadParseInFlight = 0;
 const miniUploadParseWaiters = [];
 let miniTelegramNotificationQueue = Promise.resolve();
@@ -3974,49 +3995,386 @@ function signWebAuthPayload(payload) {
   return crypto.createHmac("sha256", WEB_AUTH_SESSION_SECRET).update(payload).digest("hex");
 }
 
-function createWebAuthSessionToken(username) {
-  const expiresAt = Date.now() + WEB_AUTH_SESSION_TTL_SEC * 1000;
-  const payload = JSON.stringify({
-    u: sanitizeTextValue(username, 200),
-    e: expiresAt,
-  });
-  const encodedPayload = encodeBase64Url(payload);
+function createRandomUrlSafeToken(sizeBytes = 24) {
+  try {
+    return crypto.randomBytes(Math.max(12, Math.min(sizeBytes, 64))).toString("base64url");
+  } catch {
+    const fallback = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 18)}`;
+    return sanitizeTextValue(fallback, 140);
+  }
+}
+
+function buildWebAuthTokenFromPayload(payload) {
+  let serializedPayload = "";
+  try {
+    serializedPayload = JSON.stringify(payload || {});
+  } catch {
+    serializedPayload = "";
+  }
+  if (!serializedPayload) {
+    return "";
+  }
+
+  const encodedPayload = encodeBase64Url(serializedPayload);
   const signature = signWebAuthPayload(encodedPayload);
   return `${encodedPayload}.${signature}`;
 }
 
-function parseWebAuthSessionToken(rawToken) {
+function parseWebAuthToken(rawToken) {
   const token = sanitizeTextValue(rawToken, 1200);
   if (!token) {
-    return "";
+    return null;
   }
 
   const separatorIndex = token.lastIndexOf(".");
   if (separatorIndex <= 0) {
-    return "";
+    return null;
   }
 
   const encodedPayload = token.slice(0, separatorIndex);
   const receivedSignature = token.slice(separatorIndex + 1);
   const expectedSignature = signWebAuthPayload(encodedPayload);
   if (!safeEqual(receivedSignature, expectedSignature)) {
-    return "";
+    return null;
   }
 
   let parsedPayload = null;
   try {
     parsedPayload = JSON.parse(decodeBase64Url(encodedPayload));
   } catch {
-    return "";
+    return null;
   }
 
-  const username = sanitizeTextValue(parsedPayload?.u, 200);
+  const username = normalizeWebAuthUsername(parsedPayload?.u);
   const expiresAt = Number.parseInt(parsedPayload?.e, 10);
+  const issuedAt = Number.parseInt(parsedPayload?.i, 10);
+  const sessionId = sanitizeTextValue(parsedPayload?.s, 240);
+  const tokenType = sanitizeTextValue(parsedPayload?.t, 16).toLowerCase() || "w";
   if (!username || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return null;
+  }
+
+  return {
+    token,
+    username,
+    expiresAt,
+    issuedAt: Number.isFinite(issuedAt) && issuedAt > 0 ? issuedAt : 0,
+    sessionId,
+    tokenType,
+  };
+}
+
+function createWebAuthSessionToken(username) {
+  const expiresAt = Date.now() + WEB_AUTH_SESSION_TTL_SEC * 1000;
+  return buildWebAuthTokenFromPayload({
+    u: normalizeWebAuthUsername(username),
+    e: expiresAt,
+    t: "w",
+  });
+}
+
+function parseWebAuthSessionToken(rawToken) {
+  const parsedToken = parseWebAuthToken(rawToken);
+  if (!parsedToken || parsedToken.tokenType === "m") {
     return "";
   }
 
-  return username;
+  return parsedToken.username;
+}
+
+function normalizeWebAuthMobileDeviceId(rawValue) {
+  const value = sanitizeTextValue(rawValue, 240);
+  if (!value) {
+    return "";
+  }
+
+  const normalized = value.trim();
+  if (normalized.length < 16 || normalized.length > 200) {
+    return "";
+  }
+
+  if (!/^[A-Za-z0-9._:-]+$/.test(normalized)) {
+    return "";
+  }
+
+  return normalized;
+}
+
+function resolveWebAuthMobileDeviceIdFromRequest(req) {
+  return normalizeWebAuthMobileDeviceId(req?.headers?.[WEB_AUTH_MOBILE_DEVICE_HEADER]);
+}
+
+function resolveWebAuthMobileRequestIdFromRequest(req) {
+  const value = sanitizeTextValue(req?.headers?.[WEB_AUTH_MOBILE_REQUEST_ID_HEADER], 240);
+  if (!value) {
+    return "";
+  }
+  const normalized = value.trim();
+  if (normalized.length < 16 || normalized.length > 200) {
+    return "";
+  }
+  if (!/^[A-Za-z0-9._:-]+$/.test(normalized)) {
+    return "";
+  }
+  return normalized;
+}
+
+function hashWebAuthMobileDeviceId(deviceId) {
+  const normalized = normalizeWebAuthMobileDeviceId(deviceId);
+  if (!normalized) {
+    return "";
+  }
+  return crypto.createHash("sha256").update(normalized).digest("hex");
+}
+
+function sweepWebAuthMobileSessionState(nowMs = Date.now()) {
+  for (const [sessionId, entry] of webAuthMobileSessionById.entries()) {
+    if (
+      !entry ||
+      !Number.isFinite(entry.expiresAt) ||
+      entry.expiresAt <= nowMs ||
+      !entry.username ||
+      !entry.deviceIdHash
+    ) {
+      webAuthMobileSessionById.delete(sessionId);
+    }
+  }
+
+  while (webAuthMobileSessionById.size > WEB_AUTH_MOBILE_SESSION_MAX_KEYS) {
+    const oldestSessionId = webAuthMobileSessionById.keys().next().value;
+    if (!oldestSessionId) {
+      break;
+    }
+    webAuthMobileSessionById.delete(oldestSessionId);
+  }
+
+  for (const [replayKey, expiresAtMs] of webAuthMobileReplayByKey.entries()) {
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+      webAuthMobileReplayByKey.delete(replayKey);
+    }
+  }
+
+  while (webAuthMobileReplayByKey.size > WEB_AUTH_MOBILE_REPLAY_MAX_KEYS) {
+    const oldestReplayKey = webAuthMobileReplayByKey.keys().next().value;
+    if (!oldestReplayKey) {
+      break;
+    }
+    webAuthMobileReplayByKey.delete(oldestReplayKey);
+  }
+}
+
+function parseWebAuthMobileSessionToken(rawToken) {
+  const parsedToken = parseWebAuthToken(rawToken);
+  if (!parsedToken || parsedToken.tokenType !== "m" || !parsedToken.sessionId || !parsedToken.issuedAt) {
+    return null;
+  }
+  return parsedToken;
+}
+
+function createWebAuthMobileSessionToken(username, req) {
+  const normalizedUsername = normalizeWebAuthUsername(username);
+  const deviceId = resolveWebAuthMobileDeviceIdFromRequest(req);
+  const deviceIdHash = hashWebAuthMobileDeviceId(deviceId);
+  if (!normalizedUsername || !deviceIdHash) {
+    return "";
+  }
+
+  const nowMs = Date.now();
+  sweepWebAuthMobileSessionState(nowMs);
+  const sessionId = createRandomUrlSafeToken(24);
+  const expiresAt = nowMs + WEB_AUTH_MOBILE_SESSION_TTL_SEC * 1000;
+  const issuedAt = nowMs;
+  const token = buildWebAuthTokenFromPayload({
+    u: normalizedUsername,
+    e: expiresAt,
+    i: issuedAt,
+    s: sessionId,
+    t: "m",
+  });
+  if (!token) {
+    return "";
+  }
+
+  webAuthMobileSessionById.set(sessionId, {
+    username: normalizedUsername,
+    deviceIdHash,
+    issuedAt,
+    expiresAt,
+    createdAt: nowMs,
+    lastUsedAt: nowMs,
+  });
+  return token;
+}
+
+function revokeWebAuthMobileSessionByToken(rawToken) {
+  const parsedToken = parseWebAuthMobileSessionToken(rawToken);
+  if (!parsedToken?.sessionId) {
+    return false;
+  }
+  return webAuthMobileSessionById.delete(parsedToken.sessionId);
+}
+
+function revokeWebAuthMobileSessionsForUser(rawUsername) {
+  const normalizedUsername = normalizeWebAuthUsername(rawUsername);
+  if (!normalizedUsername) {
+    return;
+  }
+
+  for (const [sessionId, entry] of webAuthMobileSessionById.entries()) {
+    if (normalizeWebAuthUsername(entry?.username) === normalizedUsername) {
+      webAuthMobileSessionById.delete(sessionId);
+    }
+  }
+}
+
+function resolveMobileSessionTokenFromRequest(req) {
+  const authorizationHeader = sanitizeTextValue(req?.headers?.authorization, 1500);
+  if (
+    authorizationHeader &&
+    authorizationHeader.toLowerCase().startsWith(`${WEB_AUTH_MOBILE_AUTHORIZATION_SCHEME} `)
+  ) {
+    const bearerToken = sanitizeTextValue(
+      authorizationHeader.slice(WEB_AUTH_MOBILE_AUTHORIZATION_SCHEME.length + 1),
+      1200,
+    );
+    if (bearerToken) {
+      return bearerToken;
+    }
+  }
+
+  return sanitizeTextValue(req?.headers?.[WEB_AUTH_MOBILE_SESSION_HEADER], 1200);
+}
+
+function reserveWebAuthMobileReplayKey(sessionId, requestId, nowMs = Date.now()) {
+  const normalizedSessionId = sanitizeTextValue(sessionId, 260);
+  const normalizedRequestId = sanitizeTextValue(requestId, 220);
+  if (!normalizedSessionId || !normalizedRequestId) {
+    return {
+      ok: true,
+    };
+  }
+
+  sweepWebAuthMobileSessionState(nowMs);
+  const replayKey = `${normalizedSessionId}:${normalizedRequestId}`;
+  const existingExpiry = Number.parseInt(webAuthMobileReplayByKey.get(replayKey), 10);
+  if (Number.isFinite(existingExpiry) && existingExpiry > nowMs) {
+    return {
+      ok: false,
+      status: 409,
+      error: "Duplicate mobile request was blocked.",
+      code: "mobile_request_replay",
+    };
+  }
+
+  const expiresAtMs = nowMs + WEB_AUTH_MOBILE_REPLAY_TTL_SEC * 1000;
+  webAuthMobileReplayByKey.set(replayKey, expiresAtMs);
+  return {
+    ok: true,
+  };
+}
+
+function resolveMobileSessionContextFromRequest(req, options = {}) {
+  const requireRequestId = options.requireRequestId !== false;
+  const nowMs = Date.now();
+  sweepWebAuthMobileSessionState(nowMs);
+
+  const token = resolveMobileSessionTokenFromRequest(req);
+  if (!token) {
+    return {
+      ok: false,
+      missingToken: true,
+      status: 401,
+      error: "Mobile auth token is required.",
+      code: "mobile_session_missing",
+    };
+  }
+
+  const parsedToken = parseWebAuthMobileSessionToken(token);
+  if (!parsedToken) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Mobile auth token is invalid or expired.",
+      code: "mobile_session_invalid",
+    };
+  }
+
+  const sessionEntry = webAuthMobileSessionById.get(parsedToken.sessionId);
+  if (!sessionEntry || !Number.isFinite(sessionEntry.expiresAt) || sessionEntry.expiresAt <= nowMs) {
+    webAuthMobileSessionById.delete(parsedToken.sessionId);
+    return {
+      ok: false,
+      status: 401,
+      error: "Mobile auth session expired. Sign in again.",
+      code: "mobile_session_expired",
+    };
+  }
+
+  if (
+    normalizeWebAuthUsername(sessionEntry.username) !== parsedToken.username ||
+    Number.parseInt(sessionEntry.issuedAt, 10) !== parsedToken.issuedAt ||
+    Number.parseInt(sessionEntry.expiresAt, 10) !== parsedToken.expiresAt
+  ) {
+    webAuthMobileSessionById.delete(parsedToken.sessionId);
+    return {
+      ok: false,
+      status: 401,
+      error: "Mobile auth session is no longer valid. Sign in again.",
+      code: "mobile_session_revoked",
+    };
+  }
+
+  const deviceId = resolveWebAuthMobileDeviceIdFromRequest(req);
+  if (!deviceId) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Mobile device binding is required.",
+      code: "mobile_device_missing",
+    };
+  }
+
+  const deviceIdHash = hashWebAuthMobileDeviceId(deviceId);
+  if (!deviceIdHash || !safeEqual(sessionEntry.deviceIdHash, deviceIdHash)) {
+    webAuthMobileSessionById.delete(parsedToken.sessionId);
+    return {
+      ok: false,
+      status: 401,
+      error: "Mobile device binding mismatch. Sign in again.",
+      code: "mobile_device_mismatch",
+    };
+  }
+
+  const requestId = resolveWebAuthMobileRequestIdFromRequest(req);
+  if (requireRequestId && !requestId) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Missing X-CBooster-Request-Id header.",
+      code: "mobile_request_id_missing",
+    };
+  }
+
+  if (requestId) {
+    const replayResult = reserveWebAuthMobileReplayKey(parsedToken.sessionId, requestId, nowMs);
+    if (!replayResult.ok) {
+      return replayResult;
+    }
+  }
+
+  sessionEntry.lastUsedAt = nowMs;
+  sessionEntry.expiresAt = Math.min(
+    nowMs + WEB_AUTH_MOBILE_SESSION_TTL_SEC * 1000,
+    parsedToken.expiresAt,
+  );
+
+  return {
+    ok: true,
+    username: sessionEntry.username,
+    sessionId: parsedToken.sessionId,
+    token,
+    requestId,
+  };
 }
 
 function getRequestCookie(req, cookieName) {
@@ -4140,36 +4498,34 @@ function normalizeRequestPathname(req, maxLength = 260) {
   return normalizedPath.toLowerCase();
 }
 
-function resolveMobileSessionUsernameFromRequest(req) {
-  const headerToken = sanitizeTextValue(req?.headers?.[WEB_AUTH_MOBILE_SESSION_HEADER], 1200);
-  const headerUsername = parseWebAuthSessionToken(headerToken);
-  if (headerUsername) {
-    return headerUsername;
+function resolveMobileSessionUsernameFromRequest(req, options = {}) {
+  const authContext = resolveMobileSessionContextFromRequest(req, options);
+  if (!authContext.ok) {
+    req.webAuthMobileAuthError = authContext.missingToken ? null : authContext;
+    return "";
   }
-
-  const authorizationHeader = sanitizeTextValue(req?.headers?.authorization, 1400);
-  if (authorizationHeader.toLowerCase().startsWith("bearer ")) {
-    const bearerToken = authorizationHeader.slice("bearer ".length).trim();
-    const bearerUsername = parseWebAuthSessionToken(bearerToken);
-    if (bearerUsername) {
-      return bearerUsername;
-    }
-  }
-
-  return "";
+  req.webAuthMobileSession = {
+    sessionId: authContext.sessionId,
+    requestId: authContext.requestId || "",
+  };
+  req.webAuthMobileAuthError = null;
+  return authContext.username;
 }
 
 function getRequestWebAuthUser(req) {
   const pathname = normalizeRequestPathname(req, 260);
-  const isMobileApiPath = pathname.startsWith("/api/mobile/");
-  if (isMobileApiPath) {
-    return resolveMobileSessionUsernameFromRequest(req);
-  }
-
+  const isApiPath = pathname.startsWith("/api/");
   const cookieToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
   const cookieUsername = parseWebAuthSessionToken(cookieToken);
   if (cookieUsername) {
+    req.webAuthMobileAuthError = null;
     return cookieUsername;
+  }
+
+  if (isApiPath) {
+    return resolveMobileSessionUsernameFromRequest(req, {
+      requireRequestId: true,
+    });
   }
 
   return "";
@@ -10250,6 +10606,7 @@ function isWebAuthPasswordChangeAllowedPath(pathname) {
     pathname === "/first-password" ||
     pathname === "/logout" ||
     pathname === "/api/auth/session" ||
+    pathname === "/api/mobile/auth/session" ||
     pathname === "/api/auth/logout" ||
     pathname === "/api/mobile/auth/logout" ||
     pathname === "/api/auth/first-password" ||
@@ -10612,6 +10969,7 @@ function escapeHtml(value) {
 
 function requireWebAuth(req, res, next) {
   const pathname = normalizeRequestPathname(req, 260) || "/";
+  const isApiPath = pathname.startsWith("/api/");
   if (isPublicWebAuthPath(pathname)) {
     next();
     return;
@@ -10667,9 +11025,18 @@ function requireWebAuth(req, res, next) {
     return;
   }
 
+  if (isApiPath && req.webAuthMobileAuthError) {
+    const mobileAuthError = req.webAuthMobileAuthError;
+    res.status(mobileAuthError.status || 401).json({
+      error: sanitizeTextValue(mobileAuthError.error, 260) || "Authentication required.",
+      code: sanitizeTextValue(mobileAuthError.code, 80) || "mobile_auth_failed",
+    });
+    return;
+  }
+
   clearWebAuthSessionCookie(req, res);
 
-  if (pathname.startsWith("/api/")) {
+  if (isApiPath) {
     res.status(401).json({
       error: "Authentication required.",
     });
@@ -22277,10 +22644,28 @@ function handleApiAuthLogin(req, res) {
   }
 
   clearFailedLoginAttempts(req, authUser.username);
-  const sessionToken = createWebAuthSessionToken(authUser.username);
-  const mustChangePassword = isWebAuthPasswordChangeRequired(authUser);
-  setWebAuthSessionCookie(req, res, authUser.username, sessionToken);
   const isMobileApiLogin = sanitizeTextValue(req.path, 120).startsWith("/api/mobile/");
+  let sessionToken = "";
+  if (isMobileApiLogin) {
+    revokeWebAuthMobileSessionsForUser(authUser.username);
+    sessionToken = createWebAuthMobileSessionToken(authUser.username, req);
+    if (!sessionToken) {
+      clearWebAuthSessionCookie(req, res);
+      res.status(400).json({
+        error: "Mobile device binding is required for sign-in.",
+        code: "mobile_device_missing",
+      });
+      return;
+    }
+  } else {
+    sessionToken = createWebAuthSessionToken(authUser.username);
+    setWebAuthSessionCookie(req, res, authUser.username, sessionToken);
+  }
+
+  const mustChangePassword = isWebAuthPasswordChangeRequired(authUser);
+  if (isMobileApiLogin) {
+    clearWebAuthSessionCookie(req, res);
+  }
   res.setHeader("Cache-Control", "no-store, private");
   const payload = {
     ok: true,
@@ -22291,11 +22676,35 @@ function handleApiAuthLogin(req, res) {
   };
   if (isMobileApiLogin) {
     payload.sessionToken = sessionToken;
+    payload.sessionTtlSec = WEB_AUTH_MOBILE_SESSION_TTL_SEC;
+    payload.tokenType = "Bearer";
   }
   res.json(payload);
 }
 
 function handleApiAuthLogout(req, res) {
+  const isMobileApiLogout = sanitizeTextValue(req.path, 120).startsWith("/api/mobile/");
+  if (isMobileApiLogout) {
+    const mobileAuthContext = resolveMobileSessionContextFromRequest(req, {
+      requireRequestId: true,
+    });
+    if (!mobileAuthContext.ok) {
+      res.status(mobileAuthContext.status || 401).json({
+        error: sanitizeTextValue(mobileAuthContext.error, 260) || "Authentication required.",
+        code: sanitizeTextValue(mobileAuthContext.code, 80) || "mobile_auth_failed",
+      });
+      return;
+    }
+
+    revokeWebAuthMobileSessionByToken(mobileAuthContext.token);
+    clearWebAuthSessionCookie(req, res);
+    res.setHeader("Cache-Control", "no-store, private");
+    res.json({
+      ok: true,
+    });
+    return;
+  }
+
   // Defense in depth: logout must not bypass CSRF when cookie session exists,
   // even if routing middleware order changes in the future.
   let csrfPassed = false;
@@ -22398,6 +22807,7 @@ app.post("/first-password", (req, res) => {
 
   try {
     const updatedUser = applyWebAuthFirstPasswordChange(userProfile, req.body);
+    revokeWebAuthMobileSessionsForUser(updatedUser.username);
     const sessionToken = createWebAuthSessionToken(updatedUser.username);
     setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
     req.webAuthUser = updatedUser.username;
@@ -22429,8 +22839,20 @@ function handleApiAuthFirstPassword(req, res) {
     return;
   }
 
+  let mobileAuthContext = null;
   if (isMobileApiFirstPassword) {
-    const mobileSessionUsername = normalizeWebAuthUsername(resolveMobileSessionUsernameFromRequest(req));
+    mobileAuthContext = resolveMobileSessionContextFromRequest(req, {
+      requireRequestId: true,
+    });
+    if (!mobileAuthContext.ok) {
+      res.status(mobileAuthContext.status || 401).json({
+        error: sanitizeTextValue(mobileAuthContext.error, 260) || "Mobile auth token is required for this endpoint.",
+        code: sanitizeTextValue(mobileAuthContext.code, 80) || "mobile_auth_failed",
+      });
+      return;
+    }
+
+    const mobileSessionUsername = normalizeWebAuthUsername(mobileAuthContext.username);
     const authenticatedUsername = normalizeWebAuthUsername(userProfile.username);
     if (!mobileSessionUsername || !authenticatedUsername || mobileSessionUsername !== authenticatedUsername) {
       res.status(401).json({
@@ -22442,8 +22864,24 @@ function handleApiAuthFirstPassword(req, res) {
 
   try {
     const updatedUser = applyWebAuthFirstPasswordChange(userProfile, req.body);
-    const sessionToken = createWebAuthSessionToken(updatedUser.username);
-    setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
+    revokeWebAuthMobileSessionsForUser(updatedUser.username);
+
+    let sessionToken = "";
+    if (isMobileApiFirstPassword) {
+      sessionToken = createWebAuthMobileSessionToken(updatedUser.username, req);
+      if (!sessionToken) {
+        res.status(400).json({
+          error: "Mobile device binding is required for this endpoint.",
+          code: "mobile_device_missing",
+        });
+        return;
+      }
+      clearWebAuthSessionCookie(req, res);
+    } else {
+      sessionToken = createWebAuthSessionToken(updatedUser.username);
+      setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
+    }
+
     req.webAuthUser = updatedUser.username;
     req.webAuthProfile = updatedUser;
     res.setHeader("Cache-Control", "no-store, private");
@@ -22453,7 +22891,12 @@ function handleApiAuthFirstPassword(req, res) {
       permissions: updatedUser.permissions || {},
     };
     if (isMobileApiFirstPassword) {
+      if (mobileAuthContext?.token) {
+        revokeWebAuthMobileSessionByToken(mobileAuthContext.token);
+      }
       payload.sessionToken = sessionToken;
+      payload.sessionTtlSec = WEB_AUTH_MOBILE_SESSION_TTL_SEC;
+      payload.tokenType = "Bearer";
     }
     res.json(payload);
   } catch (error) {
@@ -22466,14 +22909,24 @@ function handleApiAuthFirstPassword(req, res) {
 app.post("/api/auth/first-password", handleApiAuthFirstPassword);
 app.post("/api/mobile/auth/first-password", handleApiAuthFirstPassword);
 
-app.get("/api/auth/session", (req, res) => {
+function handleApiAuthSession(req, res) {
+  const normalizedPathname = normalizeRequestPathname(req, 260);
+  const isMobileApiSession = normalizedPathname.startsWith("/api/mobile/");
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
-  res.json({
+  const payload = {
     ok: true,
     user: buildWebAuthPublicUser(userProfile),
     permissions: userProfile?.permissions || {},
-  });
-});
+  };
+  if (isMobileApiSession) {
+    payload.sessionTtlSec = WEB_AUTH_MOBILE_SESSION_TTL_SEC;
+    payload.tokenType = "Bearer";
+  }
+  res.json(payload);
+}
+
+app.get("/api/auth/session", handleApiAuthSession);
+app.get("/api/mobile/auth/session", handleApiAuthSession);
 
 app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (req, res) => {
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
@@ -22600,6 +23053,12 @@ app.put("/api/auth/users/:username", requireWebPermission(WEB_AUTH_PERMISSION_MA
 
   try {
     const updatedUser = updateWebAuthUserInDirectory(targetUsername, req.body);
+    if (updatedUser?.username) {
+      revokeWebAuthMobileSessionsForUser(updatedUser.username);
+    }
+    if (targetUsername && normalizeWebAuthUsername(updatedUser?.username) !== normalizeWebAuthUsername(targetUsername)) {
+      revokeWebAuthMobileSessionsForUser(targetUsername);
+    }
     if (normalizeWebAuthUsername(req.webAuthUser) === targetUsername && updatedUser?.username) {
       const sessionToken = createWebAuthSessionToken(updatedUser.username);
       setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
