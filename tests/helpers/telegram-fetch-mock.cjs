@@ -1,5 +1,6 @@
 "use strict";
 
+const fs = require("node:fs");
 const originalFetch = globalThis.fetch;
 
 function jsonResponse(status, payload) {
@@ -18,6 +19,37 @@ function textResponse(status, bodyText) {
       "Content-Type": "text/plain",
     },
   });
+}
+
+function captureTelegramRequest(urlString, init) {
+  const captureFile = String(process.env.TEST_TELEGRAM_CAPTURE_FILE || "").trim();
+  if (!captureFile) {
+    return;
+  }
+
+  const method = String(init?.method || "GET").toUpperCase();
+  let body = "";
+  if (typeof init?.body === "string") {
+    body = init.body;
+  } else if (init?.body === undefined || init?.body === null) {
+    body = "";
+  } else {
+    body = "[non-string-body]";
+  }
+
+  try {
+    fs.appendFileSync(
+      captureFile,
+      `${JSON.stringify({
+        url: urlString,
+        method,
+        body,
+      })}\n`,
+      "utf8",
+    );
+  } catch {
+    // Best-effort capture for tests.
+  }
 }
 
 function buildMatrixResponse(urlString) {
@@ -67,6 +99,8 @@ globalThis.fetch = async function patchedFetch(input, init) {
   if (!isTelegramRequest) {
     return originalFetch(input, init);
   }
+
+  captureTelegramRequest(urlString, init);
 
   const mode = String(process.env.TEST_TELEGRAM_FETCH_MODE || "").trim();
   if (mode === "network_error") {
