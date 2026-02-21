@@ -856,7 +856,41 @@ const RECORDS_PUT_FIELD_MAX_LENGTH = Object.freeze({
   identityIq: MINI_EXTRA_MAX_LENGTH.identityIq,
   clientEmailAddress: MINI_EXTRA_MAX_LENGTH.clientEmailAddress,
 });
-const MINI_REQUIRED_FIELDS = ["clientName"];
+const MINI_REQUIRED_FIELD_LABELS = Object.freeze({
+  clientName: "Client Name",
+  closedBy: "Closed By",
+  companyName: "Company Name",
+  serviceType: "Service Type",
+  contractTotals: "Contract Totals",
+  payment1: "Payment 1",
+  payment1Date: "Payment 1 Date",
+  leadSource: "Lead Source",
+  ssn: "SSN",
+  clientPhoneNumber: "Client Phone Number",
+  clientEmailAddress: "Client Email Address",
+  futurePayment: "Future Payment",
+  identityIq: "IdentityIQ",
+  notes: "Notes",
+});
+const MINI_SUBMIT_REQUIRED_FIELDS = Object.freeze([
+  "clientName",
+  "closedBy",
+  "companyName",
+  "serviceType",
+  "contractTotals",
+  "payment1",
+  "payment1Date",
+]);
+const MINI_APPROVE_REQUIRED_FIELDS = Object.freeze([
+  ...MINI_SUBMIT_REQUIRED_FIELDS,
+  "leadSource",
+  "ssn",
+  "clientPhoneNumber",
+  "clientEmailAddress",
+  "futurePayment",
+  "identityIq",
+  "notes",
+]);
 const ASSISTANT_MAX_MESSAGE_LENGTH = 2000;
 const ASSISTANT_REVIEW_MAX_TEXT_LENGTH = 8000;
 const ASSISTANT_REVIEW_MAX_COMMENT_LENGTH = 4000;
@@ -20185,6 +20219,23 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
     }
 
     if (normalizedDecision === "approved") {
+      const approveRequiredValidation = validateMiniRequiredFields(
+        buildMiniApprovalValidationPayload(submission),
+        MINI_APPROVE_REQUIRED_FIELDS,
+        {
+          shortSingleFieldError: false,
+          errorPrefix: "Cannot approve submission. Missing required fields",
+        },
+      );
+      if (!approveRequiredValidation.ok) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          status: 400,
+          error: approveRequiredValidation.error,
+        };
+      }
+
       const stateResult = await client.query(
         `SELECT records FROM ${STATE_TABLE} WHERE id = $1 FOR UPDATE`,
         [STATE_ROW_ID],
@@ -20351,6 +20402,63 @@ function createEmptyMiniData() {
   return miniData;
 }
 
+function resolveMiniRequiredFieldMaxLength(field) {
+  if (Object.prototype.hasOwnProperty.call(MINI_EXTRA_MAX_LENGTH, field)) {
+    return MINI_EXTRA_MAX_LENGTH[field];
+  }
+
+  if (Object.prototype.hasOwnProperty.call(RECORDS_PUT_FIELD_MAX_LENGTH, field)) {
+    return RECORDS_PUT_FIELD_MAX_LENGTH[field];
+  }
+
+  return 4000;
+}
+
+function validateMiniRequiredFields(rawValues, requiredFields, options = {}) {
+  const values = rawValues && typeof rawValues === "object" ? rawValues : {};
+  const missingFieldIds = [];
+
+  for (const field of requiredFields) {
+    const value = sanitizeTextValue(values[field], resolveMiniRequiredFieldMaxLength(field));
+    if (!value) {
+      missingFieldIds.push(field);
+    }
+  }
+
+  if (!missingFieldIds.length) {
+    return {
+      ok: true,
+      missingFieldIds: [],
+      error: "",
+    };
+  }
+
+  if (options.shortSingleFieldError !== false && missingFieldIds.length === 1) {
+    return {
+      ok: false,
+      missingFieldIds,
+      error: `\`${missingFieldIds[0]}\` is required.`,
+    };
+  }
+
+  const missingLabels = missingFieldIds.map((field) => MINI_REQUIRED_FIELD_LABELS[field] || field);
+  const errorPrefix = sanitizeTextValue(options.errorPrefix, 120) || "Missing required fields";
+  return {
+    ok: false,
+    missingFieldIds,
+    error: `${errorPrefix}: ${missingLabels.join(", ")}.`,
+  };
+}
+
+function buildMiniApprovalValidationPayload(submission) {
+  const record = submission?.record && typeof submission.record === "object" ? submission.record : {};
+  const miniData = submission?.mini_data && typeof submission.mini_data === "object" ? submission.mini_data : {};
+  return {
+    ...record,
+    ...miniData,
+  };
+}
+
 function createRecordFromMiniPayload(rawClient) {
   if (!rawClient || typeof rawClient !== "object") {
     return {
@@ -20365,15 +20473,13 @@ function createRecordFromMiniPayload(rawClient) {
     }
   }
 
-  for (const field of MINI_REQUIRED_FIELDS) {
-    const maxLength =
-      Object.prototype.hasOwnProperty.call(MINI_EXTRA_MAX_LENGTH, field) ? MINI_EXTRA_MAX_LENGTH[field] : 4000;
-    const value = sanitizeTextValue(client[field], maxLength);
-    if (!value) {
-      return {
-        error: `\`${field}\` is required.`,
-      };
-    }
+  const submitRequiredValidation = validateMiniRequiredFields(client, MINI_SUBMIT_REQUIRED_FIELDS, {
+    shortSingleFieldError: true,
+  });
+  if (!submitRequiredValidation.ok) {
+    return {
+      error: submitRequiredValidation.error,
+    };
   }
 
   const clientName = sanitizeTextValue(client.clientName, 200);

@@ -462,7 +462,7 @@
       }
     </style>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/mini.js?v=20260221-upload-token-v1" defer></script>
+    <script src="/mini.js?v=20260221-required-contract-v1" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -503,8 +503,8 @@
           </div>
 
           <div class="field">
-            <label for="companyName">Company</label>
-            <input id="companyName" name="companyName" autocomplete="off" />
+            <label for="companyName">Company *</label>
+            <input id="companyName" name="companyName" required autocomplete="off" />
           </div>
         </section>
 
@@ -512,8 +512,8 @@
           <h2 id="mini-section-sales" class="section-title">Sales Info</h2>
 
           <div class="field">
-            <label for="closedBy">Closed By</label>
-            <input id="closedBy" name="closedBy" autocomplete="off" />
+            <label for="closedBy">Closed By *</label>
+            <input id="closedBy" name="closedBy" required autocomplete="off" />
           </div>
 
           <div class="field">
@@ -522,8 +522,8 @@
           </div>
 
           <div class="field">
-            <label for="serviceType">Service Type</label>
-            <input id="serviceType" name="serviceType" autocomplete="off" />
+            <label for="serviceType">Service Type *</label>
+            <input id="serviceType" name="serviceType" required autocomplete="off" />
           </div>
         </section>
 
@@ -531,8 +531,8 @@
           <h2 id="mini-section-contract" class="section-title">Contract</h2>
 
           <div class="field">
-            <label for="contractTotals">Contract Totals</label>
-            <input id="contractTotals" name="contractTotals" autocomplete="off" />
+            <label for="contractTotals">Contract Totals *</label>
+            <input id="contractTotals" name="contractTotals" required autocomplete="off" />
           </div>
 
           <div class="payment-group">
@@ -540,14 +540,14 @@
 
             <div class="payment-grid">
               <div class="field">
-                <label for="payment1">Amount</label>
-                <input id="payment1" name="payment1" autocomplete="off" />
+                <label for="payment1">Amount *</label>
+                <input id="payment1" name="payment1" required autocomplete="off" />
               </div>
 
               <div class="field">
-                <label for="payment1Date">Date</label>
+                <label for="payment1Date">Date *</label>
                 <div class="date-input-shell">
-                  <input id="payment1Date" name="payment1Date" type="text" placeholder="MM/DD/YYYY" autocomplete="off" />
+                  <input id="payment1Date" name="payment1Date" type="text" placeholder="MM/DD/YYYY" required autocomplete="off" />
                   <button type="button" class="date-picker-trigger" data-date-target="payment1Date" aria-label="Pick date">
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <path

@@ -104,6 +104,14 @@ const CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_TIMEZONE = (
 )
   .toString()
   .trim();
+const CUSTOM_DASHBOARD_REPORT_TIMEZONE = (
+  process.env.CUSTOM_DASHBOARD_REPORT_TIMEZONE ||
+  process.env.CUSTOM_DASHBOARD_CALLS_REPORT_TIMEZONE ||
+  CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_TIMEZONE ||
+  "America/Chicago"
+)
+  .toString()
+  .trim();
 const CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_HOUR = Math.min(
   Math.max(toSafeInteger(process.env.CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_HOUR, 22), 0),
   23,
@@ -2149,7 +2157,8 @@ function registerCustomDashboardModule(config) {
       return left.managerName.localeCompare(right.managerName, "en-US", { sensitivity: "base" });
     });
 
-    const todayStart = getCurrentUtcDayStart();
+    const reportTimeZone = resolveSafeTimeZone(CUSTOM_DASHBOARD_REPORT_TIMEZONE, "America/Chicago");
+    const todayStart = getCurrentDayStartInTimeZone(reportTimeZone);
     const todaySummary = {
       outgoing: 0,
       incoming: 0,
@@ -2158,7 +2167,7 @@ function registerCustomDashboardModule(config) {
     const todayMap = new Map();
 
     for (const call of visibleCalls) {
-      const callDayStart = getUtcDayStart(call.callAtTimestamp);
+      const callDayStart = getDayStartInTimeZone(call.callAtTimestamp, reportTimeZone);
       if (callDayStart === null || callDayStart !== todayStart) {
         continue;
       }
@@ -3739,6 +3748,13 @@ function getCurrentUtcDayStart() {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
+function getCurrentDayStartInTimeZone(timeZone) {
+  const safeTimeZone = resolveSafeTimeZone(timeZone, "UTC");
+  const nowTimestamp = Date.now();
+  const parts = getDateTimePartsInTimeZone(nowTimestamp, safeTimeZone);
+  return zonedDateTimeToUtcTimestamp(safeTimeZone, parts.year, parts.month, parts.day, 0, 0, 0);
+}
+
 function getUtcDayStart(timestamp) {
   if (!Number.isFinite(timestamp)) {
     return null;
@@ -3746,6 +3762,16 @@ function getUtcDayStart(timestamp) {
 
   const date = new Date(timestamp);
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function getDayStartInTimeZone(timestamp, timeZone) {
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  const safeTimeZone = resolveSafeTimeZone(timeZone, "UTC");
+  const parts = getDateTimePartsInTimeZone(timestamp, safeTimeZone);
+  return zonedDateTimeToUtcTimestamp(safeTimeZone, parts.year, parts.month, parts.day, 0, 0, 0);
 }
 
 function getCurrentWeekStartUtc(todayStart) {
