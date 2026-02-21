@@ -30,6 +30,12 @@ type VmSandbox = Record<string, unknown> & {
   globalThis?: unknown;
 };
 
+type FetchResponseConfig = {
+  ok: boolean;
+  status: number;
+  body?: unknown;
+};
+
 let miniSource = "";
 
 beforeAll(() => {
@@ -45,8 +51,55 @@ afterEach(() => {
   delete windowWithTelegram.Telegram;
 });
 
-function loadMiniUi(options: { dataTransfer?: unknown } = {}) {
+function createFetchMock(fetchResponses: FetchResponseConfig[]) {
+  const queue = [...fetchResponses];
+  return async () => {
+    const response = queue.shift();
+    if (!response) {
+      throw new Error("Unexpected fetch call");
+    }
+    return {
+      ok: response.ok,
+      status: response.status,
+      json: async () => response.body ?? {},
+    };
+  };
+}
+
+async function flushAsync(iterations = 4) {
+  for (let index = 0; index < iterations; index += 1) {
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+function loadMiniUi(options: { dataTransfer?: unknown; telegramInitData?: string; fetchResponses?: FetchResponseConfig[] } = {}) {
   document.body.innerHTML = MINI_HTML;
+  const windowWithTelegram = window as Window & {
+    Telegram?: {
+      WebApp: {
+        initData: string;
+        ready: () => void;
+        expand: () => void;
+      };
+    };
+  };
+
+  if (options.telegramInitData) {
+    windowWithTelegram.Telegram = {
+      WebApp: {
+        initData: options.telegramInitData,
+        ready: () => {},
+        expand: () => {},
+      },
+    };
+  } else {
+    delete windowWithTelegram.Telegram;
+  }
+
+  const fetchMock = Array.isArray(options.fetchResponses)
+    ? createFetchMock(options.fetchResponses)
+    : async () => ({ ok: false, status: 503, json: async () => ({}) });
 
   const sandbox: VmSandbox = {
     module: { exports: {} },
@@ -54,7 +107,7 @@ function loadMiniUi(options: { dataTransfer?: unknown } = {}) {
     window,
     document,
     console,
-    fetch: async () => ({ ok: false, status: 503, json: async () => ({}) }),
+    fetch: fetchMock,
     FormData,
     DataTransfer: options.dataTransfer,
     File: globalThis.File,
@@ -208,5 +261,34 @@ describe("mini.js attachments UI", () => {
     expect(selectedAfterValidation).not.toBeNull();
     expect(selectedAfterValidation?.length).toBe(11);
     expect(getAttachmentsPreview().querySelectorAll(".attachments-preview__item")).toHaveLength(10);
+  });
+
+  it("blocks unsupported extensions from backend allowlist policy", async () => {
+    loadMiniUi({
+      telegramInitData: "auth_payload",
+      fetchResponses: [
+        {
+          ok: true,
+          status: 200,
+          body: {
+            ok: true,
+            uploadToken: "token-allowlist",
+            miniConfig: {
+              attachments: {
+                maxCount: 10,
+                allowedExtensions: [".pdf", ".png", ".jpg"],
+                allowedFormatsHelpText: "Allowed formats: images and PDF.",
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    await flushAsync();
+    dispatchAttachmentsChange([new File(["name,value"], "report.csv", { type: "text/csv" })]);
+
+    expect(getMessageNode().textContent || "").toBe('File "report.csv" is not allowed. Allowed formats: images and PDF.');
+    expect(getAttachmentsPreview().hidden).toBe(true);
   });
 });

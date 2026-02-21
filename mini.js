@@ -23,7 +23,9 @@ const REQUIRED_MINI_FIELDS = [
   { id: "payment1Date", label: "Payment 1 Date" },
 ];
 const DEFAULT_SUBMIT_BUTTON_LABEL = "Add Client";
-const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
+const MINI_ATTACHMENTS_DEFAULT_HELP_TEXT =
+  "Allowed formats: images, PDF, DOC/DOCX, XLS/XLSX, PPT/PPTX, TXT, CSV, RTF.";
+const FALLBACK_BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
   ".html",
   ".htm",
   ".xhtml",
@@ -52,6 +54,9 @@ let isMiniAccessAllowed = false;
 let isSubmitting = false;
 let isAccessCheckInProgress = true;
 let miniUploadToken = "";
+let miniAttachmentAllowlistExtensions = null;
+let miniAttachmentMaxCount = MAX_ATTACHMENTS_COUNT;
+let miniAttachmentAllowedFormatsHelpText = MINI_ATTACHMENTS_DEFAULT_HELP_TEXT;
 
 initializeDateField(payment1DateInput);
 initializeSsnField(ssnInput);
@@ -220,6 +225,7 @@ async function verifyMiniAccess(options = {}) {
     if (!miniUploadToken) {
       throw new Error("Mini upload token is missing. Reopen Mini App.");
     }
+    applyMiniAttachmentsConfig(responseBody?.miniConfig?.attachments);
 
     isMiniAccessAllowed = true;
     isAccessCheckInProgress = false;
@@ -233,6 +239,45 @@ async function verifyMiniAccess(options = {}) {
       setMessage(error.message || "Access denied for Mini App.", "error");
     }
   }
+}
+
+function applyMiniAttachmentsConfig(rawConfig) {
+  const allowlist = parseMiniAttachmentAllowlistExtensions(rawConfig?.allowedExtensions);
+  miniAttachmentAllowlistExtensions = allowlist;
+
+  const maxCount = Number.parseInt(rawConfig?.maxCount, 10);
+  if (Number.isFinite(maxCount) && maxCount > 0 && maxCount <= 20) {
+    miniAttachmentMaxCount = maxCount;
+  } else {
+    miniAttachmentMaxCount = MAX_ATTACHMENTS_COUNT;
+  }
+
+  const helpText = normalizeValue(rawConfig?.allowedFormatsHelpText);
+  miniAttachmentAllowedFormatsHelpText = helpText || MINI_ATTACHMENTS_DEFAULT_HELP_TEXT;
+}
+
+function parseMiniAttachmentAllowlistExtensions(rawExtensions) {
+  if (!Array.isArray(rawExtensions)) {
+    return null;
+  }
+
+  const normalizedExtensions = rawExtensions
+    .map((value) => normalizeAttachmentExtension(value))
+    .filter(Boolean);
+  if (!normalizedExtensions.length) {
+    return null;
+  }
+
+  return new Set(normalizedExtensions);
+}
+
+function normalizeAttachmentExtension(rawValue) {
+  const value = normalizeValue(rawValue).toLowerCase().replace(/^\.+/, "");
+  if (!value || !/^[a-z0-9]{1,12}$/.test(value)) {
+    return "";
+  }
+
+  return `.${value}`;
 }
 
 function initializeDateField(input) {
@@ -761,23 +806,25 @@ function validateSelectedAttachments() {
     };
   }
 
-  const limitedFiles = selectedFiles.slice(0, MAX_ATTACHMENTS_COUNT);
-  if (selectedFiles.length > MAX_ATTACHMENTS_COUNT) {
+  const maxAttachmentsCount = Math.max(1, Number.parseInt(miniAttachmentMaxCount, 10) || MAX_ATTACHMENTS_COUNT);
+  const limitedFiles = selectedFiles.slice(0, maxAttachmentsCount);
+  if (selectedFiles.length > maxAttachmentsCount) {
     replaceSelectedAttachments(limitedFiles);
     return {
       files: limitedFiles,
-      error: `You can upload up to ${MAX_ATTACHMENTS_COUNT} files.`,
+      error: `You can upload up to ${maxAttachmentsCount} files.`,
     };
   }
 
   for (const file of limitedFiles) {
     const name = (file?.name || "").toString().trim().toLowerCase();
     const extension = getFileExtension(name);
-    if (BLOCKED_ATTACHMENT_EXTENSIONS.has(extension)) {
+    const blockReason = resolveAttachmentBlockReason(file.name || "attachment", extension);
+    if (blockReason) {
       replaceSelectedAttachments([]);
       return {
         files: [],
-        error: `File "${file.name}" is not allowed. Script and HTML files are blocked.`,
+        error: blockReason,
       };
     }
   }
@@ -786,6 +833,21 @@ function validateSelectedAttachments() {
     files: limitedFiles,
     error: "",
   };
+}
+
+function resolveAttachmentBlockReason(fileName, extension) {
+  if (miniAttachmentAllowlistExtensions instanceof Set && miniAttachmentAllowlistExtensions.size) {
+    if (!miniAttachmentAllowlistExtensions.has(extension)) {
+      return `File "${fileName}" is not allowed. ${miniAttachmentAllowedFormatsHelpText}`;
+    }
+    return "";
+  }
+
+  if (FALLBACK_BLOCKED_ATTACHMENT_EXTENSIONS.has(extension)) {
+    return `File "${fileName}" is not allowed. Script and HTML files are blocked.`;
+  }
+
+  return "";
 }
 
 function replaceSelectedAttachments(files) {
