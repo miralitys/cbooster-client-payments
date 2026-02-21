@@ -40,6 +40,6 @@ jobs:
         if: ${{ hashFiles('mobile-app/package.json') != '' }}
         run: npm --prefix mobile-app ci
 
-      - name: Audit gate (high/critical block)
+      - name: Audit gate (critical block, temporary)
         if: ${{ hashFiles('mobile-app/package.json') != '' }}
         run: node scripts/mobile-audit-gate.js
