@@ -63,3 +63,15 @@ export interface QuickBooksSyncJobPayload {
   reused?: boolean;
   job?: QuickBooksSyncJob | null;
 }
+
+export interface QuickBooksTransactionInsightRequest {
+  companyName: string;
+  amount: number;
+  date: string;
+  description?: string;
+}
+
+export interface QuickBooksTransactionInsightPayload {
+  ok: boolean;
+  insight: string;
+}
