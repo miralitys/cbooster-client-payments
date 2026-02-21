@@ -1645,6 +1645,10 @@ a {
   min-width: 160px;
 }
 
+.quickbooks-uncategorized-filter {
+  min-width: 210px;
+}
+
 .quickbooks-range {
   margin: 0;
   font-size: var(--font-size-xs);
@@ -2914,6 +2918,10 @@ a {
   }
 
   .quickbooks-refund-filter {
+    width: 100%;
+  }
+
+  .quickbooks-uncategorized-filter {
     width: 100%;
   }
 
