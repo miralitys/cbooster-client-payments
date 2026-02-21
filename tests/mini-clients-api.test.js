@@ -18,6 +18,7 @@ const FAKE_PG_PRELOAD = path.join(PROJECT_ROOT, "tests", "helpers", "fake-pg.cjs
 const TELEGRAM_BOT_TOKEN = "test_bot_token_for_mini_clients";
 const TEST_WEB_AUTH_SESSION_SECRET =
   "mini-clients-test-session-secret-mini-clients-test-session-secret-123456";
+const TEST_WEB_AUTH_PASSWORD_HASH = "$2b$10$MpB./1tOb0ZE6.iPuOikWuHbK3svW2fleu34gqhmYNjy4jQLGn3Gi";
 const MINI_UPLOAD_TOKEN_HEADER_NAME = "x-mini-upload-token";
 
 function delay(ms) {
@@ -1291,6 +1292,105 @@ test("POST /api/mini/clients enforces total attachment budget for chunked multip
   }
 });
 
+test("POST /api/mini/clients accepts multipart string client payload", async () => {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-multipart-string-client-"));
+  const pgCaptureFilePath = path.join(captureDir, "pg-events.jsonl");
+
+  try {
+    await withServer(
+      {
+        DATABASE_URL: "postgres://fake/fake",
+        TEST_USE_FAKE_PG: "1",
+        TEST_PG_CAPTURE_FILE: pgCaptureFilePath,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      },
+      async ({ baseUrl }) => {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const initData = buildTelegramInitData({
+          authDate: nowSeconds,
+          user: { id: 1012, username: "multipart_string_client_user" },
+        });
+        const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+        const response = await postMiniClientsMultipart(baseUrl, {
+          initData,
+          uploadToken,
+          client: JSON.stringify(
+            buildValidMiniClient({
+              clientName: "Multipart String Client",
+            }),
+          ),
+          attachments: [
+            {
+              fileName: "multipart-string-client.pdf",
+              mimeType: "application/pdf",
+              bytes: makePdfBytes(256),
+            },
+          ],
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 201);
+        assert.equal(body.ok, true);
+        assert.equal(body.status, "pending");
+
+        const events = readPgCaptureEvents(pgCaptureFilePath);
+        const lastFileInsert = [...events].reverse().find((event) => event.type === "file_insert");
+        assert.ok(lastFileInsert, "Expected file_insert event for multipart attachment.");
+        assert.equal(lastFileInsert.fileName, "multipart-string-client.pdf");
+        assert.equal(lastFileInsert.mimeType, "application/pdf");
+      },
+    );
+  } finally {
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
+});
+
+test("POST /api/mini/clients rejects multipart helper defaults when auth headers are missing", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+    },
+    async ({ baseUrl }) => {
+      const response = await postMiniClientsMultipart(baseUrl, {
+        client: buildValidMiniClient({
+          clientName: "Multipart Missing Auth Client",
+        }),
+        attachments: null,
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 401);
+      assert.equal(typeof body.error, "string");
+    },
+  );
+});
+
+test("POST /api/mini/clients rejects chunked helper fallback payload without auth", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+    },
+    async ({ baseUrl }) => {
+      const response = await postMiniClientsMultipartChunked(baseUrl, {
+        client: "",
+        attachments: [{}],
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 401);
+      assert.equal(typeof body.error, "string");
+    },
+  );
+});
+
 test("POST /api/mini/clients fails closed when AV scan is enabled but unavailable", async () => {
   await withServer(
     {
@@ -1316,6 +1416,91 @@ test("POST /api/mini/clients fails closed when AV scan is enabled but unavailabl
         attachments: [
           {
             fileName: "scan.pdf",
+            mimeType: "application/pdf",
+            bytes: makePdfBytes(256),
+          },
+        ],
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 503);
+      assert.equal(typeof body.error, "string");
+      assert.ok(body.error.includes("security scan is unavailable"));
+    },
+  );
+});
+
+test("POST /api/mini/clients enforces AV scan by default in production", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      NODE_ENV: "production",
+      WEB_AUTH_USERNAME: "owner_secure",
+      WEB_AUTH_PASSWORD_HASH: TEST_WEB_AUTH_PASSWORD_HASH,
+      MINI_ATTACHMENT_AV_SCAN_ENABLED: "",
+      MINI_ATTACHMENT_AV_SCAN_BIN: "",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const initData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 709, username: "av_scan_prod_default_user" },
+      });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+      const response = await postMiniClientsMultipart(baseUrl, {
+        initData,
+        uploadToken,
+        client: buildValidMiniClient({ clientName: "AV Scan Prod Default Client" }),
+        attachments: [
+          {
+            fileName: "scan-default.pdf",
+            mimeType: "application/pdf",
+            bytes: makePdfBytes(256),
+          },
+        ],
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 503);
+      assert.equal(typeof body.error, "string");
+      assert.ok(body.error.includes("security scan is unavailable"));
+    },
+  );
+});
+
+test("POST /api/mini/clients ignores AV fail-open mode in production", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      NODE_ENV: "production",
+      WEB_AUTH_USERNAME: "owner_secure",
+      WEB_AUTH_PASSWORD_HASH: TEST_WEB_AUTH_PASSWORD_HASH,
+      MINI_ATTACHMENT_AV_SCAN_ENABLED: "true",
+      MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN: "true",
+      MINI_ATTACHMENT_AV_SCAN_BIN: "",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const initData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 710, username: "av_scan_prod_fail_open_user" },
+      });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+      const response = await postMiniClientsMultipart(baseUrl, {
+        initData,
+        uploadToken,
+        client: buildValidMiniClient({ clientName: "AV Scan Prod Fail Open Client" }),
+        attachments: [
+          {
+            fileName: "scan-fail-open.pdf",
             mimeType: "application/pdf",
             bytes: makePdfBytes(256),
           },
