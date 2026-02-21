@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Credit Booster",
+    "slug": "cbooster-mobile",
+    "version": "1.0.0",
+    "icon": "./assets/app-icon.png",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "cbooster",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cbooster.payments"
+    },
+    "android": {
+      "package": "com.cbooster.payments"
+    },
+    "plugins": [
+      "expo-asset"
+    ]
+  }
+}
