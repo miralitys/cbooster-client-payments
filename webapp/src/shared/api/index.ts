@@ -24,6 +24,7 @@ export {
   getCustomDashboard,
   getCustomDashboardUsers,
   saveCustomDashboardUsers,
+  syncCustomDashboardCalls,
   syncCustomDashboardTasks,
   updateCustomDashboardTasksSource,
   uploadCustomDashboardFile,
