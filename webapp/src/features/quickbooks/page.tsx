@@ -16,6 +16,12 @@ import {
   type QuickBooksExpenseCategoryMap,
 } from "@/shared/storage/quickbooksExpenseCategories";
 import {
+  normalizeQuickBooksTransactionInsightMap,
+  readQuickBooksTransactionInsightMap,
+  writeQuickBooksTransactionInsightMap,
+  type QuickBooksInsightCacheMap,
+} from "@/shared/storage/quickbooksInsights";
+import {
   createQuickBooksSyncJob,
   getQuickBooksOutgoingPayments,
   getQuickBooksPayments,
@@ -120,6 +126,7 @@ export default function QuickBooksPage() {
   const [insightText, setInsightText] = useState("");
   const [insightError, setInsightError] = useState("");
   const [isInsightLoading, setIsInsightLoading] = useState(false);
+  const [insightCache, setInsightCache] = useState<QuickBooksInsightCacheMap>(() => readQuickBooksTransactionInsightMap());
 
   const [search, setSearch] = useState("");
   const [refundOnly, setRefundOnly] = useState(false);
@@ -138,6 +145,8 @@ export default function QuickBooksPage() {
   const incomingTransactionsRef = useRef<QuickBooksViewRow[]>([]);
   const outgoingTransactionsRef = useRef<QuickBooksViewRow[]>([]);
   const rowKeySequenceRef = useRef(0);
+  const insightModalCacheKeyRef = useRef("");
+  const insightPendingCacheKeysRef = useRef(new Set<string>());
   const allTransactions = activeTab === "incoming" ? incomingTransactions : outgoingTransactions;
   const showOnlyRefunds = activeTab === "incoming" && refundOnly;
   const showOnlyUncategorized = activeTab === "outgoing" && uncategorizedOnly;
@@ -243,6 +252,10 @@ export default function QuickBooksPage() {
   useEffect(() => {
     writeQuickBooksExpenseCategoryFingerprintMap(expenseCategoryFingerprintMap);
   }, [expenseCategoryFingerprintMap]);
+
+  useEffect(() => {
+    writeQuickBooksTransactionInsightMap(insightCache);
+  }, [insightCache]);
 
   useEffect(() => {
     const outgoingKeys = new Set(outgoingTransactions.map((row) => resolveQuickBooksOutgoingSelectionKey(row)).filter(Boolean));
@@ -384,14 +397,102 @@ export default function QuickBooksPage() {
     }
   }, [bulkExpenseCategory, outgoingTransactions, selectedOutgoingKeys, setQuickBooksExpenseCategory]);
 
-  const openInsightModal = useCallback((row: QuickBooksViewRow) => {
-    setInsightModalRow(row);
-    setInsightText("");
-    setInsightError("");
-    setIsInsightLoading(false);
+  const fetchQuickBooksInsight = useCallback(async (
+    row: QuickBooksViewRow,
+    options: {
+      showSuccessToast?: boolean;
+      showErrorToast?: boolean;
+    } = {},
+  ) => {
+    const cacheKey = buildQuickBooksInsightCacheKey(row);
+    if (!cacheKey || insightPendingCacheKeysRef.current.has(cacheKey)) {
+      return;
+    }
+
+    const showSuccessToast = options.showSuccessToast !== false;
+    const showErrorToast = options.showErrorToast !== false;
+    const isCurrentModalTarget = insightModalCacheKeyRef.current === cacheKey;
+    if (isCurrentModalTarget) {
+      setIsInsightLoading(true);
+      setInsightError("");
+    }
+    insightPendingCacheKeysRef.current.add(cacheKey);
+
+    try {
+      const payload = await getQuickBooksTransactionInsight({
+        companyName: formatQuickBooksPayeeLabel(row.clientName),
+        amount: Number(row.paymentAmount) || 0,
+        date: String(row.paymentDate || "").trim(),
+        description: buildQuickBooksInsightDescription(row),
+      });
+
+      const nextInsight = String(payload?.insight || "").trim();
+      if (!nextInsight) {
+        throw new Error("GPT returned an empty response.");
+      }
+
+      setInsightCache((previousCache) =>
+        normalizeQuickBooksTransactionInsightMap({
+          ...normalizeQuickBooksTransactionInsightMap(previousCache),
+          [cacheKey]: nextInsight,
+        }),
+      );
+      if (insightModalCacheKeyRef.current === cacheKey) {
+        setInsightText(nextInsight);
+        setInsightError("");
+      }
+      if (showSuccessToast) {
+        showToast({
+          type: "success",
+          message: "Insight received from GPT.",
+          dedupeKey: "quickbooks-insight-success",
+          cooldownMs: 2200,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to get GPT insight.";
+      if (insightModalCacheKeyRef.current === cacheKey) {
+        setInsightError(message);
+      }
+      if (showErrorToast) {
+        showToast({
+          type: "error",
+          message,
+          dedupeKey: `quickbooks-insight-error-${message}`,
+          cooldownMs: 2200,
+        });
+      }
+    } finally {
+      insightPendingCacheKeysRef.current.delete(cacheKey);
+      if (insightModalCacheKeyRef.current === cacheKey) {
+        setIsInsightLoading(false);
+      }
+    }
   }, []);
 
+  const openInsightModal = useCallback((row: QuickBooksViewRow) => {
+    const cacheKey = buildQuickBooksInsightCacheKey(row);
+    const cachedInsight = cacheKey ? insightCache[cacheKey] : "";
+    insightModalCacheKeyRef.current = cacheKey;
+
+    setInsightModalRow(row);
+    setInsightError("");
+    if (cachedInsight) {
+      setInsightText(cachedInsight);
+      setIsInsightLoading(false);
+      return;
+    }
+
+    setInsightText("");
+    setIsInsightLoading(true);
+    void fetchQuickBooksInsight(row, {
+      showSuccessToast: false,
+      showErrorToast: false,
+    });
+  }, [fetchQuickBooksInsight, insightCache]);
+
   const closeInsightModal = useCallback(() => {
+    insightModalCacheKeyRef.current = "";
     setInsightModalRow(null);
     setInsightText("");
     setInsightError("");
@@ -403,42 +504,11 @@ export default function QuickBooksPage() {
       return;
     }
 
-    setIsInsightLoading(true);
-    setInsightError("");
-
-    try {
-      const payload = await getQuickBooksTransactionInsight({
-        companyName: formatQuickBooksPayeeLabel(insightModalRow.clientName),
-        amount: Number(insightModalRow.paymentAmount) || 0,
-        date: String(insightModalRow.paymentDate || "").trim(),
-        description: buildQuickBooksInsightDescription(insightModalRow),
-      });
-
-      const nextInsight = String(payload?.insight || "").trim();
-      if (!nextInsight) {
-        throw new Error("GPT returned an empty response.");
-      }
-
-      setInsightText(nextInsight);
-      showToast({
-        type: "success",
-        message: "Insight received from GPT.",
-        dedupeKey: "quickbooks-insight-success",
-        cooldownMs: 2200,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to get GPT insight.";
-      setInsightError(message);
-      showToast({
-        type: "error",
-        message,
-        dedupeKey: `quickbooks-insight-error-${message}`,
-        cooldownMs: 2200,
-      });
-    } finally {
-      setIsInsightLoading(false);
-    }
-  }, [insightModalRow]);
+    await fetchQuickBooksInsight(insightModalRow, {
+      showSuccessToast: true,
+      showErrorToast: true,
+    });
+  }, [fetchQuickBooksInsight, insightModalRow]);
 
   const tableColumns = useMemo<TableColumn<QuickBooksViewRow>[]>(() => {
     if (activeTab === "outgoing") {
@@ -1103,7 +1173,9 @@ export default function QuickBooksPage() {
         </div>
 
         {!insightText && !insightError ? (
-          <p className="quickbooks-insight-empty">Click "Ask GPT" to generate a transaction explanation.</p>
+          <p className="quickbooks-insight-empty">
+            {isInsightLoading ? "Generating GPT insight..." : 'Click "Ask GPT" to generate a transaction explanation.'}
+          </p>
         ) : null}
         {insightError ? <p className="quickbooks-insight-error">{insightError}</p> : null}
         {insightText ? <pre className="quickbooks-insight-result">{insightText}</pre> : null}
@@ -1512,6 +1584,24 @@ function buildQuickBooksInsightDescription(item: QuickBooksPaymentRow): string {
     .map((part) => String(part || "").trim())
     .filter(Boolean);
   return details.join(" | ") || "-";
+}
+
+function buildQuickBooksInsightCacheKey(item: QuickBooksPaymentRow): string {
+  const transactionId = sanitizeQuickBooksTransactionId(item?.transactionId);
+  if (transactionId) {
+    return `tx:${transactionId}`;
+  }
+
+  const signature = [
+    String(item?.clientName || "").trim(),
+    String(item?.paymentAmount ?? "").trim(),
+    String(item?.paymentDate || "").trim(),
+    String(item?.transactionType || "").trim(),
+    String(item?.description || "").trim(),
+  ]
+    .join("|")
+    .trim();
+  return signature ? `sig:${signature}` : "";
 }
 
 function parseQuickBooksIsoDateParts(value: string): { year: number; month: number; day: number } | null {
