@@ -20967,18 +20967,23 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     const clientMentions = buildAssistantClientMentions(normalizedReply, filteredRecords, 24);
     const parsedDateRange = parseAssistantDateRangeFromMessage(message);
     const fallbackScope = normalizeAssistantScopePayload(fallbackPayload.scope);
-    const mentionScope = buildAssistantScopeFromClientMentions(
-      clientMentions,
-      filteredRecords,
-      parsedDateRange || fallbackScope?.range || sessionScope?.range || null,
-    );
+    const mentionScope =
+      shouldResetContext || fallbackScope
+        ? null
+        : buildAssistantScopeFromClientMentions(
+            clientMentions,
+            filteredRecords,
+            parsedDateRange || sessionScope?.range || null,
+          );
+    let scopeSource = "none";
 
     if (shouldResetContext) {
       await clearAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
-    } else if (fallbackScope) {
+    } else if (fallbackScope && fallbackScope.scopeEstablished === true) {
       await upsertAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, fallbackScope);
+      scopeSource = "explicit";
     } else if (mentionScope && mentionScope.scopeEstablished === true) {
-      await upsertAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, mentionScope);
+      scopeSource = "mention";
     }
 
     try {
@@ -20998,13 +21003,14 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     }
 
     console.info(
-      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId}`,
+      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} scope_source=${scopeSource}`,
     );
 
     res.json({
       ok: true,
       reply: normalizedReply,
       clientMentions,
+      scope_source: scopeSource,
       suggestions: Array.isArray(fallbackPayload.suggestions) ? fallbackPayload.suggestions.slice(0, 8) : [],
       source: {
         recordsUsed: filteredRecords.length,
