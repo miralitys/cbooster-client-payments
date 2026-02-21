@@ -100,6 +100,18 @@ export default function QuickBooksPage() {
           cell: (item) => formatQuickBooksOutgoingCategoryLabel(item.categoryName),
         },
         {
+          key: "categoryDetails",
+          label: "Category details",
+          align: "left",
+          cell: (item) => formatQuickBooksOutgoingCategoryDetailsLabel(item.categoryDetails),
+        },
+        {
+          key: "description",
+          label: "Description",
+          align: "left",
+          cell: (item) => formatQuickBooksOutgoingDescriptionLabel(item.description),
+        },
+        {
           key: "paymentAmount",
           label: "Outgoing Amount",
           align: "right",
@@ -509,6 +521,8 @@ function quickBooksRowSignature(row: QuickBooksPaymentRow): string {
     String(row.clientPhone || "").trim(),
     String(row.clientEmail || "").trim(),
     String(row.categoryName || "").trim(),
+    String(row.categoryDetails || "").trim(),
+    String(row.description || "").trim(),
     String(row.paymentDate || "").trim(),
     String(row.paymentAmount ?? "").trim(),
     String(row.transactionType || "").trim(),
@@ -702,6 +716,16 @@ function formatQuickBooksOutgoingTypeLabel(transactionType: string): string {
 function formatQuickBooksOutgoingCategoryLabel(categoryName: string | undefined): string {
   const normalizedName = String(categoryName || "").trim();
   return normalizedName || "-";
+}
+
+function formatQuickBooksOutgoingCategoryDetailsLabel(categoryDetails: string | undefined): string {
+  const normalizedValue = String(categoryDetails || "").trim();
+  return normalizedValue || "-";
+}
+
+function formatQuickBooksOutgoingDescriptionLabel(description: string | undefined): string {
+  const normalizedValue = String(description || "").trim();
+  return normalizedValue || "-";
 }
 
 function formatContactCellValue(value: string): string {

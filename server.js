@@ -16129,7 +16129,7 @@ async function fetchQuickBooksRefundsInRange(accessToken, fromDate, toDate) {
 
 async function fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate) {
   return fetchQuickBooksEntityInRange(accessToken, "Purchase", fromDate, toDate, "purchases", {
-    selectFields: ["Id", "TotalAmt", "TxnDate", "EntityRef", "AccountRef", "Line"],
+    selectFields: ["Id", "TotalAmt", "TxnDate", "EntityRef", "AccountRef", "Line", "PrivateNote"],
   });
 }
 
@@ -16412,6 +16412,8 @@ function normalizeQuickBooksOutgoingTransaction(item) {
   const clientPhone = normalizeQuickBooksCustomerPhone(item?.clientPhone);
   const clientEmail = normalizeQuickBooksCustomerEmail(item?.clientEmail);
   const categoryName = sanitizeTextValue(item?.categoryName, 300);
+  const categoryDetails = sanitizeTextValue(item?.categoryDetails, 300);
+  const description = sanitizeTextValue(item?.description, 300);
   const parsedAmount = Number.parseFloat(item?.paymentAmount);
   const paymentAmount = Number.isFinite(parsedAmount) ? -Math.abs(parsedAmount) : 0;
   const paymentDate = sanitizeTextValue(item?.paymentDate, 20);
@@ -16427,6 +16429,8 @@ function normalizeQuickBooksOutgoingTransaction(item) {
     clientPhone,
     clientEmail,
     categoryName,
+    categoryDetails,
+    description,
     paymentAmount,
     paymentDate,
   };
@@ -16464,39 +16468,88 @@ function resolveQuickBooksPayeeReference(reference, fallbackLabel) {
   };
 }
 
-function extractQuickBooksOutgoingCategoryName(record) {
+function pushQuickBooksOutgoingUniqueValue(target, seen, value) {
+  const normalizedValue = sanitizeTextValue(value, 300);
+  if (!normalizedValue) {
+    return;
+  }
+  const dedupeKey = normalizedValue.toLowerCase();
+  if (seen.has(dedupeKey)) {
+    return;
+  }
+  seen.add(dedupeKey);
+  target.push(normalizedValue);
+}
+
+function formatQuickBooksOutgoingValueList(values, maxVisible = 3) {
+  const normalizedValues = Array.isArray(values) ? values.filter((value) => sanitizeTextValue(value, 300)) : [];
+  if (!normalizedValues.length) {
+    return "";
+  }
+  if (normalizedValues.length <= maxVisible) {
+    return normalizedValues.join(", ");
+  }
+  return `${normalizedValues.slice(0, maxVisible).join(", ")} +${normalizedValues.length - maxVisible}`;
+}
+
+function extractQuickBooksOutgoingCategoryInfo(record) {
   const normalizedRecord = record && typeof record === "object" ? record : {};
   const categoryCandidates = [];
-  const seen = new Set();
-
-  function pushCandidate(value) {
-    const normalizedValue = sanitizeTextValue(value, 300);
-    if (!normalizedValue || seen.has(normalizedValue)) {
-      return;
-    }
-    seen.add(normalizedValue);
-    categoryCandidates.push(normalizedValue);
-  }
+  const categorySeen = new Set();
+  const detailCandidates = [];
+  const detailSeen = new Set();
 
   const lines = Array.isArray(normalizedRecord?.Line) ? normalizedRecord.Line : [];
   for (const line of lines) {
     const normalizedLine = line && typeof line === "object" ? line : {};
-    pushCandidate(resolveQuickBooksReferenceLabel(normalizedLine?.AccountBasedExpenseLineDetail?.AccountRef, "Account"));
-    pushCandidate(resolveQuickBooksReferenceLabel(normalizedLine?.ItemBasedExpenseLineDetail?.ExpenseAccountRef, "Expense Account"));
-    pushCandidate(resolveQuickBooksReferenceLabel(normalizedLine?.ItemBasedExpenseLineDetail?.ItemRef, "Item"));
+    const accountCategory = resolveQuickBooksReferenceLabel(normalizedLine?.AccountBasedExpenseLineDetail?.AccountRef, "Account");
+    const expenseAccountCategory = resolveQuickBooksReferenceLabel(
+      normalizedLine?.ItemBasedExpenseLineDetail?.ExpenseAccountRef,
+      "Expense Account",
+    );
+    const itemCategory = resolveQuickBooksReferenceLabel(normalizedLine?.ItemBasedExpenseLineDetail?.ItemRef, "Item");
+
+    if (accountCategory) {
+      pushQuickBooksOutgoingUniqueValue(categoryCandidates, categorySeen, accountCategory);
+      pushQuickBooksOutgoingUniqueValue(detailCandidates, detailSeen, `Account: ${accountCategory}`);
+    }
+    if (expenseAccountCategory) {
+      pushQuickBooksOutgoingUniqueValue(categoryCandidates, categorySeen, expenseAccountCategory);
+      pushQuickBooksOutgoingUniqueValue(detailCandidates, detailSeen, `Expense account: ${expenseAccountCategory}`);
+    }
+    if (itemCategory) {
+      if (!categoryCandidates.length) {
+        pushQuickBooksOutgoingUniqueValue(categoryCandidates, categorySeen, itemCategory);
+      }
+      pushQuickBooksOutgoingUniqueValue(detailCandidates, detailSeen, `Item: ${itemCategory}`);
+    }
   }
 
-  if (!categoryCandidates.length) {
-    return "";
+  return {
+    categoryName: categoryCandidates[0] || "",
+    categoryDetails: formatQuickBooksOutgoingValueList(detailCandidates, 3),
+  };
+}
+
+function extractQuickBooksOutgoingDescription(record) {
+  const normalizedRecord = record && typeof record === "object" ? record : {};
+  const descriptionCandidates = [];
+  const descriptionSeen = new Set();
+
+  pushQuickBooksOutgoingUniqueValue(descriptionCandidates, descriptionSeen, normalizedRecord?.PrivateNote);
+
+  const lines = Array.isArray(normalizedRecord?.Line) ? normalizedRecord.Line : [];
+  for (const line of lines) {
+    const normalizedLine = line && typeof line === "object" ? line : {};
+    pushQuickBooksOutgoingUniqueValue(descriptionCandidates, descriptionSeen, normalizedLine?.Description);
   }
-  if (categoryCandidates.length <= 3) {
-    return categoryCandidates.join(", ");
-  }
-  return `${categoryCandidates.slice(0, 3).join(", ")} +${categoryCandidates.length - 3}`;
+
+  return formatQuickBooksOutgoingValueList(descriptionCandidates, 3);
 }
 
 function mapQuickBooksPurchaseAsOutgoing(record) {
   const payeeReference = resolveQuickBooksPayeeReference(record?.EntityRef, "Payee");
+  const categoryInfo = extractQuickBooksOutgoingCategoryInfo(record);
   return normalizeQuickBooksOutgoingTransaction({
     transactionType: "expense",
     transactionId: record?.Id,
@@ -16504,7 +16557,9 @@ function mapQuickBooksPurchaseAsOutgoing(record) {
     clientName: payeeReference.payeeName,
     clientPhone: "",
     clientEmail: "",
-    categoryName: extractQuickBooksOutgoingCategoryName(record),
+    categoryName: categoryInfo.categoryName,
+    categoryDetails: categoryInfo.categoryDetails,
+    description: extractQuickBooksOutgoingDescription(record),
     paymentAmount: record?.TotalAmt,
     paymentDate: record?.TxnDate,
   });
