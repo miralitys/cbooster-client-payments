@@ -100,6 +100,7 @@ const RATE_LIMIT_PROFILE_API_CHAT = Object.freeze({
 const RATE_LIMIT_PROFILE_API_MINI_ACCESS = Object.freeze({
   windowMs: 60 * 1000,
   maxHitsIp: 90,
+  maxHitsUser: 45,
   blockMs: 2 * 60 * 1000,
 });
 const RATE_LIMIT_PROFILE_API_MINI_WRITE = Object.freeze({
@@ -20194,9 +20195,9 @@ function handleApiAuthLogout(req, res) {
 }
 
 app.post("/api/auth/login", handleApiAuthLogin);
-app.post("/api/auth/logout", handleApiAuthLogout);
+app.post("/api/auth/logout", requireWebApiCsrf, handleApiAuthLogout);
 app.post("/api/mobile/auth/login", handleApiAuthLogin);
-app.post("/api/mobile/auth/logout", handleApiAuthLogout);
+app.post("/api/mobile/auth/logout", requireWebApiCsrf, handleApiAuthLogout);
 
 function handleWebLogout(req, res) {
   clearWebAuthSessionCookie(req, res);
@@ -21944,6 +21945,22 @@ app.post("/api/mini/access", async (req, res) => {
     return;
   }
 
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.mini.access",
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_MINI_ACCESS.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.blockMs,
+      },
+      username: sanitizeTextValue(authResult.user?.id, 50),
+      message: "Mini App access check limit reached. Please wait before retrying.",
+      code: "mini_access_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   const uploadToken = createMiniUploadToken(authResult.user);
   res.json({
     ok: true,
@@ -22058,6 +22075,23 @@ app.post("/api/mini/clients", async (req, res) => {
   }
 
   const authenticatedUserId = sanitizeTextValue(authResult.user?.id, 50);
+  if (
+    !parsedUploadToken &&
+    !enforceRateLimit(req, res, {
+      scope: "api.mini.write",
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_MINI_WRITE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.blockMs,
+      },
+      username: authenticatedUserId,
+      message: "Mini App write limit reached. Please wait before retrying.",
+      code: "mini_write_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   if (parsedUploadToken && (!authenticatedUserId || authenticatedUserId !== parsedUploadToken.userId)) {
     res.status(401).json({
       error: "Upload token user mismatch. Reopen Mini App.",
