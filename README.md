@@ -38,8 +38,11 @@ npm start
    - `WEB_AUTH_SESSION_SECRET` = длинный случайный секрет для подписи cookie-сессии;
    - `WEB_AUTH_SESSION_TTL_SEC` = TTL сессии в секундах (по умолчанию `43200` = 12 часов);
    - `WEB_AUTH_COOKIE_SECURE` = `true`/`false` (опционально, принудительный secure-флаг cookie);
+   - `TRUST_PROXY` = настройка Express `trust proxy` (по умолчанию `1` для Render/Cloudflare);
    - `RATE_LIMIT_ENABLED` = `true`/`false` (по умолчанию `true`, защита от brute-force и burst-запросов);
+   - `RATE_LIMIT_STORE_MODE` = `postgres` или `memory` (по умолчанию `postgres`, если задан `DATABASE_URL`);
    - `RATE_LIMIT_STORE_MAX_KEYS` = лимит in-memory ключей rate-limit (по умолчанию `60000`);
+   - `RATE_LIMIT_DB_ERROR_COOLDOWN_MS` = cooldown при ошибках shared rate-limit store (по умолчанию `30000`);
    - `QUICKBOOKS_CLIENT_ID` = QuickBooks OAuth Client ID;
    - `QUICKBOOKS_CLIENT_SECRET` = QuickBooks OAuth Client Secret;
    - `QUICKBOOKS_REFRESH_TOKEN` = QuickBooks OAuth Refresh Token;
@@ -66,6 +69,8 @@ npm start
    - `DB_TABLE_NAME` = `client_records_state`;
    - `DB_MODERATION_TABLE_NAME` = `mini_client_submissions`;
    - `DB_MODERATION_FILES_TABLE_NAME` = `mini_submission_files`;
+   - `DB_RATE_LIMIT_BUCKETS_TABLE_NAME` = `web_rate_limit_buckets`;
+   - `DB_LOGIN_FAILURES_TABLE_NAME` = `web_login_failure_state`;
    - `TELEGRAM_BOT_TOKEN` = токен бота (для Mini App);
    - `TELEGRAM_ALLOWED_USER_IDS` = список Telegram user id через запятую (опционально);
    - `TELEGRAM_REQUIRED_CHAT_ID` = id группы, где пользователь должен состоять, чтобы пользоваться Mini App (опционально);

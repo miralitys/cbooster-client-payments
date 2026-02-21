@@ -118,9 +118,16 @@ const WEB_AUTH_MOBILE_REPLAY_MAX_KEYS = Math.min(
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
 const WEB_AUTH_SESSION_SECRET_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_SESSION_SECRET);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW);
+const TRUST_PROXY_SETTING = resolveExpressTrustProxySetting(process.env.TRUST_PROXY, 1);
 const RATE_LIMIT_ENABLED = resolveOptionalBoolean(process.env.RATE_LIMIT_ENABLED) !== false;
+const RATE_LIMIT_STORE_MODE = resolveRateLimitStoreMode(process.env.RATE_LIMIT_STORE_MODE, DATABASE_URL);
 const RATE_LIMIT_STORE_MAX_KEYS = Math.min(Math.max(parsePositiveInteger(process.env.RATE_LIMIT_STORE_MAX_KEYS, 60000), 5000), 300000);
 const RATE_LIMIT_SWEEP_EVERY_REQUESTS = 120;
+const RATE_LIMIT_DB_SWEEP_EVERY_REQUESTS = 300;
+const RATE_LIMIT_DB_ERROR_COOLDOWN_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.RATE_LIMIT_DB_ERROR_COOLDOWN_MS, 30 * 1000), 5 * 1000),
+  10 * 60 * 1000,
+);
 const RATE_LIMIT_PROFILE_LOGIN_IP = Object.freeze({
   windowMs: 10 * 60 * 1000,
   maxHits: 40,
@@ -568,6 +575,16 @@ const ASSISTANT_SESSION_SCOPE_TABLE_NAME = resolveTableName(
   process.env.DB_ASSISTANT_SESSION_SCOPE_TABLE_NAME,
   DEFAULT_ASSISTANT_SESSION_SCOPE_TABLE_NAME,
 );
+const DEFAULT_RATE_LIMIT_BUCKETS_TABLE_NAME = "web_rate_limit_buckets";
+const RATE_LIMIT_BUCKETS_TABLE_NAME = resolveTableName(
+  process.env.DB_RATE_LIMIT_BUCKETS_TABLE_NAME,
+  DEFAULT_RATE_LIMIT_BUCKETS_TABLE_NAME,
+);
+const DEFAULT_LOGIN_FAILURES_TABLE_NAME = "web_login_failure_state";
+const LOGIN_FAILURES_TABLE_NAME = resolveTableName(
+  process.env.DB_LOGIN_FAILURES_TABLE_NAME,
+  DEFAULT_LOGIN_FAILURES_TABLE_NAME,
+);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
@@ -581,6 +598,8 @@ const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CA
 const GHL_LEADS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_LEADS_CACHE_TABLE_NAME);
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
 const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESSION_SCOPE_TABLE_NAME);
+const RATE_LIMIT_BUCKETS_TABLE = qualifyTableName(DB_SCHEMA, RATE_LIMIT_BUCKETS_TABLE_NAME);
+const LOGIN_FAILURES_TABLE = qualifyTableName(DB_SCHEMA, LOGIN_FAILURES_TABLE_NAME);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
@@ -1290,7 +1309,7 @@ const performanceObservability = createPerformanceObservabilityState({
 startPerformanceObservabilityMonitor(performanceObservability);
 
 const app = express();
-app.set("trust proxy", 1);
+app.set("trust proxy", TRUST_PROXY_SETTING);
 app.disable("x-powered-by");
 app.use(
   helmet({
@@ -1348,6 +1367,9 @@ const pool = DATABASE_URL
       performanceObservability,
     )
   : null;
+if (RATE_LIMIT_ENABLED && RATE_LIMIT_STORE_MODE === "postgres" && !pool) {
+  console.warn("[rate-limit] RATE_LIMIT_STORE_MODE resolved to postgres, but DATABASE_URL is missing. Falling back to memory.");
+}
 const miniAttachmentsUploadMemoryMiddleware = createMiniAttachmentsUploadMiddleware({
   useDisk: false,
 });
@@ -1378,6 +1400,9 @@ let ghlLocationDocumentCandidatesCache = {
   items: [],
 };
 let rateLimitSweepCounter = 0;
+let rateLimitDbUnavailableUntilMs = 0;
+let rateLimitDbLastSweepStartedAtMs = 0;
+let rateLimitDbSweepInFlight = false;
 const rateLimitRequestBuckets = new Map();
 const loginFailureByAccountKey = new Map();
 const loginFailureByIpAccountKey = new Map();
@@ -1491,6 +1516,47 @@ function parsePositiveInteger(rawValue, fallbackValue) {
     return fallbackValue;
   }
   return parsed;
+}
+
+function resolveExpressTrustProxySetting(rawValue, fallbackValue = 1) {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return fallbackValue;
+  }
+
+  const normalized = value.toLowerCase();
+  if (normalized === "false" || normalized === "off" || normalized === "0" || normalized === "no") {
+    return false;
+  }
+
+  if (normalized === "true" || normalized === "on" || normalized === "yes") {
+    return true;
+  }
+
+  const hops = Number.parseInt(value, 10);
+  if (Number.isFinite(hops) && hops >= 0) {
+    return hops;
+  }
+
+  // Express accepts CSV subnet names / CIDRs / IPs (e.g. loopback, 10.0.0.0/8).
+  if (/^[a-z0-9_.,:/\-\s]+$/i.test(value)) {
+    return value;
+  }
+
+  return fallbackValue;
+}
+
+function resolveRateLimitStoreMode(rawValue, databaseUrl) {
+  const normalized = (rawValue || "auto").toString().trim().toLowerCase();
+  if (normalized === "memory" || normalized === "in-memory" || normalized === "in_memory") {
+    return "memory";
+  }
+
+  if (normalized === "postgres" || normalized === "pg" || normalized === "database" || normalized === "db") {
+    return databaseUrl ? "postgres" : "memory";
+  }
+
+  return databaseUrl ? "postgres" : "memory";
 }
 
 function parseOptionalPositiveInteger(rawValue) {
@@ -10231,22 +10297,43 @@ function requireOwnerOrAdminAccess(message = "Owner or admin access is required.
   };
 }
 
+function normalizeRateLimitIpAddress(rawValue) {
+  let candidate = sanitizeTextValue(rawValue, 200);
+  if (!candidate) {
+    return "";
+  }
+
+  // Normalize mapped localhost/IPv4 forms.
+  if (candidate === "::1") {
+    return "127.0.0.1";
+  }
+  if (candidate.startsWith("::ffff:")) {
+    candidate = candidate.slice("::ffff:".length);
+  }
+
+  // Remove IPv6 zone id (`fe80::1%en0`) and IPv4 port suffix (`1.2.3.4:1234`).
+  const zoneIndex = candidate.indexOf("%");
+  if (zoneIndex >= 0) {
+    candidate = candidate.slice(0, zoneIndex);
+  }
+  if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(candidate)) {
+    candidate = candidate.replace(/:\d+$/, "");
+  }
+
+  if (candidate.startsWith("[") && candidate.endsWith("]")) {
+    candidate = candidate.slice(1, -1);
+  }
+
+  return sanitizeTextValue(candidate, 160);
+}
+
 function resolveRateLimitClientIp(req) {
-  const directIp = sanitizeTextValue(req?.ip, 160);
+  const directIp = normalizeRateLimitIpAddress(req?.ip);
   if (directIp) {
     return directIp;
   }
 
-  const forwardedRaw = sanitizeTextValue(req?.headers?.["x-forwarded-for"], 400);
-  if (forwardedRaw) {
-    const firstForwarded = forwardedRaw.split(",")[0]?.trim();
-    const normalizedForwarded = sanitizeTextValue(firstForwarded, 160);
-    if (normalizedForwarded) {
-      return normalizedForwarded;
-    }
-  }
-
-  const socketIp = sanitizeTextValue(req?.socket?.remoteAddress || req?.connection?.remoteAddress, 160);
+  const socketIp = normalizeRateLimitIpAddress(req?.socket?.remoteAddress || req?.connection?.remoteAddress);
   if (socketIp) {
     return socketIp;
   }
@@ -10258,9 +10345,54 @@ function normalizeRateLimitUsername(rawValue) {
   return normalizeWebAuthUsername(rawValue || "");
 }
 
+function normalizeRateLimitStoreKey(rawValue, maxLength = 260) {
+  return sanitizeTextValue(rawValue, maxLength);
+}
+
+function readRateLimitNumeric(value, fallback = 0) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return numeric;
+}
+
 function buildRateLimitRetryAfterSeconds(retryAfterMs) {
   const normalizedMs = Number.isFinite(retryAfterMs) ? Math.max(0, retryAfterMs) : 0;
   return Math.max(1, Math.ceil(normalizedMs / 1000));
+}
+
+function buildRateLimitExpiryIso(nowMs, ttlMs) {
+  const normalizedNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const normalizedTtlMs = Math.max(1000, Number.isFinite(ttlMs) ? ttlMs : 60_000);
+  return new Date(normalizedNowMs + normalizedTtlMs).toISOString();
+}
+
+function shouldUseSharedRateLimitStore(nowMs = Date.now()) {
+  if (!RATE_LIMIT_ENABLED) {
+    return false;
+  }
+  if (RATE_LIMIT_STORE_MODE !== "postgres") {
+    return false;
+  }
+  if (!pool) {
+    return false;
+  }
+  return nowMs >= rateLimitDbUnavailableUntilMs;
+}
+
+function markSharedRateLimitStoreFailure(error, operation = "unknown") {
+  const nowMs = Date.now();
+  const previousUnavailableUntilMs = rateLimitDbUnavailableUntilMs;
+  rateLimitDbUnavailableUntilMs = Math.max(rateLimitDbUnavailableUntilMs, nowMs + RATE_LIMIT_DB_ERROR_COOLDOWN_MS);
+  if (nowMs >= previousUnavailableUntilMs) {
+    console.warn(
+      `[rate-limit] shared store unavailable (${operation}), falling back to memory for ${Math.round(
+        RATE_LIMIT_DB_ERROR_COOLDOWN_MS / 1000,
+      )}s:`,
+      sanitizeTextValue(error?.message, 320) || "unknown error",
+    );
+  }
 }
 
 function maybeSweepRateLimitStores(nowMs = Date.now()) {
@@ -10269,36 +10401,51 @@ function maybeSweepRateLimitStores(nowMs = Date.now()) {
   }
 
   rateLimitSweepCounter += 1;
-  if (rateLimitSweepCounter % RATE_LIMIT_SWEEP_EVERY_REQUESTS !== 0) {
-    return;
-  }
-
-  const requestBucketExpiryFloorMs = 3 * 60 * 60 * 1000;
-  for (const [key, entry] of rateLimitRequestBuckets) {
-    const staleWindowMs = Math.max(entry.windowMs || 0, entry.blockMs || 0, requestBucketExpiryFloorMs);
-    if ((entry.lastSeenMs || 0) + staleWindowMs < nowMs) {
-      rateLimitRequestBuckets.delete(key);
+  if (rateLimitSweepCounter % RATE_LIMIT_SWEEP_EVERY_REQUESTS === 0) {
+    const requestBucketExpiryFloorMs = 3 * 60 * 60 * 1000;
+    for (const [key, entry] of rateLimitRequestBuckets) {
+      const staleWindowMs = Math.max(entry.windowMs || 0, entry.blockMs || 0, requestBucketExpiryFloorMs);
+      if ((entry.lastSeenMs || 0) + staleWindowMs < nowMs) {
+        rateLimitRequestBuckets.delete(key);
+      }
     }
-  }
 
-  const failureEntryExpiryFloorMs = 3 * 60 * 60 * 1000;
-  for (const [key, entry] of loginFailureByAccountKey) {
-    const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
-    if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
-      loginFailureByAccountKey.delete(key);
+    const failureEntryExpiryFloorMs = 3 * 60 * 60 * 1000;
+    for (const [key, entry] of loginFailureByAccountKey) {
+      const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
+      if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
+        loginFailureByAccountKey.delete(key);
+      }
     }
-  }
 
-  for (const [key, entry] of loginFailureByIpAccountKey) {
-    const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
-    if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
-      loginFailureByIpAccountKey.delete(key);
+    for (const [key, entry] of loginFailureByIpAccountKey) {
+      const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
+      if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
+        loginFailureByIpAccountKey.delete(key);
+      }
     }
+
+    trimRateLimitStore(rateLimitRequestBuckets);
+    trimRateLimitStore(loginFailureByAccountKey);
+    trimRateLimitStore(loginFailureByIpAccountKey);
   }
 
-  trimRateLimitStore(rateLimitRequestBuckets);
-  trimRateLimitStore(loginFailureByAccountKey);
-  trimRateLimitStore(loginFailureByIpAccountKey);
+  if (
+    shouldUseSharedRateLimitStore(nowMs) &&
+    rateLimitSweepCounter % RATE_LIMIT_DB_SWEEP_EVERY_REQUESTS === 0 &&
+    !rateLimitDbSweepInFlight &&
+    nowMs - rateLimitDbLastSweepStartedAtMs >= 30 * 1000
+  ) {
+    rateLimitDbSweepInFlight = true;
+    rateLimitDbLastSweepStartedAtMs = nowMs;
+    void sweepSharedRateLimitStores(nowMs)
+      .catch((error) => {
+        markSharedRateLimitStoreFailure(error, "db_sweep");
+      })
+      .finally(() => {
+        rateLimitDbSweepInFlight = false;
+      });
+  }
 }
 
 function trimRateLimitStore(store) {
@@ -10317,7 +10464,20 @@ function trimRateLimitStore(store) {
   }
 }
 
-function consumeRateLimitBucket(scope, subject, profile, nowMs = Date.now()) {
+async function sweepSharedRateLimitStores(nowMs = Date.now()) {
+  if (!shouldUseSharedRateLimitStore(nowMs)) {
+    return;
+  }
+
+  await ensureDatabaseReady();
+  const nowIso = new Date(nowMs).toISOString();
+  await Promise.all([
+    pool.query(`DELETE FROM ${RATE_LIMIT_BUCKETS_TABLE} WHERE expires_at < $1`, [nowIso]),
+    pool.query(`DELETE FROM ${LOGIN_FAILURES_TABLE} WHERE expires_at < $1`, [nowIso]),
+  ]);
+}
+
+function consumeRateLimitBucketInMemory(scope, subject, profile, nowMs = Date.now()) {
   if (!profile || !subject) {
     return {
       allowed: true,
@@ -10378,6 +10538,176 @@ function consumeRateLimitBucket(scope, subject, profile, nowMs = Date.now()) {
   };
 }
 
+async function consumeRateLimitBucketInPostgres(scope, subject, profile, nowMs = Date.now()) {
+  if (!profile || !subject) {
+    return {
+      allowed: true,
+      retryAfterMs: 0,
+    };
+  }
+
+  await ensureDatabaseReady();
+  const windowMs = Math.max(1_000, Number(profile.windowMs) || 60_000);
+  const maxHits = Math.max(1, Number(profile.maxHits) || 1);
+  const blockMs = Math.max(windowMs, Number(profile.blockMs) || windowMs);
+  const key = normalizeRateLimitStoreKey(`${scope}:${subject}`, 512);
+  if (!key) {
+    return {
+      allowed: true,
+      retryAfterMs: 0,
+    };
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const selectResult = await client.query(
+      `
+        SELECT
+          window_start_ms,
+          hits,
+          blocked_until_ms,
+          window_ms,
+          block_ms,
+          last_seen_ms
+        FROM ${RATE_LIMIT_BUCKETS_TABLE}
+        WHERE bucket_key = $1
+        FOR UPDATE
+      `,
+      [key],
+    );
+
+    let entry;
+    if (selectResult.rows.length) {
+      const row = selectResult.rows[0];
+      entry = {
+        windowStartMs: readRateLimitNumeric(row.window_start_ms, nowMs),
+        hits: readRateLimitNumeric(row.hits, 0),
+        blockedUntilMs: readRateLimitNumeric(row.blocked_until_ms, 0),
+        lastSeenMs: readRateLimitNumeric(row.last_seen_ms, nowMs),
+        windowMs: readRateLimitNumeric(row.window_ms, windowMs),
+        blockMs: readRateLimitNumeric(row.block_ms, blockMs),
+      };
+    } else {
+      entry = {
+        windowStartMs: nowMs,
+        hits: 0,
+        blockedUntilMs: 0,
+        lastSeenMs: nowMs,
+        windowMs,
+        blockMs,
+      };
+    }
+
+    let result;
+    if (entry.blockedUntilMs > nowMs) {
+      entry.lastSeenMs = nowMs;
+      result = {
+        allowed: false,
+        retryAfterMs: Math.max(0, entry.blockedUntilMs - nowMs),
+      };
+    } else {
+      if (nowMs - entry.windowStartMs >= windowMs) {
+        entry.windowStartMs = nowMs;
+        entry.hits = 0;
+        entry.blockedUntilMs = 0;
+      }
+
+      entry.hits += 1;
+      entry.lastSeenMs = nowMs;
+      entry.windowMs = windowMs;
+      entry.blockMs = blockMs;
+
+      if (entry.hits > maxHits) {
+        entry.blockedUntilMs = nowMs + blockMs;
+        result = {
+          allowed: false,
+          retryAfterMs: Math.max(0, entry.blockedUntilMs - nowMs),
+        };
+      } else {
+        result = {
+          allowed: true,
+          retryAfterMs: 0,
+        };
+      }
+    }
+
+    const expiresAtIso = buildRateLimitExpiryIso(nowMs, Math.max(windowMs, blockMs, 3 * 60 * 60 * 1000));
+    await client.query(
+      `
+        INSERT INTO ${RATE_LIMIT_BUCKETS_TABLE} (
+          bucket_key,
+          scope,
+          subject,
+          window_start_ms,
+          hits,
+          blocked_until_ms,
+          window_ms,
+          block_ms,
+          last_seen_ms,
+          expires_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (bucket_key)
+        DO UPDATE SET
+          scope = EXCLUDED.scope,
+          subject = EXCLUDED.subject,
+          window_start_ms = EXCLUDED.window_start_ms,
+          hits = EXCLUDED.hits,
+          blocked_until_ms = EXCLUDED.blocked_until_ms,
+          window_ms = EXCLUDED.window_ms,
+          block_ms = EXCLUDED.block_ms,
+          last_seen_ms = EXCLUDED.last_seen_ms,
+          expires_at = EXCLUDED.expires_at
+      `,
+      [
+        key,
+        normalizeRateLimitStoreKey(scope, 160),
+        normalizeRateLimitStoreKey(subject, 260),
+        Math.trunc(entry.windowStartMs),
+        Math.max(0, Math.trunc(entry.hits)),
+        Math.max(0, Math.trunc(entry.blockedUntilMs)),
+        Math.max(1000, Math.trunc(windowMs)),
+        Math.max(1000, Math.trunc(blockMs)),
+        Math.max(0, Math.trunc(entry.lastSeenMs)),
+        expiresAtIso,
+      ],
+    );
+
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // ignore rollback errors
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function consumeRateLimitBucket(scope, subject, profile, nowMs = Date.now()) {
+  if (!profile || !subject) {
+    return {
+      allowed: true,
+      retryAfterMs: 0,
+    };
+  }
+
+  if (!shouldUseSharedRateLimitStore(nowMs)) {
+    return consumeRateLimitBucketInMemory(scope, subject, profile, nowMs);
+  }
+
+  try {
+    return await consumeRateLimitBucketInPostgres(scope, subject, profile, nowMs);
+  } catch (error) {
+    markSharedRateLimitStoreFailure(error, "consume_bucket");
+    return consumeRateLimitBucketInMemory(scope, subject, profile, nowMs);
+  }
+}
+
 function sendRateLimitResponse(req, res, options = {}) {
   const retryAfterMs = Math.max(0, Number(options.retryAfterMs) || 0);
   const retryAfterSec = buildRateLimitRetryAfterSeconds(retryAfterMs);
@@ -10405,7 +10735,7 @@ function sendRateLimitResponse(req, res, options = {}) {
   });
 }
 
-function enforceRateLimit(req, res, options = {}) {
+async function enforceRateLimit(req, res, options = {}) {
   if (!RATE_LIMIT_ENABLED) {
     return true;
   }
@@ -10416,7 +10746,7 @@ function enforceRateLimit(req, res, options = {}) {
   const ip = resolveRateLimitClientIp(req);
 
   if (options.ipProfile) {
-    const ipResult = consumeRateLimitBucket(`${scope}:ip`, ip, options.ipProfile, nowMs);
+    const ipResult = await consumeRateLimitBucket(`${scope}:ip`, ip, options.ipProfile, nowMs);
     if (!ipResult.allowed) {
       sendRateLimitResponse(req, res, {
         retryAfterMs: ipResult.retryAfterMs,
@@ -10433,7 +10763,7 @@ function enforceRateLimit(req, res, options = {}) {
     const sessionUsername = normalizeRateLimitUsername(req.webAuthUser);
     const userKey = sessionUsername || fallbackUsername;
     if (userKey) {
-      const userResult = consumeRateLimitBucket(`${scope}:user`, userKey, options.userProfile, nowMs);
+      const userResult = await consumeRateLimitBucket(`${scope}:user`, userKey, options.userProfile, nowMs);
       if (!userResult.allowed) {
         sendRateLimitResponse(req, res, {
           retryAfterMs: userResult.retryAfterMs,
@@ -10503,7 +10833,213 @@ function clearLoginFailureEntry(store, key) {
   store.delete(key);
 }
 
-function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
+async function readLoginFailureLockFromStore(store, policyScope, key, policy, nowMs) {
+  if (!key) {
+    return 0;
+  }
+
+  if (!shouldUseSharedRateLimitStore(nowMs)) {
+    return readLoginFailureLock(store.get(key), nowMs, policy);
+  }
+
+  try {
+    await ensureDatabaseReady();
+    const result = await pool.query(
+      `
+        SELECT
+          last_attempt_ms,
+          locked_until_ms
+        FROM ${LOGIN_FAILURES_TABLE}
+        WHERE failure_key = $1
+          AND policy_scope = $2
+        LIMIT 1
+      `,
+      [key, policyScope],
+    );
+    if (!result.rows.length) {
+      return 0;
+    }
+
+    const row = result.rows[0];
+    const lockedUntilMs = readRateLimitNumeric(row.locked_until_ms, 0);
+    const lastAttemptMs = readRateLimitNumeric(row.last_attempt_ms, 0);
+
+    if (lockedUntilMs > nowMs) {
+      return lockedUntilMs - nowMs;
+    }
+    if (nowMs - lastAttemptMs > policy.windowMs) {
+      void pool
+        .query(
+          `
+            DELETE FROM ${LOGIN_FAILURES_TABLE}
+            WHERE failure_key = $1
+              AND policy_scope = $2
+          `,
+          [key, policyScope],
+        )
+        .catch((error) => {
+          markSharedRateLimitStoreFailure(error, "login_lock_cleanup");
+        });
+      return 0;
+    }
+    return 0;
+  } catch (error) {
+    markSharedRateLimitStoreFailure(error, "read_login_lock");
+    return readLoginFailureLock(store.get(key), nowMs, policy);
+  }
+}
+
+async function recordLoginFailureEntryInStore(store, policyScope, key, policy, nowMs) {
+  if (!key) {
+    return;
+  }
+
+  if (!shouldUseSharedRateLimitStore(nowMs)) {
+    recordLoginFailureEntry(store, key, policy, nowMs);
+    return;
+  }
+
+  try {
+    await ensureDatabaseReady();
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const selectResult = await client.query(
+        `
+          SELECT
+            first_attempt_ms,
+            last_attempt_ms,
+            failures,
+            locked_until_ms,
+            window_ms,
+            lock_ms
+          FROM ${LOGIN_FAILURES_TABLE}
+          WHERE failure_key = $1
+            AND policy_scope = $2
+          FOR UPDATE
+        `,
+        [key, policyScope],
+      );
+
+      let entry;
+      if (selectResult.rows.length) {
+        const row = selectResult.rows[0];
+        entry = {
+          firstAttemptMs: readRateLimitNumeric(row.first_attempt_ms, nowMs),
+          lastAttemptMs: readRateLimitNumeric(row.last_attempt_ms, nowMs),
+          failures: readRateLimitNumeric(row.failures, 0),
+          lockedUntilMs: readRateLimitNumeric(row.locked_until_ms, 0),
+          windowMs: readRateLimitNumeric(row.window_ms, policy.windowMs),
+          lockMs: readRateLimitNumeric(row.lock_ms, policy.lockMs),
+        };
+      } else {
+        entry = null;
+      }
+
+      const shouldResetWindow = !entry || nowMs - entry.firstAttemptMs > policy.windowMs;
+      const lockExpired = entry && entry.lockedUntilMs > 0 && entry.lockedUntilMs <= nowMs;
+      if (shouldResetWindow || lockExpired) {
+        entry = {
+          firstAttemptMs: nowMs,
+          lastAttemptMs: nowMs,
+          failures: 0,
+          lockedUntilMs: 0,
+          windowMs: policy.windowMs,
+          lockMs: policy.lockMs,
+        };
+      }
+
+      entry.failures += 1;
+      entry.lastAttemptMs = nowMs;
+      entry.windowMs = policy.windowMs;
+      entry.lockMs = policy.lockMs;
+      if (entry.failures >= policy.maxFailures) {
+        entry.lockedUntilMs = nowMs + policy.lockMs;
+      }
+
+      const expiresAtIso = buildRateLimitExpiryIso(nowMs, Math.max(policy.windowMs, policy.lockMs, 3 * 60 * 60 * 1000));
+      await client.query(
+        `
+          INSERT INTO ${LOGIN_FAILURES_TABLE} (
+            failure_key,
+            policy_scope,
+            first_attempt_ms,
+            last_attempt_ms,
+            failures,
+            locked_until_ms,
+            window_ms,
+            lock_ms,
+            expires_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ON CONFLICT (failure_key)
+          DO UPDATE SET
+            policy_scope = EXCLUDED.policy_scope,
+            first_attempt_ms = EXCLUDED.first_attempt_ms,
+            last_attempt_ms = EXCLUDED.last_attempt_ms,
+            failures = EXCLUDED.failures,
+            locked_until_ms = EXCLUDED.locked_until_ms,
+            window_ms = EXCLUDED.window_ms,
+            lock_ms = EXCLUDED.lock_ms,
+            expires_at = EXCLUDED.expires_at
+        `,
+        [
+          key,
+          policyScope,
+          Math.max(0, Math.trunc(entry.firstAttemptMs)),
+          Math.max(0, Math.trunc(entry.lastAttemptMs)),
+          Math.max(0, Math.trunc(entry.failures)),
+          Math.max(0, Math.trunc(entry.lockedUntilMs)),
+          Math.max(1000, Math.trunc(policy.windowMs)),
+          Math.max(1000, Math.trunc(policy.lockMs)),
+          expiresAtIso,
+        ],
+      );
+
+      await client.query("COMMIT");
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // ignore rollback errors
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    markSharedRateLimitStoreFailure(error, "record_login_failure");
+    recordLoginFailureEntry(store, key, policy, nowMs);
+  }
+}
+
+async function clearLoginFailureEntryInStore(store, policyScope, key) {
+  if (!key) {
+    return;
+  }
+
+  if (!shouldUseSharedRateLimitStore(Date.now())) {
+    clearLoginFailureEntry(store, key);
+    return;
+  }
+
+  try {
+    await ensureDatabaseReady();
+    await pool.query(
+      `
+        DELETE FROM ${LOGIN_FAILURES_TABLE}
+        WHERE failure_key = $1
+          AND policy_scope = $2
+      `,
+      [key, policyScope],
+    );
+  } catch (error) {
+    markSharedRateLimitStoreFailure(error, "clear_login_failure");
+    clearLoginFailureEntry(store, key);
+  }
+}
+
+async function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   if (!RATE_LIMIT_ENABLED) {
     return true;
   }
@@ -10511,7 +11047,7 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   const normalizedUsername = normalizeRateLimitUsername(username);
   const ip = resolveRateLimitClientIp(req);
 
-  const isRateAllowed = enforceRateLimit(req, res, {
+  const isRateAllowed = await enforceRateLimit(req, res, {
     scope: "login",
     ipProfile: RATE_LIMIT_PROFILE_LOGIN_IP,
     userProfile: RATE_LIMIT_PROFILE_LOGIN_ACCOUNT,
@@ -10530,13 +11066,21 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
 
   maybeSweepRateLimitStores();
   const nowMs = Date.now();
-  const accountKey = `account:${normalizedUsername}`;
-  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
-  const accountLockMs = readLoginFailureLock(loginFailureByAccountKey.get(accountKey), nowMs, LOGIN_FAILURE_ACCOUNT_POLICY);
-  const ipAccountLockMs = readLoginFailureLock(
-    loginFailureByIpAccountKey.get(ipAccountKey),
+  const accountKey = normalizeRateLimitStoreKey(`account:${normalizedUsername}`, 320);
+  const ipAccountKey = normalizeRateLimitStoreKey(`account-ip:${normalizedUsername}:${ip}`, 400);
+  const accountLockMs = await readLoginFailureLockFromStore(
+    loginFailureByAccountKey,
+    "account",
+    accountKey,
+    LOGIN_FAILURE_ACCOUNT_POLICY,
     nowMs,
+  );
+  const ipAccountLockMs = await readLoginFailureLockFromStore(
+    loginFailureByIpAccountKey,
+    "account_ip",
+    ipAccountKey,
     LOGIN_FAILURE_IP_ACCOUNT_POLICY,
+    nowMs,
   );
   const retryAfterMs = Math.max(accountLockMs, ipAccountLockMs);
 
@@ -10553,7 +11097,7 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   return true;
 }
 
-function registerFailedLoginAttempt(req, username) {
+async function registerFailedLoginAttempt(req, username) {
   if (!RATE_LIMIT_ENABLED) {
     return;
   }
@@ -10566,14 +11110,20 @@ function registerFailedLoginAttempt(req, username) {
   maybeSweepRateLimitStores();
   const nowMs = Date.now();
   const ip = resolveRateLimitClientIp(req);
-  const accountKey = `account:${normalizedUsername}`;
-  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const accountKey = normalizeRateLimitStoreKey(`account:${normalizedUsername}`, 320);
+  const ipAccountKey = normalizeRateLimitStoreKey(`account-ip:${normalizedUsername}:${ip}`, 400);
 
-  recordLoginFailureEntry(loginFailureByAccountKey, accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
-  recordLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey, LOGIN_FAILURE_IP_ACCOUNT_POLICY, nowMs);
+  await recordLoginFailureEntryInStore(loginFailureByAccountKey, "account", accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
+  await recordLoginFailureEntryInStore(
+    loginFailureByIpAccountKey,
+    "account_ip",
+    ipAccountKey,
+    LOGIN_FAILURE_IP_ACCOUNT_POLICY,
+    nowMs,
+  );
 }
 
-function clearFailedLoginAttempts(req, username) {
+async function clearFailedLoginAttempts(req, username) {
   if (!RATE_LIMIT_ENABLED) {
     return;
   }
@@ -10584,10 +11134,10 @@ function clearFailedLoginAttempts(req, username) {
   }
 
   const ip = resolveRateLimitClientIp(req);
-  const accountKey = `account:${normalizedUsername}`;
-  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
-  clearLoginFailureEntry(loginFailureByAccountKey, accountKey);
-  clearLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey);
+  const accountKey = normalizeRateLimitStoreKey(`account:${normalizedUsername}`, 320);
+  const ipAccountKey = normalizeRateLimitStoreKey(`account-ip:${normalizedUsername}:${ip}`, 400);
+  await clearLoginFailureEntryInStore(loginFailureByAccountKey, "account", accountKey);
+  await clearLoginFailureEntryInStore(loginFailureByIpAccountKey, "account_ip", ipAccountKey);
 }
 
 function isPublicWebAuthPath(pathname) {
@@ -18567,6 +19117,45 @@ async function ensureDatabaseReady() {
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_tenant_user_updated_idx
         ON ${ASSISTANT_SESSION_SCOPE_TABLE} (tenant_key, user_key, updated_at DESC, cache_key DESC)
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${RATE_LIMIT_BUCKETS_TABLE} (
+          bucket_key TEXT PRIMARY KEY,
+          scope TEXT NOT NULL DEFAULT '',
+          subject TEXT NOT NULL DEFAULT '',
+          window_start_ms BIGINT NOT NULL,
+          hits INTEGER NOT NULL DEFAULT 0,
+          blocked_until_ms BIGINT NOT NULL DEFAULT 0,
+          window_ms INTEGER NOT NULL DEFAULT 0,
+          block_ms INTEGER NOT NULL DEFAULT 0,
+          last_seen_ms BIGINT NOT NULL DEFAULT 0,
+          expires_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${RATE_LIMIT_BUCKETS_TABLE_NAME}_expires_at_idx
+        ON ${RATE_LIMIT_BUCKETS_TABLE} (expires_at ASC)
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${LOGIN_FAILURES_TABLE} (
+          failure_key TEXT PRIMARY KEY,
+          policy_scope TEXT NOT NULL DEFAULT '',
+          first_attempt_ms BIGINT NOT NULL,
+          last_attempt_ms BIGINT NOT NULL,
+          failures INTEGER NOT NULL DEFAULT 0,
+          locked_until_ms BIGINT NOT NULL DEFAULT 0,
+          window_ms INTEGER NOT NULL DEFAULT 0,
+          lock_ms INTEGER NOT NULL DEFAULT 0,
+          expires_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${LOGIN_FAILURES_TABLE_NAME}_expires_at_idx
+        ON ${LOGIN_FAILURES_TABLE} (expires_at ASC)
+      `);
     })().catch((error) => {
       dbReadyPromise = null;
       throw error;
@@ -22803,24 +23392,24 @@ app.get("/login", (req, res) => {
     );
 });
 
-app.post("/login", (req, res) => {
+app.post("/login", async (req, res) => {
   const username = req.body?.username;
   const password = req.body?.password;
   const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
-  if (!ensureLoginAttemptAllowed(req, res, username, nextPath)) {
+  if (!(await ensureLoginAttemptAllowed(req, res, username, nextPath))) {
     return;
   }
 
   const authUser = authenticateWebAuthCredentials(username, password);
 
   if (!authUser) {
-    registerFailedLoginAttempt(req, username);
+    await registerFailedLoginAttempt(req, username);
     clearWebAuthSessionCookie(req, res);
     res.redirect(302, `/login?error=1&next=${encodeURIComponent(nextPath)}`);
     return;
   }
 
-  clearFailedLoginAttempts(req, authUser.username);
+  await clearFailedLoginAttempts(req, authUser.username);
   setWebAuthSessionCookie(req, res, authUser.username);
   if (isWebAuthPasswordChangeRequired(authUser)) {
     res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
@@ -22829,17 +23418,17 @@ app.post("/login", (req, res) => {
   res.redirect(302, nextPath);
 });
 
-function handleApiAuthLogin(req, res) {
+async function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
   const password = req.body?.password;
-  if (!ensureLoginAttemptAllowed(req, res, username, "/")) {
+  if (!(await ensureLoginAttemptAllowed(req, res, username, "/"))) {
     return;
   }
 
   const authUser = authenticateWebAuthCredentials(username, password);
 
   if (!authUser) {
-    registerFailedLoginAttempt(req, username);
+    await registerFailedLoginAttempt(req, username);
     clearWebAuthSessionCookie(req, res);
     res.status(401).json({
       error: "Invalid login or password.",
@@ -22847,7 +23436,7 @@ function handleApiAuthLogin(req, res) {
     return;
   }
 
-  clearFailedLoginAttempts(req, authUser.username);
+  await clearFailedLoginAttempts(req, authUser.username);
   const isMobileApiLogin = sanitizeTextValue(req.path, 120).startsWith("/api/mobile/");
   let sessionToken = "";
   if (isMobileApiLogin) {
@@ -23308,7 +23897,7 @@ async function respondQuickBooksRecentPayments(req, res, options = {}) {
   const quickBooksRateProfile = RATE_LIMIT_PROFILE_API_EXPENSIVE;
 
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
       ipProfile: {
         windowMs: quickBooksRateProfile.windowMs,
@@ -23322,7 +23911,7 @@ async function respondQuickBooksRecentPayments(req, res, options = {}) {
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -23367,7 +23956,7 @@ async function respondQuickBooksOutgoingPayments(req, res, options = {}) {
   const quickBooksRateProfile = RATE_LIMIT_PROFILE_API_EXPENSIVE;
 
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
       ipProfile: {
         windowMs: quickBooksRateProfile.windowMs,
@@ -23381,7 +23970,7 @@ async function respondQuickBooksOutgoingPayments(req, res, options = {}) {
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -23489,7 +24078,7 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
   }
 
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.quickbooks.sync",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
@@ -23503,7 +24092,7 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -23553,9 +24142,9 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
   });
 });
 
-app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (req, res) => {
+app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
@@ -23569,7 +24158,7 @@ app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -23684,7 +24273,7 @@ app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSIO
 
 app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.assistant.chat",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
@@ -23698,7 +24287,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
       },
       message: "Assistant request limit reached. Please wait before retrying.",
       code: "assistant_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -23812,7 +24401,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 
 app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.assistant.tts",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
@@ -23826,7 +24415,7 @@ app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLI
       },
       message: "Assistant audio request limit reached. Please wait before retrying.",
       code: "assistant_tts_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -23871,7 +24460,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
   const todayOnly = rangeMode === "today";
   const leadsRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: refreshMode !== "none" ? "api.ghl.leads.refresh" : "api.ghl.leads.read",
       ipProfile: {
         windowMs: leadsRateProfile.windowMs,
@@ -23885,7 +24474,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
       },
       message: "Leads lookup limit reached. Please wait before retrying.",
       code: "ghl_leads_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24055,7 +24644,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
 async function respondGhlClientManagers(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/client-managers") {
   const managerRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: refreshMode !== "none" ? "api.ghl.client_managers.refresh" : "api.ghl.client_managers.read",
       ipProfile: {
         windowMs: managerRateProfile.windowMs,
@@ -24069,7 +24658,7 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
       },
       message: "Client-manager lookup limit reached. Please wait before retrying.",
       code: "ghl_client_managers_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24202,7 +24791,7 @@ app.post("/api/ghl/client-managers/refresh", requireWebPermission(WEB_AUTH_PERMI
 
 app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.ghl.client_contracts",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
@@ -24216,7 +24805,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       },
       message: "Contract lookup limit reached. Please wait before retrying.",
       code: "ghl_client_contracts_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24275,7 +24864,7 @@ app.post(
   requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
   async (req, res) => {
     if (
-      !enforceRateLimit(req, res, {
+      !(await enforceRateLimit(req, res, {
         scope: "api.ghl.basic_notes.refresh_all",
         ipProfile: {
           windowMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.windowMs,
@@ -24289,7 +24878,7 @@ app.post(
         },
         message: "Bulk BASIC/MEMO refresh limit reached. Please wait before retrying.",
         code: "ghl_basic_notes_refresh_rate_limited",
-      })
+      }))
     ) {
       return;
     }
@@ -24423,7 +25012,7 @@ async function resolveGhlBasicNoteContext(req, input) {
 
 app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.ghl.basic_note",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
@@ -24437,7 +25026,7 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
       },
       message: "BASIC/MEMO request limit reached. Please wait before retrying.",
       code: "ghl_basic_note_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24478,7 +25067,7 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
 
 app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.ghl.basic_note.refresh",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
@@ -24492,7 +25081,7 @@ app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PER
       },
       message: "BASIC/MEMO refresh limit reached. Please wait before retrying.",
       code: "ghl_basic_note_refresh_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24563,7 +25152,7 @@ app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PER
 
 app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.records.write",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
@@ -24577,7 +25166,7 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
       },
       message: "Save request limit reached. Please wait before retrying.",
       code: "records_write_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24646,7 +25235,7 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
   }
 
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.records.write",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
@@ -24660,7 +25249,7 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
       },
       message: "Save request limit reached. Please wait before retrying.",
       code: "records_write_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24722,7 +25311,7 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
 
 app.post("/api/mini/access", async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.mini.access",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
@@ -24731,7 +25320,7 @@ app.post("/api/mini/access", async (req, res) => {
       },
       message: "Mini App access check limit reached. Please wait before retrying.",
       code: "mini_access_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24745,7 +25334,7 @@ app.post("/api/mini/access", async (req, res) => {
   }
 
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.mini.access",
       userProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
@@ -24755,7 +25344,7 @@ app.post("/api/mini/access", async (req, res) => {
       username: sanitizeTextValue(authResult.user?.id, 50),
       message: "Mini App access check limit reached. Please wait before retrying.",
       code: "mini_access_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24787,7 +25376,7 @@ app.post("/api/mini/clients", async (req, res) => {
   const idempotencyKey = idempotencyKeyResult.key;
   let parsedUploadToken = null;
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.mini.write",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -24796,7 +25385,7 @@ app.post("/api/mini/clients", async (req, res) => {
       },
       message: "Mini App write limit reached. Please wait before retrying.",
       code: "mini_write_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24821,7 +25410,7 @@ app.post("/api/mini/clients", async (req, res) => {
     }
 
     if (
-      !enforceRateLimit(req, res, {
+      !(await enforceRateLimit(req, res, {
         scope: "api.mini.write",
         userProfile: {
           windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -24831,7 +25420,7 @@ app.post("/api/mini/clients", async (req, res) => {
         username: parsedUploadToken.userId,
         message: "Mini App write limit reached. Please wait before retrying.",
         code: "mini_write_rate_limited",
-      })
+      }))
     ) {
       return;
     }
@@ -24888,7 +25477,7 @@ app.post("/api/mini/clients", async (req, res) => {
   const authenticatedUserId = sanitizeTextValue(authResult.user?.id, 50);
   if (
     !parsedUploadToken &&
-    !enforceRateLimit(req, res, {
+    !(await enforceRateLimit(req, res, {
       scope: "api.mini.write",
       userProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -24898,7 +25487,7 @@ app.post("/api/mini/clients", async (req, res) => {
       username: authenticatedUserId,
       message: "Mini App write limit reached. Please wait before retrying.",
       code: "mini_write_rate_limited",
-    })
+    }))
   ) {
     return;
   }
