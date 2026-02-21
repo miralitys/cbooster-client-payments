@@ -2454,6 +2454,36 @@ a {
   margin: 0;
 }
 
+.access-control-temp-password-react {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-primary) 4%, var(--color-surface) 96%);
+}
+
+.access-control-temp-password-label-react {
+  margin: 0;
+  font-size: var(--font-size-xxs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.access-control-temp-password-value-react {
+  display: inline-block;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  overflow-wrap: anywhere;
+}
+
 .access-control-current-grid-react {
   display: grid;
   gap: var(--space-2);

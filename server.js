@@ -4746,10 +4746,35 @@ function generateWebAuthUsernameFromDisplayName(displayName) {
   return `pending.user.${Date.now().toString(36)}`.slice(0, 120);
 }
 
+function generateSecureRandomString(length, alphabet) {
+  const normalizedLength = Math.max(1, Number.parseInt(length, 10) || 1);
+  const normalizedAlphabet = typeof alphabet === "string" ? alphabet : "";
+  if (!normalizedAlphabet) {
+    return "";
+  }
+
+  const alphabetLength = normalizedAlphabet.length;
+  const maxByteInclusive = Math.floor(256 / alphabetLength) * alphabetLength - 1;
+  let output = "";
+
+  while (output.length < normalizedLength) {
+    const bytes = crypto.randomBytes(Math.max(32, normalizedLength * 2));
+    for (let index = 0; index < bytes.length && output.length < normalizedLength; index += 1) {
+      const byte = bytes[index];
+      if (byte > maxByteInclusive) {
+        continue;
+      }
+      output += normalizedAlphabet[byte % alphabetLength];
+    }
+  }
+
+  return output;
+}
+
 function generateWebAuthTemporaryPassword() {
-  const randomChunk = Math.random().toString(36).slice(2, 12);
-  const tsChunk = Date.now().toString(36).slice(-6);
-  return `Temp!${randomChunk}${tsChunk}`;
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const randomChunk = generateSecureRandomString(14, alphabet);
+  return `Temp!${randomChunk}`;
 }
 
 function buildWebAuthBootstrapUserPassword(username) {
@@ -10081,11 +10106,13 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
   }
 
   let password = normalizeWebAuthConfigValue(payload.password);
+  let temporaryPassword = "";
   if (password && password.length < 8) {
     throw createHttpError("Password must be at least 8 characters.", 400);
   }
   if (!password) {
     password = generateWebAuthTemporaryPassword();
+    temporaryPassword = password;
   }
 
   const departmentId = normalizeWebAuthDepartmentId(payload.departmentId || payload.department);
@@ -10113,6 +10140,7 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     roleId,
     teamUsernames,
     mustChangePassword: true,
+    temporaryPassword,
   };
 }
 
@@ -23938,7 +23966,8 @@ app.post("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCE
     return;
   }
 
-  const existingUser = getWebAuthUserByUsername(normalizedPayload.username);
+  const usernameToCreate = normalizeWebAuthUsername(normalizedPayload?.username);
+  const existingUser = getWebAuthUserByUsername(usernameToCreate);
   if (existingUser) {
     res.status(409).json({
       error: "User with this username already exists.",
@@ -23947,11 +23976,17 @@ app.post("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCE
   }
 
   try {
-    const createdUser = upsertWebAuthUserInDirectory(normalizedPayload);
-    res.status(201).json({
+    const temporaryPassword = sanitizeTextValue(normalizedPayload?.temporaryPassword, 200);
+    const { temporaryPassword: _temporaryPassword, ...userPayload } = normalizedPayload;
+    const createdUser = upsertWebAuthUserInDirectory(userPayload);
+    const responsePayload = {
       ok: true,
       item: buildWebAuthPublicUser(createdUser),
-    });
+    };
+    if (temporaryPassword) {
+      responsePayload.temporaryPassword = temporaryPassword;
+    }
+    res.status(201).json(responsePayload);
   } catch (error) {
     res.status(error.httpStatus || 400).json({
       error: sanitizeTextValue(error?.message, 260) || "Failed to create user.",

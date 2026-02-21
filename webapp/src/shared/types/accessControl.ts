@@ -56,6 +56,7 @@ export interface UpsertUserPayload {
 export interface UpsertUserResponse {
   ok: boolean;
   item: AuthUser;
+  temporaryPassword?: string;
 }
 
 export interface AssistantReviewItem {
