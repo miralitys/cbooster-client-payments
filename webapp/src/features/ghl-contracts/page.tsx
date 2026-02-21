@@ -82,9 +82,13 @@ export default function GhlContractsPage() {
     }));
 
     try {
-      const { blob, fileName } = await downloadGhlClientContract(item.clientName, item.contactId);
+      const { blob, fileName, mode } = await downloadGhlClientContract(item.clientName, item.contactId);
       triggerBlobDownload(blob, ensurePdfFileName(fileName || item.contractTitle || item.clientName));
-      setStatusText(`Downloaded PDF contract for "${item.clientName}".`);
+      if (mode === "text-fallback") {
+        setStatusText(`Downloaded fallback PDF (from extracted contract text) for "${item.clientName}".`);
+      } else {
+        setStatusText(`Downloaded PDF contract for "${item.clientName}".`);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : `Failed to download contract for "${item.clientName}".`;
       setStatusText(message);
@@ -138,7 +142,8 @@ export default function GhlContractsPage() {
         align: "left",
         cell: (item) => {
           const rowKey = buildRowKey(item);
-          const canDownload = normalizeStatus(item.status) === "ready";
+          const normalizedStatus = normalizeStatus(item.status);
+          const canDownload = normalizedStatus === "ready" || normalizedStatus === "no_contract";
           return (
             <div className="ghl-contracts-actions">
               <Button
