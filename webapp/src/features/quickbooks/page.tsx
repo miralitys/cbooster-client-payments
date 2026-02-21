@@ -42,20 +42,21 @@ const QUICKBOOKS_FROM_DATE = "2026-01-01";
 const QUICKBOOKS_SYNC_POLL_INTERVAL_MS = 1200;
 const QUICKBOOKS_SYNC_POLL_MAX_ATTEMPTS = 150;
 const QUICKBOOKS_MONTH_OPTIONS = [
-  { value: 1, label: "Январь" },
-  { value: 2, label: "Февраль" },
-  { value: 3, label: "Март" },
-  { value: 4, label: "Апрель" },
-  { value: 5, label: "Май" },
-  { value: 6, label: "Июнь" },
-  { value: 7, label: "Июль" },
-  { value: 8, label: "Август" },
-  { value: 9, label: "Сентябрь" },
-  { value: 10, label: "Октябрь" },
-  { value: 11, label: "Ноябрь" },
-  { value: 12, label: "Декабрь" },
+  { value: 1, label: "January" },
+  { value: 2, label: "February" },
+  { value: 3, label: "March" },
+  { value: 4, label: "April" },
+  { value: 5, label: "May" },
+  { value: 6, label: "June" },
+  { value: 7, label: "July" },
+  { value: 8, label: "August" },
+  { value: 9, label: "September" },
+  { value: 10, label: "October" },
+  { value: 11, label: "November" },
+  { value: 12, label: "December" },
 ] as const;
-const QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES = ["Маркетинг", "Зарплаты"] as const;
+const QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES = ["Marketing", "Salaries"] as const;
+const QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL = "Uncategorized";
 const QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE = "__none__";
 const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -83,11 +84,11 @@ interface LoadOptions {
 const QUICKBOOKS_MONEY_FLOW_TABS = [
   {
     key: "incoming",
-    label: "Входящие деньги",
+    label: "Incoming Money",
   },
   {
     key: "outgoing",
-    label: "Исходящие деньги",
+    label: "Outgoing Money",
   },
 ] as const;
 
@@ -263,7 +264,7 @@ export default function QuickBooksPage() {
   }, []);
 
   const addQuickBooksExpenseCategoryFromPrompt = useCallback((row: QuickBooksViewRow) => {
-    const nextCategoryRaw = globalThis.window?.prompt("Добавить категорию расходов", "") || "";
+    const nextCategoryRaw = globalThis.window?.prompt("Add expense category", "") || "";
     const nextCategory = normalizeQuickBooksExpenseCategoryLabel(nextCategoryRaw);
     if (!nextCategory) {
       return;
@@ -319,7 +320,7 @@ export default function QuickBooksPage() {
                 }}
                 className="quickbooks-expense-category-input"
               >
-                <option value={QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE}>Не выбрано</option>
+                <option value={QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE}>Not selected</option>
                 {expenseCategoryOptions.map((categoryOption) => (
                   <option key={categoryOption} value={categoryOption}>
                     {categoryOption}
@@ -333,7 +334,7 @@ export default function QuickBooksPage() {
                 className="quickbooks-expense-category-add"
                 onClick={() => addQuickBooksExpenseCategoryFromPrompt(item)}
               >
-                Добавить
+                Add
               </Button>
             </div>
           ),
@@ -642,7 +643,7 @@ export default function QuickBooksPage() {
         actions={
           <div className="quickbooks-toolbar-react">
             <div className="quickbooks-tabs-wrap">
-              <p className="search-label quickbooks-search-field__label">Денежный поток</p>
+              <p className="search-label quickbooks-search-field__label">Money Flow</p>
               <div id="quickbooks-money-flow-tab" className="quickbooks-money-flow-segmented">
                 <SegmentedControl
                   value={activeTab}
@@ -659,7 +660,7 @@ export default function QuickBooksPage() {
             </div>
             <div className="quickbooks-search-field">
               <label htmlFor="quickbooks-month-select" className="search-label quickbooks-search-field__label">
-                Месяц-Год
+                Month-Year
               </label>
               <div className="quickbooks-period-field__controls">
                 <Select
@@ -738,7 +739,7 @@ export default function QuickBooksPage() {
       >
         {activeTab === "outgoing" ? (
           <div className="quickbooks-expense-summary">
-            <p className="quickbooks-expense-summary__title">Категории расходов</p>
+            <p className="quickbooks-expense-summary__title">Expense Categories</p>
             <div className="quickbooks-expense-summary__rows">
               {expenseCategorySummaryRows.map((summaryRow) => (
                 <div key={summaryRow.category} className="quickbooks-expense-summary__row">
@@ -841,12 +842,15 @@ function normalizeQuickBooksExpenseCategoryLabel(rawValue: unknown): string {
     return "";
   }
 
-  const lowered = value.toLocaleLowerCase("ru-RU");
+  const lowered = value.toLocaleLowerCase("en-US");
   if (lowered === "маркетинг" || lowered === "marketing") {
-    return "Маркетинг";
+    return "Marketing";
   }
   if (lowered === "зарплаты" || lowered === "зарплата" || lowered === "salary" || lowered === "salaries") {
-    return "Зарплаты";
+    return "Salaries";
+  }
+  if (lowered === "без категории" || lowered === "uncategorized" || lowered === "no category") {
+    return QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL;
   }
 
   return value.slice(0, 120);
@@ -883,11 +887,23 @@ function buildQuickBooksExpenseCategoryOptions(
   categoryMap: QuickBooksExpenseCategoryMap = {},
   categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
 ): string[] {
-  const normalizedCategories = normalizeQuickBooksExpenseCategoriesList(categories || []);
-  const combined = [...normalizedCategories];
-  const seen = new Set(normalizedCategories.map((category) => category.toLocaleLowerCase("ru-RU")));
+  const normalizedCategories = normalizeQuickBooksExpenseCategoriesList(categories || [])
+    .map((category) => normalizeQuickBooksExpenseCategoryLabel(category))
+    .filter(Boolean);
+  const dedupedNormalizedCategories: string[] = [];
+  const seen = new Set<string>();
+  for (const category of normalizedCategories) {
+    const key = category.toLocaleLowerCase("en-US");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    dedupedNormalizedCategories.push(category);
+  }
+
+  const combined = [...dedupedNormalizedCategories];
   for (const defaultCategory of QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES) {
-    const key = defaultCategory.toLocaleLowerCase("ru-RU");
+    const key = defaultCategory.toLocaleLowerCase("en-US");
     if (seen.has(key)) {
       continue;
     }
@@ -899,7 +915,7 @@ function buildQuickBooksExpenseCategoryOptions(
     if (!resolvedCategory) {
       continue;
     }
-    const key = resolvedCategory.toLocaleLowerCase("ru-RU");
+    const key = resolvedCategory.toLocaleLowerCase("en-US");
     if (seen.has(key)) {
       continue;
     }
@@ -915,10 +931,10 @@ function prependQuickBooksExpenseCategory(categories: string[], category: string
     return categories;
   }
   const normalizedCategories = buildQuickBooksExpenseCategoryOptions(categories);
-  const categoryKey = normalizedCategory.toLocaleLowerCase("ru-RU");
+  const categoryKey = normalizedCategory.toLocaleLowerCase("en-US");
   const nextCategories = [normalizedCategory];
   for (const currentCategory of normalizedCategories) {
-    if (currentCategory.toLocaleLowerCase("ru-RU") === categoryKey) {
+    if (currentCategory.toLocaleLowerCase("en-US") === categoryKey) {
       continue;
     }
     nextCategories.push(currentCategory);
@@ -963,16 +979,16 @@ function buildQuickBooksExpenseCategorySummaryRows(
       continue;
     }
     const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap, categoryFingerprintMap);
-    const category = resolvedCategory || "Без категории";
+    const category = resolvedCategory || QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL;
     totals.set(category, (totals.get(category) || 0) + amount);
   }
 
   const extraCategories = [...totals.keys()]
-    .filter((category) => !orderedCategories.includes(category) && category !== "Без категории")
-    .sort((left, right) => left.localeCompare(right, "ru-RU"));
+    .filter((category) => !orderedCategories.includes(category) && category !== QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL)
+    .sort((left, right) => left.localeCompare(right, "en-US"));
   const normalizedOrderedCategories = [...orderedCategories, ...extraCategories];
-  if ((totals.get("Без категории") || 0) > 0) {
-    normalizedOrderedCategories.push("Без категории");
+  if ((totals.get(QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL) || 0) > 0) {
+    normalizedOrderedCategories.push(QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL);
   }
   return normalizedOrderedCategories.map((category) => ({
     category,
