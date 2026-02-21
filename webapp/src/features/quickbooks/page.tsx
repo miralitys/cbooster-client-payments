@@ -102,6 +102,7 @@ const QUICKBOOKS_MONEY_FLOW_TABS = [
 
 type QuickBooksTab = (typeof QUICKBOOKS_MONEY_FLOW_TABS)[number]["key"];
 type QuickBooksViewRow = RowWithKey<QuickBooksPaymentRow>;
+type QuickBooksExpenseCategoryPayeeSuggestionMap = Record<string, string>;
 
 export default function QuickBooksPage() {
   const todayDate = useMemo(() => new Date(), []);
@@ -200,6 +201,10 @@ export default function QuickBooksPage() {
     () => buildQuickBooksMonthlyRange(selectedYear, selectedMonth, todayDate),
     [selectedMonth, selectedYear, todayDate],
   );
+  const expenseCategoryPayeeSuggestionMap = useMemo(
+    () => buildQuickBooksExpenseCategoryPayeeSuggestionMap(expenseCategoryFingerprintMap),
+    [expenseCategoryFingerprintMap],
+  );
   const expenseCategoryOptions = useMemo(
     () =>
       buildQuickBooksExpenseCategoryOptions(
@@ -207,8 +212,15 @@ export default function QuickBooksPage() {
         outgoingTransactions,
         expenseCategoryMap,
         expenseCategoryFingerprintMap,
+        expenseCategoryPayeeSuggestionMap,
       ),
-    [expenseCategoryFingerprintMap, expenseCategoryMap, outgoingTransactions, savedExpenseCategories],
+    [
+      expenseCategoryFingerprintMap,
+      expenseCategoryMap,
+      expenseCategoryPayeeSuggestionMap,
+      outgoingTransactions,
+      savedExpenseCategories,
+    ],
   );
   const expenseCategorySummaryRows = useMemo(
     () => buildQuickBooksExpenseCategorySummaryRows(outgoingTransactions, expenseCategoryMap, expenseCategoryOptions),
@@ -391,12 +403,13 @@ export default function QuickBooksPage() {
       row,
       expenseCategoryMap,
       expenseCategoryFingerprintMap,
+      expenseCategoryPayeeSuggestionMap,
     );
     if (!suggestedCategory) {
       return;
     }
     setQuickBooksExpenseCategory(row, suggestedCategory);
-  }, [expenseCategoryFingerprintMap, expenseCategoryMap, setQuickBooksExpenseCategory]);
+  }, [expenseCategoryFingerprintMap, expenseCategoryMap, expenseCategoryPayeeSuggestionMap, setQuickBooksExpenseCategory]);
 
   const fetchQuickBooksInsight = useCallback(async (
     row: QuickBooksViewRow,
@@ -546,6 +559,7 @@ export default function QuickBooksPage() {
               item,
               expenseCategoryMap,
               expenseCategoryFingerprintMap,
+              expenseCategoryPayeeSuggestionMap,
             );
             const hasSuggestion = Boolean(suggestedCategory);
 
@@ -675,6 +689,7 @@ export default function QuickBooksPage() {
     expenseCategoryFingerprintMap,
     expenseCategoryMap,
     expenseCategoryOptions,
+    expenseCategoryPayeeSuggestionMap,
     confirmSuggestedQuickBooksExpenseCategory,
     selectedOutgoingKeySet,
     openInsightModal,
@@ -1293,12 +1308,16 @@ function normalizeQuickBooksExpenseFingerprintValue(rawValue: unknown): string {
 }
 
 function buildQuickBooksExpenseFingerprint(row: QuickBooksPaymentRow): string {
-  const normalizedPayee = normalizeQuickBooksExpenseFingerprintValue(row?.clientName);
+  const normalizedPayee = buildQuickBooksExpensePayeeFingerprint(row);
   const normalizedDescription = normalizeQuickBooksExpenseFingerprintValue(row?.description);
   if (!normalizedPayee && !normalizedDescription) {
     return "";
   }
   return `${normalizedPayee}|${normalizedDescription}`;
+}
+
+function buildQuickBooksExpensePayeeFingerprint(row: QuickBooksPaymentRow): string {
+  return normalizeQuickBooksExpenseFingerprintValue(row?.clientName);
 }
 
 function sanitizeQuickBooksExpenseCategorySelectValue(rawValue: unknown): string {
@@ -1314,6 +1333,7 @@ function buildQuickBooksExpenseCategoryOptions(
   rows: QuickBooksPaymentRow[] = [],
   categoryMap: QuickBooksExpenseCategoryMap = {},
   categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
+  categoryPayeeSuggestionMap: QuickBooksExpenseCategoryPayeeSuggestionMap = {},
 ): string[] {
   const normalizedCategories = normalizeQuickBooksExpenseCategoriesList(categories || [])
     .map((category) => normalizeQuickBooksExpenseCategoryLabel(category))
@@ -1341,7 +1361,12 @@ function buildQuickBooksExpenseCategoryOptions(
   for (const row of Array.isArray(rows) ? rows : []) {
     const resolvedCategory =
       resolveQuickBooksExpenseCategoryForRow(row, categoryMap) ||
-      resolveQuickBooksSuggestedExpenseCategoryForRow(row, categoryMap, categoryFingerprintMap);
+      resolveQuickBooksSuggestedExpenseCategoryForRow(
+        row,
+        categoryMap,
+        categoryFingerprintMap,
+        categoryPayeeSuggestionMap,
+      );
     if (!resolvedCategory) {
       continue;
     }
@@ -1390,16 +1415,69 @@ function resolveQuickBooksSuggestedExpenseCategoryForRow(
   row: QuickBooksPaymentRow,
   categoryMap: QuickBooksExpenseCategoryMap,
   categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
+  categoryPayeeSuggestionMap: QuickBooksExpenseCategoryPayeeSuggestionMap = {},
 ): string {
   const confirmedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap);
   if (confirmedCategory) {
     return "";
   }
   const fingerprint = buildQuickBooksExpenseFingerprint(row);
-  if (!fingerprint) {
+  if (fingerprint) {
+    const exactCategory = normalizeQuickBooksExpenseCategoryLabel(categoryFingerprintMap[fingerprint] || "");
+    if (exactCategory) {
+      return exactCategory;
+    }
+  }
+
+  const payeeFingerprint = buildQuickBooksExpensePayeeFingerprint(row);
+  if (!payeeFingerprint) {
     return "";
   }
-  return normalizeQuickBooksExpenseCategoryLabel(categoryFingerprintMap[fingerprint] || "");
+  return normalizeQuickBooksExpenseCategoryLabel(categoryPayeeSuggestionMap[payeeFingerprint] || "");
+}
+
+function buildQuickBooksExpenseCategoryPayeeSuggestionMap(
+  categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
+): QuickBooksExpenseCategoryPayeeSuggestionMap {
+  const normalizedFingerprintMap = normalizeQuickBooksExpenseCategoryFingerprintMap(categoryFingerprintMap);
+  const uniqueCategoryByPayee = new Map<string, string | null>();
+
+  for (const [rawFingerprint, rawCategory] of Object.entries(normalizedFingerprintMap)) {
+    const normalizedFingerprint = normalizeQuickBooksExpenseFingerprintValue(rawFingerprint);
+    if (!normalizedFingerprint) {
+      continue;
+    }
+
+    const separatorIndex = normalizedFingerprint.indexOf("|");
+    const payeeFingerprint = separatorIndex >= 0 ? normalizedFingerprint.slice(0, separatorIndex) : normalizedFingerprint;
+    if (!payeeFingerprint) {
+      continue;
+    }
+
+    const normalizedCategory = normalizeQuickBooksExpenseCategoryLabel(rawCategory);
+    if (!normalizedCategory) {
+      continue;
+    }
+
+    const previousCategory = uniqueCategoryByPayee.get(payeeFingerprint);
+    if (previousCategory === undefined) {
+      uniqueCategoryByPayee.set(payeeFingerprint, normalizedCategory);
+      continue;
+    }
+
+    if (previousCategory && previousCategory.toLocaleLowerCase("en-US") !== normalizedCategory.toLocaleLowerCase("en-US")) {
+      uniqueCategoryByPayee.set(payeeFingerprint, null);
+    }
+  }
+
+  const payeeSuggestionMap: QuickBooksExpenseCategoryPayeeSuggestionMap = {};
+  for (const [payeeFingerprint, category] of uniqueCategoryByPayee.entries()) {
+    if (!category) {
+      continue;
+    }
+    payeeSuggestionMap[payeeFingerprint] = category;
+  }
+  return payeeSuggestionMap;
 }
 
 function buildQuickBooksExpenseCategorySummaryRows(
