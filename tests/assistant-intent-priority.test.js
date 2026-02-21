@@ -100,6 +100,43 @@ test("scope follow-up uses saved scope and does not aggregate over all records",
   assert.deepEqual(result.scope.clientComparables, ["john smith"]);
 });
 
+test("explicit fresh-scope intent dominates over follow-up reference in one message", () => {
+  const result = __assistantInternals.buildAssistantReplyPayload(
+    "Покажи клиентов с 2026-02-01 по 2026-02-09 и посчитай долг по ним",
+    FIXTURE_RECORDS,
+    UPDATED_AT,
+    {
+      clientComparables: ["john smith"],
+      scopeEstablished: true,
+    },
+  );
+
+  assert.equal(result.handledByRules, true);
+  assert.ok(result.scope);
+  assert.equal(result.scope.scopeEstablished, true);
+  assert.ok(Array.isArray(result.scope.clientComparables));
+  assert.ok(result.scope.clientComparables.length >= 2);
+  assert.notDeepEqual(result.scope.clientComparables, ["john smith"]);
+  assert.doesNotMatch(result.reply, /Контекст найден/i);
+});
+
+test("scope follow-up still applies when message has no explicit fresh-scope intent", () => {
+  const result = __assistantInternals.buildAssistantReplyPayload(
+    "Посчитай общий долг по ним за последнюю неделю",
+    FIXTURE_RECORDS,
+    UPDATED_AT,
+    {
+      clientComparables: ["john smith"],
+      scopeEstablished: true,
+    },
+  );
+
+  assert.match(result.reply, /Общий остаток долга/i);
+  assert.match(result.reply, /700\.00/);
+  assert.ok(result.scope);
+  assert.deepEqual(result.scope.clientComparables, ["john smith"]);
+});
+
 test("manager comparison intent has priority over generic manager list", () => {
   const result = __assistantInternals.buildAssistantReplyPayload(
     "Сравни менеджеров Vlad Burnis и Nenad Nash",

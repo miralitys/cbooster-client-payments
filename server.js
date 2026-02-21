@@ -6258,6 +6258,51 @@ function hasAssistantScopeReferenceInMessage(normalizedMessage) {
   return hasExplicitEnglishReference || hasExplicitRussianReference;
 }
 
+function hasAssistantExplicitClientListIntent(normalizedMessage) {
+  if (!normalizedMessage) {
+    return false;
+  }
+
+  const hasExplicitEnglishListIntent =
+    /\b(?:show|list|find|get|display)\b\s+(?:all\s+|the\s+|me\s+|new\s+|overdue\s+){0,3}(?:clients?|records?|contracts?|debtors?)\b/i.test(
+      normalizedMessage,
+    );
+  const hasExplicitRussianListIntent =
+    /(?:^|[\s,.;:!?()«»"'`])(?:покажи|выведи|список|найди|отобрази)\s+(?:всех\s+|мне\s+|новых\s+|просроченных\s+){0,3}(?:клиент(?:ов|а)?|запис(?:и|ей)|договор(?:ы|а)?|должник(?:ов|а)?)(?=$|[\s,.;:!?()«»"'`])/i.test(
+      normalizedMessage,
+    );
+
+  return hasExplicitEnglishListIntent || hasExplicitRussianListIntent;
+}
+
+function shouldAssistantPreferFreshScopeIntent(intentProfile) {
+  if (!intentProfile?.wantsScopeReference) {
+    return false;
+  }
+
+  if (intentProfile.hasExplicitClientListIntent === true) {
+    return true;
+  }
+
+  if (!intentProfile.parsedDateRange) {
+    return false;
+  }
+
+  return (
+    intentProfile.wantsTop ||
+    intentProfile.wantsNewClients ||
+    intentProfile.wantsFirstPayment ||
+    intentProfile.wantsStoppedPaying ||
+    intentProfile.wantsOverdue ||
+    intentProfile.wantsWrittenOff ||
+    intentProfile.wantsNotFullyPaid ||
+    intentProfile.wantsFullyPaid ||
+    intentProfile.wantsLatestPayment ||
+    intentProfile.wantsAnomaly ||
+    intentProfile.wantsCallList
+  );
+}
+
 function tokenizeAssistantText(rawValue) {
   const normalized = normalizeAssistantComparableText(rawValue, 4000);
   if (!normalized) {
@@ -9026,6 +9071,7 @@ function buildAssistantIntentProfile(message) {
       /(paid.*(more|over|greater|больше|выше).*(contract|договор|контракт)|оплач.*(больше|выше).*(договор|контракт))/i.test(
         normalizedMessage,
       ),
+    hasExplicitClientListIntent: hasAssistantExplicitClientListIntent(normalizedMessage),
     wantsScopeReference: hasAssistantScopeReferenceInMessage(normalizedMessage),
     wantsContextReset: /(reset context|clear context|forget context|сбрось контекст|очисти контекст|забудь контекст)/i.test(
       normalizedMessage,
@@ -9042,6 +9088,7 @@ function buildAssistantIntentProfile(message) {
   profile.wantsPeriodBreakdown = /(by week|by month|by day|по недел|по месяц|по дням|динам|trend)/i.test(normalizedMessage);
   profile.wantsPaymentSummary =
     profile.wantsPaid || profile.wantsRevenue || /(сумм|денег|money|amount|total paid|total amount|общая сумма)/i.test(normalizedMessage);
+  profile.prefersFreshScopeIntent = shouldAssistantPreferFreshScopeIntent(profile);
 
   return profile;
 }
@@ -9243,6 +9290,8 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
     wantsNegativeHint,
     wantsPaidGtContractHint,
     wantsContextReset,
+    hasExplicitClientListIntent,
+    prefersFreshScopeIntent,
     comparator,
     topLimit,
     dayRange,
@@ -9291,7 +9340,9 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
   }
 
   const runtimeData = buildAssistantReplyRuntimeData(message, visibleRecords, preparedData, intentProfile);
-  const scopeReplyPayload = executeAssistantScopeFollowUpReply(intentProfile, sessionScope, runtimeData, respond);
+  const scopeReplyPayload = prefersFreshScopeIntent
+    ? null
+    : executeAssistantScopeFollowUpReply(intentProfile, sessionScope, runtimeData, respond);
   if (scopeReplyPayload) {
     return scopeReplyPayload;
   }
@@ -9301,22 +9352,30 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
     return respond(buildAssistantManagerComparisonReply(analyzedRows, primaryManager, secondaryManager, isRussian));
   }
 
-  const shouldListClientsByRange =
+  const shouldForceFreshClientRangeScope =
+    prefersFreshScopeIntent &&
+    hasExplicitClientListIntent &&
     wantsClientLookup &&
     parsedDateRange &&
     !primaryManager &&
-    !primaryCompany &&
-    !wantsTop &&
-    !wantsSummary &&
-    !wantsDebt &&
-    !wantsOverdue &&
-    !wantsAnomaly &&
-    !wantsCallList &&
-    !wantsStoppedPaying &&
-    !wantsNewClients &&
-    !wantsFirstPayment &&
-    !wantsRevenue &&
-    !wantsDebtDynamics;
+    !primaryCompany;
+  const shouldListClientsByRange =
+    shouldForceFreshClientRangeScope ||
+    (wantsClientLookup &&
+      parsedDateRange &&
+      !primaryManager &&
+      !primaryCompany &&
+      !wantsTop &&
+      !wantsSummary &&
+      !wantsDebt &&
+      !wantsOverdue &&
+      !wantsAnomaly &&
+      !wantsCallList &&
+      !wantsStoppedPaying &&
+      !wantsNewClients &&
+      !wantsFirstPayment &&
+      !wantsRevenue &&
+      !wantsDebtDynamics);
 
   if (shouldListClientsByRange) {
     const entries = buildAssistantClientsWithPaymentsInRangeEntries(paymentEvents, parsedDateRange);
