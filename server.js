@@ -555,6 +555,12 @@ const ASSISTANT_SESSION_SCOPE_TABLE_NAME = resolveTableName(
   process.env.DB_ASSISTANT_SESSION_SCOPE_TABLE_NAME,
   DEFAULT_ASSISTANT_SESSION_SCOPE_TABLE_NAME,
 );
+const DEFAULT_MINI_RUNTIME_STATE_TABLE_NAME = "mini_runtime_state";
+const MINI_RUNTIME_STATE_TABLE_NAME = resolveTableName(
+  process.env.DB_MINI_RUNTIME_STATE_TABLE_NAME,
+  DEFAULT_MINI_RUNTIME_STATE_TABLE_NAME,
+);
+const MINI_RUNTIME_STATE_STORE = resolveMiniRuntimeStateStore(process.env.MINI_RUNTIME_STATE_STORE);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
@@ -568,6 +574,8 @@ const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CA
 const GHL_LEADS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_LEADS_CACHE_TABLE_NAME);
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
 const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESSION_SCOPE_TABLE_NAME);
+const MINI_RUNTIME_STATE_TABLE = qualifyTableName(DB_SCHEMA, MINI_RUNTIME_STATE_TABLE_NAME);
+const MINI_RUNTIME_STATE_USE_POSTGRES = MINI_RUNTIME_STATE_STORE === "postgres" && Boolean(DATABASE_URL);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
@@ -711,6 +719,13 @@ const MINI_WRITE_IDEMPOTENCY_MAX_KEYS = Math.min(
 const MINI_WRITE_IDEMPOTENCY_KEY_MIN_LENGTH = 8;
 const MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH = 180;
 const MINI_IDEMPOTENCY_KEY_HEADER_NAMES = ["idempotency-key", "x-idempotency-key"];
+const MINI_RUNTIME_STATE_SWEEP_EVERY_REQUESTS = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_RUNTIME_STATE_SWEEP_EVERY_REQUESTS, 200), 10),
+  5000,
+);
+const MINI_RUNTIME_STATE_SCOPE_RATE_LIMIT = "mini_rate_limit";
+const MINI_RUNTIME_STATE_SCOPE_REPLAY = "mini_write_replay";
+const MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY = "mini_write_idempotency";
 const MINI_REVIEW_PURGE_ENABLED = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_ENABLED) !== false;
 const MINI_REVIEW_PURGE_ATTACHMENTS = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_ATTACHMENTS) !== false;
 const MINI_REVIEW_PURGE_SENSITIVE_DATA = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_SENSITIVE_DATA) !== false;
@@ -1041,6 +1056,11 @@ const ASSISTANT_PREPARED_DATA_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.ASSISTANT_PREPARED_DATA_CACHE_TTL_MS, 15 * 60 * 1000), 60 * 1000),
   24 * 60 * 60 * 1000,
 );
+const ASSISTANT_RECORDS_STALE_FALLBACK_ENABLED = resolveOptionalBoolean(process.env.ASSISTANT_RECORDS_STALE_FALLBACK_ENABLED) !== false;
+const ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS, 3 * 60 * 1000), 30 * 1000),
+  30 * 60 * 1000,
+);
 const ASSISTANT_SESSION_SCOPE_MAX_CLIENTS = 1200;
 const ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY = "default";
 const ASSISTANT_SESSION_SCOPE_CLEAR_TOMBSTONE_COMPARABLE = "__assistant_scope_cleared__";
@@ -1366,6 +1386,7 @@ const webAuthMobileReplayByKey = new Map();
 let miniUploadParseInFlight = 0;
 const miniUploadParseWaiters = [];
 const MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL = Symbol("miniUploadTrackedTotalBytes");
+let miniRuntimeStateSweepCounter = 0;
 let miniTelegramNotificationQueue = Promise.resolve();
 let miniTelegramNotificationQueueDepth = 0;
 let assistantRecordsSnapshotCache = null;
@@ -1500,6 +1521,19 @@ function parseOptionalTelegramChatId(rawValue) {
   }
 
   return value;
+}
+
+function resolveMiniRuntimeStateStore(rawValue) {
+  const normalized = (rawValue || "").toString().trim().toLowerCase();
+  if (normalized === "memory" || normalized === "postgres") {
+    return normalized;
+  }
+
+  if (IS_PRODUCTION && DATABASE_URL) {
+    return "postgres";
+  }
+
+  return "memory";
 }
 
 function resolveAttachmentStorageRoot(rawValue) {
@@ -2744,7 +2778,7 @@ function sweepMiniWriteInitDataReplayState(nowMs = Date.now()) {
   }
 }
 
-function reserveMiniWriteInitDataReplayKey(replayKey, expiresAtMs) {
+function reserveMiniWriteInitDataReplayKeyInMemory(replayKey, expiresAtMs) {
   const normalizedReplayKey = sanitizeTextValue(replayKey, 900);
   if (!normalizedReplayKey) {
     return {
@@ -2781,11 +2815,12 @@ function reserveMiniWriteInitDataReplayKey(replayKey, expiresAtMs) {
     reservation: {
       key: normalizedReplayKey,
       expiresAtMs: safeExpiresAtMs,
+      store: "memory",
     },
   };
 }
 
-function releaseMiniWriteInitDataReplayKeyReservation(reservation, markAsUsed) {
+function releaseMiniWriteInitDataReplayKeyReservationInMemory(reservation, markAsUsed) {
   if (!reservation || !reservation.key) {
     return;
   }
@@ -2818,7 +2853,7 @@ function sweepMiniWriteIdempotencyState(nowMs = Date.now()) {
   }
 }
 
-function reserveMiniWriteIdempotency(userId, rawIdempotencyKey) {
+function reserveMiniWriteIdempotencyInMemory(userId, rawIdempotencyKey) {
   const normalizedUserId = sanitizeTextValue(userId, 50);
   const normalizedIdempotencyKey = sanitizeTextValue(rawIdempotencyKey, MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH);
   if (!normalizedUserId || !normalizedIdempotencyKey) {
@@ -2861,11 +2896,12 @@ function reserveMiniWriteIdempotency(userId, rawIdempotencyKey) {
     reservation: {
       cacheKey,
       expiresAtMs,
+      store: "memory",
     },
   };
 }
 
-function commitMiniWriteIdempotencySuccess(reservation, statusCode, responseBody) {
+function commitMiniWriteIdempotencySuccessInMemory(reservation, statusCode, responseBody) {
   if (!reservation?.cacheKey) {
     return;
   }
@@ -2883,7 +2919,7 @@ function commitMiniWriteIdempotencySuccess(reservation, statusCode, responseBody
   });
 }
 
-function releaseMiniWriteIdempotencyReservation(reservation) {
+function releaseMiniWriteIdempotencyReservationInMemory(reservation) {
   if (!reservation?.cacheKey) {
     return;
   }
@@ -2891,6 +2927,371 @@ function releaseMiniWriteIdempotencyReservation(reservation) {
   const existingEntry = miniWriteIdempotencyByKey.get(reservation.cacheKey);
   if (existingEntry && existingEntry.state === "in_flight") {
     miniWriteIdempotencyByKey.delete(reservation.cacheKey);
+  }
+}
+
+function normalizeMiniRuntimeEntryState(rawValue) {
+  return sanitizeTextValue(rawValue, 40).toLowerCase();
+}
+
+async function reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs) {
+  const normalizedReplayKey = sanitizeTextValue(replayKey, 900);
+  if (!normalizedReplayKey) {
+    return {
+      ok: true,
+      reservation: null,
+    };
+  }
+
+  await ensureDatabaseReady();
+  const nowMs = Date.now();
+  const safeExpiresAtMs = Math.max(
+    nowMs + 1000,
+    Number.isFinite(expiresAtMs) ? expiresAtMs : nowMs + TELEGRAM_INIT_DATA_WRITE_TTL_SEC * 1000,
+  );
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      MINI_RUNTIME_STATE_SCOPE_REPLAY,
+      normalizedReplayKey,
+    ]);
+
+    const existingResult = await client.query(
+      `
+        SELECT state
+        FROM ${MINI_RUNTIME_STATE_TABLE}
+        WHERE scope = $1
+          AND entry_key = $2
+          AND expires_at > NOW()
+        FOR UPDATE
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_REPLAY, normalizedReplayKey],
+    );
+
+    if (existingResult.rows.length) {
+      const existingState = normalizeMiniRuntimeEntryState(existingResult.rows[0]?.state);
+      await client.query("COMMIT");
+      if (existingState === "used") {
+        return {
+          ok: false,
+          status: 409,
+          error: "This Telegram session was already used. Reopen Mini App before submitting again.",
+          code: "mini_init_data_replay",
+        };
+      }
+      return {
+        ok: false,
+        status: 409,
+        error: "The same Telegram session is already being submitted. Please wait.",
+        code: "mini_init_data_replay_in_flight",
+      };
+    }
+
+    await client.query(
+      `
+        INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
+          (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
+        VALUES
+          ($1, $2, 'in_flight', 0, NULL, NULL, NULL, NULL, $3, NOW())
+        ON CONFLICT (scope, entry_key)
+        DO UPDATE SET
+          state = EXCLUDED.state,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = NOW()
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_REPLAY, normalizedReplayKey, new Date(safeExpiresAtMs).toISOString()],
+    );
+
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      reservation: {
+        key: normalizedReplayKey,
+        expiresAtMs: safeExpiresAtMs,
+        store: "shared",
+      },
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function releaseMiniWriteInitDataReplayKeyReservationShared(reservation, markAsUsed) {
+  if (!reservation?.key) {
+    return;
+  }
+
+  await ensureDatabaseReady();
+  const safeKey = sanitizeTextValue(reservation.key, 900);
+  if (!safeKey) {
+    return;
+  }
+
+  if (markAsUsed) {
+    const safeExpiresAtMs = Math.max(Date.now() + 1000, Number.parseInt(reservation.expiresAtMs, 10) || 0);
+    await pool.query(
+      `
+        UPDATE ${MINI_RUNTIME_STATE_TABLE}
+        SET state = 'used',
+            expires_at = $3,
+            updated_at = NOW()
+        WHERE scope = $1
+          AND entry_key = $2
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_REPLAY, safeKey, new Date(safeExpiresAtMs).toISOString()],
+    );
+    return;
+  }
+
+  await pool.query(
+    `
+      DELETE FROM ${MINI_RUNTIME_STATE_TABLE}
+      WHERE scope = $1
+        AND entry_key = $2
+        AND state = 'in_flight'
+    `,
+    [MINI_RUNTIME_STATE_SCOPE_REPLAY, safeKey],
+  );
+}
+
+async function reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey) {
+  const normalizedUserId = sanitizeTextValue(userId, 50);
+  const normalizedIdempotencyKey = sanitizeTextValue(rawIdempotencyKey, MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH);
+  if (!normalizedUserId || !normalizedIdempotencyKey) {
+    return {
+      ok: true,
+      reservation: null,
+    };
+  }
+
+  await ensureDatabaseReady();
+  const cacheKey = `${normalizedUserId}:${normalizedIdempotencyKey}`;
+  const nowMs = Date.now();
+  const expiresAtMs = nowMs + MINI_WRITE_IDEMPOTENCY_TTL_SEC * 1000;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY,
+      cacheKey,
+    ]);
+
+    const existingResult = await client.query(
+      `
+        SELECT state, status_code, response_body
+        FROM ${MINI_RUNTIME_STATE_TABLE}
+        WHERE scope = $1
+          AND entry_key = $2
+          AND expires_at > NOW()
+        FOR UPDATE
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY, cacheKey],
+    );
+
+    if (existingResult.rows.length) {
+      const existingRow = existingResult.rows[0] || {};
+      const existingState = normalizeMiniRuntimeEntryState(existingRow.state);
+      if (existingState === "done") {
+        await client.query("COMMIT");
+        const replayedStatus = Number.parseInt(existingRow.status_code, 10);
+        const replayedBody =
+          existingRow.response_body && typeof existingRow.response_body === "object" && !Array.isArray(existingRow.response_body)
+            ? JSON.parse(JSON.stringify(existingRow.response_body))
+            : { ok: true };
+        return {
+          ok: false,
+          replayed: true,
+          status: Number.isFinite(replayedStatus) ? replayedStatus : 201,
+          body: replayedBody,
+        };
+      }
+
+      await client.query("COMMIT");
+      return {
+        ok: false,
+        status: 409,
+        error: "Duplicate request is already in progress. Please wait and retry.",
+        code: "mini_idempotency_in_flight",
+      };
+    }
+
+    await client.query(
+      `
+        INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
+          (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
+        VALUES
+          ($1, $2, 'in_flight', 0, NULL, NULL, NULL, NULL, $3, NOW())
+        ON CONFLICT (scope, entry_key)
+        DO UPDATE SET
+          state = EXCLUDED.state,
+          status_code = NULL,
+          response_body = NULL,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = NOW()
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY, cacheKey, new Date(expiresAtMs).toISOString()],
+    );
+
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      reservation: {
+        cacheKey,
+        expiresAtMs,
+        store: "shared",
+      },
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function commitMiniWriteIdempotencySuccessShared(reservation, statusCode, responseBody) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  await ensureDatabaseReady();
+  const safeStatus = Number.isFinite(statusCode) ? Math.max(200, Math.min(299, statusCode)) : 201;
+  const safeBody =
+    responseBody && typeof responseBody === "object" && !Array.isArray(responseBody)
+      ? JSON.parse(JSON.stringify(responseBody))
+      : { ok: true };
+  const safeExpiresAtMs = Math.max(Date.now() + 1000, Number.parseInt(reservation.expiresAtMs, 10) || 0);
+  await pool.query(
+    `
+      UPDATE ${MINI_RUNTIME_STATE_TABLE}
+      SET state = 'done',
+          status_code = $3,
+          response_body = $4::jsonb,
+          expires_at = $5,
+          updated_at = NOW()
+      WHERE scope = $1
+        AND entry_key = $2
+    `,
+    [
+      MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY,
+      sanitizeTextValue(reservation.cacheKey, 260),
+      safeStatus,
+      JSON.stringify(safeBody),
+      new Date(safeExpiresAtMs).toISOString(),
+    ],
+  );
+}
+
+async function releaseMiniWriteIdempotencyReservationShared(reservation) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  await ensureDatabaseReady();
+  await pool.query(
+    `
+      DELETE FROM ${MINI_RUNTIME_STATE_TABLE}
+      WHERE scope = $1
+        AND entry_key = $2
+        AND state = 'in_flight'
+    `,
+    [MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY, sanitizeTextValue(reservation.cacheKey, 260)],
+  );
+}
+
+async function reserveMiniWriteInitDataReplayKey(replayKey, expiresAtMs) {
+  if (!shouldUseMiniRuntimeStateSharedStore()) {
+    return reserveMiniWriteInitDataReplayKeyInMemory(replayKey, expiresAtMs);
+  }
+
+  await maybeSweepMiniRuntimeStateSharedStore();
+  try {
+    return await reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs);
+  } catch (error) {
+    console.warn("[mini replay] Shared replay guard failed, falling back to process-local guard:", sanitizeTextValue(error?.message, 260));
+    return reserveMiniWriteInitDataReplayKeyInMemory(replayKey, expiresAtMs);
+  }
+}
+
+async function releaseMiniWriteInitDataReplayKeyReservation(reservation, markAsUsed) {
+  if (!reservation || !reservation.key) {
+    return;
+  }
+
+  if (reservation.store === "memory" || !shouldUseMiniRuntimeStateSharedStore()) {
+    releaseMiniWriteInitDataReplayKeyReservationInMemory(reservation, markAsUsed);
+    return;
+  }
+
+  try {
+    await releaseMiniWriteInitDataReplayKeyReservationShared(reservation, markAsUsed);
+  } catch (error) {
+    console.warn("[mini replay] Shared replay release failed, applying process-local fallback:", sanitizeTextValue(error?.message, 260));
+    releaseMiniWriteInitDataReplayKeyReservationInMemory(reservation, markAsUsed);
+  }
+}
+
+async function reserveMiniWriteIdempotency(userId, rawIdempotencyKey) {
+  if (!shouldUseMiniRuntimeStateSharedStore()) {
+    return reserveMiniWriteIdempotencyInMemory(userId, rawIdempotencyKey);
+  }
+
+  await maybeSweepMiniRuntimeStateSharedStore();
+  try {
+    return await reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey);
+  } catch (error) {
+    console.warn("[mini idempotency] Shared reservation failed, falling back to process-local state:", sanitizeTextValue(error?.message, 260));
+    return reserveMiniWriteIdempotencyInMemory(userId, rawIdempotencyKey);
+  }
+}
+
+async function commitMiniWriteIdempotencySuccess(reservation, statusCode, responseBody) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  if (reservation.store === "memory" || !shouldUseMiniRuntimeStateSharedStore()) {
+    commitMiniWriteIdempotencySuccessInMemory(reservation, statusCode, responseBody);
+    return;
+  }
+
+  try {
+    await commitMiniWriteIdempotencySuccessShared(reservation, statusCode, responseBody);
+  } catch (error) {
+    console.warn("[mini idempotency] Shared commit failed, mirroring success in process-local state:", sanitizeTextValue(error?.message, 260));
+    commitMiniWriteIdempotencySuccessInMemory(reservation, statusCode, responseBody);
+  }
+}
+
+async function releaseMiniWriteIdempotencyReservation(reservation) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  if (reservation.store === "memory" || !shouldUseMiniRuntimeStateSharedStore()) {
+    releaseMiniWriteIdempotencyReservationInMemory(reservation);
+    return;
+  }
+
+  try {
+    await releaseMiniWriteIdempotencyReservationShared(reservation);
+  } catch (error) {
+    console.warn("[mini idempotency] Shared release failed, applying process-local cleanup:", sanitizeTextValue(error?.message, 260));
+    releaseMiniWriteIdempotencyReservationInMemory(reservation);
   }
 }
 
@@ -10890,6 +11291,216 @@ function enforceRateLimit(req, res, options = {}) {
   return true;
 }
 
+function parseTimestampMs(value) {
+  if (!value) {
+    return 0;
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return 0;
+  }
+  return timestamp;
+}
+
+function shouldUseMiniRuntimeStateSharedStore() {
+  return MINI_RUNTIME_STATE_USE_POSTGRES && Boolean(pool);
+}
+
+async function maybeSweepMiniRuntimeStateSharedStore() {
+  if (!shouldUseMiniRuntimeStateSharedStore()) {
+    return;
+  }
+
+  miniRuntimeStateSweepCounter += 1;
+  if (miniRuntimeStateSweepCounter % MINI_RUNTIME_STATE_SWEEP_EVERY_REQUESTS !== 0) {
+    return;
+  }
+
+  try {
+    await ensureDatabaseReady();
+    await pool.query(`DELETE FROM ${MINI_RUNTIME_STATE_TABLE} WHERE expires_at <= NOW()`);
+  } catch (error) {
+    console.warn("[mini runtime state] Failed to sweep expired rows:", sanitizeTextValue(error?.message, 220));
+  }
+}
+
+function buildMiniRateLimitScopeKey(scope, subjectType) {
+  const safeScope = sanitizeTextValue(scope, 80) || "api";
+  const safeSubjectType = sanitizeTextValue(subjectType, 16) || "ip";
+  return `${MINI_RUNTIME_STATE_SCOPE_RATE_LIMIT}:${safeScope}:${safeSubjectType}`;
+}
+
+async function consumeMiniRateLimitBucketShared(scope, subjectType, subject, profile, nowMs = Date.now()) {
+  if (!profile || !subject) {
+    return {
+      allowed: true,
+      retryAfterMs: 0,
+    };
+  }
+
+  await ensureDatabaseReady();
+  const windowMs = Math.max(1_000, Number(profile.windowMs) || 60_000);
+  const maxHits = Math.max(1, Number(profile.maxHits) || 1);
+  const blockMs = Math.max(windowMs, Number(profile.blockMs) || windowMs);
+  const safeSubject = sanitizeTextValue(subject, 220);
+  if (!safeSubject) {
+    return {
+      allowed: true,
+      retryAfterMs: 0,
+    };
+  }
+
+  const scopeKey = buildMiniRateLimitScopeKey(scope, subjectType);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      scopeKey,
+      safeSubject,
+    ]);
+
+    const existingResult = await client.query(
+      `
+        SELECT hits, window_started_at, blocked_until
+        FROM ${MINI_RUNTIME_STATE_TABLE}
+        WHERE scope = $1
+          AND entry_key = $2
+          AND expires_at > NOW()
+        FOR UPDATE
+      `,
+      [scopeKey, safeSubject],
+    );
+
+    let hits = 0;
+    let windowStartMs = nowMs;
+    let blockedUntilMs = 0;
+    if (existingResult.rows.length) {
+      const row = existingResult.rows[0] || {};
+      hits = Math.max(0, Number.parseInt(row.hits, 10) || 0);
+      const parsedWindowStartedAt = parseTimestampMs(row.window_started_at);
+      if (parsedWindowStartedAt > 0) {
+        windowStartMs = parsedWindowStartedAt;
+      }
+      blockedUntilMs = parseTimestampMs(row.blocked_until);
+    }
+
+    let allowed = true;
+    let retryAfterMs = 0;
+    if (blockedUntilMs > nowMs) {
+      allowed = false;
+      retryAfterMs = blockedUntilMs - nowMs;
+    } else {
+      if (nowMs - windowStartMs >= windowMs) {
+        windowStartMs = nowMs;
+        hits = 0;
+        blockedUntilMs = 0;
+      }
+
+      hits += 1;
+      if (hits > maxHits) {
+        blockedUntilMs = nowMs + blockMs;
+        allowed = false;
+        retryAfterMs = blockedUntilMs - nowMs;
+      }
+    }
+
+    const expiresAtMs = Math.max(nowMs + windowMs * 2, blockedUntilMs, nowMs + 60_000);
+    await client.query(
+      `
+        INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
+          (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
+        VALUES
+          ($1, $2, 'rate_limit', $3, $4, $5, NULL, NULL, $6, NOW())
+        ON CONFLICT (scope, entry_key)
+        DO UPDATE SET
+          state = EXCLUDED.state,
+          hits = EXCLUDED.hits,
+          window_started_at = EXCLUDED.window_started_at,
+          blocked_until = EXCLUDED.blocked_until,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = NOW()
+      `,
+      [
+        scopeKey,
+        safeSubject,
+        hits,
+        new Date(windowStartMs).toISOString(),
+        blockedUntilMs > 0 ? new Date(blockedUntilMs).toISOString() : null,
+        new Date(expiresAtMs).toISOString(),
+      ],
+    );
+
+    await client.query("COMMIT");
+    return {
+      allowed,
+      retryAfterMs,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function enforceMiniRateLimit(req, res, options = {}) {
+  if (!RATE_LIMIT_ENABLED) {
+    return true;
+  }
+
+  if (!shouldUseMiniRuntimeStateSharedStore()) {
+    return enforceRateLimit(req, res, options);
+  }
+
+  await maybeSweepMiniRuntimeStateSharedStore();
+  const nowMs = Date.now();
+  const scope = sanitizeTextValue(options.scope, 80) || "api";
+  const ip = resolveRateLimitClientIp(req);
+
+  try {
+    if (options.ipProfile) {
+      const ipResult = await consumeMiniRateLimitBucketShared(scope, "ip", ip, options.ipProfile, nowMs);
+      if (!ipResult.allowed) {
+        sendRateLimitResponse(req, res, {
+          retryAfterMs: ipResult.retryAfterMs,
+          message: options.message,
+          code: options.code,
+          nextPath: options.nextPath,
+        });
+        return false;
+      }
+    }
+
+    if (options.userProfile) {
+      const fallbackUsername = normalizeRateLimitUsername(options.username || req.body?.username || req.query?.username || "");
+      const sessionUsername = normalizeRateLimitUsername(req.webAuthUser);
+      const userKey = sessionUsername || fallbackUsername;
+      if (userKey) {
+        const userResult = await consumeMiniRateLimitBucketShared(scope, "user", userKey, options.userProfile, nowMs);
+        if (!userResult.allowed) {
+          sendRateLimitResponse(req, res, {
+            retryAfterMs: userResult.retryAfterMs,
+            message: options.message,
+            code: options.code,
+            nextPath: options.nextPath,
+          });
+          return false;
+        }
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.warn("[mini rate limit] Shared store check failed, falling back to process-local limiter:", sanitizeTextValue(error?.message, 260));
+    return enforceRateLimit(req, res, options);
+  }
+}
+
 function readLoginFailureLock(entry, nowMs, policy) {
   if (!entry) {
     return 0;
@@ -18609,6 +19220,33 @@ async function ensureDatabaseReady() {
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_tenant_user_updated_idx
         ON ${ASSISTANT_SESSION_SCOPE_TABLE} (tenant_key, user_key, updated_at DESC, cache_key DESC)
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE} (
+          scope TEXT NOT NULL,
+          entry_key TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT '',
+          hits INTEGER NOT NULL DEFAULT 0,
+          window_started_at TIMESTAMPTZ,
+          blocked_until TIMESTAMPTZ,
+          status_code INTEGER,
+          response_body JSONB,
+          expires_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (scope, entry_key)
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE_NAME}_expires_at_idx
+        ON ${MINI_RUNTIME_STATE_TABLE} (expires_at ASC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE_NAME}_scope_expires_idx
+        ON ${MINI_RUNTIME_STATE_TABLE} (scope, expires_at ASC)
+      `);
     })().catch((error) => {
       dbReadyPromise = null;
       throw error;
@@ -18698,6 +19336,56 @@ function normalizeAssistantRecordsSnapshotVersion(rawUpdatedAt) {
   return new Date(normalizedTimestamp).toISOString();
 }
 
+function buildAssistantRecordsStateFromSnapshotCache(snapshotCache, options = {}) {
+  const normalizedUpdatedAt = normalizeAssistantRecordsSnapshotVersion(snapshotCache?.updatedAt);
+  const normalizedStaleSnapshotAgeMs = Number.parseInt(String(options?.staleSnapshotAgeMs ?? ""), 10);
+  return {
+    records: Array.isArray(snapshotCache?.records) ? snapshotCache.records : [],
+    updatedAt: normalizedUpdatedAt === "none" ? null : normalizedUpdatedAt,
+    source: sanitizeTextValue(snapshotCache?.source, 40) || (READ_V2_ENABLED ? "v2" : "legacy"),
+    fallbackFromV2: snapshotCache?.fallbackFromV2 === true,
+    degradedMode: options?.degradedMode === true,
+    degradedReason: sanitizeTextValue(options?.degradedReason, 80) || "",
+    staleSnapshotAgeMs:
+      Number.isFinite(normalizedStaleSnapshotAgeMs) && normalizedStaleSnapshotAgeMs >= 0 ? normalizedStaleSnapshotAgeMs : null,
+  };
+}
+
+function buildAssistantStaleSnapshotFallbackState(snapshotCache, options = {}) {
+  const fallbackEnabled =
+    typeof options?.enabled === "boolean" ? options.enabled : ASSISTANT_RECORDS_STALE_FALLBACK_ENABLED;
+  if (!fallbackEnabled || !snapshotCache || typeof snapshotCache !== "object") {
+    return null;
+  }
+
+  const nowMs =
+    Number.isFinite(Number(options?.nowMs)) && Number(options.nowMs) > 0
+      ? Math.floor(Number(options.nowMs))
+      : Date.now();
+  const maxAgeMs =
+    Number.isFinite(Number(options?.maxAgeMs)) && Number(options.maxAgeMs) > 0
+      ? Math.floor(Number(options.maxAgeMs))
+      : ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS;
+  const refreshedAtMs =
+    Number.isFinite(Number(snapshotCache.refreshedAtMs)) && Number(snapshotCache.refreshedAtMs) > 0
+      ? Math.floor(Number(snapshotCache.refreshedAtMs))
+      : 0;
+  if (refreshedAtMs <= 0) {
+    return null;
+  }
+
+  const staleSnapshotAgeMs = Math.max(0, nowMs - refreshedAtMs);
+  if (staleSnapshotAgeMs > maxAgeMs) {
+    return null;
+  }
+
+  return buildAssistantRecordsStateFromSnapshotCache(snapshotCache, {
+    degradedMode: true,
+    degradedReason: sanitizeTextValue(options?.degradedReason, 80) || "stale_snapshot",
+    staleSnapshotAgeMs,
+  });
+}
+
 function buildAssistantVisibilitySignature(userProfile) {
   if (!userProfile || typeof userProfile !== "object") {
     return "anonymous";
@@ -18759,38 +19447,43 @@ async function getStoredRecordsHeadRevision() {
 }
 
 async function getStoredRecordsForAssistantChat() {
-  const headRevision = await getStoredRecordsHeadRevision();
-  const headRevisionVersion = normalizeAssistantRecordsSnapshotVersion(headRevision);
+  try {
+    const headRevision = await getStoredRecordsHeadRevision();
+    const headRevisionVersion = normalizeAssistantRecordsSnapshotVersion(headRevision);
 
-  if (assistantRecordsSnapshotCache?.snapshotVersion === headRevisionVersion) {
-    return {
-      records: assistantRecordsSnapshotCache.records,
-      updatedAt: assistantRecordsSnapshotCache.updatedAt,
-      source: assistantRecordsSnapshotCache.source,
-      fallbackFromV2: assistantRecordsSnapshotCache.fallbackFromV2,
+    if (assistantRecordsSnapshotCache?.snapshotVersion === headRevisionVersion) {
+      return buildAssistantRecordsStateFromSnapshotCache(assistantRecordsSnapshotCache);
+    }
+
+    const state = await getStoredRecordsForApiRecordsRoute();
+    const normalizedStateUpdatedAt = normalizeAssistantRecordsSnapshotVersion(state.updatedAt);
+    if (assistantRecordsSnapshotCache?.snapshotVersion && assistantRecordsSnapshotCache.snapshotVersion !== headRevisionVersion) {
+      assistantPreparedDataCache.clear();
+    }
+
+    assistantRecordsSnapshotCache = {
+      snapshotVersion: headRevisionVersion,
+      updatedAt: normalizedStateUpdatedAt === "none" ? null : normalizedStateUpdatedAt,
+      records: Array.isArray(state.records) ? state.records : [],
+      source: sanitizeTextValue(state.source, 40) || (READ_V2_ENABLED ? "v2" : "legacy"),
+      fallbackFromV2: state.fallbackFromV2 === true,
+      refreshedAtMs: Date.now(),
     };
+
+    return buildAssistantRecordsStateFromSnapshotCache(assistantRecordsSnapshotCache);
+  } catch (error) {
+    const fallbackState = buildAssistantStaleSnapshotFallbackState(assistantRecordsSnapshotCache, {
+      degradedReason: "db_read_failed",
+    });
+    if (fallbackState) {
+      const errorCode = sanitizeTextValue(error?.code, 40) || "unknown";
+      console.warn(
+        `[assistant] stale snapshot fallback activated (reason=${fallbackState.degradedReason}, age_ms=${fallbackState.staleSnapshotAgeMs ?? -1}, error_code=${errorCode})`,
+      );
+      return fallbackState;
+    }
+    throw error;
   }
-
-  const state = await getStoredRecordsForApiRecordsRoute();
-  const normalizedStateUpdatedAt = normalizeAssistantRecordsSnapshotVersion(state.updatedAt);
-  if (assistantRecordsSnapshotCache?.snapshotVersion && assistantRecordsSnapshotCache.snapshotVersion !== headRevisionVersion) {
-    assistantPreparedDataCache.clear();
-  }
-
-  assistantRecordsSnapshotCache = {
-    snapshotVersion: headRevisionVersion,
-    updatedAt: normalizedStateUpdatedAt === "none" ? null : normalizedStateUpdatedAt,
-    records: Array.isArray(state.records) ? state.records : [],
-    source: sanitizeTextValue(state.source, 40) || (READ_V2_ENABLED ? "v2" : "legacy"),
-    fallbackFromV2: state.fallbackFromV2 === true,
-  };
-
-  return {
-    records: assistantRecordsSnapshotCache.records,
-    updatedAt: assistantRecordsSnapshotCache.updatedAt,
-    source: assistantRecordsSnapshotCache.source,
-    fallbackFromV2: assistantRecordsSnapshotCache.fallbackFromV2,
-  };
 }
 
 function getAssistantPreparedDataForUserScope(recordsState, rawTenantKey, rawUsername, userProfile) {
@@ -23927,6 +24620,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 
   try {
     const state = await getStoredRecordsForAssistantChat();
+    const isAssistantDegradedMode = state.degradedMode === true;
     const preparedData = getAssistantPreparedDataForUserScope(state, tenantKey, req.webAuthUser, req.webAuthProfile);
     const filteredRecords = preparedData.visibleRecords;
     const sessionScope = shouldResetContext ? null : await getAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
@@ -24004,8 +24698,11 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     }
 
     console.info(
-      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} seq=${clientMessageSeq || 0} scope_source=${scopeSource}`,
+      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} seq=${clientMessageSeq || 0} scope_source=${scopeSource} degraded=${isAssistantDegradedMode ? "1" : "0"}`,
     );
+    if (isAssistantDegradedMode) {
+      res.setHeader("X-Assistant-Degraded-Mode", "1");
+    }
 
     res.json({
       ok: true,
@@ -24017,6 +24714,12 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
         recordsUsed: filteredRecords.length,
         updatedAt: state.updatedAt || null,
         provider,
+        degradedMode: isAssistantDegradedMode,
+        degradedReason: isAssistantDegradedMode ? sanitizeTextValue(state.degradedReason, 80) || "stale_snapshot" : undefined,
+        staleSnapshotAgeMs:
+          isAssistantDegradedMode && Number.isFinite(Number(state.staleSnapshotAgeMs))
+            ? Number(state.staleSnapshotAgeMs)
+            : undefined,
       },
     });
   } catch (error) {
@@ -24923,7 +25626,7 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
 
 app.post("/api/mini/access", async (req, res) => {
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.access",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
@@ -24932,7 +25635,7 @@ app.post("/api/mini/access", async (req, res) => {
       },
       message: "Mini App access check limit reached. Please wait before retrying.",
       code: "mini_access_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24946,7 +25649,7 @@ app.post("/api/mini/access", async (req, res) => {
   }
 
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.access",
       userProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
@@ -24956,7 +25659,7 @@ app.post("/api/mini/access", async (req, res) => {
       username: sanitizeTextValue(authResult.user?.id, 50),
       message: "Mini App access check limit reached. Please wait before retrying.",
       code: "mini_access_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -24988,7 +25691,7 @@ app.post("/api/mini/clients", async (req, res) => {
   const idempotencyKey = idempotencyKeyResult.key;
   let parsedUploadToken = null;
   if (
-    !enforceRateLimit(req, res, {
+    !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.write",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -24997,7 +25700,7 @@ app.post("/api/mini/clients", async (req, res) => {
       },
       message: "Mini App write limit reached. Please wait before retrying.",
       code: "mini_write_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -25022,7 +25725,7 @@ app.post("/api/mini/clients", async (req, res) => {
     }
 
     if (
-      !enforceRateLimit(req, res, {
+      !(await enforceMiniRateLimit(req, res, {
         scope: "api.mini.write",
         userProfile: {
           windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -25032,7 +25735,7 @@ app.post("/api/mini/clients", async (req, res) => {
         username: parsedUploadToken.userId,
         message: "Mini App write limit reached. Please wait before retrying.",
         code: "mini_write_rate_limited",
-      })
+      }))
     ) {
       return;
     }
@@ -25089,7 +25792,7 @@ app.post("/api/mini/clients", async (req, res) => {
   const authenticatedUserId = sanitizeTextValue(authResult.user?.id, 50);
   if (
     !parsedUploadToken &&
-    !enforceRateLimit(req, res, {
+    !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.write",
       userProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -25099,7 +25802,7 @@ app.post("/api/mini/clients", async (req, res) => {
       username: authenticatedUserId,
       message: "Mini App write limit reached. Please wait before retrying.",
       code: "mini_write_rate_limited",
-    })
+    }))
   ) {
     return;
   }
@@ -25133,7 +25836,7 @@ app.post("/api/mini/clients", async (req, res) => {
   let writeReplayReservationShouldPersist = false;
   let writeIdempotencyReservation = null;
   try {
-    const idempotencyReservationResult = reserveMiniWriteIdempotency(authenticatedUserId, idempotencyKey);
+    const idempotencyReservationResult = await reserveMiniWriteIdempotency(authenticatedUserId, idempotencyKey);
     if (!idempotencyReservationResult.ok) {
       if (idempotencyReservationResult.replayed) {
         res.setHeader("Idempotency-Replayed", "true");
@@ -25153,7 +25856,7 @@ app.post("/api/mini/clients", async (req, res) => {
     }
     writeIdempotencyReservation = idempotencyReservationResult.reservation;
 
-    const replayReservationResult = reserveMiniWriteInitDataReplayKey(
+    const replayReservationResult = await reserveMiniWriteInitDataReplayKey(
       buildMiniWriteInitDataReplayKey(authResult),
       resolveMiniWriteInitDataReplayExpiresAtMs(authResult),
     );
@@ -25180,7 +25883,7 @@ app.post("/api/mini/clients", async (req, res) => {
       submittedAt: submission.submittedAt,
       attachmentsCount: submission.attachmentsCount || 0,
     };
-    commitMiniWriteIdempotencySuccess(writeIdempotencyReservation, 201, successResponsePayload);
+    await commitMiniWriteIdempotencySuccess(writeIdempotencyReservation, 201, successResponsePayload);
     writeReplayReservationShouldPersist = true;
     res.status(201).json(successResponsePayload);
 
@@ -25195,8 +25898,8 @@ app.post("/api/mini/clients", async (req, res) => {
     console.error("POST /api/mini/clients failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to submit client"));
   } finally {
-    releaseMiniWriteIdempotencyReservation(writeIdempotencyReservation);
-    releaseMiniWriteInitDataReplayKeyReservation(
+    await releaseMiniWriteIdempotencyReservation(writeIdempotencyReservation);
+    await releaseMiniWriteInitDataReplayKeyReservation(
       writeReplayReservation,
       writeReplayReservationShouldPersist,
     );
@@ -25662,6 +26365,7 @@ module.exports = {
   __assistantInternals: {
     buildAssistantIntentProfile,
     buildAssistantReplyPayload,
+    buildAssistantStaleSnapshotFallbackState,
     sanitizeAssistantReviewTextForStorage,
     resolveAssistantReviewPiiMode,
     buildAssistantReviewRetentionCutoffIso,
