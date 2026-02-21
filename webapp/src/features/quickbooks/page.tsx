@@ -3,6 +3,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { showToast } from "@/shared/lib/toast";
 import { withStableRowKeys, type RowWithKey } from "@/shared/lib/stableRowKeys";
 import {
+  normalizeQuickBooksExpenseCategoryMap,
+  readQuickBooksExpenseCategoryMap,
+  writeQuickBooksExpenseCategoryMap,
+  type QuickBooksExpenseCategoryMap,
+} from "@/shared/storage/quickbooksExpenseCategories";
+import {
   createQuickBooksSyncJob,
   getQuickBooksOutgoingPayments,
   getQuickBooksPayments,
@@ -42,6 +48,7 @@ const QUICKBOOKS_MONTH_OPTIONS = [
   { value: 11, label: "Ноябрь" },
   { value: 12, label: "Декабрь" },
 ] as const;
+const QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES = ["Маркетинг", "Зарплаты"] as const;
 const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -52,6 +59,11 @@ const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
 interface QuickBooksRange {
   from: string;
   to: string;
+}
+
+interface QuickBooksExpenseCategorySummaryRow {
+  category: string;
+  totalAmount: number;
 }
 
 interface LoadOptions {
@@ -96,6 +108,9 @@ export default function QuickBooksPage() {
 
   const [search, setSearch] = useState("");
   const [refundOnly, setRefundOnly] = useState(false);
+  const [expenseCategoryMap, setExpenseCategoryMap] = useState<QuickBooksExpenseCategoryMap>(() =>
+    readQuickBooksExpenseCategoryMap(),
+  );
   const incomingTransactionsRef = useRef<QuickBooksViewRow[]>([]);
   const outgoingTransactionsRef = useRef<QuickBooksViewRow[]>([]);
   const rowKeySequenceRef = useRef(0);
@@ -122,6 +137,10 @@ export default function QuickBooksPage() {
     () => buildQuickBooksMonthlyRange(selectedYear, selectedMonth, todayDate),
     [selectedMonth, selectedYear, todayDate],
   );
+  const expenseCategorySummaryRows = useMemo(
+    () => buildQuickBooksExpenseCategorySummaryRows(outgoingTransactions, expenseCategoryMap),
+    [expenseCategoryMap, outgoingTransactions],
+  );
 
   useEffect(() => {
     if (!monthOptions.length) {
@@ -137,6 +156,37 @@ export default function QuickBooksPage() {
       setSelectedMonth(maxAllowedMonth);
     }
   }, [monthOptions, selectedMonth]);
+
+  useEffect(() => {
+    writeQuickBooksExpenseCategoryMap(expenseCategoryMap);
+  }, [expenseCategoryMap]);
+
+  const setQuickBooksExpenseCategory = useCallback((row: QuickBooksViewRow, rawValue: string) => {
+    const transactionId = sanitizeQuickBooksTransactionId(row?.transactionId);
+    if (!transactionId) {
+      return;
+    }
+
+    const normalizedValue = normalizeQuickBooksExpenseCategoryLabel(rawValue);
+    setExpenseCategoryMap((previousMap) => {
+      const normalizedMap = normalizeQuickBooksExpenseCategoryMap(previousMap);
+      if (!normalizedValue) {
+        if (!(transactionId in normalizedMap)) {
+          return previousMap;
+        }
+        const nextMap = { ...normalizedMap };
+        delete nextMap[transactionId];
+        return nextMap;
+      }
+      if (normalizedMap[transactionId] === normalizedValue) {
+        return previousMap;
+      }
+      return {
+        ...normalizedMap,
+        [transactionId]: normalizedValue,
+      };
+    });
+  }, []);
 
   const tableColumns = useMemo<TableColumn<QuickBooksViewRow>[]>(() => {
     if (activeTab === "outgoing") {
@@ -164,6 +214,19 @@ export default function QuickBooksPage() {
           label: "Description",
           align: "left",
           cell: (item) => formatQuickBooksOutgoingDescriptionLabel(item.description),
+        },
+        {
+          key: "expenseCategory",
+          label: "Expense Category",
+          align: "left",
+          cell: (item) => (
+            <Input
+              value={resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap)}
+              onChange={(event) => setQuickBooksExpenseCategory(item, event.target.value)}
+              placeholder="Маркетинг / Зарплаты / ..."
+              className="quickbooks-expense-category-input"
+            />
+          ),
         },
       ];
     }
@@ -203,7 +266,7 @@ export default function QuickBooksPage() {
         cell: (item) => formatDate(item.paymentDate),
       },
     ];
-  }, [activeTab]);
+  }, [activeTab, expenseCategoryMap, setQuickBooksExpenseCategory]);
 
   const pollQuickBooksSyncJob = useCallback(async (jobId: string, shouldTotalRefresh: boolean) => {
     const normalizedJobId = String(jobId || "").trim();
@@ -536,6 +599,20 @@ export default function QuickBooksPage() {
           </div>
         }
       >
+        {activeTab === "outgoing" ? (
+          <div className="quickbooks-expense-summary">
+            <p className="quickbooks-expense-summary__title">Категории расходов</p>
+            <div className="quickbooks-expense-summary__rows">
+              {expenseCategorySummaryRows.map((summaryRow) => (
+                <div key={summaryRow.category} className="quickbooks-expense-summary__row">
+                  <span>{summaryRow.category}</span>
+                  <strong>{CURRENCY_FORMATTER.format(summaryRow.totalAmount)}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         <p className={`dashboard-message quickbooks-status ${loadError || syncWarning ? "error" : ""}`.trim()}>
           {syncWarning || statusText}
         </p>
@@ -600,6 +677,7 @@ function filterTransactions<RowType extends QuickBooksPaymentRow>(
 
 function quickBooksRowSignature(row: QuickBooksPaymentRow): string {
   return [
+    String(row.transactionId || "").trim(),
     String(row.clientName || "").trim(),
     String(row.clientPhone || "").trim(),
     String(row.clientEmail || "").trim(),
@@ -610,6 +688,67 @@ function quickBooksRowSignature(row: QuickBooksPaymentRow): string {
     String(row.paymentAmount ?? "").trim(),
     String(row.transactionType || "").trim(),
   ].join("|");
+}
+
+function sanitizeQuickBooksTransactionId(rawValue: unknown): string {
+  return String(rawValue || "").trim().slice(0, 180);
+}
+
+function normalizeQuickBooksExpenseCategoryLabel(rawValue: unknown): string {
+  const value = String(rawValue || "").trim();
+  if (!value) {
+    return "";
+  }
+
+  const lowered = value.toLocaleLowerCase("ru-RU");
+  if (lowered === "маркетинг" || lowered === "marketing") {
+    return "Маркетинг";
+  }
+  if (lowered === "зарплаты" || lowered === "зарплата" || lowered === "salary" || lowered === "salaries") {
+    return "Зарплаты";
+  }
+
+  return value.slice(0, 120);
+}
+
+function resolveQuickBooksExpenseCategoryForRow(
+  row: QuickBooksPaymentRow,
+  categoryMap: QuickBooksExpenseCategoryMap,
+): string {
+  const transactionId = sanitizeQuickBooksTransactionId(row?.transactionId);
+  if (!transactionId) {
+    return "";
+  }
+  return normalizeQuickBooksExpenseCategoryLabel(categoryMap[transactionId] || "");
+}
+
+function buildQuickBooksExpenseCategorySummaryRows(
+  rows: QuickBooksPaymentRow[],
+  categoryMap: QuickBooksExpenseCategoryMap,
+): QuickBooksExpenseCategorySummaryRow[] {
+  const totals = new Map<string, number>();
+  for (const defaultCategory of QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES) {
+    totals.set(defaultCategory, 0);
+  }
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const amount = Math.abs(Number(row?.paymentAmount) || 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      continue;
+    }
+    const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap);
+    const category = resolvedCategory || "Без категории";
+    totals.set(category, (totals.get(category) || 0) + amount);
+  }
+
+  const extraCategories = [...totals.keys()]
+    .filter((category) => !QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES.includes(category as (typeof QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES)[number]))
+    .sort((left, right) => left.localeCompare(right, "ru-RU"));
+  const orderedCategories = [...QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES, ...extraCategories];
+  return orderedCategories.map((category) => ({
+    category,
+    totalAmount: totals.get(category) || 0,
+  }));
 }
 
 function buildFilterStatusMessage(
