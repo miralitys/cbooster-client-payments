@@ -658,6 +658,22 @@ const MINI_UPLOAD_PARSE_MAX_CONCURRENCY = Math.min(
   24,
 );
 const MINI_MULTIPART_MAX_CONTENT_LENGTH_BYTES = MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES + 3 * 1024 * 1024;
+const MINI_REVIEW_PURGE_ENABLED = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_ENABLED) !== false;
+const MINI_REVIEW_PURGE_ATTACHMENTS = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_ATTACHMENTS) !== false;
+const MINI_REVIEW_PURGE_SENSITIVE_DATA = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_SENSITIVE_DATA) !== false;
+const MINI_RETENTION_SWEEP_ENABLED = resolveOptionalBoolean(process.env.MINI_RETENTION_SWEEP_ENABLED) !== false;
+const MINI_RETENTION_DAYS = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_RETENTION_DAYS, 90), 1),
+  3650,
+);
+const MINI_RETENTION_SWEEP_INTERVAL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_RETENTION_SWEEP_INTERVAL_MS, 60 * 60 * 1000), 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
+const MINI_RETENTION_SWEEP_BATCH_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_RETENTION_SWEEP_BATCH_LIMIT, 250), 1),
+  5000,
+);
 const MINI_BLOCKED_FILE_EXTENSIONS = new Set([
   ".html",
   ".htm",
@@ -2851,6 +2867,231 @@ async function removeStoredAttachmentByKey(storageKey) {
   }
 
   await removeFileIfExists(storagePath);
+}
+
+function normalizeModerationSubmissionIds(rawSubmissionIds) {
+  const source = Array.isArray(rawSubmissionIds) ? rawSubmissionIds : [rawSubmissionIds];
+  const seen = new Set();
+  const normalized = [];
+  for (const rawId of source) {
+    const submissionId = sanitizeTextValue(rawId, 180);
+    if (!submissionId || seen.has(submissionId)) {
+      continue;
+    }
+    seen.add(submissionId);
+    normalized.push(submissionId);
+  }
+  return normalized;
+}
+
+function collectStoredAttachmentKeysFromRows(rows) {
+  const items = Array.isArray(rows) ? rows : [];
+  const unique = new Set();
+  for (const row of items) {
+    const storageKey = sanitizeTextValue(row?.storage_key, 320);
+    if (storageKey) {
+      unique.add(storageKey);
+    }
+  }
+  return [...unique];
+}
+
+async function removeStoredAttachmentsByKeys(rawStorageKeys) {
+  const uniqueStorageKeys = collectStoredAttachmentKeysFromRows(
+    (Array.isArray(rawStorageKeys) ? rawStorageKeys : []).map((storageKey) => ({ storage_key: storageKey })),
+  );
+  if (!uniqueStorageKeys.length) {
+    return 0;
+  }
+
+  await Promise.all(uniqueStorageKeys.map((storageKey) => removeStoredAttachmentByKey(storageKey)));
+  return uniqueStorageKeys.length;
+}
+
+async function purgeModerationSubmissionArtifactsInTransaction(client, rawSubmissionIds, options = {}) {
+  const submissionIds = normalizeModerationSubmissionIds(rawSubmissionIds);
+  if (!submissionIds.length) {
+    return {
+      submissionCount: 0,
+      deletedFilesCount: 0,
+      scrubbedSubmissionsCount: 0,
+      storageKeys: [],
+    };
+  }
+
+  const purgeAttachments = options.purgeAttachments !== false;
+  const purgeSensitiveData = options.purgeSensitiveData !== false;
+  let deletedFilesCount = 0;
+  let scrubbedSubmissionsCount = 0;
+  let storageKeys = [];
+
+  if (purgeAttachments) {
+    const filesResult = await client.query(
+      `
+        SELECT storage_key
+        FROM ${MODERATION_FILES_TABLE}
+        WHERE submission_id = ANY($1::text[])
+      `,
+      [submissionIds],
+    );
+    storageKeys = collectStoredAttachmentKeysFromRows(filesResult.rows);
+
+    const deleteFilesResult = await client.query(
+      `
+        DELETE FROM ${MODERATION_FILES_TABLE}
+        WHERE submission_id = ANY($1::text[])
+      `,
+      [submissionIds],
+    );
+    deletedFilesCount = Number.isFinite(deleteFilesResult?.rowCount) ? deleteFilesResult.rowCount : 0;
+  }
+
+  if (purgeSensitiveData) {
+    const scrubResult = await client.query(
+      `
+        UPDATE ${MODERATION_TABLE}
+        SET mini_data = '{}'::jsonb,
+            submitted_by = '{}'::jsonb,
+            purged_at = NOW()
+        WHERE id = ANY($1::text[]) AND status <> 'pending'
+      `,
+      [submissionIds],
+    );
+    scrubbedSubmissionsCount = Number.isFinite(scrubResult?.rowCount) ? scrubResult.rowCount : 0;
+  } else {
+    const markResult = await client.query(
+      `
+        UPDATE ${MODERATION_TABLE}
+        SET purged_at = COALESCE(purged_at, NOW())
+        WHERE id = ANY($1::text[]) AND status <> 'pending'
+      `,
+      [submissionIds],
+    );
+    scrubbedSubmissionsCount = Number.isFinite(markResult?.rowCount) ? markResult.rowCount : 0;
+  }
+
+  return {
+    submissionCount: submissionIds.length,
+    deletedFilesCount,
+    scrubbedSubmissionsCount,
+    storageKeys,
+  };
+}
+
+function buildMiniRetentionCutoffIso(nowMs = Date.now()) {
+  const retentionWindowMs = MINI_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  return new Date(nowMs - retentionWindowMs).toISOString();
+}
+
+async function runMiniRetentionSweep() {
+  if (!MINI_RETENTION_SWEEP_ENABLED || !pool) {
+    return;
+  }
+  if (miniRetentionSweepInFlight) {
+    return;
+  }
+
+  miniRetentionSweepInFlight = true;
+  try {
+    let deletedSubmissionsCount = 0;
+    let deletedFilesCount = 0;
+    let removedStoredAttachmentsCount = 0;
+    let scannedSubmissionCount = 0;
+    let storageKeys = [];
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const candidateResult = await client.query(
+        `
+          SELECT id
+          FROM ${MODERATION_TABLE}
+          WHERE status <> 'pending'
+            AND COALESCE(reviewed_at, submitted_at) < $1::timestamptz
+          ORDER BY COALESCE(reviewed_at, submitted_at) ASC, id ASC
+          LIMIT $2
+        `,
+        [buildMiniRetentionCutoffIso(), MINI_RETENTION_SWEEP_BATCH_LIMIT],
+      );
+      const submissionIds = normalizeModerationSubmissionIds(
+        (Array.isArray(candidateResult.rows) ? candidateResult.rows : []).map((row) => row?.id),
+      );
+      scannedSubmissionCount = submissionIds.length;
+
+      if (submissionIds.length) {
+        const filesResult = await client.query(
+          `
+            SELECT storage_key
+            FROM ${MODERATION_FILES_TABLE}
+            WHERE submission_id = ANY($1::text[])
+          `,
+          [submissionIds],
+        );
+        storageKeys = collectStoredAttachmentKeysFromRows(filesResult.rows);
+
+        const deleteFilesResult = await client.query(
+          `
+            DELETE FROM ${MODERATION_FILES_TABLE}
+            WHERE submission_id = ANY($1::text[])
+          `,
+          [submissionIds],
+        );
+        deletedFilesCount = Number.isFinite(deleteFilesResult?.rowCount) ? deleteFilesResult.rowCount : 0;
+
+        const deleteSubmissionsResult = await client.query(
+          `
+            DELETE FROM ${MODERATION_TABLE}
+            WHERE id = ANY($1::text[]) AND status <> 'pending'
+          `,
+          [submissionIds],
+        );
+        deletedSubmissionsCount = Number.isFinite(deleteSubmissionsResult?.rowCount) ? deleteSubmissionsResult.rowCount : 0;
+      }
+
+      await client.query("COMMIT");
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Best-effort rollback.
+      }
+      console.error("[mini retention] sweep failed:", error);
+      return;
+    } finally {
+      client.release();
+    }
+
+    if (storageKeys.length) {
+      try {
+        removedStoredAttachmentsCount = await removeStoredAttachmentsByKeys(storageKeys);
+      } catch (error) {
+        console.error("[mini retention] storage cleanup failed:", error);
+      }
+    }
+
+    if (deletedSubmissionsCount || deletedFilesCount || removedStoredAttachmentsCount) {
+      console.log(
+        `[mini retention] purged submissions=${deletedSubmissionsCount} files=${deletedFilesCount} storage_objects=${removedStoredAttachmentsCount} scanned=${scannedSubmissionCount}.`,
+      );
+    }
+  } finally {
+    miniRetentionSweepInFlight = false;
+  }
+}
+
+function startMiniRetentionSweepScheduler() {
+  if (!MINI_RETENTION_SWEEP_ENABLED || !pool) {
+    return false;
+  }
+  if (miniRetentionSweepIntervalId) {
+    return true;
+  }
+
+  miniRetentionSweepIntervalId = setInterval(() => {
+    void runMiniRetentionSweep();
+  }, MINI_RETENTION_SWEEP_INTERVAL_MS);
+  void runMiniRetentionSweep();
+  return true;
 }
 
 async function storeAttachmentInStreamingStorage(attachment, submissionId) {
@@ -16306,7 +16547,8 @@ async function ensureDatabaseReady() {
           submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           reviewed_at TIMESTAMPTZ,
           reviewed_by TEXT,
-          review_note TEXT
+          review_note TEXT,
+          purged_at TIMESTAMPTZ
         )
       `);
 
@@ -16316,8 +16558,23 @@ async function ensureDatabaseReady() {
       `);
 
       await pool.query(`
+        ALTER TABLE ${MODERATION_TABLE}
+        ADD COLUMN IF NOT EXISTS purged_at TIMESTAMPTZ
+      `);
+
+      await pool.query(`
         CREATE INDEX IF NOT EXISTS ${MODERATION_TABLE_NAME}_status_submitted_at_id_idx
         ON ${MODERATION_TABLE} (status, submitted_at DESC, id DESC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${MODERATION_TABLE_NAME}_status_reviewed_submitted_idx
+        ON ${MODERATION_TABLE} (status, reviewed_at DESC, submitted_at DESC, id DESC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${MODERATION_TABLE_NAME}_purged_at_idx
+        ON ${MODERATION_TABLE} (purged_at DESC NULLS LAST)
       `);
 
       await pool.query(`
@@ -18983,6 +19240,7 @@ function mapModerationRow(row) {
     submittedBy: row.submitted_by && typeof row.submitted_by === "object" ? row.submitted_by : null,
     submittedAt: row.submitted_at ? new Date(row.submitted_at).toISOString() : null,
     reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+    purgedAt: row.purged_at ? new Date(row.purged_at).toISOString() : null,
     reviewedBy: (row.reviewed_by || "").toString(),
     reviewNote: (row.review_note || "").toString(),
   };
@@ -19863,7 +20121,7 @@ async function listModerationSubmissions(options = {}) {
   const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
   const result = await pool.query(
     `
-      SELECT id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+      SELECT id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note, purged_at
       FROM ${MODERATION_TABLE}
       ${whereSql}
       ORDER BY submitted_at DESC, id DESC
@@ -19921,13 +20179,16 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
   const normalizedReviewer = sanitizeTextValue(reviewedBy, 200) || "moderator";
   const normalizedReviewNote = sanitizeTextValue(reviewNote, 2000) || null;
   const client = await pool.connect();
+  let reviewPurgeStorageKeys = [];
+  let reviewPurgeDeletedFilesCount = 0;
+  let reviewPurgeScrubbedSubmissionsCount = 0;
 
   try {
     await client.query("BEGIN");
 
     const submissionResult = await client.query(
       `
-        SELECT id, record, mini_data, submitted_by, status, submitted_at
+        SELECT id, record, mini_data, submitted_by, status, submitted_at, purged_at
         FROM ${MODERATION_TABLE}
         WHERE id = $1
         FOR UPDATE
@@ -19979,12 +20240,44 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
         UPDATE ${MODERATION_TABLE}
         SET status = $2, reviewed_at = NOW(), reviewed_by = $3, review_note = $4
         WHERE id = $1
-        RETURNING id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note
+        RETURNING id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note, purged_at
       `,
       [normalizedSubmissionId, normalizedDecision, normalizedReviewer, normalizedReviewNote],
     );
 
+    if (MINI_REVIEW_PURGE_ENABLED) {
+      const reviewPurgeResult = await purgeModerationSubmissionArtifactsInTransaction(
+        client,
+        [normalizedSubmissionId],
+        {
+          purgeAttachments: MINI_REVIEW_PURGE_ATTACHMENTS,
+          purgeSensitiveData: MINI_REVIEW_PURGE_SENSITIVE_DATA,
+        },
+      );
+      reviewPurgeStorageKeys = reviewPurgeResult.storageKeys;
+      reviewPurgeDeletedFilesCount = reviewPurgeResult.deletedFilesCount;
+      reviewPurgeScrubbedSubmissionsCount = reviewPurgeResult.scrubbedSubmissionsCount;
+      if (MINI_REVIEW_PURGE_SENSITIVE_DATA && updateResult.rows[0]) {
+        updateResult.rows[0].mini_data = {};
+        updateResult.rows[0].submitted_by = {};
+      }
+    }
+
     await client.query("COMMIT");
+
+    if (reviewPurgeStorageKeys.length) {
+      try {
+        await removeStoredAttachmentsByKeys(reviewPurgeStorageKeys);
+      } catch (storageError) {
+        console.error("[mini moderation] failed to remove reviewed submission storage objects:", storageError);
+      }
+    }
+
+    if (reviewPurgeDeletedFilesCount || reviewPurgeScrubbedSubmissionsCount) {
+      console.log(
+        `[mini moderation] purged reviewed submission ${normalizedSubmissionId}: files=${reviewPurgeDeletedFilesCount} scrubbed=${reviewPurgeScrubbedSubmissionsCount}.`,
+      );
+    }
 
     return {
       ok: true,
@@ -22800,6 +23093,22 @@ app.listen(PORT, () => {
   }
   if (TELEGRAM_NOTIFY_THREAD_ID && !TELEGRAM_NOTIFY_CHAT_ID) {
     console.warn("TELEGRAM_NOTIFY_THREAD_ID is ignored because TELEGRAM_NOTIFY_CHAT_ID is not set.");
+  }
+  if (!MINI_REVIEW_PURGE_ENABLED) {
+    console.warn("Reviewed Mini submissions are NOT purged (MINI_REVIEW_PURGE_ENABLED=false).");
+  } else {
+    console.log(
+      `Reviewed Mini submission purge is enabled: attachments=${MINI_REVIEW_PURGE_ATTACHMENTS ? "on" : "off"}, sensitive_data=${MINI_REVIEW_PURGE_SENSITIVE_DATA ? "on" : "off"}.`,
+    );
+  }
+  if (!MINI_RETENTION_SWEEP_ENABLED) {
+    console.warn("Mini retention sweep is disabled (MINI_RETENTION_SWEEP_ENABLED=false).");
+  } else if (!pool) {
+    console.warn("Mini retention sweep is disabled because DATABASE_URL is missing.");
+  } else if (startMiniRetentionSweepScheduler()) {
+    console.log(
+      `Mini retention sweep started: every ${Math.round(MINI_RETENTION_SWEEP_INTERVAL_MS / (60 * 1000))} min, retention ${MINI_RETENTION_DAYS} days, batch ${MINI_RETENTION_SWEEP_BATCH_LIMIT}.`,
+    );
   }
   const quickBooksConfigured = isQuickBooksConfigured();
   if (!quickBooksConfigured) {
