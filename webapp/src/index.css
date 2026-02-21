@@ -2749,6 +2749,10 @@ a {
   font-size: var(--font-size-xs);
 }
 
+.custom-dashboard-section-switcher {
+  grid-column: 1 / -1;
+}
+
 .custom-dashboard-widget-panel,
 .custom-dashboard-uploads-panel,
 .custom-dashboard-settings-panel {
