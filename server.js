@@ -9549,6 +9549,124 @@ async function requestOpenAiAssistantReply(message, mode, records, updatedAt) {
   return normalizeAssistantReplyForDisplay(reply);
 }
 
+function normalizeQuickBooksInsightAmount(rawValue) {
+  const numericValue = Number.parseFloat(rawValue);
+  if (Number.isFinite(numericValue)) {
+    return numericValue.toFixed(2);
+  }
+
+  return sanitizeTextValue(rawValue, 60) || "-";
+}
+
+function buildQuickBooksTransactionInsightPrompt(details) {
+  const companyName = sanitizeTextValue(details?.companyName, 300) || "Unknown company";
+  const amount = normalizeQuickBooksInsightAmount(details?.amount);
+  const date = sanitizeTextValue(details?.date, 80) || "-";
+  const description = sanitizeTextValue(details?.description, 1200) || "-";
+
+  return [
+    "You are a financial research assistant helping a US-based business categorize transactions correctly for bookkeeping (QuickBooks).",
+    "",
+    "Your task:",
+    "",
+    "1. Identify what the company does based on its name.",
+    "2. Determine the most likely type of product or service.",
+    "3. Suggest the most appropriate accounting category (US GAAP style).",
+    "4. If the amount is small (under $100), assume it is most likely a subscription or service unless strong evidence suggests otherwise.",
+    "5. Provide 2–3 possible categories ranked by likelihood.",
+    "6. Keep the response structured and concise.",
+    "",
+    "Transaction details:",
+    `Company name: ${companyName}`,
+    `Amount: ${amount}`,
+    `Date: ${date}`,
+    `Transaction description (if available): ${description}`,
+    "",
+    "Return response in this format:",
+    "",
+    "Company Activity:",
+    "Short explanation of what the company does.",
+    "",
+    "Most Likely Expense Type:",
+    "(Explain reasoning briefly)",
+    "",
+    "Suggested QuickBooks Category (ranked):",
+    "1.",
+    "2.",
+    "3.",
+    "",
+    "Confidence Level:",
+    "Low / Medium / High",
+  ].join("\n");
+}
+
+async function requestOpenAiQuickBooksInsight(details) {
+  if (!isOpenAiAssistantConfigured()) {
+    throw createHttpError("OpenAI is not configured. Set OPENAI_API_KEY to use Ask GPT.", 503, "openai_not_configured");
+  }
+
+  const requestBody = {
+    model: OPENAI_MODEL,
+    input: buildQuickBooksTransactionInsightPrompt(details),
+    max_output_tokens: Math.min(OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS, 900),
+  };
+
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    abortController.abort("timeout");
+  }, OPENAI_ASSISTANT_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(`${OPENAI_API_BASE_URL}/v1/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+      signal: abortController.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (abortController.signal.aborted) {
+      throw createHttpError(`OpenAI request timed out after ${OPENAI_ASSISTANT_TIMEOUT_MS}ms.`, 504, "openai_timeout");
+    }
+
+    throw createHttpError(
+      `OpenAI request failed: ${sanitizeTextValue(error?.message, 320) || "network error"}.`,
+      503,
+      "openai_network_error",
+    );
+  }
+
+  clearTimeout(timeoutId);
+
+  const rawResponseText = await response.text();
+  if (!response.ok) {
+    const safeErrorText = sanitizeTextValue(rawResponseText, 600) || "No details.";
+    throw createHttpError(
+      `OpenAI request failed with status ${response.status}. ${safeErrorText}`,
+      502,
+      "openai_http_error",
+    );
+  }
+
+  let payload = null;
+  try {
+    payload = JSON.parse(rawResponseText);
+  } catch {
+    throw createHttpError("OpenAI returned a non-JSON response.", 502, "openai_invalid_response");
+  }
+
+  const insight = sanitizeTextValue(extractOpenAiAssistantText(payload), 8000);
+  if (!insight) {
+    throw createHttpError("OpenAI returned an empty response.", 502, "openai_empty_response");
+  }
+
+  return insight;
+}
+
 async function requestElevenLabsSpeech(rawText) {
   if (!isElevenLabsConfigured()) {
     return null;
@@ -23881,14 +23999,17 @@ app.all("/api/quickbooks/*", (req, res, next) => {
   const isAllowedSyncPost =
     req.method === "POST" &&
     (pathname === "/api/quickbooks/payments/recent/sync" || pathname === "/payments/recent/sync");
-  if (req.method === "GET" || isAllowedSyncPost) {
+  const isAllowedInsightPost =
+    req.method === "POST" &&
+    (pathname === "/api/quickbooks/transaction-insight" || pathname === "/transaction-insight");
+  if (req.method === "GET" || isAllowedSyncPost || isAllowedInsightPost) {
     next();
     return;
   }
 
   res.status(405).json({
     error:
-      "QuickBooks integration is read-only toward QuickBooks. Use GET for reads and POST /api/quickbooks/payments/recent/sync for internal sync.",
+      "QuickBooks integration is read-only toward QuickBooks. Use GET for reads and POST /api/quickbooks/payments/recent/sync (sync) or POST /api/quickbooks/transaction-insight (Ask GPT).",
   });
 });
 
@@ -24182,6 +24303,69 @@ app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission
     ok: true,
     job: buildQuickBooksSyncJobPayload(job),
   });
+});
+
+app.post("/api/quickbooks/transaction-insight", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+  if (
+    !(await enforceRateLimit(req, res, {
+      scope: "api.quickbooks.read",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "QuickBooks request limit reached. Please wait before retrying.",
+      code: "quickbooks_rate_limited",
+    }))
+  ) {
+    return;
+  }
+
+  const companyName = sanitizeTextValue(req.body?.companyName, 300);
+  if (!companyName) {
+    res.status(400).json({
+      error: "companyName is required.",
+      code: "quickbooks_insight_invalid_payload",
+    });
+    return;
+  }
+
+  const amount = Number.parseFloat(req.body?.amount);
+  if (!Number.isFinite(amount)) {
+    res.status(400).json({
+      error: "amount must be a valid number.",
+      code: "quickbooks_insight_invalid_payload",
+    });
+    return;
+  }
+
+  const date = sanitizeTextValue(req.body?.date, 80) || "-";
+  const description = sanitizeTextValue(req.body?.description, 1200) || "-";
+
+  try {
+    const insight = await requestOpenAiQuickBooksInsight({
+      companyName,
+      amount,
+      date,
+      description,
+    });
+
+    res.json({
+      ok: true,
+      insight,
+    });
+  } catch (error) {
+    console.error("POST /api/quickbooks/transaction-insight failed:", error);
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to generate transaction insight.",
+      code: sanitizeTextValue(error?.code, 80) || "quickbooks_insight_failed",
+    });
+  }
 });
 
 app.get("/api/health", async (_req, res) => {

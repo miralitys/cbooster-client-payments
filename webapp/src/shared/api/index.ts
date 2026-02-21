@@ -13,6 +13,7 @@ export {
   getQuickBooksOutgoingPayments,
   getQuickBooksPayments,
   getQuickBooksSyncJob,
+  getQuickBooksTransactionInsight,
 } from "@/shared/api/quickbooks";
 export { getClientManagers } from "@/shared/api/clientManagers";
 export { getGhlLeads } from "@/shared/api/ghlLeads";

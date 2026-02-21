@@ -20,6 +20,7 @@ import {
   getQuickBooksOutgoingPayments,
   getQuickBooksPayments,
   getQuickBooksSyncJob,
+  getQuickBooksTransactionInsight,
   getSession,
 } from "@/shared/api";
 import type { QuickBooksPaymentRow, QuickBooksSyncJob, QuickBooksSyncMeta } from "@/shared/types/quickbooks";
@@ -29,6 +30,7 @@ import {
   ErrorState,
   Input,
   LoadingSkeleton,
+  Modal,
   PageHeader,
   PageShell,
   Panel,
@@ -114,6 +116,10 @@ export default function QuickBooksPage() {
   const [statusText, setStatusText] = useState("Loading incoming transactions...");
   const [rangeText, setRangeText] = useState("");
   const [lastLoadPrefix, setLastLoadPrefix] = useState("");
+  const [insightModalRow, setInsightModalRow] = useState<QuickBooksViewRow | null>(null);
+  const [insightText, setInsightText] = useState("");
+  const [insightError, setInsightError] = useState("");
+  const [isInsightLoading, setIsInsightLoading] = useState(false);
 
   const [search, setSearch] = useState("");
   const [refundOnly, setRefundOnly] = useState(false);
@@ -378,6 +384,62 @@ export default function QuickBooksPage() {
     }
   }, [bulkExpenseCategory, outgoingTransactions, selectedOutgoingKeys, setQuickBooksExpenseCategory]);
 
+  const openInsightModal = useCallback((row: QuickBooksViewRow) => {
+    setInsightModalRow(row);
+    setInsightText("");
+    setInsightError("");
+    setIsInsightLoading(false);
+  }, []);
+
+  const closeInsightModal = useCallback(() => {
+    setInsightModalRow(null);
+    setInsightText("");
+    setInsightError("");
+    setIsInsightLoading(false);
+  }, []);
+
+  const askQuickBooksInsight = useCallback(async () => {
+    if (!insightModalRow) {
+      return;
+    }
+
+    setIsInsightLoading(true);
+    setInsightError("");
+
+    try {
+      const payload = await getQuickBooksTransactionInsight({
+        companyName: formatQuickBooksPayeeLabel(insightModalRow.clientName),
+        amount: Number(insightModalRow.paymentAmount) || 0,
+        date: String(insightModalRow.paymentDate || "").trim(),
+        description: buildQuickBooksInsightDescription(insightModalRow),
+      });
+
+      const nextInsight = String(payload?.insight || "").trim();
+      if (!nextInsight) {
+        throw new Error("GPT returned an empty response.");
+      }
+
+      setInsightText(nextInsight);
+      showToast({
+        type: "success",
+        message: "Insight received from GPT.",
+        dedupeKey: "quickbooks-insight-success",
+        cooldownMs: 2200,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to get GPT insight.";
+      setInsightError(message);
+      showToast({
+        type: "error",
+        message,
+        dedupeKey: `quickbooks-insight-error-${message}`,
+        cooldownMs: 2200,
+      });
+    } finally {
+      setIsInsightLoading(false);
+    }
+  }, [insightModalRow]);
+
   const tableColumns = useMemo<TableColumn<QuickBooksViewRow>[]>(() => {
     if (activeTab === "outgoing") {
       return [
@@ -443,7 +505,19 @@ export default function QuickBooksPage() {
           key: "clientName",
           label: "Payee",
           align: "left",
-          cell: (item) => formatQuickBooksPayeeLabel(item.clientName),
+          cell: (item) => (
+            <div className="quickbooks-client-cell">
+              <span>{formatQuickBooksPayeeLabel(item.clientName)}</span>
+              <button
+                type="button"
+                className="quickbooks-info-button"
+                onClick={() => openInsightModal(item)}
+                aria-label={`Open transaction insight for ${formatQuickBooksPayeeLabel(item.clientName)}`}
+              >
+                i
+              </button>
+            </div>
+          ),
         },
         {
           key: "paymentAmount",
@@ -465,10 +539,19 @@ export default function QuickBooksPage() {
         key: "clientName",
         label: "Client Name",
         align: "left",
-        cell: (item) => {
-          const amount = Number(item.paymentAmount) || 0;
-          return formatQuickBooksClientLabel(item.clientName, item.transactionType, amount);
-        },
+        cell: (item) => (
+          <div className="quickbooks-client-cell">
+            <span>{formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0)}</span>
+            <button
+              type="button"
+              className="quickbooks-info-button"
+              onClick={() => openInsightModal(item)}
+              aria-label={`Open transaction insight for ${formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0)}`}
+            >
+              i
+            </button>
+          </div>
+        ),
       },
       {
         key: "clientPhone",
@@ -502,6 +585,7 @@ export default function QuickBooksPage() {
     expenseCategoryMap,
     expenseCategoryOptions,
     selectedOutgoingKeySet,
+    openInsightModal,
     setQuickBooksExpenseCategory,
     toggleOutgoingTransactionSelection,
   ]);
@@ -989,6 +1073,41 @@ export default function QuickBooksPage() {
           transactionsContent
         )}
       </Panel>
+
+      <Modal
+        open={Boolean(insightModalRow)}
+        title="Transaction Insight"
+        onClose={closeInsightModal}
+        footer={
+          <div className="quickbooks-insight-actions">
+            <Button type="button" variant="secondary" size="sm" onClick={closeInsightModal} disabled={isInsightLoading}>
+              Close
+            </Button>
+            <Button type="button" size="sm" onClick={() => void askQuickBooksInsight()} isLoading={isInsightLoading}>
+              Ask GPT
+            </Button>
+          </div>
+        }
+      >
+        <div className="quickbooks-insight-summary">
+          <p>
+            <strong>Company:</strong> {insightModalRow ? formatQuickBooksPayeeLabel(insightModalRow.clientName) : "-"}
+          </p>
+          <p>
+            <strong>Amount:</strong>{" "}
+            {insightModalRow ? CURRENCY_FORMATTER.format(Number(insightModalRow.paymentAmount) || 0) : "-"}
+          </p>
+          <p>
+            <strong>Date:</strong> {insightModalRow ? formatDate(insightModalRow.paymentDate) : "-"}
+          </p>
+        </div>
+
+        {!insightText && !insightError ? (
+          <p className="quickbooks-insight-empty">Click "Ask GPT" to generate a transaction explanation.</p>
+        ) : null}
+        {insightError ? <p className="quickbooks-insight-error">{insightError}</p> : null}
+        {insightText ? <pre className="quickbooks-insight-result">{insightText}</pre> : null}
+      </Modal>
     </PageShell>
   );
 }
@@ -1386,6 +1505,13 @@ function formatQuickBooksPayeeLabel(payeeName: string): string {
 function formatQuickBooksOutgoingDescriptionLabel(description: string | undefined): string {
   const normalizedValue = String(description || "").trim();
   return normalizedValue || "-";
+}
+
+function buildQuickBooksInsightDescription(item: QuickBooksPaymentRow): string {
+  const details = [item?.description, item?.categoryName, item?.categoryDetails, item?.transactionType]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean);
+  return details.join(" | ") || "-";
 }
 
 function parseQuickBooksIsoDateParts(value: string): { year: number; month: number; day: number } | null {
