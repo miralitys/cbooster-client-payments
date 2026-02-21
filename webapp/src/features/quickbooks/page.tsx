@@ -94,18 +94,6 @@ export default function QuickBooksPage() {
           cell: (item) => formatQuickBooksOutgoingTypeLabel(item.transactionType),
         },
         {
-          key: "categoryName",
-          label: "Category",
-          align: "left",
-          cell: (item) => formatQuickBooksOutgoingCategoryLabel(item.categoryName),
-        },
-        {
-          key: "categoryDetails",
-          label: "Category details",
-          align: "left",
-          cell: (item) => formatQuickBooksOutgoingCategoryDetailsLabel(item.categoryDetails),
-        },
-        {
           key: "description",
           label: "Description",
           align: "left",
@@ -711,16 +699,6 @@ function formatQuickBooksOutgoingTypeLabel(transactionType: string): string {
     return "Check";
   }
   return normalizedType ? normalizedType.charAt(0).toUpperCase() + normalizedType.slice(1) : "-";
-}
-
-function formatQuickBooksOutgoingCategoryLabel(categoryName: string | undefined): string {
-  const normalizedName = String(categoryName || "").trim();
-  return normalizedName || "-";
-}
-
-function formatQuickBooksOutgoingCategoryDetailsLabel(categoryDetails: string | undefined): string {
-  const normalizedValue = String(categoryDetails || "").trim();
-  return normalizedValue || "-";
 }
 
 function formatQuickBooksOutgoingDescriptionLabel(description: string | undefined): string {
