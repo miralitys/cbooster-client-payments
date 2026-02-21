@@ -1,9 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import assistantAvatar from "@/assets/assistant-avatar.svg";
-import { ApiError, queueAssistantSessionContextResetBeacon, resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api";
+import {
+  ApiError,
+  queueAssistantSessionContextResetBeacon,
+  reportAssistantContextResetFailureTelemetry,
+  resetAssistantSessionContext,
+  sendAssistantMessage,
+} from "@/shared/api";
 import { cx } from "@/shared/lib/cx";
-import type { AssistantMode } from "@/shared/types/assistant";
+import type {
+  AssistantContextResetFailureReasonCode,
+  AssistantContextResetFailureStage,
+  AssistantMode,
+} from "@/shared/types/assistant";
 
 interface ChatMessage {
   id: string;
@@ -126,20 +136,13 @@ function delayMs(durationMs: number): Promise<void> {
 }
 
 function emitAssistantContextResetFailureMetric(
-  stage: "keepalive_retry_exhausted" | "beacon_failed",
-  sessionId: string,
+  stage: AssistantContextResetFailureStage,
   error?: unknown,
 ): void {
-  const reason =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : "unknown_error";
+  const reasonCode = resolveAssistantContextResetFailureReasonCode(error);
   const detail = {
     stage,
-    sessionId,
-    reason,
+    reasonCode,
     timestamp: new Date().toISOString(),
   };
 
@@ -152,6 +155,60 @@ function emitAssistantContextResetFailureMetric(
   }
 
   console.warn("[assistant.context_reset_failure]", detail);
+  void reportAssistantContextResetFailureTelemetry({
+    stage,
+    reasonCode,
+  }).catch(() => {
+    // Best-effort telemetry only.
+  });
+}
+
+function resolveAssistantContextResetFailureReasonCode(error?: unknown): AssistantContextResetFailureReasonCode {
+  if (error instanceof ApiError) {
+    if (error.code === "timeout") {
+      return "timeout";
+    }
+    if (error.code === "network_error") {
+      return "network_error";
+    }
+    if (error.code === "aborted") {
+      return "aborted";
+    }
+    if (error.code.startsWith("csrf_")) {
+      return "csrf";
+    }
+    if (error.status === 401) {
+      return "unauthorized";
+    }
+    if (error.status === 403) {
+      return "forbidden";
+    }
+    if (error.status >= 500) {
+      return "server_error";
+    }
+    return "http_error";
+  }
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  const normalizedMessage = message.toLowerCase();
+
+  if (normalizedMessage.includes("timeout")) {
+    return "timeout";
+  }
+  if (
+    normalizedMessage.includes("network") ||
+    normalizedMessage.includes("failed to fetch") ||
+    normalizedMessage.includes("offline")
+  ) {
+    return "network_error";
+  }
+
+  return "unknown_error";
 }
 
 function generateMessageId(): string {
@@ -623,10 +680,10 @@ export function AssistantWidget() {
       }
     }
 
-    emitAssistantContextResetFailureMetric("keepalive_retry_exhausted", sessionId, lastError);
+    emitAssistantContextResetFailureMetric("keepalive_retry_exhausted", lastError);
 
     if (!queueAssistantSessionContextResetBeacon(sessionId)) {
-      emitAssistantContextResetFailureMetric("beacon_failed", sessionId, lastError);
+      emitAssistantContextResetFailureMetric("beacon_failed", lastError);
     }
   }
 

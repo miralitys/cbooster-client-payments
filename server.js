@@ -162,6 +162,12 @@ const RATE_LIMIT_PROFILE_API_ASSISTANT_TTS = Object.freeze({
   maxHitsUser: 8,
   blockMs: 30 * 60 * 1000,
 });
+const RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY = Object.freeze({
+  windowMs: 10 * 60 * 1000,
+  maxHitsIp: 120,
+  maxHitsUser: 80,
+  blockMs: 2 * 60 * 1000,
+});
 const RATE_LIMIT_PROFILE_API_MINI_ACCESS = Object.freeze({
   windowMs: 60 * 1000,
   maxHitsIp: 90,
@@ -1072,6 +1078,22 @@ const ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS = Math.min(
 const ASSISTANT_SESSION_SCOPE_MAX_CLIENTS = 1200;
 const ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY = "default";
 const ASSISTANT_SESSION_SCOPE_CLEAR_TOMBSTONE_COMPARABLE = "__assistant_scope_cleared__";
+const ASSISTANT_CONTEXT_RESET_FAILURE_STAGE_ALLOWLIST = new Set([
+  "keepalive_retry_exhausted",
+  "beacon_failed",
+]);
+const ASSISTANT_CONTEXT_RESET_FAILURE_REASON_CODE_ALLOWLIST = new Set([
+  "timeout",
+  "network_error",
+  "aborted",
+  "unauthorized",
+  "forbidden",
+  "csrf",
+  "server_error",
+  "http_error",
+  "unknown_error",
+]);
+const ASSISTANT_CONTEXT_RESET_BROWSER_METRIC_MAX_BUCKETS = 64;
 const ASSISTANT_LLM_MAX_CONTEXT_RECORDS = 18;
 const ASSISTANT_LLM_MAX_NOTES_LENGTH = 220;
 const ASSISTANT_PAYMENT_FIELDS = ["payment1", "payment2", "payment3", "payment4", "payment5", "payment6", "payment7"];
@@ -1811,6 +1833,31 @@ function createPerformanceObservabilityState(options = {}) {
       lastErrorAt: null,
       lastErrorMessage: "",
     },
+    assistantContextReset: {
+      failureCount: 0,
+      byStage: {
+        keepalive_retry_exhausted: 0,
+        beacon_failed: 0,
+        unknown: 0,
+      },
+      byReasonCode: {
+        timeout: 0,
+        network_error: 0,
+        aborted: 0,
+        unauthorized: 0,
+        forbidden: 0,
+        csrf: 0,
+        server_error: 0,
+        http_error: 0,
+        unknown_error: 0,
+      },
+      byBrowserVersion: new Map(),
+      browserVersionOverflowCount: 0,
+      lastFailureAt: null,
+      lastStage: null,
+      lastReasonCode: null,
+      lastBrowserVersion: null,
+    },
   };
 }
 
@@ -1991,6 +2038,139 @@ function recordAssistantSessionScopeMetricError(state, error) {
   }
   state.assistantSessionScope.lastErrorAt = new Date().toISOString();
   state.assistantSessionScope.lastErrorMessage = sanitizeTextValue(error?.message, 600);
+}
+
+function normalizeAssistantContextResetFailureStage(rawValue) {
+  const value = sanitizeTextValue(rawValue, 64).toLowerCase();
+  if (!value) {
+    return "unknown";
+  }
+  if (ASSISTANT_CONTEXT_RESET_FAILURE_STAGE_ALLOWLIST.has(value)) {
+    return value;
+  }
+  return "unknown";
+}
+
+function normalizeAssistantContextResetFailureReasonCode(rawValue) {
+  const value = sanitizeTextValue(rawValue, 64).toLowerCase();
+  if (!value) {
+    return "unknown_error";
+  }
+  if (ASSISTANT_CONTEXT_RESET_FAILURE_REASON_CODE_ALLOWLIST.has(value)) {
+    return value;
+  }
+  return "unknown_error";
+}
+
+function normalizeAssistantContextResetBrowserVersion(rawValue) {
+  const value = sanitizeTextValue(rawValue, 24);
+  if (!value) {
+    return "0";
+  }
+  const match = value.match(/\d{1,3}/);
+  return match ? match[0] : "0";
+}
+
+function parseAssistantContextResetBrowserFromUserAgent(rawUserAgent) {
+  const userAgent = sanitizeTextValue(rawUserAgent, 600);
+  if (!userAgent) {
+    return {
+      name: "unknown",
+      version: "0",
+    };
+  }
+
+  let match = userAgent.match(/(?:Edg|Edge)\/([0-9]+(?:\.[0-9]+){0,2})/i);
+  if (match) {
+    return {
+      name: "edge",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  match = userAgent.match(/OPR\/([0-9]+(?:\.[0-9]+){0,2})/i);
+  if (match) {
+    return {
+      name: "opera",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  match = userAgent.match(/(?:Chrome|CriOS)\/([0-9]+(?:\.[0-9]+){0,2})/i);
+  if (match) {
+    return {
+      name: "chrome",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  match = userAgent.match(/(?:Firefox|FxiOS)\/([0-9]+(?:\.[0-9]+){0,2})/i);
+  if (match) {
+    return {
+      name: "firefox",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  match = userAgent.match(/Version\/([0-9]+(?:\.[0-9]+){0,2}).*Safari\//i);
+  if (match) {
+    return {
+      name: "safari",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  return {
+    name: "unknown",
+    version: "0",
+  };
+}
+
+function buildAssistantContextResetBrowserVersionKey(browser = {}) {
+  const name = sanitizeTextValue(browser.name, 40).toLowerCase() || "unknown";
+  const version = normalizeAssistantContextResetBrowserVersion(browser.version);
+  return `${name}/${version}`;
+}
+
+function incrementAssistantContextResetBrowserMetricBucket(state, browserVersionKey) {
+  if (!state?.assistantContextReset?.byBrowserVersion || !browserVersionKey) {
+    return;
+  }
+
+  const buckets = state.assistantContextReset.byBrowserVersion;
+  const current = Number.parseInt(buckets.get(browserVersionKey), 10);
+  if (Number.isFinite(current) && current > 0) {
+    buckets.set(browserVersionKey, current + 1);
+    return;
+  }
+
+  if (buckets.size >= ASSISTANT_CONTEXT_RESET_BROWSER_METRIC_MAX_BUCKETS) {
+    state.assistantContextReset.browserVersionOverflowCount += 1;
+    return;
+  }
+
+  buckets.set(browserVersionKey, 1);
+}
+
+function recordAssistantContextResetFailureMetric(state, payload = {}) {
+  if (!state?.assistantContextReset) {
+    return;
+  }
+
+  const stage = normalizeAssistantContextResetFailureStage(payload.stage);
+  const reasonCode = normalizeAssistantContextResetFailureReasonCode(payload.reasonCode);
+  const browserVersionKey = buildAssistantContextResetBrowserVersionKey(payload.browser);
+  const stageCounters = state.assistantContextReset.byStage || {};
+  const reasonCounters = state.assistantContextReset.byReasonCode || {};
+
+  state.assistantContextReset.failureCount += 1;
+  stageCounters[stage] = (Number.parseInt(stageCounters[stage], 10) || 0) + 1;
+  reasonCounters[reasonCode] = (Number.parseInt(reasonCounters[reasonCode], 10) || 0) + 1;
+  incrementAssistantContextResetBrowserMetricBucket(state, browserVersionKey);
+  state.assistantContextReset.lastFailureAt = new Date().toISOString();
+  state.assistantContextReset.lastStage = stage;
+  state.assistantContextReset.lastReasonCode = reasonCode;
+  state.assistantContextReset.lastBrowserVersion = browserVersionKey;
 }
 
 function startPerformanceObservabilityMonitor(state) {
@@ -2262,6 +2442,14 @@ function buildPerformanceDiagnosticsPayload(state) {
   const dualWriteState = state.recordsDualWrite || {};
   const dualReadCompareState = state.recordsDualReadCompare || {};
   const assistantSessionScopeState = state.assistantSessionScope || {};
+  const assistantContextResetState = state.assistantContextReset || {};
+  const assistantContextResetBrowserRows = Array.from(assistantContextResetState.byBrowserVersion?.entries() || [])
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 30)
+    .map(([browserVersion, count]) => ({
+      browserVersion,
+      count: normalizeDualWriteSummaryValue(count),
+    }));
 
   const httpRouteRows = Array.from(httpState.routes.values())
     .sort((left, right) => {
@@ -2400,6 +2588,33 @@ function buildPerformanceDiagnosticsPayload(state) {
       lastEvictionAt: sanitizeTextValue(assistantSessionScopeState.lastEvictionAt, 60),
       lastErrorAt: sanitizeTextValue(assistantSessionScopeState.lastErrorAt, 60),
       lastErrorMessage: sanitizeTextValue(assistantSessionScopeState.lastErrorMessage, 600),
+    },
+    assistantContextReset: {
+      failureCount: normalizeDualWriteSummaryValue(assistantContextResetState.failureCount),
+      byStage: {
+        keepalive_retry_exhausted: normalizeDualWriteSummaryValue(
+          assistantContextResetState.byStage?.keepalive_retry_exhausted,
+        ),
+        beacon_failed: normalizeDualWriteSummaryValue(assistantContextResetState.byStage?.beacon_failed),
+        unknown: normalizeDualWriteSummaryValue(assistantContextResetState.byStage?.unknown),
+      },
+      byReasonCode: {
+        timeout: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.timeout),
+        network_error: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.network_error),
+        aborted: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.aborted),
+        unauthorized: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.unauthorized),
+        forbidden: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.forbidden),
+        csrf: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.csrf),
+        server_error: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.server_error),
+        http_error: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.http_error),
+        unknown_error: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.unknown_error),
+      },
+      byBrowserVersion: assistantContextResetBrowserRows,
+      browserVersionOverflowCount: normalizeDualWriteSummaryValue(assistantContextResetState.browserVersionOverflowCount),
+      lastFailureAt: sanitizeTextValue(assistantContextResetState.lastFailureAt, 60),
+      lastStage: sanitizeTextValue(assistantContextResetState.lastStage, 64),
+      lastReasonCode: sanitizeTextValue(assistantContextResetState.lastReasonCode, 64),
+      lastBrowserVersion: sanitizeTextValue(assistantContextResetState.lastBrowserVersion, 80),
     },
   };
 }
@@ -24668,6 +24883,43 @@ app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSIO
   }
 });
 
+app.post("/api/assistant/context/reset/telemetry", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.assistant.context_reset_telemetry",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.blockMs,
+      },
+      message: "Assistant telemetry request limit reached. Please wait before retrying.",
+      code: "assistant_context_reset_telemetry_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const stage = normalizeAssistantContextResetFailureStage(req.body?.stage);
+  const reasonCode = normalizeAssistantContextResetFailureReasonCode(req.body?.reasonCode);
+  const userAgentHeader = Array.isArray(req.headers["user-agent"]) ? req.headers["user-agent"][0] : req.headers["user-agent"];
+  const browser = parseAssistantContextResetBrowserFromUserAgent(userAgentHeader);
+
+  recordAssistantContextResetFailureMetric(performanceObservability, {
+    stage,
+    reasonCode,
+    browser,
+  });
+
+  res.json({
+    ok: true,
+  });
+});
+
 app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
@@ -26490,5 +26742,9 @@ module.exports = {
     buildAssistantReviewRetentionCutoffIso,
     resolveAssistantSessionScopeTenantKeyFromRequest,
     normalizeAssistantClientMessageSeq,
+    normalizeAssistantContextResetFailureStage,
+    normalizeAssistantContextResetFailureReasonCode,
+    parseAssistantContextResetBrowserFromUserAgent,
+    buildAssistantContextResetBrowserVersionKey,
   },
 };

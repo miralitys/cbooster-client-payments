@@ -3,10 +3,13 @@ import type {
   AssistantChatRequest,
   AssistantChatResponse,
   AssistantContextResetResponse,
+  AssistantContextResetTelemetryRequest,
+  AssistantContextResetTelemetryResponse,
   AssistantMode,
 } from "@/shared/types/assistant";
 
 const ASSISTANT_CONTEXT_RESET_PATH = "/api/assistant/context/reset";
+const ASSISTANT_CONTEXT_RESET_TELEMETRY_PATH = "/api/assistant/context/reset/telemetry";
 const WEB_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
 
 interface AssistantContextResetOptions {
@@ -61,6 +64,24 @@ export async function resetAssistantSessionContext(
     signal: options.signal,
     keepalive: options.keepalive,
     timeoutMs: options.timeoutMs,
+  });
+}
+
+export async function reportAssistantContextResetFailureTelemetry(
+  payload: AssistantContextResetTelemetryRequest,
+): Promise<AssistantContextResetTelemetryResponse> {
+  return apiRequest<AssistantContextResetTelemetryResponse>(ASSISTANT_CONTEXT_RESET_TELEMETRY_PATH, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      stage: payload.stage,
+      reasonCode: payload.reasonCode || "unknown_error",
+    }),
+    keepalive: true,
+    timeoutMs: 3_500,
+    allowUnauthorized: true,
   });
 }
 

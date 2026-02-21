@@ -1,6 +1,17 @@
 export type AssistantMode = "text" | "voice";
 export type AssistantScopeSource = "explicit" | "mention" | "none";
 export type AssistantScopeEphemeralSource = "mention" | "none";
+export type AssistantContextResetFailureStage = "keepalive_retry_exhausted" | "beacon_failed";
+export type AssistantContextResetFailureReasonCode =
+  | "timeout"
+  | "network_error"
+  | "aborted"
+  | "unauthorized"
+  | "forbidden"
+  | "csrf"
+  | "server_error"
+  | "http_error"
+  | "unknown_error";
 
 export interface AssistantChatRequest {
   message: string;
@@ -30,5 +41,14 @@ export interface AssistantChatResponse {
 }
 
 export interface AssistantContextResetResponse {
+  ok: boolean;
+}
+
+export interface AssistantContextResetTelemetryRequest {
+  stage: AssistantContextResetFailureStage;
+  reasonCode?: AssistantContextResetFailureReasonCode;
+}
+
+export interface AssistantContextResetTelemetryResponse {
   ok: boolean;
 }
