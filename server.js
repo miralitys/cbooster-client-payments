@@ -25359,31 +25359,63 @@ function dedupeIdentityIqBureauScores(items) {
   return Array.from(byBureau.values());
 }
 
+function collectIdentityIqScoreCandidates(text) {
+  const normalizedText = normalizeIdentityIqPageText(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const values = [];
+  const compactMatches = normalizedText.match(/\b([2-9]\d{2})\b/g) || [];
+  for (const match of compactMatches) {
+    const score = parseIdentityIqScoreNumber(match);
+    if (score !== null) {
+      values.push(score);
+    }
+  }
+
+  const splitDigitMatches = normalizedText.match(/\b([2-9]\d)\s+(\d)\b/g) || [];
+  for (const match of splitDigitMatches) {
+    const normalized = sanitizeTextValue(match, 12).replace(/\s+/g, "");
+    const score = parseIdentityIqScoreNumber(normalized);
+    if (score !== null) {
+      values.push(score);
+    }
+  }
+
+  return Array.from(new Set(values));
+}
+
 function parseIdentityIqBureauScores(text) {
   const normalizedText = normalizeIdentityIqPageText(text);
   if (!normalizedText) {
     return [];
   }
 
+  const loweredText = normalizedText.toLowerCase();
   const matches = [];
+
   for (const entry of IDENTITYIQ_BUREAU_SCORE_PATTERNS) {
-    entry.pattern.lastIndex = 0;
-    let match;
-    while ((match = entry.pattern.exec(normalizedText)) !== null) {
-      const score = parseIdentityIqScoreNumber(match[1]);
-      if (score === null) {
-        continue;
-      }
-      matches.push({
-        bureau: entry.bureau,
-        score,
-      });
-      if (matches.length >= 12) {
+    const needle = entry.bureau.toLowerCase();
+    let cursor = 0;
+
+    while (cursor < loweredText.length) {
+      const foundAt = loweredText.indexOf(needle, cursor);
+      if (foundAt < 0) {
         break;
       }
-    }
-    if (matches.length >= 12) {
-      break;
+
+      const snippet = normalizedText.slice(foundAt, Math.min(foundAt + 220, normalizedText.length));
+      const candidates = collectIdentityIqScoreCandidates(snippet);
+      if (candidates.length) {
+        matches.push({
+          bureau: entry.bureau,
+          score: candidates[0],
+        });
+        break;
+      }
+
+      cursor = foundAt + needle.length;
     }
   }
 
@@ -27399,6 +27431,7 @@ async function probeGhlContractDownloadUrlByCandidateId(candidateId, context = {
   if (!normalizedCandidateId) {
     return null;
   }
+  const fastMode = Boolean(context?.fastMode);
 
   const encodedCandidateId = encodeURIComponent(normalizedCandidateId);
   const normalizedContactId = sanitizeTextValue(context?.contactId, 160);
