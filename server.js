@@ -27288,7 +27288,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-4",
+      matcherVersion: "ghl-contract-download-v2026-02-21-5",
       debugMode,
     });
   } catch (error) {
