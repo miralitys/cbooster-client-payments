@@ -12,6 +12,11 @@ const MINI_JS_PATH = path.resolve(TEST_DIR, "../../../../mini.js");
 const MINI_HTML = `
   <form id="mini-client-form">
     <input id="clientName" name="clientName" />
+    <input id="closedBy" name="closedBy" />
+    <input id="companyName" name="companyName" />
+    <input id="serviceType" name="serviceType" />
+    <input id="contractTotals" name="contractTotals" />
+    <input id="payment1" name="payment1" />
     <input id="payment1Date" name="payment1Date" />
     <input id="ssn" name="ssn" />
     <input id="clientPhoneNumber" name="clientPhoneNumber" />
@@ -98,6 +103,12 @@ describe("mini.js validators", () => {
   it("validateRequiredMiniFields marks missing required input", () => {
     const validators = loadMiniValidators();
     const clientName = document.querySelector("#clientName") as HTMLInputElement;
+    const closedBy = document.querySelector("#closedBy") as HTMLInputElement;
+    const companyName = document.querySelector("#companyName") as HTMLInputElement;
+    const serviceType = document.querySelector("#serviceType") as HTMLInputElement;
+    const contractTotals = document.querySelector("#contractTotals") as HTMLInputElement;
+    const payment1 = document.querySelector("#payment1") as HTMLInputElement;
+    const payment1Date = document.querySelector("#payment1Date") as HTMLInputElement;
 
     clientName.value = "   ";
     const result = validators.validateRequiredMiniFields();
@@ -109,6 +120,12 @@ describe("mini.js validators", () => {
     expect(clientName.getAttribute("aria-invalid")).toBe("true");
 
     clientName.value = "  Jane Doe  ";
+    closedBy.value = "Manager";
+    companyName.value = "Credit Booster";
+    serviceType.value = "Repair";
+    contractTotals.value = "1000";
+    payment1.value = "200";
+    payment1Date.value = "02/20/2026";
     const validResult = validators.validateRequiredMiniFields();
     expect(validResult).toEqual({ ok: true, error: "" });
     expect(clientName.getAttribute("aria-invalid")).toBe("false");

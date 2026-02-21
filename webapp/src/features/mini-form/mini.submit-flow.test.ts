@@ -327,19 +327,29 @@ function getSubmitButtonLabel() {
   return label;
 }
 
-function getRequiredClientNameInput() {
-  const input = document.querySelector("#clientName");
+function getRequiredInput(fieldId: string) {
+  const input = document.querySelector(`#${fieldId}`);
   if (!(input instanceof HTMLInputElement)) {
-    throw new Error("#clientName was not found");
+    throw new Error(`#${fieldId} was not found`);
   }
 
   return input;
 }
 
-function fillRequiredClientName(value = "John Doe") {
-  const input = getRequiredClientNameInput();
+function setRequiredInputValue(fieldId: string, value: string) {
+  const input = getRequiredInput(fieldId);
   input.value = value;
   input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function fillRequiredMiniFields(clientName = "John Doe") {
+  setRequiredInputValue("clientName", clientName);
+  setRequiredInputValue("closedBy", "Manager");
+  setRequiredInputValue("companyName", "Credit Booster");
+  setRequiredInputValue("serviceType", "Repair");
+  setRequiredInputValue("contractTotals", "1000");
+  setRequiredInputValue("payment1", "200");
+  setRequiredInputValue("payment1Date", "02/20/2026");
 }
 
 describe("mini.js submit flow", () => {
@@ -408,8 +418,7 @@ describe("mini.js submit flow", () => {
 
     await flushAsync();
 
-    const clientName = document.querySelector("#clientName") as HTMLInputElement;
-    clientName.value = "  John Doe  ";
+    fillRequiredMiniFields("  John Doe  ");
 
     await submitForm();
 
@@ -450,11 +459,9 @@ describe("mini.js submit flow", () => {
 
     await flushAsync();
 
-    const clientName = document.querySelector("#clientName") as HTMLInputElement;
     const paymentDate = document.querySelector("#payment1Date") as HTMLInputElement;
 
-    clientName.value = "  Jane Smith  ";
-    paymentDate.value = "";
+    fillRequiredMiniFields("  Jane Smith  ");
 
     await submitForm();
 
@@ -462,6 +469,7 @@ describe("mini.js submit flow", () => {
     expect(telegram.hapticCalls).toContain("success");
     expect(telegram.popupCalls.length).toBeGreaterThanOrEqual(1);
 
+    const clientName = document.querySelector("#clientName") as HTMLInputElement;
     expect(clientName.value).toBe("");
     expect(paymentDate.value).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
 
@@ -483,7 +491,7 @@ describe("mini.js submit flow", () => {
     };
 
     expect(parsedClient.clientName).toBe("Jane Smith");
-    expect(parsedClient.payment1Date).toBe("");
+    expect(parsedClient.payment1Date).toBe("02/20/2026");
   });
 
   it("keeps submit button disabled while mini access check is in progress", async () => {
@@ -494,7 +502,7 @@ describe("mini.js submit flow", () => {
       fetchMock: deferredFetch.fetchMock,
     });
 
-    fillRequiredClientName("John");
+    fillRequiredMiniFields("John");
     await flushAsync();
 
     const submitButton = getSubmitButton();
@@ -520,7 +528,7 @@ describe("mini.js submit flow", () => {
       fetchMock: deferredFetch.fetchMock,
     });
 
-    fillRequiredClientName("John");
+    fillRequiredMiniFields("John");
     await flushAsync();
 
     deferredFetch.resolveNext({
@@ -563,7 +571,7 @@ describe("mini.js submit flow", () => {
       fetchMock: deferredFetch.fetchMock,
     });
 
-    fillRequiredClientName("John");
+    fillRequiredMiniFields("John");
     await flushAsync();
 
     deferredFetch.resolveNext({
@@ -607,7 +615,7 @@ describe("mini.js submit flow", () => {
       ],
     });
 
-    fillRequiredClientName("John");
+    fillRequiredMiniFields("John");
     await flushAsync();
     await submitForm();
 
@@ -636,7 +644,7 @@ describe("mini.js submit flow", () => {
       ],
     });
 
-    fillRequiredClientName("John");
+    fillRequiredMiniFields("John");
     await flushAsync();
     await submitForm();
 
