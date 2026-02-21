@@ -620,6 +620,14 @@ const GHL_LEADS_READ_ENRICH_MAX_ROWS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LEADS_READ_ENRICH_MAX_ROWS, 120), 0),
   1000,
 );
+const GHL_LEADS_REFRESH_READ_ENRICH_MAX_ROWS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_REFRESH_READ_ENRICH_MAX_ROWS, 1000), 0),
+  5000,
+);
+const GHL_LEADS_REFRESH_READ_ENRICH_CONCURRENCY = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_LEADS_REFRESH_READ_ENRICH_CONCURRENCY, 8), 1),
+  16,
+);
 const GHL_LEADS_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: GHL_LEADS_SYNC_TIME_ZONE,
   year: "numeric",
@@ -14918,13 +14926,15 @@ function mergeGhlLeadRows(baseRow, patchRow) {
   return merged;
 }
 
-async function enrichGhlLeadRows(rows, pipelineContext = null) {
+async function enrichGhlLeadRows(rows, pipelineContext = null, options = {}) {
   const sourceRows = Array.isArray(rows) ? rows : [];
   if (!sourceRows.length || !isGhlConfigured()) {
     return sourceRows;
   }
 
-  const maxRows = Math.min(sourceRows.length, GHL_LEADS_ENRICH_MAX_ROWS);
+  const requestedMaxRows = parsePositiveIntegerOrZero(options?.maxRows);
+  const maxRowsLimit = requestedMaxRows > 0 ? requestedMaxRows : GHL_LEADS_ENRICH_MAX_ROWS;
+  const maxRows = Math.min(sourceRows.length, maxRowsLimit);
   if (maxRows <= 0) {
     return sourceRows;
   }
@@ -14966,7 +14976,8 @@ async function enrichGhlLeadRows(rows, pipelineContext = null) {
   const managerNameCache = new Map();
 
   let cursor = 0;
-  const workerCount = Math.min(GHL_LEADS_ENRICH_CONCURRENCY, maxRows);
+  const requestedConcurrency = parsePositiveIntegerOrZero(options?.concurrency);
+  const workerCount = Math.max(1, Math.min(requestedConcurrency || GHL_LEADS_ENRICH_CONCURRENCY, maxRows, 16));
   async function worker() {
     while (cursor < maxRows) {
       const currentIndex = cursor;
@@ -22704,13 +22715,25 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
       rangeMode,
     });
     if (refreshMode !== "none" && isGhlConfigured() && items.length && GHL_LEADS_READ_ENRICH_MAX_ROWS > 0) {
+      const readEnrichMaxRows = Math.min(
+        items.length,
+        Math.max(
+          GHL_LEADS_READ_ENRICH_MAX_ROWS,
+          refreshMode === "full" ? GHL_LEADS_REFRESH_READ_ENRICH_MAX_ROWS : GHL_LEADS_READ_ENRICH_MAX_ROWS,
+        ),
+      );
+      const readEnrichConcurrency =
+        refreshMode === "full" ? Math.max(GHL_LEADS_ENRICH_CONCURRENCY, GHL_LEADS_REFRESH_READ_ENRICH_CONCURRENCY) : GHL_LEADS_ENRICH_CONCURRENCY;
       const rowsNeedingEnrichment = items
         .filter((row) => isSparseGhlLeadRow(row))
-        .slice(0, GHL_LEADS_READ_ENRICH_MAX_ROWS);
+        .slice(0, readEnrichMaxRows);
 
       if (rowsNeedingEnrichment.length) {
         try {
-          const enrichedRows = await enrichGhlLeadRows(rowsNeedingEnrichment, pipelineContext);
+          const enrichedRows = await enrichGhlLeadRows(rowsNeedingEnrichment, pipelineContext, {
+            maxRows: readEnrichMaxRows,
+            concurrency: readEnrichConcurrency,
+          });
           if (enrichedRows.length) {
             await upsertGhlLeadsCacheRows(enrichedRows);
             const enrichedById = new Map(enrichedRows.map((row) => [sanitizeTextValue(row?.leadId, 180), row]));
@@ -22722,6 +22745,8 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
               return mergeGhlLeadRows(row, enrichedById.get(leadId));
             });
           }
+          refreshMeta.readEnrichRequestedCount = rowsNeedingEnrichment.length;
+          refreshMeta.readEnrichAppliedCount = enrichedRows.length;
         } catch (readEnrichError) {
           console.warn(
             `[ghl leads] read enrichment skipped: ${sanitizeTextValue(readEnrichError?.message, 300) || "unknown error"}`,

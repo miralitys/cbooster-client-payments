@@ -18,7 +18,7 @@ export async function getGhlLeads(
   if (refresh !== "none") {
     return apiRequest<GhlLeadsPayload>("/api/ghl/leads/refresh", {
       method: "POST",
-      timeoutMs: 60_000,
+      timeoutMs: 90_000,
       headers: {
         "Content-Type": "application/json",
       },
