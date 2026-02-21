@@ -50,9 +50,10 @@ export default function AccessControlPage() {
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [createForm, setCreateForm] = useState<UserFormState>(EMPTY_FORM);
   const [createStatusText, setCreateStatusText] = useState(
-    "Fill out the form to create a new user. Username and password are optional.",
+    "Fill out the form to create a new user. If password is empty, a temporary password will be generated and shown once.",
   );
   const [createStatusError, setCreateStatusError] = useState(false);
+  const [createdTemporaryPassword, setCreatedTemporaryPassword] = useState("");
   const [isCreating, setIsCreating] = useState(false);
 
   const [editingOriginalUsername, setEditingOriginalUsername] = useState("");
@@ -315,12 +316,20 @@ export default function AccessControlPage() {
     setIsCreating(true);
     setCreateStatusText("Creating user...");
     setCreateStatusError(false);
+    setCreatedTemporaryPassword("");
 
     try {
       const payload = buildUpsertPayload(createForm);
       const response = await createAccessUser(payload);
       const createdUsername = response?.item?.username || payload.username || createForm.displayName;
-      setCreateStatusText(`User "${createdUsername}" created.`);
+      const temporaryPassword = String(response?.temporaryPassword || "").trim();
+      if (temporaryPassword) {
+        setCreateStatusText(`User "${createdUsername}" created. Temporary password is shown below (copy and share once).`);
+        setCreatedTemporaryPassword(temporaryPassword);
+      } else {
+        setCreateStatusText(`User "${createdUsername}" created.`);
+        setCreatedTemporaryPassword("");
+      }
       setCreateStatusError(false);
       setCreateForm((previous) =>
         ensureFormDefaults(
@@ -332,14 +341,35 @@ export default function AccessControlPage() {
           departments,
         ),
       );
-      setRegistrationOpen(false);
+      setRegistrationOpen(Boolean(temporaryPassword));
       await loadAccessModel();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create user.";
       setCreateStatusText(message);
       setCreateStatusError(true);
+      setCreatedTemporaryPassword("");
     } finally {
       setIsCreating(false);
+    }
+  }
+
+  async function copyCreatedTemporaryPassword() {
+    const password = createdTemporaryPassword.trim();
+    if (!password) {
+      return;
+    }
+
+    try {
+      if (!globalThis.navigator?.clipboard?.writeText) {
+        throw new Error("Clipboard access is not available.");
+      }
+      await globalThis.navigator.clipboard.writeText(password);
+      setCreateStatusText("Temporary password copied to clipboard.");
+      setCreateStatusError(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to copy temporary password.";
+      setCreateStatusText(message);
+      setCreateStatusError(true);
     }
   }
 
@@ -466,7 +496,15 @@ export default function AccessControlPage() {
             <Button
               type="button"
               size="sm"
-              onClick={() => setRegistrationOpen((previous) => !previous)}
+              onClick={() =>
+                setRegistrationOpen((previous) => {
+                  const nextOpen = !previous;
+                  if (!nextOpen) {
+                    setCreatedTemporaryPassword("");
+                  }
+                  return nextOpen;
+                })
+              }
             >
               {registrationOpen ? "Hide User Registration" : "Add New User"}
             </Button>
@@ -508,6 +546,15 @@ export default function AccessControlPage() {
       {registrationOpen && canManageAccess ? (
         <Panel title="User Registration">
           <p className={`dashboard-message ${createStatusError ? "error" : ""}`.trim()}>{createStatusText}</p>
+          {createdTemporaryPassword ? (
+            <div className="access-control-temp-password-react">
+              <p className="access-control-temp-password-label-react">One-time temporary password</p>
+              <code className="access-control-temp-password-value-react">{createdTemporaryPassword}</code>
+              <Button type="button" size="sm" variant="secondary" onClick={() => void copyCreatedTemporaryPassword()}>
+                Copy Password
+              </Button>
+            </div>
+          ) : null}
 
           <form className="access-control-form-react" onSubmit={(event) => void submitCreateUser(event)}>
             <Field label="Username / Email (optional)" htmlFor="access-create-username">
@@ -520,13 +567,13 @@ export default function AccessControlPage() {
               />
             </Field>
 
-            <Field label="Password (optional)" htmlFor="access-create-password">
+            <Field label="Password (optional, min 8 chars)" htmlFor="access-create-password">
               <Input
                 id="access-create-password"
                 type="password"
                 value={createForm.password}
                 onChange={(event) => setCreateForm((previous) => ({ ...previous, password: event.target.value }))}
-                placeholder="Optional: at least 8 characters"
+                placeholder="Leave empty to auto-generate temporary password"
                 disabled={isCreating}
               />
             </Field>
