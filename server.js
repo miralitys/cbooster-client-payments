@@ -14165,6 +14165,28 @@ function extractGhlUrlsFromText(rawValue) {
   return [...deduped];
 }
 
+function extractLikelyGhlEntityId(rawValue) {
+  const value = sanitizeTextValue(rawValue, 220);
+  if (!value) {
+    return "";
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (/^[a-f0-9]{8}-[a-f0-9-]{27,}$/i.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^[A-Za-z0-9_-]{8,200}$/.test(normalized)) {
+    return normalized;
+  }
+
+  return "";
+}
+
 function normalizeGhlContractCandidate(candidate, fallbackSource = "") {
   if (!candidate || typeof candidate !== "object") {
     return null;
@@ -14176,8 +14198,12 @@ function normalizeGhlContractCandidate(candidate, fallbackSource = "") {
   const source = sanitizeTextValue(candidate.source || fallbackSource, 120) || "unknown";
   const contactName = sanitizeTextValue(candidate.contactName, 300);
   const contactId = sanitizeTextValue(candidate.contactId, 160);
+  const candidateId =
+    extractLikelyGhlEntityId(
+      candidate.candidateId || candidate.documentId || candidate.document_id || candidate.proposalId || candidate.id,
+    ) || extractLikelyGhlEntityId(snippet);
 
-  if (!title && !url && !snippet) {
+  if (!title && !url && !snippet && !candidateId) {
     return null;
   }
 
@@ -14188,6 +14214,7 @@ function normalizeGhlContractCandidate(candidate, fallbackSource = "") {
     source,
     contactName,
     contactId,
+    candidateId,
   };
 }
 
@@ -14299,6 +14326,7 @@ function dedupeGhlContractCandidates(candidates) {
       candidate.source.toLowerCase(),
       candidate.contactName.toLowerCase(),
       candidate.contactId.toLowerCase(),
+      sanitizeTextValue(candidate.candidateId, 220).toLowerCase(),
     ].join("::");
     if (seen.has(key)) {
       continue;
@@ -14599,6 +14627,16 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
       objectContactLink.contactId,
     160,
   );
+  const candidateEntityId =
+    extractLikelyGhlEntityId(
+      object.documentId ||
+        object.document_id ||
+        object.proposalId ||
+        object.proposal_id ||
+        object.fileId ||
+        object.file_id ||
+        object.id,
+    ) || "";
   const urlCandidates = [
     object.url,
     object.fileUrl,
@@ -14635,9 +14673,10 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
         source: sourceLabel,
         contactName: candidateContactName,
         contactId: candidateContactId,
+        candidateId: candidateEntityId,
       });
     }
-  } else if (title && /\b(contract|agreement)\b/i.test(`${title} ${snippet}`)) {
+  } else if (candidateEntityId || (title && /\b(contract|agreement)\b/i.test(`${title} ${snippet}`))) {
     target.push({
       title,
       url: "",
@@ -14645,6 +14684,7 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
       source: sourceLabel,
       contactName: candidateContactName,
       contactId: candidateContactId,
+      candidateId: candidateEntityId,
     });
   }
 
@@ -25812,8 +25852,12 @@ function isGhlContractDownloadSourceAllowed(rawSource) {
 
 function computeGhlContractDownloadCandidateScore(candidate, context = {}) {
   const source = sanitizeTextValue(candidate?.source, 160).toLowerCase();
-  const signal = normalizeGhlContractComparableText(`${candidate?.title || ""} ${candidate?.snippet || ""} ${source}`);
-  const hasPdfHint = isLikelyGhlPdfUrl(candidate?.url) || /\bpdf\b/.test(signal);
+  const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
+  const hasUrl = Boolean(extractGhlUrlsFromText(candidate?.url)[0]);
+  const signal = normalizeGhlContractComparableText(
+    `${candidate?.title || ""} ${candidate?.snippet || ""} ${source} ${candidateId || ""}`,
+  );
+  const hasPdfHint = (hasUrl && isLikelyGhlPdfUrl(candidate?.url)) || /\bpdf\b/.test(signal);
   const hasContractKeyword = hasGhlContractOrAgreementKeyword(candidate);
   const hasSignedHint = /\b(signed|signature|completed|accepted)\b/.test(signal);
   const isRelatedToContact = isGhlContractCandidateRelatedToContact(candidate, context?.contactName, context?.contactId);
@@ -25831,8 +25875,11 @@ function computeGhlContractDownloadCandidateScore(candidate, context = {}) {
     score += 25;
   }
 
-  if (candidate?.url) {
+  if (hasUrl) {
     score += 15;
+  }
+  if (candidateId) {
+    score += 14;
   }
   if (hasPdfHint) {
     score += 45;
@@ -25852,6 +25899,9 @@ function computeGhlContractDownloadCandidateScore(candidate, context = {}) {
   if (contextContactId && candidateContactId && contextContactId === candidateContactId) {
     score += 15;
   }
+  if (!hasUrl && candidateId && source.startsWith("proposals.")) {
+    score += 12;
+  }
 
   return score;
 }
@@ -25866,18 +25916,22 @@ function isGhlContractDownloadCandidate(candidate, context = {}) {
   }
 
   const url = extractGhlUrlsFromText(candidate.url)[0] || "";
-  if (!url || !isAllowedGhlContractDownloadUrl(url)) {
+  const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
+  const hasAllowedUrl = Boolean(url && isAllowedGhlContractDownloadUrl(url));
+  if (!hasAllowedUrl && !candidateId) {
     return false;
   }
 
   const source = sanitizeTextValue(candidate?.source, 160).toLowerCase();
-  const signal = normalizeGhlContractComparableText(`${candidate?.title || ""} ${candidate?.snippet || ""} ${source}`);
-  const hasPdfHint = isLikelyGhlPdfUrl(url) || /\bpdf\b/.test(signal);
+  const signal = normalizeGhlContractComparableText(
+    `${candidate?.title || ""} ${candidate?.snippet || ""} ${source} ${candidateId || ""}`,
+  );
+  const hasPdfHint = (hasAllowedUrl && isLikelyGhlPdfUrl(url)) || /\bpdf\b/.test(signal);
   const hasContractKeyword = hasGhlContractOrAgreementKeyword(candidate);
   const isRelatedToContact = isGhlContractCandidateRelatedToContact(candidate, context?.contactName, context?.contactId);
   const isProposalSource = source.startsWith("proposals.");
 
-  if (isProposalSource && !isRelatedToContact && !hasContractKeyword) {
+  if (isProposalSource && !isRelatedToContact && !hasContractKeyword && !candidateId) {
     return false;
   }
 
@@ -25892,7 +25946,7 @@ function isGhlContractDownloadCandidate(candidate, context = {}) {
       source.startsWith("contacts.attachments") ||
       source.startsWith("contact.attachments");
 
-    if (!isDirectDocumentSource && !hasPdfHint && !hasContractKeyword) {
+    if (!isDirectDocumentSource && !hasPdfHint && !hasContractKeyword && !candidateId) {
       return false;
     }
   }
@@ -25900,24 +25954,27 @@ function isGhlContractDownloadCandidate(candidate, context = {}) {
   return true;
 }
 
-function pickBestGhlContractDownloadCandidate(candidates, context = {}) {
+function pickBestGhlContractDownloadCandidate(candidates, context = {}, options = {}) {
   const normalizedCandidates = dedupeGhlContractCandidates(candidates);
   if (!normalizedCandidates.length) {
     return null;
   }
+  const requireUrl = Boolean(options?.requireUrl);
 
   let bestCandidate = null;
   let bestScore = -1;
 
   for (const candidate of normalizedCandidates) {
     const normalizedUrl = extractGhlUrlsFromText(candidate?.url)[0] || "";
-    if (!normalizedUrl) {
+    const normalizedCandidateId = extractLikelyGhlEntityId(candidate?.candidateId);
+    if (requireUrl && !normalizedUrl) {
       continue;
     }
 
     const enrichedCandidate = {
       ...candidate,
       url: normalizedUrl,
+      candidateId: normalizedCandidateId,
     };
     if (!isGhlContractDownloadCandidate(enrichedCandidate, context)) {
       continue;
@@ -25938,6 +25995,214 @@ function pickBestGhlContractDownloadCandidate(candidates, context = {}) {
     ...bestCandidate,
     score: bestScore,
   };
+}
+
+async function resolveGhlContractDownloadCandidateViaId(candidate, context = {}) {
+  const normalizedCandidate = normalizeGhlContractCandidate(candidate);
+  if (!normalizedCandidate) {
+    return null;
+  }
+
+  const directUrl = extractGhlUrlsFromText(normalizedCandidate.url)[0] || "";
+  if (directUrl && isAllowedGhlContractDownloadUrl(directUrl)) {
+    return {
+      ...normalizedCandidate,
+      url: directUrl,
+    };
+  }
+
+  const candidateId = extractLikelyGhlEntityId(normalizedCandidate.candidateId);
+  if (!candidateId) {
+    return null;
+  }
+
+  const encodedCandidateId = encodeURIComponent(candidateId);
+  const normalizedContactName = sanitizeTextValue(context?.contactName || normalizedCandidate.contactName, 300);
+  const normalizedContactId = sanitizeTextValue(context?.contactId || normalizedCandidate.contactId, 160);
+  const normalizedClientName = sanitizeTextValue(context?.clientName, 300);
+
+  const attempts = [];
+  if (normalizedContactId) {
+    const encodedContactId = encodeURIComponent(normalizedContactId);
+    attempts.push(
+      {
+        source: "contacts.documents.by_id",
+        request: () =>
+          requestGhlApi(`/contacts/${encodedContactId}/documents/${encodedCandidateId}`, {
+            method: "GET",
+            query: {
+              locationId: GHL_LOCATION_ID,
+            },
+            tolerateNotFound: true,
+          }),
+      },
+      {
+        source: "contacts.files.by_id",
+        request: () =>
+          requestGhlApi(`/contacts/${encodedContactId}/files/${encodedCandidateId}`, {
+            method: "GET",
+            query: {
+              locationId: GHL_LOCATION_ID,
+            },
+            tolerateNotFound: true,
+          }),
+      },
+      {
+        source: "contacts.attachments.by_id",
+        request: () =>
+          requestGhlApi(`/contacts/${encodedContactId}/attachments/${encodedCandidateId}`, {
+            method: "GET",
+            query: {
+              locationId: GHL_LOCATION_ID,
+            },
+            tolerateNotFound: true,
+          }),
+      },
+    );
+  }
+
+  attempts.push(
+    {
+      source: "proposals.document.by_id",
+      request: () =>
+        requestGhlApi(`/proposals/document/${encodedCandidateId}`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.documents.by_id",
+      request: () =>
+        requestGhlApi(`/proposals/documents/${encodedCandidateId}`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.document.by_query_id",
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            id: candidateId,
+            skip: 0,
+            limit: 50,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.documents.by_query_id",
+      request: () =>
+        requestGhlApi("/proposals/documents", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            id: candidateId,
+            skip: 0,
+            limit: 50,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.document.by_document_id",
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            documentId: candidateId,
+            skip: 0,
+            limit: 50,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.document.by_proposal_id",
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            proposalId: candidateId,
+            skip: 0,
+            limit: 50,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.document.by_search",
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            query: [candidateId, normalizedContactName, normalizedClientName].filter(Boolean).join(" ").trim(),
+            skip: 0,
+            limit: 100,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+  );
+
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt.request();
+    } catch {
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const extracted = extractGhlContractCandidatesFromPayload(response.body, attempt.source);
+    if (!extracted.length) {
+      continue;
+    }
+
+    const enriched = extracted.map((item) => ({
+      ...item,
+      source: sanitizeTextValue(item?.source, 160) || attempt.source,
+      contactName: sanitizeTextValue(item?.contactName, 300) || normalizedContactName || normalizedClientName,
+      contactId: sanitizeTextValue(item?.contactId, 160) || normalizedContactId,
+      candidateId:
+        extractLikelyGhlEntityId(item?.candidateId || item?.documentId || item?.document_id || item?.proposalId || item?.id) ||
+        candidateId,
+    }));
+    const resolvedCandidate = pickBestGhlContractDownloadCandidate(
+      enriched,
+      {
+        contactName: normalizedContactName || normalizedClientName,
+        contactId: normalizedContactId,
+        clientName: normalizedClientName,
+      },
+      {
+        requireUrl: true,
+      },
+    );
+    if (resolvedCandidate && resolvedCandidate.url) {
+      return {
+        ...normalizedCandidate,
+        ...resolvedCandidate,
+        candidateId,
+      };
+    }
+  }
+
+  return null;
 }
 
 async function listGhlContractDownloadCandidatesForContact(contactId, options = {}) {
@@ -26323,16 +26588,43 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         });
       }
 
-      const contactBestCandidate = pickBestGhlContractDownloadCandidate(candidates, {
-        contactName,
-        contactId,
-        clientName: normalizedClientName,
-      });
+      let contactBestCandidate = pickBestGhlContractDownloadCandidate(
+        candidates,
+        {
+          contactName,
+          contactId,
+          clientName: normalizedClientName,
+        },
+        {
+          requireUrl: true,
+        },
+      );
       if (!contactBestCandidate) {
+        const contactResolvableCandidate = pickBestGhlContractDownloadCandidate(candidates, {
+          contactName,
+          contactId,
+          clientName: normalizedClientName,
+        });
+        if (contactResolvableCandidate) {
+          contactBestCandidate = await resolveGhlContractDownloadCandidateViaId(contactResolvableCandidate, {
+            contactName,
+            contactId,
+            clientName: normalizedClientName,
+          });
+        }
+      }
+
+      if (!contactBestCandidate || !contactBestCandidate.url) {
         continue;
       }
 
-      const contactBestScore = Number.isFinite(contactBestCandidate.score) ? contactBestCandidate.score : -1;
+      const contactBestScore = Number.isFinite(contactBestCandidate.score)
+        ? contactBestCandidate.score
+        : computeGhlContractDownloadCandidateScore(contactBestCandidate, {
+            contactName,
+            contactId,
+            clientName: normalizedClientName,
+          });
       if (contactBestScore > bestCandidateScore) {
         bestCandidate = contactBestCandidate;
         bestCandidateScore = contactBestScore;
@@ -26343,14 +26635,41 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
 
     if (!bestCandidate) {
       const byNameCandidates = await listGhlContractDownloadCandidatesForClientName(normalizedClientName);
-      const byNameBestCandidate = pickBestGhlContractDownloadCandidate(byNameCandidates, {
-        contactName: normalizedClientName,
-        contactId: "",
-        clientName: normalizedClientName,
-      });
-      if (byNameBestCandidate) {
+      let byNameBestCandidate = pickBestGhlContractDownloadCandidate(
+        byNameCandidates,
+        {
+          contactName: normalizedClientName,
+          contactId: "",
+          clientName: normalizedClientName,
+        },
+        {
+          requireUrl: true,
+        },
+      );
+      if (!byNameBestCandidate) {
+        const byNameResolvableCandidate = pickBestGhlContractDownloadCandidate(byNameCandidates, {
+          contactName: normalizedClientName,
+          contactId: "",
+          clientName: normalizedClientName,
+        });
+        if (byNameResolvableCandidate) {
+          byNameBestCandidate = await resolveGhlContractDownloadCandidateViaId(byNameResolvableCandidate, {
+            contactName: normalizedClientName,
+            contactId: "",
+            clientName: normalizedClientName,
+          });
+        }
+      }
+
+      if (byNameBestCandidate && byNameBestCandidate.url) {
         bestCandidate = byNameBestCandidate;
-        bestCandidateScore = Number.isFinite(byNameBestCandidate.score) ? byNameBestCandidate.score : -1;
+        bestCandidateScore = Number.isFinite(byNameBestCandidate.score)
+          ? byNameBestCandidate.score
+          : computeGhlContractDownloadCandidateScore(byNameBestCandidate, {
+              contactName: normalizedClientName,
+              contactId: "",
+              clientName: normalizedClientName,
+            });
         bestContactName = sanitizeTextValue(byNameBestCandidate?.contactName, 300) || bestContactName || normalizedClientName;
         bestContactId = sanitizeTextValue(byNameBestCandidate?.contactId, 160) || bestContactId || "";
       }
