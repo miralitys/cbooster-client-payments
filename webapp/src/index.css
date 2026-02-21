@@ -741,6 +741,16 @@ a {
   white-space: normal;
 }
 
+.client-payments-react-page .cb-table th.client-manager-column,
+.client-payments-react-page .cb-table td.client-manager-column {
+  min-width: clamp(140px, 14vw, 180px);
+  width: clamp(150px, 16vw, 220px);
+  max-width: min(24vw, 260px);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .client-name-cell {
   display: grid;
   gap: 6px;

@@ -313,8 +313,8 @@ export default function ClientPaymentsPage() {
         ) : (
           <span className="th-sort-label">{headerLabel}</span>
         ),
-        headerClassName: column === "clientName" ? "client-name-column" : undefined,
-        className: column === "clientName" ? "client-name-column" : undefined,
+        headerClassName: getClientPaymentsColumnClassName(column),
+        className: getClientPaymentsColumnClassName(column),
         align: getColumnAlign(column),
         cell: (row) => {
           const record = row.record;
@@ -913,6 +913,18 @@ function getColumnAlign(column: keyof ClientRecord | "score" | "clientManager"):
   }
 
   return "left";
+}
+
+function getClientPaymentsColumnClassName(column: keyof ClientRecord | "score" | "clientManager"): string | undefined {
+  if (column === "clientName") {
+    return "client-name-column";
+  }
+
+  if (column === "clientManager") {
+    return "client-manager-column";
+  }
+
+  return undefined;
 }
 
 function buildClientManagersLookup(rows: ClientManagerRow[]): Map<string, string> {
