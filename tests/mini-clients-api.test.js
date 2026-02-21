@@ -3,7 +3,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { once } = require("node:events");
@@ -13,6 +15,9 @@ const SERVER_ENTRY = path.join(PROJECT_ROOT, "server.js");
 const TELEGRAM_FETCH_PRELOAD = path.join(PROJECT_ROOT, "tests", "helpers", "telegram-fetch-mock.cjs");
 const FAKE_PG_PRELOAD = path.join(PROJECT_ROOT, "tests", "helpers", "fake-pg.cjs");
 const TELEGRAM_BOT_TOKEN = "test_bot_token_for_mini_clients";
+const TEST_WEB_AUTH_SESSION_SECRET =
+  "mini-clients-test-session-secret-mini-clients-test-session-secret-123456";
+const MINI_UPLOAD_TOKEN_HEADER_NAME = "x-mini-upload-token";
 
 function delay(ms) {
   return new Promise((resolve) => {
@@ -69,6 +74,7 @@ async function startServer(envOverrides = {}) {
     ...process.env,
     NODE_ENV: "test",
     PORT: String(port),
+    WEB_AUTH_SESSION_SECRET: TEST_WEB_AUTH_SESSION_SECRET,
     TELEGRAM_ALLOWED_USER_IDS: "",
     TELEGRAM_REQUIRED_CHAT_ID: "",
     TELEGRAM_NOTIFY_CHAT_ID: "",
@@ -167,6 +173,76 @@ async function postMiniClients(baseUrl, payload, headers = {}) {
   });
 }
 
+function encodeBase64Url(rawValue) {
+  return Buffer.from(rawValue, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function signMiniUploadTokenPayload(encodedPayload, secret = TEST_WEB_AUTH_SESSION_SECRET) {
+  return crypto.createHmac("sha256", secret).update(`mini-upload:${encodedPayload}`).digest("hex");
+}
+
+function createMiniUploadTokenForUser(userId, options = {}) {
+  const expiresAtMs = Number.isFinite(options.expiresAtMs) ? options.expiresAtMs : Date.now() + 10 * 60 * 1000;
+  const payload = JSON.stringify({
+    u: String(userId || ""),
+    e: expiresAtMs,
+  });
+  const encodedPayload = encodeBase64Url(payload);
+  const signature = signMiniUploadTokenPayload(encodedPayload, options.secret || TEST_WEB_AUTH_SESSION_SECRET);
+  return `${encodedPayload}.${signature}`;
+}
+
+async function fetchUploadTokenFromAccess(baseUrl, initData) {
+  const response = await fetch(`${baseUrl}/api/mini/access`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ initData }),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(typeof body.uploadToken, "string");
+  assert.ok(body.uploadToken.length > 20);
+  return body.uploadToken;
+}
+
+function readCapturedSendMessageText(captureFilePath) {
+  const raw = fs.existsSync(captureFilePath) ? fs.readFileSync(captureFilePath, "utf8") : "";
+  const lines = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const events = [];
+  for (const line of lines) {
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      // Ignore malformed capture lines.
+    }
+  }
+
+  const sendMessageEvent = [...events].reverse().find((event) => String(event?.url || "").includes("/sendMessage"));
+  if (!sendMessageEvent || typeof sendMessageEvent.body !== "string" || !sendMessageEvent.body) {
+    return "";
+  }
+
+  try {
+    const body = JSON.parse(sendMessageEvent.body);
+    return typeof body?.text === "string" ? body.text : "";
+  } catch {
+    return "";
+  }
+}
+
 test("POST /api/mini/clients returns 503 without database", async () => {
   await withServer(
     {
@@ -174,9 +250,18 @@ test("POST /api/mini/clients returns 503 without database", async () => {
       TELEGRAM_BOT_TOKEN,
     },
     async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const initData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 88, username: "no_db_user" },
+      });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
       const response = await postMiniClients(baseUrl, {
-        initData: "any",
+        initData,
         client: { clientName: "John Doe" },
+      }, {
+        [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
       const body = await response.json();
 
@@ -199,9 +284,12 @@ test("POST /api/mini/clients returns 400 for invalid payload", async () => {
         authDate: nowSeconds,
         user: { id: 101, username: "payload_user" },
       });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
 
       const response = await postMiniClients(baseUrl, {
         initData,
+      }, {
+        [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
       const body = await response.json();
 
@@ -225,11 +313,14 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
         authDate: nowSeconds,
         user: { id: 111, username: "parse_payload_user" },
       });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
 
       async function expectInvalidClient(clientValue) {
         const response = await postMiniClients(baseUrl, {
           initData,
           client: clientValue,
+        }, {
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
         });
         const body = await response.json();
         assert.equal(response.status, 400);
@@ -243,6 +334,8 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
             clientName: "Object Client",
             notes: "object payload",
           },
+        }, {
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
         });
         const body = await response.json();
 
@@ -258,6 +351,8 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
             clientName: "JSON Client",
             notes: "json string payload",
           }),
+        }, {
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
         });
         const body = await response.json();
 
@@ -285,6 +380,123 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
   );
 });
 
+test("POST /api/mini/clients validates and normalizes Mini payload fields", async (t) => {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-capture-"));
+  const captureFilePath = path.join(captureDir, "telegram-requests.jsonl");
+
+  try {
+    await withServer(
+      {
+        DATABASE_URL: "postgres://fake/fake",
+        TEST_USE_FAKE_PG: "1",
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_NOTIFY_CHAT_ID: "-100700700700",
+        TEST_TELEGRAM_CAPTURE_FILE: captureFilePath,
+        TELEGRAM_INIT_DATA_TTL_SEC: "120",
+      },
+      async ({ baseUrl }) => {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const initData = buildTelegramInitData({
+          authDate: nowSeconds,
+          user: { id: 909, username: "normalization_user" },
+        });
+        const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+        async function expect400(client, expectedError) {
+          const response = await postMiniClients(baseUrl, { initData, client }, {
+            [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
+          });
+          const body = await response.json();
+          assert.equal(response.status, 400);
+          assert.equal(body.error, expectedError);
+        }
+
+        await t.test("rejects missing required clientName", async () => {
+          await expect400(
+            {
+              clientName: "   ",
+            },
+            "`clientName` is required.",
+          );
+        });
+
+        await t.test("rejects invalid date fields", async () => {
+          await expect400(
+            {
+              clientName: "Invalid Date Client",
+              payment1Date: "13/45/2026",
+            },
+            'Invalid date in field "payment1Date". Use MM/DD/YYYY.',
+          );
+        });
+
+        await t.test("rejects invalid SSN format", async () => {
+          await expect400(
+            {
+              clientName: "Invalid SSN Client",
+              ssn: "12-34",
+            },
+            "Invalid SSN format. Use XXX-XX-XXXX.",
+          );
+        });
+
+        await t.test("rejects invalid phone format", async () => {
+          await expect400(
+            {
+              clientName: "Invalid Phone Client",
+              clientPhoneNumber: "12345",
+            },
+            "Invalid client phone format. Use +1(XXX)XXX-XXXX.",
+          );
+        });
+
+        await t.test("rejects invalid email format", async () => {
+          await expect400(
+            {
+              clientName: "Invalid Email Client",
+              clientEmailAddress: "invalid-email",
+            },
+            "Invalid client email. Email must include @.",
+          );
+        });
+
+        await t.test("normalizes valid payload fields and auto-fills written-off date", async () => {
+          const response = await postMiniClients(baseUrl, {
+            initData,
+            client: {
+              clientName: "Normalization Client",
+              payment1Date: "2026-02-03",
+              ssn: "123456789",
+              clientPhoneNumber: "1234567890",
+              clientEmailAddress: "  normalized@example.com  ",
+              afterResult: true,
+              writtenOff: true,
+            },
+          }, {
+            [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
+          });
+          const body = await response.json();
+
+          assert.equal(response.status, 201);
+          assert.equal(body.ok, true);
+          assert.equal(body.status, "pending");
+
+          const messageText = readCapturedSendMessageText(captureFilePath);
+          assert.ok(messageText.includes("- Payment 1 date: 02/03/2026"));
+          assert.ok(messageText.includes("- SSN: 123-45-6789"));
+          assert.ok(messageText.includes("- Client phone number: +1(123)456-7890"));
+          assert.ok(messageText.includes("- Client email address: normalized@example.com"));
+          assert.ok(messageText.includes("- After result: Yes"));
+          assert.ok(messageText.includes("- Written off: Yes"));
+          assert.match(messageText, /- Date when written off: \d{2}\/\d{2}\/\d{4}/);
+        });
+      },
+    );
+  } finally {
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
+});
+
 test("POST /api/mini/clients returns 401 for Telegram auth fail", async () => {
   await withServer(
     {
@@ -294,15 +506,23 @@ test("POST /api/mini/clients returns 401 for Telegram auth fail", async () => {
     },
     async ({ baseUrl }) => {
       const nowSeconds = Math.floor(Date.now() / 1000);
-      const initData = buildTelegramInitData({
+      const validInitData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 202, username: "auth_fail_user" },
+      });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, validInitData);
+
+      const invalidInitData = buildTelegramInitData({
         authDate: nowSeconds,
         user: { id: 202, username: "auth_fail_user" },
         invalidHash: true,
       });
 
       const response = await postMiniClients(baseUrl, {
-        initData,
+        initData: invalidInitData,
         client: { clientName: "Auth Fail" },
+      }, {
+        [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
       const body = await response.json();
 
@@ -326,10 +546,13 @@ test("POST /api/mini/clients returns 403 for disallowed user", async () => {
         authDate: nowSeconds,
         user: { id: 303, username: "forbidden_user" },
       });
+      const uploadToken = createMiniUploadTokenForUser("303");
 
       const response = await postMiniClients(baseUrl, {
         initData,
         client: { clientName: "Forbidden User" },
+      }, {
+        [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
       const body = await response.json();
 
@@ -353,6 +576,7 @@ test("POST /api/mini/clients returns 201 for successful submission", async () =>
         authDate: nowSeconds,
         user: { id: 404, username: "success_user" },
       });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
 
       const response = await postMiniClients(baseUrl, {
         initData,
@@ -360,6 +584,8 @@ test("POST /api/mini/clients returns 201 for successful submission", async () =>
           clientName: "Success Client",
           clientEmailAddress: "success@example.com",
         },
+      }, {
+        [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
       const body = await response.json();
 
@@ -391,12 +617,15 @@ test("POST /api/mini/clients still returns 201 when Telegram notification fails"
         authDate: nowSeconds,
         user: { id: 505, username: "notify_fail_user" },
       });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
 
       const response = await postMiniClients(baseUrl, {
         initData,
         client: {
           clientName: "Notify Failure Client",
         },
+      }, {
+        [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
       const body = await response.json();
 
