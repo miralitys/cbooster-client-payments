@@ -12729,11 +12729,14 @@ async function requestGhlApi(pathname, options = {}) {
       body = null;
     }
 
+    const responseContentType = normalizeAttachmentMimeType(response.headers.get("content-type"));
     if (response.ok) {
       return {
         ok: true,
         status: response.status,
         body,
+        rawText: responseText,
+        contentType: responseContentType,
       };
     }
 
@@ -12742,6 +12745,8 @@ async function requestGhlApi(pathname, options = {}) {
         ok: false,
         status: 404,
         body: null,
+        rawText: responseText,
+        contentType: responseContentType,
       };
     }
 
@@ -27389,6 +27394,17 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
               locationId: GHL_LOCATION_ID,
             },
             tolerateNotFound: true,
+        }),
+      },
+      {
+        source: "contract_text.contacts.documents.by_id.preview",
+        request: () =>
+          requestGhlApi(`/contacts/${encodedContactId}/documents/${encodedCandidateId}/preview`, {
+            method: "GET",
+            query: {
+              locationId: GHL_LOCATION_ID,
+            },
+            tolerateNotFound: true,
           }),
       },
     );
@@ -27487,6 +27503,96 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
           tolerateNotFound: true,
         }),
     },
+    {
+      source: "contract_text.proposals.document.by_id.preview",
+      request: () =>
+        requestGhlApi(`/proposals/document/${encodedCandidateId}/preview`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contract_text.proposals.documents.by_id.preview",
+      request: () =>
+        requestGhlApi(`/proposals/documents/${encodedCandidateId}/preview`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contract_text.proposals.document.preview_path",
+      request: () =>
+        requestGhlApi(`/proposals/document/preview/${encodedCandidateId}`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contract_text.proposals.document.by_id.content",
+      request: () =>
+        requestGhlApi(`/proposals/document/${encodedCandidateId}/content`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contract_text.proposals.documents.by_id.content",
+      request: () =>
+        requestGhlApi(`/proposals/documents/${encodedCandidateId}/content`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contract_text.proposals.document.content_path",
+      request: () =>
+        requestGhlApi(`/proposals/document/content/${encodedCandidateId}`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contract_text.proposals.document.by_id.query_html",
+      request: () =>
+        requestGhlApi(`/proposals/document/${encodedCandidateId}`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            format: "html",
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "contract_text.proposals.documents.by_id.query_html",
+      request: () =>
+        requestGhlApi(`/proposals/documents/${encodedCandidateId}`, {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            format: "html",
+          },
+          tolerateNotFound: true,
+        }),
+    },
   );
 
   if (debugTrace && typeof debugTrace === "object") {
@@ -27510,7 +27616,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
       continue;
     }
 
-    if (!response.ok || !response.body) {
+    if (!response.ok) {
       if (debugTrace?.attempts instanceof Array) {
         debugTrace.attempts.push({
           source: attempt.source,
@@ -27524,30 +27630,66 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
     const extraction = extractGhlContractTextFromPayload(response.body, {
       candidateId: normalizedCandidateId,
     });
+    const rawText = sanitizeTextValue(response?.rawText, 600000);
+    let rawTextExtraction = null;
+    if (rawText) {
+      let jsonFromRaw = null;
+      if (!response?.body && /^[\s]*[\[{]/.test(rawText)) {
+        try {
+          jsonFromRaw = JSON.parse(rawText);
+        } catch {
+          jsonFromRaw = null;
+        }
+      }
+
+      if (jsonFromRaw && typeof jsonFromRaw === "object") {
+        rawTextExtraction = extractGhlContractTextFromPayload(jsonFromRaw, {
+          candidateId: normalizedCandidateId,
+        });
+      } else if (shouldUseGhlContractTextValue(rawText, attempt.source)) {
+        const normalizedRawText = normalizeGhlContractTextFragment(rawText);
+        if (normalizedRawText) {
+          rawTextExtraction = {
+            text: normalizedRawText,
+            fragments: [normalizedRawText],
+            truncated: normalizedRawText.length > GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS,
+            sourceNodeCount: 0,
+          };
+        }
+      }
+    }
+
+    const bestExtraction = extraction.text
+      ? extraction
+      : rawTextExtraction && rawTextExtraction.text
+        ? rawTextExtraction
+        : null;
     if (debugTrace?.attempts instanceof Array) {
       debugTrace.attempts.push({
         source: attempt.source,
         ok: true,
         status: Number.isFinite(response?.status) ? response.status : 200,
         payload: summarizeGhlPayloadForDebug(response.body),
-        textFound: Boolean(extraction.text),
-        textLength: extraction.text.length,
-        fragmentsCount: extraction.fragments.length,
+        contentType: sanitizeTextValue(response?.contentType, 120),
+        textFound: Boolean(bestExtraction?.text),
+        textLength: bestExtraction?.text ? bestExtraction.text.length : 0,
+        fragmentsCount: Array.isArray(bestExtraction?.fragments) ? bestExtraction.fragments.length : 0,
+        rawTextLength: rawText.length,
       });
     }
 
-    if (!extraction.text) {
+    if (!bestExtraction?.text) {
       continue;
     }
 
     return {
       candidateId: normalizedCandidateId,
       source: attempt.source,
-      text: extraction.text,
-      textLength: extraction.text.length,
-      fragmentsCount: extraction.fragments.length,
-      truncated: extraction.truncated,
-      sourceNodeCount: extraction.sourceNodeCount,
+      text: bestExtraction.text,
+      textLength: bestExtraction.text.length,
+      fragmentsCount: Array.isArray(bestExtraction.fragments) ? bestExtraction.fragments.length : 0,
+      truncated: Boolean(bestExtraction.truncated),
+      sourceNodeCount: Number.isFinite(bestExtraction.sourceNodeCount) ? bestExtraction.sourceNodeCount : 0,
     };
   }
 
@@ -28828,7 +28970,7 @@ app.get("/api/ghl/client-contracts/download", requireWebPermission(WEB_AUTH_PERM
 
     const lookupRow = await resolveGhlClientContractDownloadRow(matchedClientName, {
       preferredContactId: requestedContactId,
-      debugEnabled: true,
+      debugEnabled: debugMode,
     });
     const lookupStatus = normalizeGhlClientContractDownloadStatus(lookupRow?.status);
     if (lookupStatus === "error") {
