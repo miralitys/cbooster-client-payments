@@ -144,10 +144,10 @@ async function withServer(envOverrides, callback) {
   }
 }
 
-function buildTelegramInitData({ authDate, user, botToken = TELEGRAM_BOT_TOKEN, invalidHash = false }) {
+function buildTelegramInitData({ authDate, user, botToken = TELEGRAM_BOT_TOKEN, invalidHash = false, queryId = "AAEAAAE" }) {
   const params = new URLSearchParams();
   params.set("auth_date", String(authDate));
-  params.set("query_id", "AAEAAAE");
+  params.set("query_id", String(queryId || "AAEAAAE"));
   params.set("user", JSON.stringify(user || {}));
 
   const dataCheckString = [...params.entries()]
@@ -387,6 +387,11 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
         authDate: nowSeconds,
         user: { id: 111, username: "parse_payload_user" },
       });
+      const secondInitData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 111, username: "parse_payload_user" },
+        queryId: "AAEAAA_SECOND",
+      });
       const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
 
       async function expectInvalidClient(clientValue) {
@@ -420,7 +425,7 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
 
       await t.test("accepts JSON string client payload", async () => {
         const response = await postMiniClients(baseUrl, {
-          initData,
+          initData: secondInitData,
           client: JSON.stringify({
             clientName: "JSON Client",
             notes: "json string payload",
@@ -679,6 +684,163 @@ test("POST /api/mini/clients returns 201 for successful submission", async () =>
       assert.ok(!Number.isNaN(Date.parse(body.submittedAt)));
     },
   );
+});
+
+test("POST /api/mini/clients enforces stricter write TTL than access endpoint", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "86400",
+      TELEGRAM_INIT_DATA_WRITE_TTL_SEC: "60",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const staleInitData = buildTelegramInitData({
+        authDate: nowSeconds - 120,
+        user: { id: 441, username: "write_ttl_user" },
+      });
+
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, staleInitData);
+      const response = await postMiniClients(baseUrl, {
+        initData: staleInitData,
+        client: {
+          clientName: "Write TTL Client",
+        },
+      }, {
+        [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 401);
+      assert.equal(body.error, "Telegram session expired. Reopen Mini App from Telegram chat.");
+    },
+  );
+});
+
+test("POST /api/mini/clients blocks replay of the same Telegram initData", async () => {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-replay-"));
+  const pgCaptureFilePath = path.join(captureDir, "pg-events.jsonl");
+
+  try {
+    await withServer(
+      {
+        DATABASE_URL: "postgres://fake/fake",
+        TEST_USE_FAKE_PG: "1",
+        TEST_PG_CAPTURE_FILE: pgCaptureFilePath,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_INIT_DATA_TTL_SEC: "600",
+        TELEGRAM_INIT_DATA_WRITE_TTL_SEC: "600",
+      },
+      async ({ baseUrl }) => {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const initData = buildTelegramInitData({
+          authDate: nowSeconds,
+          user: { id: 442, username: "replay_user" },
+          queryId: "AAEAAA_REPLAY",
+        });
+        const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+        const firstResponse = await postMiniClients(baseUrl, {
+          initData,
+          client: {
+            clientName: "Replay Client #1",
+          },
+        }, {
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
+        });
+        const firstBody = await firstResponse.json();
+        assert.equal(firstResponse.status, 201);
+        assert.equal(firstBody.ok, true);
+
+        const secondResponse = await postMiniClients(baseUrl, {
+          initData,
+          client: {
+            clientName: "Replay Client #2",
+          },
+        }, {
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
+        });
+        const secondBody = await secondResponse.json();
+        assert.equal(secondResponse.status, 409);
+        assert.equal(secondBody.code, "mini_init_data_replay");
+
+        const events = readPgCaptureEvents(pgCaptureFilePath);
+        const submissionInsertEvents = events.filter((event) => event.type === "submission_insert");
+        assert.equal(submissionInsertEvents.length, 1);
+      },
+    );
+  } finally {
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
+});
+
+test("POST /api/mini/clients replays successful response for the same Idempotency-Key", async () => {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-idempotency-"));
+  const pgCaptureFilePath = path.join(captureDir, "pg-events.jsonl");
+
+  try {
+    await withServer(
+      {
+        DATABASE_URL: "postgres://fake/fake",
+        TEST_USE_FAKE_PG: "1",
+        TEST_PG_CAPTURE_FILE: pgCaptureFilePath,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_INIT_DATA_TTL_SEC: "600",
+        TELEGRAM_INIT_DATA_WRITE_TTL_SEC: "600",
+      },
+      async ({ baseUrl }) => {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const user = { id: 443, username: "idempotency_user" };
+        const initDataFirst = buildTelegramInitData({
+          authDate: nowSeconds,
+          user,
+          queryId: "AAEAAA_IDEMP_1",
+        });
+        const initDataSecond = buildTelegramInitData({
+          authDate: nowSeconds,
+          user,
+          queryId: "AAEAAA_IDEMP_2",
+        });
+        const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initDataFirst);
+        const idempotencyKey = "mini-submit-443-key-001";
+
+        const firstResponse = await postMiniClients(baseUrl, {
+          initData: initDataFirst,
+          client: {
+            clientName: "Idempotent Client #1",
+          },
+        }, {
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
+          "idempotency-key": idempotencyKey,
+        });
+        const firstBody = await firstResponse.json();
+        assert.equal(firstResponse.status, 201);
+        assert.equal(firstBody.ok, true);
+
+        const secondResponse = await postMiniClients(baseUrl, {
+          initData: initDataSecond,
+          client: {
+            clientName: "Idempotent Client #2",
+          },
+        }, {
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
+          "idempotency-key": idempotencyKey,
+        });
+        const secondBody = await secondResponse.json();
+        assert.equal(secondResponse.status, 201);
+        assert.equal(secondResponse.headers.get("idempotency-replayed"), "true");
+        assert.deepEqual(secondBody, firstBody);
+
+        const events = readPgCaptureEvents(pgCaptureFilePath);
+        const submissionInsertEvents = events.filter((event) => event.type === "submission_insert");
+        assert.equal(submissionInsertEvents.length, 1);
+      },
+    );
+  } finally {
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
 });
 
 test("POST /api/mini/clients masks sensitive fields in Telegram notifications", async () => {
