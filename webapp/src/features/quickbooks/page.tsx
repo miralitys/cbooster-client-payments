@@ -19,6 +19,7 @@ import {
   PageHeader,
   PageShell,
   Panel,
+  Select,
   SegmentedControl,
   Table,
 } from "@/shared/ui";
@@ -27,6 +28,20 @@ import type { TableColumn } from "@/shared/ui";
 const QUICKBOOKS_FROM_DATE = "2026-01-01";
 const QUICKBOOKS_SYNC_POLL_INTERVAL_MS = 1200;
 const QUICKBOOKS_SYNC_POLL_MAX_ATTEMPTS = 150;
+const QUICKBOOKS_MONTH_OPTIONS = [
+  { value: 1, label: "Январь" },
+  { value: 2, label: "Февраль" },
+  { value: 3, label: "Март" },
+  { value: 4, label: "Апрель" },
+  { value: 5, label: "Май" },
+  { value: 6, label: "Июнь" },
+  { value: 7, label: "Июль" },
+  { value: 8, label: "Август" },
+  { value: 9, label: "Сентябрь" },
+  { value: 10, label: "Октябрь" },
+  { value: 11, label: "Ноябрь" },
+  { value: 12, label: "Декабрь" },
+] as const;
 const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -34,9 +49,15 @@ const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+interface QuickBooksRange {
+  from: string;
+  to: string;
+}
+
 interface LoadOptions {
   sync?: boolean;
   fullSync?: boolean;
+  range?: QuickBooksRange;
 }
 
 const QUICKBOOKS_MONEY_FLOW_TABS = [
@@ -54,7 +75,15 @@ type QuickBooksTab = (typeof QUICKBOOKS_MONEY_FLOW_TABS)[number]["key"];
 type QuickBooksViewRow = RowWithKey<QuickBooksPaymentRow>;
 
 export default function QuickBooksPage() {
+  const todayDate = useMemo(() => new Date(), []);
+  const minDateParts = useMemo(() => parseQuickBooksIsoDateParts(QUICKBOOKS_FROM_DATE), []);
+  const minQuickBooksYear = minDateParts?.year ?? todayDate.getUTCFullYear();
+  const minQuickBooksMonth = minDateParts?.month ?? 1;
+  const currentYear = todayDate.getUTCFullYear();
+  const currentMonth = todayDate.getUTCMonth() + 1;
   const [activeTab, setActiveTab] = useState<QuickBooksTab>("incoming");
+  const [selectedYear, setSelectedYear] = useState(currentYear);
+  const [selectedMonth, setSelectedMonth] = useState(currentMonth);
   const [canSync, setCanSync] = useState(false);
   const [incomingTransactions, setIncomingTransactions] = useState<QuickBooksViewRow[]>([]);
   const [outgoingTransactions, setOutgoingTransactions] = useState<QuickBooksViewRow[]>([]);
@@ -77,6 +106,37 @@ export default function QuickBooksPage() {
     () => filterTransactions(allTransactions, search, showOnlyRefunds),
     [allTransactions, search, showOnlyRefunds],
   );
+  const yearOptions = useMemo(() => {
+    const years: number[] = [];
+    for (let year = currentYear; year >= minQuickBooksYear; year -= 1) {
+      years.push(year);
+    }
+    return years;
+  }, [currentYear, minQuickBooksYear]);
+  const monthOptions = useMemo(() => {
+    const minMonth = selectedYear === minQuickBooksYear ? minQuickBooksMonth : 1;
+    const maxMonth = selectedYear === currentYear ? currentMonth : 12;
+    return QUICKBOOKS_MONTH_OPTIONS.filter((monthOption) => monthOption.value >= minMonth && monthOption.value <= maxMonth);
+  }, [currentMonth, currentYear, minQuickBooksMonth, minQuickBooksYear, selectedYear]);
+  const selectedRange = useMemo(
+    () => buildQuickBooksMonthlyRange(selectedYear, selectedMonth, todayDate),
+    [selectedMonth, selectedYear, todayDate],
+  );
+
+  useEffect(() => {
+    if (!monthOptions.length) {
+      return;
+    }
+    const minAllowedMonth = monthOptions[0].value;
+    const maxAllowedMonth = monthOptions[monthOptions.length - 1].value;
+    if (selectedMonth < minAllowedMonth) {
+      setSelectedMonth(minAllowedMonth);
+      return;
+    }
+    if (selectedMonth > maxAllowedMonth) {
+      setSelectedMonth(maxAllowedMonth);
+    }
+  }, [monthOptions, selectedMonth]);
 
   const tableColumns = useMemo<TableColumn<QuickBooksViewRow>[]>(() => {
     if (activeTab === "outgoing") {
@@ -169,7 +229,7 @@ export default function QuickBooksPage() {
   const loadIncomingQuickBooksPayments = useCallback(async (options: LoadOptions = {}) => {
     const shouldSync = Boolean(options.sync);
     const shouldTotalRefresh = Boolean(options.fullSync);
-    const rangeTo = formatDateForApi(new Date());
+    const targetRange = options.range || selectedRange;
     const previousItems = [...incomingTransactionsRef.current];
     setIsLoading(true);
     setLoadError("");
@@ -185,8 +245,8 @@ export default function QuickBooksPage() {
       let syncMetaOverride: QuickBooksSyncMeta | null = null;
       if (shouldSync) {
         const syncJobPayload = await createQuickBooksSyncJob({
-          from: QUICKBOOKS_FROM_DATE,
-          to: rangeTo,
+          from: targetRange.from,
+          to: targetRange.to,
           fullSync: shouldTotalRefresh,
         });
         const syncJobId = String(syncJobPayload?.job?.id || "").trim();
@@ -200,8 +260,8 @@ export default function QuickBooksPage() {
       }
 
       const payload = await getQuickBooksPayments({
-        from: QUICKBOOKS_FROM_DATE,
-        to: rangeTo,
+        from: targetRange.from,
+        to: targetRange.to,
       });
       const items = Array.isArray(payload.items) ? payload.items : [];
       setIncomingTransactions(
@@ -230,10 +290,10 @@ export default function QuickBooksPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [pollQuickBooksSyncJob]);
+  }, [pollQuickBooksSyncJob, selectedRange]);
 
-  const loadOutgoingQuickBooksPayments = useCallback(async () => {
-    const rangeTo = formatDateForApi(new Date());
+  const loadOutgoingQuickBooksPayments = useCallback(async (options: LoadOptions = {}) => {
+    const targetRange = options.range || selectedRange;
     const previousItems = [...outgoingTransactionsRef.current];
     setIsLoading(true);
     setLoadError("");
@@ -242,8 +302,8 @@ export default function QuickBooksPage() {
 
     try {
       const payload = await getQuickBooksOutgoingPayments({
-        from: QUICKBOOKS_FROM_DATE,
-        to: rangeTo,
+        from: targetRange.from,
+        to: targetRange.to,
       });
       const items = Array.isArray(payload.items) ? payload.items : [];
       setOutgoingTransactions(
@@ -272,7 +332,7 @@ export default function QuickBooksPage() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [selectedRange]);
 
   useEffect(() => {
     incomingTransactionsRef.current = incomingTransactions;
@@ -405,6 +465,47 @@ export default function QuickBooksPage() {
                     setActiveTab(nextTab);
                   }}
                 />
+              </div>
+            </div>
+            <div className="quickbooks-search-field">
+              <label htmlFor="quickbooks-month-select" className="search-label quickbooks-search-field__label">
+                Месяц-Год
+              </label>
+              <div className="quickbooks-period-field__controls">
+                <Select
+                  id="quickbooks-month-select"
+                  value={String(selectedMonth)}
+                  onChange={(event) => {
+                    const nextMonth = Number.parseInt(event.target.value, 10);
+                    if (Number.isFinite(nextMonth)) {
+                      setSelectedMonth(nextMonth);
+                    }
+                  }}
+                  disabled={isLoading}
+                >
+                  {monthOptions.map((monthOption) => (
+                    <option key={monthOption.value} value={monthOption.value}>
+                      {monthOption.label}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  id="quickbooks-year-select"
+                  value={String(selectedYear)}
+                  onChange={(event) => {
+                    const nextYear = Number.parseInt(event.target.value, 10);
+                    if (Number.isFinite(nextYear)) {
+                      setSelectedYear(nextYear);
+                    }
+                  }}
+                  disabled={isLoading}
+                >
+                  {yearOptions.map((yearOption) => (
+                    <option key={yearOption} value={yearOption}>
+                      {yearOption}
+                    </option>
+                  ))}
+                </Select>
               </div>
             </div>
             <div className="quickbooks-search-field">
@@ -684,6 +785,37 @@ function formatQuickBooksPayeeLabel(payeeName: string): string {
 function formatQuickBooksOutgoingDescriptionLabel(description: string | undefined): string {
   const normalizedValue = String(description || "").trim();
   return normalizedValue || "-";
+}
+
+function parseQuickBooksIsoDateParts(value: string): { year: number; month: number; day: number } | null {
+  const match = String(value || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const year = Number.parseInt(match[1], 10);
+  const month = Number.parseInt(match[2], 10);
+  const day = Number.parseInt(match[3], 10);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+  return { year, month, day };
+}
+
+function buildQuickBooksMonthlyRange(year: number, month: number, todayDate: Date): QuickBooksRange {
+  const normalizedYear = Number.isFinite(year) ? Math.max(1900, Math.trunc(year)) : todayDate.getUTCFullYear();
+  const normalizedMonth = Number.isFinite(month) ? Math.min(12, Math.max(1, Math.trunc(month))) : todayDate.getUTCMonth() + 1;
+  const from = `${normalizedYear}-${String(normalizedMonth).padStart(2, "0")}-01`;
+  const endOfMonth = new Date(Date.UTC(normalizedYear, normalizedMonth, 0));
+  const endOfMonthIso = formatDateForApi(endOfMonth);
+  const todayIso = formatDateForApi(todayDate);
+  const rawTo = endOfMonthIso <= todayIso ? endOfMonthIso : todayIso;
+  return {
+    from,
+    to: rawTo >= from ? rawTo : from,
+  };
 }
 
 function formatContactCellValue(value: string): string {
