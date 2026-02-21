@@ -40,6 +40,8 @@ const TELEGRAM_INIT_DATA_TTL_SEC = parsePositiveInteger(process.env.TELEGRAM_INI
 const TELEGRAM_REQUIRED_CHAT_ID = parseOptionalTelegramChatId(process.env.TELEGRAM_REQUIRED_CHAT_ID);
 const TELEGRAM_NOTIFY_CHAT_ID = (process.env.TELEGRAM_NOTIFY_CHAT_ID || "").toString().trim();
 const TELEGRAM_NOTIFY_THREAD_ID = parseOptionalPositiveInteger(process.env.TELEGRAM_NOTIFY_THREAD_ID);
+const TELEGRAM_NOTIFY_FIELDS_RAW = (process.env.TELEGRAM_NOTIFY_FIELDS || "").toString().trim();
+const TELEGRAM_NOTIFY_MASK_SENSITIVE_FIELDS = resolveOptionalBoolean(process.env.TELEGRAM_NOTIFY_MASK_SENSITIVE_FIELDS) !== false;
 const TELEGRAM_API_BASE_URL = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}` : "";
 const TELEGRAM_HTTP_TIMEOUT_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.TELEGRAM_HTTP_TIMEOUT_MS, 7000), 1000),
@@ -1028,6 +1030,11 @@ const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
   identityIq: "IdentityIQ",
   clientEmailAddress: "Client email address",
 };
+const TELEGRAM_NOTIFICATION_SENSITIVE_FIELDS = new Set(["ssn", "clientPhoneNumber", "clientEmailAddress"]);
+const TELEGRAM_NOTIFICATION_ALLOWED_FIELDS = parseTelegramNotificationFieldAllowlist(
+  TELEGRAM_NOTIFY_FIELDS_RAW,
+  TELEGRAM_NOTIFICATION_FIELD_ORDER,
+);
 const WEB_AUTH_ROLE_DEFINITION_BY_ID = new Map(WEB_AUTH_ROLE_DEFINITIONS.map((entry) => [entry.id, entry]));
 const WEB_AUTH_DEPARTMENT_DEFINITION_BY_ID = new Map(WEB_AUTH_DEPARTMENT_DEFINITIONS.map((entry) => [entry.id, entry]));
 const WEB_AUTH_USERS_DIRECTORY = resolveWebAuthUsersDirectory({
@@ -1164,6 +1171,33 @@ function parseTelegramAllowedUserIds(rawValue) {
       .map((value) => value.trim())
       .filter(Boolean),
   );
+}
+
+function parseTelegramNotificationFieldAllowlist(rawValue, knownFields) {
+  const normalizedKnownFields = Array.isArray(knownFields)
+    ? knownFields.map((field) => sanitizeTextValue(field, 80)).filter(Boolean)
+    : [];
+  const knownFieldSet = new Set(normalizedKnownFields);
+  if (!knownFieldSet.size) {
+    return new Set();
+  }
+
+  const value = sanitizeTextValue(rawValue, 6000);
+  if (!value) {
+    return new Set(normalizedKnownFields);
+  }
+
+  const requestedFields = value
+    .split(",")
+    .map((field) => sanitizeTextValue(field, 80))
+    .filter(Boolean);
+  const allowlist = new Set();
+  for (const field of requestedFields) {
+    if (knownFieldSet.has(field)) {
+      allowlist.add(field);
+    }
+  }
+  return allowlist;
 }
 
 function parsePositiveInteger(rawValue, fallbackValue) {
@@ -19509,6 +19543,70 @@ function normalizeTelegramMessageFieldValue(value, maxLength = 600) {
   return sanitizeTextValue(value, maxLength).replace(/\s+/g, " ").trim();
 }
 
+function maskTelegramSsnValue(value) {
+  const digits = normalizeTelegramMessageFieldValue(value, 64).replace(/\D/g, "");
+  if (!digits) {
+    return "";
+  }
+  const last4 = digits.slice(-4).padStart(4, "*");
+  return `***-**-${last4}`;
+}
+
+function maskTelegramPhoneValue(value) {
+  const digits = normalizeTelegramMessageFieldValue(value, 64).replace(/\D/g, "");
+  if (!digits) {
+    return "";
+  }
+  const last4 = digits.slice(-4).padStart(4, "*");
+  return `***-***-${last4}`;
+}
+
+function maskTelegramEmailValue(value) {
+  const normalized = normalizeTelegramMessageFieldValue(value, 320);
+  if (!normalized) {
+    return "";
+  }
+
+  const atIndex = normalized.indexOf("@");
+  if (atIndex <= 0 || atIndex === normalized.length - 1) {
+    return "***";
+  }
+
+  const localPart = normalized.slice(0, atIndex);
+  const domainPart = normalized.slice(atIndex + 1);
+  const firstDotIndex = domainPart.indexOf(".");
+  const domainName = firstDotIndex >= 0 ? domainPart.slice(0, firstDotIndex) : domainPart;
+  const domainSuffix = firstDotIndex >= 0 ? domainPart.slice(firstDotIndex) : "";
+  const maskedLocal = `${localPart.charAt(0)}***`;
+  const maskedDomain = domainName ? `${domainName.charAt(0)}***` : "***";
+  return `${maskedLocal}@${maskedDomain}${domainSuffix}`;
+}
+
+function normalizeTelegramNotificationFieldValue(field, value) {
+  const normalizedField = sanitizeTextValue(field, 80);
+  if (!normalizedField) {
+    return "";
+  }
+
+  if (!TELEGRAM_NOTIFY_MASK_SENSITIVE_FIELDS || !TELEGRAM_NOTIFICATION_SENSITIVE_FIELDS.has(normalizedField)) {
+    return normalizeTelegramMessageFieldValue(value);
+  }
+
+  if (normalizedField === "ssn") {
+    return maskTelegramSsnValue(value);
+  }
+
+  if (normalizedField === "clientPhoneNumber") {
+    return maskTelegramPhoneValue(value);
+  }
+
+  if (normalizedField === "clientEmailAddress") {
+    return maskTelegramEmailValue(value);
+  }
+
+  return normalizeTelegramMessageFieldValue(value);
+}
+
 function buildTelegramSubmissionMessage(record, miniData, _submission, telegramUser, attachments = []) {
   const lines = ["New client submission from Mini App"];
 
@@ -19521,6 +19619,10 @@ function buildTelegramSubmissionMessage(record, miniData, _submission, telegramU
   lines.push("Client data:");
 
   for (const field of TELEGRAM_NOTIFICATION_FIELD_ORDER) {
+    if (!TELEGRAM_NOTIFICATION_ALLOWED_FIELDS.has(field)) {
+      continue;
+    }
+
     const label = TELEGRAM_NOTIFICATION_FIELD_LABELS[field] || field;
     if (field === "afterResult" || field === "writtenOff") {
       if (toCheckboxValue(record?.[field]) !== "Yes") {
@@ -19531,7 +19633,7 @@ function buildTelegramSubmissionMessage(record, miniData, _submission, telegramU
     }
 
     const source = MINI_EXTRA_FIELD_SET.has(field) ? miniData : record;
-    const value = normalizeTelegramMessageFieldValue(source?.[field]);
+    const value = normalizeTelegramNotificationFieldValue(field, source?.[field]);
     if (!value) {
       continue;
     }
