@@ -20022,7 +20022,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
     let items = await listCachedGhlLeadsRows(GHL_LEADS_MAX_ROWS_RESPONSE, {
       rangeMode,
     });
-    if (isGhlConfigured() && items.length && GHL_LEADS_READ_ENRICH_MAX_ROWS > 0) {
+    if (refreshMode !== "none" && isGhlConfigured() && items.length && GHL_LEADS_READ_ENRICH_MAX_ROWS > 0) {
       const rowsNeedingEnrichment = items
         .filter((row) => isSparseGhlLeadRow(row))
         .slice(0, GHL_LEADS_READ_ENRICH_MAX_ROWS);

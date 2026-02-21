@@ -223,7 +223,7 @@ export default function LeadsPage() {
               size="sm"
               onClick={() => void loadLeads(rangeMode, true)}
               disabled={isLoading || !canSync}
-              isLoading={isLoading}
+              isLoading={isSyncing}
             >
               Refresh
             </Button>
