@@ -861,8 +861,14 @@ const MINI_ATTACHMENT_ALLOWLIST_BY_EXTENSION = new Map(
     },
   ]),
 );
-const MINI_ATTACHMENT_AV_SCAN_ENABLED = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_ENABLED) === true;
-const MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN) === true;
+const MINI_ATTACHMENT_AV_SCAN_ENABLED_RAW = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_ENABLED);
+const MINI_ATTACHMENT_AV_SCAN_ENABLED =
+  MINI_ATTACHMENT_AV_SCAN_ENABLED_RAW === null
+    ? IS_PRODUCTION
+    : MINI_ATTACHMENT_AV_SCAN_ENABLED_RAW === true;
+const MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN_RAW = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN);
+const MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN =
+  MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN_RAW === true && !(IS_PRODUCTION && MINI_ATTACHMENT_AV_SCAN_ENABLED);
 const MINI_ATTACHMENT_AV_SCAN_BIN = sanitizeTextValue(process.env.MINI_ATTACHMENT_AV_SCAN_BIN, 260);
 const MINI_ATTACHMENT_AV_SCAN_ARGS = parseCommaSeparatedStringList(process.env.MINI_ATTACHMENT_AV_SCAN_ARGS, 24, 240);
 const MINI_ATTACHMENT_AV_SCAN_TIMEOUT_MS = Math.min(
@@ -25933,6 +25939,16 @@ function logServerStartupSummary(port) {
   }
   if (TELEGRAM_NOTIFY_THREAD_ID && !TELEGRAM_NOTIFY_CHAT_ID) {
     console.warn("TELEGRAM_NOTIFY_THREAD_ID is ignored because TELEGRAM_NOTIFY_CHAT_ID is not set.");
+  }
+  if (IS_PRODUCTION && MINI_ATTACHMENT_AV_SCAN_ENABLED_RAW !== true) {
+    console.warn(
+      "Mini attachment AV scan is mandatory in production. MINI_ATTACHMENT_AV_SCAN_ENABLED is forced to true.",
+    );
+  }
+  if (IS_PRODUCTION && MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN_RAW === true) {
+    console.warn(
+      "Mini attachment AV fail-open mode is not allowed in production. MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN is ignored.",
+    );
   }
   if (MINI_ATTACHMENT_AV_SCAN_ENABLED) {
     if (!MINI_ATTACHMENT_AV_SCAN_BIN) {
