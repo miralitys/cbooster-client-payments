@@ -617,8 +617,11 @@ const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"])
 const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", "error"]);
 const GHL_REQUIRED_CONTRACT_KEYWORD_PATTERN = /\bcontracts?\b/;
 const GHL_CLIENT_CONTRACT_DOWNLOAD_STATUSES = new Set(["ready", "no_contact", "no_contract", "error"]);
-const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
-const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
+const GHL_PROPOSAL_STATUS_FILTERS = ["draft", "sent", "viewed", "completed", "accepted"];
+const GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT, 21), 1),
+  21,
+);
 const GHL_CLIENT_CONTRACT_LOOKUP_MAX_CONTACTS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_LOOKUP_MAX_CONTACTS, 12), 1),
   20,
@@ -15191,311 +15194,31 @@ async function listGhlContractCandidatesForContact(contactId, options = {}) {
   const debugTrace = options?.debugTrace && typeof options.debugTrace === "object" ? options.debugTrace : null;
   const normalizedContactName = sanitizeTextValue(options?.contactName, 300);
   const normalizedClientName = sanitizeTextValue(options?.clientName, 300);
-  const proposalNameQuery = [normalizedContactName, normalizedClientName].filter(Boolean).join(" ").trim();
-
-  const encodedContactId = encodeURIComponent(normalizedContactId);
-  const attempts = [
-    {
-      source: "contacts.documents",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/documents`, {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.documents.trailing_slash",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/documents/`, {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.files",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/files`, {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.attachments",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/attachments`, {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.attachments.trailing_slash",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/attachments/`, {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.notes",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/notes`, {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.contact_id",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            contact_id: normalizedContactId,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.documents",
-      request: () =>
-        requestGhlApi("/proposals/documents", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.contact_id.no_status",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            contact_id: normalizedContactId,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.contact_id.contract",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            contact_id: normalizedContactId,
-            query: "contract",
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.documents.location_id",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/documents`, {
-          method: "GET",
-          query: {
-            location_id: GHL_LOCATION_ID,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.files.location_id",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/files`, {
-          method: "GET",
-          query: {
-            location_id: GHL_LOCATION_ID,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.attachments.location_id",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/attachments`, {
-          method: "GET",
-          query: {
-            location_id: GHL_LOCATION_ID,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.documents.no_location",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/documents`, {
-          method: "GET",
-          query: {},
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.files.no_location",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/files`, {
-          method: "GET",
-          query: {},
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "contacts.attachments.no_location",
-      request: () =>
-        requestGhlApi(`/contacts/${encodedContactId}/attachments`, {
-          method: "GET",
-          query: {},
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.contact_id.location_id",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            location_id: GHL_LOCATION_ID,
-            contact_id: normalizedContactId,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.contact_id.no_location",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            contact_id: normalizedContactId,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-  ];
-
   const candidates = [];
-  if (debugTrace) {
-    debugTrace.attempts = [];
-    debugTrace.locationFallback = null;
-    debugTrace.totalCandidates = 0;
-  }
-  for (const attempt of attempts) {
-    let response;
-    try {
-      response = await attempt.request();
-    } catch (error) {
-      if (debugTrace?.attempts instanceof Array) {
-        debugTrace.attempts.push({
-          source: attempt.source,
-          ok: false,
-          reason: "request_failed",
-          error: sanitizeTextValue(error?.message, 200),
-        });
-      }
-      continue;
-    }
-
-    if (!response.ok) {
-      if (debugTrace?.attempts instanceof Array) {
-        debugTrace.attempts.push({
-          source: attempt.source,
-          ok: false,
-          status: Number.isFinite(response.status) ? response.status : 0,
-        });
-      }
-      continue;
-    }
-
-    const extracted = extractGhlContractCandidatesFromPayload(response.body, attempt.source);
-    if (debugTrace?.attempts instanceof Array) {
-      debugTrace.attempts.push({
-        source: attempt.source,
-        ok: true,
-        status: Number.isFinite(response.status) ? response.status : 200,
-        payload: summarizeGhlPayloadForDebug(response.body),
-        extractedCount: extracted.length,
-      });
-    }
-    if (extracted.length) {
-      candidates.push(...extracted);
-    }
-  }
-
   const locationWideCandidates = await listGhlLocationContractCandidates();
-  if (debugTrace) {
-    debugTrace.locationFallback = {
-      candidatesCount: locationWideCandidates.length,
-    };
-  }
   if (locationWideCandidates.length) {
     for (const candidate of locationWideCandidates) {
+      if (
+        !isGhlContractCandidateRelatedToContact(candidate, normalizedContactName, normalizedContactId) &&
+        !isGhlCandidateRelatedToClientName(candidate, normalizedClientName)
+      ) {
+        continue;
+      }
       candidates.push({
         ...candidate,
         source: sanitizeTextValue(candidate?.source, 120) || "proposals.document.location",
+        contactName: sanitizeTextValue(candidate?.contactName, 300) || normalizedContactName || normalizedClientName,
+        contactId: sanitizeTextValue(candidate?.contactId, 160) || normalizedContactId,
       });
     }
   }
 
   const deduped = dedupeGhlContractCandidates(candidates);
   if (debugTrace) {
+    debugTrace.attempts = [];
+    debugTrace.locationFallback = {
+      candidatesCount: locationWideCandidates.length,
+    };
     debugTrace.totalCandidates = deduped.length;
   }
   return deduped;
@@ -15511,36 +15234,28 @@ async function listGhlLocationContractCandidates() {
     return ghlLocationDocumentCandidatesCache.items;
   }
 
-  const attempts = [
-    {
-      source: "proposals.document.location.contract",
+  const attempts = [];
+  for (const status of GHL_PROPOSAL_STATUS_FILTERS) {
+    attempts.push({
+      source: `proposals.document.location.contract.status_${status}`,
       query: {
         locationId: GHL_LOCATION_ID,
-        status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
+        status,
         query: "contract",
         skip: 0,
-        limit: 200,
+        limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
       },
+    });
+  }
+  attempts.push({
+    source: "proposals.document.location.contract.no_status",
+    query: {
+      locationId: GHL_LOCATION_ID,
+      query: "contract",
+      skip: 0,
+      limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
     },
-    {
-      source: "proposals.document.location.by_status",
-      query: {
-        locationId: GHL_LOCATION_ID,
-        status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-        skip: 0,
-        limit: 200,
-      },
-    },
-    {
-      source: "proposals.document.location.no_status",
-      query: {
-        locationId: GHL_LOCATION_ID,
-        query: "contract",
-        skip: 0,
-        limit: 200,
-      },
-    },
-  ];
+  });
 
   const candidates = [];
   for (const attempt of attempts) {
@@ -26449,7 +26164,7 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {},
             locationId: GHL_LOCATION_ID,
             id: candidateId,
             skip: 0,
-            limit: 50,
+            limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
           },
           tolerateNotFound: true,
         }),
@@ -26463,7 +26178,7 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {},
             locationId: GHL_LOCATION_ID,
             id: candidateId,
             skip: 0,
-            limit: 50,
+            limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
           },
           tolerateNotFound: true,
         }),
@@ -26477,7 +26192,7 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {},
             locationId: GHL_LOCATION_ID,
             documentId: candidateId,
             skip: 0,
-            limit: 50,
+            limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
           },
           tolerateNotFound: true,
         }),
@@ -26491,7 +26206,7 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {},
             locationId: GHL_LOCATION_ID,
             proposalId: candidateId,
             skip: 0,
-            limit: 50,
+            limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
           },
           tolerateNotFound: true,
         }),
@@ -26505,7 +26220,7 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {},
             locationId: GHL_LOCATION_ID,
             query: [candidateId, normalizedContactName, normalizedClientName].filter(Boolean).join(" ").trim(),
             skip: 0,
-            limit: 100,
+            limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
           },
           tolerateNotFound: true,
         }),
@@ -26648,70 +26363,43 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
           tolerateNotFound: true,
         }),
     },
-    {
-      source: "proposals.document.contact_id",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            contact_id: normalizedContactId,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.contactId",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            contactId: normalizedContactId,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.documents.contact_id",
-      request: () =>
-        requestGhlApi("/proposals/documents", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            contact_id: normalizedContactId,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: proposalNameQuery,
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.contact_id.contract",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            contact_id: normalizedContactId,
-            query: "contract",
-            skip: 0,
-            limit: 100,
-          },
-          tolerateNotFound: true,
-        }),
-    },
   ];
+  const proposalQueries = [...new Set([proposalNameQuery, [normalizedContactName, "contract"].filter(Boolean).join(" ").trim(), [normalizedClientName, "contract"].filter(Boolean).join(" ").trim(), "contract"].filter(Boolean))];
+  for (const status of GHL_PROPOSAL_STATUS_FILTERS) {
+    for (const queryText of proposalQueries) {
+      attempts.push({
+        source: `proposals.document.search.status_${status}.${queryText ? "query" : "empty"}`,
+        request: () =>
+          requestGhlApi("/proposals/document", {
+            method: "GET",
+            query: {
+              locationId: GHL_LOCATION_ID,
+              status,
+              query: queryText,
+              skip: 0,
+              limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
+            },
+            tolerateNotFound: true,
+          }),
+      });
+    }
+  }
+  for (const queryText of proposalQueries) {
+    attempts.push({
+      source: `proposals.document.search.no_status.${queryText ? "query" : "empty"}`,
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            query: queryText,
+            skip: 0,
+            limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
+          },
+          tolerateNotFound: true,
+        }),
+    });
+  }
 
   const candidates = [];
   if (debugTrace) {
@@ -26819,95 +26507,43 @@ async function listGhlContractDownloadCandidatesForClientName(clientName, option
   }
   const debugTrace = options?.debugTrace && typeof options.debugTrace === "object" ? options.debugTrace : null;
 
-  const attempts = [
-    {
-      source: "proposals.document.client_name.status",
+  const attempts = [];
+  const queryVariants = [...new Set([normalizedClientName, `${normalizedClientName} contract`, "contract"])];
+  for (const status of GHL_PROPOSAL_STATUS_FILTERS) {
+    for (const queryText of queryVariants) {
+      attempts.push({
+        source: `proposals.document.client_name.status_${status}.${queryText ? "query" : "empty"}`,
+        request: () =>
+          requestGhlApi("/proposals/document", {
+            method: "GET",
+            query: {
+              locationId: GHL_LOCATION_ID,
+              status,
+              query: queryText,
+              skip: 0,
+              limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
+            },
+            tolerateNotFound: true,
+          }),
+      });
+    }
+  }
+  for (const queryText of queryVariants) {
+    attempts.push({
+      source: `proposals.document.client_name.no_status.${queryText ? "query" : "empty"}`,
       request: () =>
         requestGhlApi("/proposals/document", {
           method: "GET",
           query: {
             locationId: GHL_LOCATION_ID,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: normalizedClientName,
+            query: queryText,
             skip: 0,
-            limit: 200,
+            limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
           },
           tolerateNotFound: true,
         }),
-    },
-    {
-      source: "proposals.documents.client_name.status",
-      request: () =>
-        requestGhlApi("/proposals/documents", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: normalizedClientName,
-            skip: 0,
-            limit: 200,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.client_name",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            locationId: GHL_LOCATION_ID,
-            query: normalizedClientName,
-            skip: 0,
-            limit: 200,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.client_name.location_id",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            location_id: GHL_LOCATION_ID,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: normalizedClientName,
-            skip: 0,
-            limit: 200,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.document.client_name.no_location",
-      request: () =>
-        requestGhlApi("/proposals/document", {
-          method: "GET",
-          query: {
-            query: normalizedClientName,
-            skip: 0,
-            limit: 200,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-    {
-      source: "proposals.documents.client_name.location_id",
-      request: () =>
-        requestGhlApi("/proposals/documents", {
-          method: "GET",
-          query: {
-            location_id: GHL_LOCATION_ID,
-            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
-            query: normalizedClientName,
-            skip: 0,
-            limit: 200,
-          },
-          tolerateNotFound: true,
-        }),
-    },
-  ];
+    });
+  }
 
   const candidates = [];
   if (debugTrace) {
@@ -27652,7 +27288,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-3",
+      matcherVersion: "ghl-contract-download-v2026-02-21-4",
       debugMode,
     });
   } catch (error) {
