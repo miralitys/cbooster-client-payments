@@ -464,6 +464,27 @@ const GHL_API_BASE_URL = (
 ).replace(/\/+$/, "");
 const GHL_API_VERSION = (process.env.GHL_API_VERSION || "2021-07-28").toString().trim() || "2021-07-28";
 const GHL_REQUEST_TIMEOUT_MS = Math.min(Math.max(parsePositiveInteger(process.env.GHL_REQUEST_TIMEOUT_MS, 15000), 2000), 60000);
+const GHL_HTTP_RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const GHL_HTTP_RETRYABLE_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETRESET",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+const GHL_HTTP_MAX_RETRIES = Math.min(Math.max(parsePositiveInteger(process.env.GHL_HTTP_MAX_RETRIES, 2), 0), 8);
+const GHL_HTTP_RETRY_BASE_MS = Math.min(Math.max(parsePositiveInteger(process.env.GHL_HTTP_RETRY_BASE_MS, 700), 100), 10000);
+const GHL_HTTP_RETRY_JITTER_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_HTTP_RETRY_JITTER_MS, 300), 0),
+  5000,
+);
 const GHL_CONTACT_SEARCH_LIMIT = Math.min(Math.max(parsePositiveInteger(process.env.GHL_CONTACT_SEARCH_LIMIT, 20), 1), 100);
 const GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY, 4), 1),
@@ -12581,56 +12602,127 @@ function buildGhlUrl(pathname, query = {}) {
   return url;
 }
 
+function parseGhlRetryAfterMilliseconds(responseHeaders) {
+  const retryAfterRaw = sanitizeTextValue(responseHeaders?.get?.("retry-after"), 80);
+  if (!retryAfterRaw) {
+    return 0;
+  }
+
+  const seconds = Number.parseInt(retryAfterRaw, 10);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 120 * 1000);
+  }
+
+  const timestamp = Date.parse(retryAfterRaw);
+  if (!Number.isFinite(timestamp)) {
+    return 0;
+  }
+
+  return Math.min(Math.max(0, timestamp - Date.now()), 120 * 1000);
+}
+
+function computeGhlRetryDelayMs(attemptNumber, retryAfterMs = 0) {
+  const normalizedAttempt = Math.max(1, Number.parseInt(attemptNumber, 10) || 1);
+  const exponentialDelay = GHL_HTTP_RETRY_BASE_MS * Math.pow(2, normalizedAttempt - 1);
+  const jitter = Math.floor(Math.random() * (GHL_HTTP_RETRY_JITTER_MS + 1));
+  return Math.min(120 * 1000, Math.max(retryAfterMs, exponentialDelay + jitter));
+}
+
+function isGhlRetryableNetworkError(error) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if (error.name === "AbortError") {
+    return true;
+  }
+
+  const errorCode = sanitizeTextValue(error.code, 80).toUpperCase();
+  if (!errorCode) {
+    return false;
+  }
+
+  return GHL_HTTP_RETRYABLE_ERROR_CODES.has(errorCode);
+}
+
 async function requestGhlApi(pathname, options = {}) {
   const method = (options.method || "GET").toString().toUpperCase();
   const includeJsonBody = method !== "GET" && method !== "HEAD";
   const headers = buildGhlRequestHeaders(includeJsonBody);
   const query = options.query && typeof options.query === "object" ? options.query : {};
   const tolerateNotFound = Boolean(options.tolerateNotFound);
+  const rawMaxRetries = Number.parseInt(sanitizeTextValue(options.maxRetries, 20), 10);
+  const maxRetries = Number.isFinite(rawMaxRetries)
+    ? Math.max(0, Math.min(rawMaxRetries, 10))
+    : GHL_HTTP_MAX_RETRIES;
+  const retryStatuses =
+    options.retryStatuses instanceof Set && options.retryStatuses.size
+      ? options.retryStatuses
+      : GHL_HTTP_RETRYABLE_STATUSES;
   const timeoutMs = Math.min(
     Math.max(parsePositiveInteger(options.timeoutMs, GHL_REQUEST_TIMEOUT_MS), 500),
     120000,
   );
   const url = buildGhlUrl(pathname, query);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method,
-      headers,
-      body: includeJsonBody && options.body ? JSON.stringify(options.body) : undefined,
-      signal: controller.signal,
-    });
-  } catch (error) {
-    clearTimeout(timeoutId);
-    const errorMessage = sanitizeTextValue(error?.message, 300) || "Unknown network error.";
-    if (error?.name === "AbortError") {
-      throw createHttpError(`GHL request timed out after ${timeoutMs}ms (${pathname}).`, 504);
+    let response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: includeJsonBody && options.body ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      const retryableNetworkError = isGhlRetryableNetworkError(error);
+      if (retryableNetworkError && attempt <= maxRetries) {
+        await delayMs(computeGhlRetryDelayMs(attempt));
+        continue;
+      }
+
+      const errorMessage = sanitizeTextValue(error?.message, 300) || "Unknown network error.";
+      if (error?.name === "AbortError") {
+        throw createHttpError(`GHL request timed out after ${timeoutMs}ms (${pathname}).`, 504);
+      }
+      throw createHttpError(`GHL request failed (${pathname}): ${errorMessage}`, 503);
+    } finally {
+      clearTimeout(timeoutId);
     }
-    throw createHttpError(`GHL request failed (${pathname}): ${errorMessage}`, 503);
-  }
 
-  clearTimeout(timeoutId);
+    const responseText = await response.text();
+    let body = null;
+    try {
+      body = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      body = null;
+    }
 
-  const responseText = await response.text();
-  let body = null;
-  try {
-    body = responseText ? JSON.parse(responseText) : null;
-  } catch {
-    body = null;
-  }
+    if (response.ok) {
+      return {
+        ok: true,
+        status: response.status,
+        body,
+      };
+    }
 
-  if (!response.ok) {
     if (tolerateNotFound && response.status === 404) {
       return {
         ok: false,
         status: 404,
         body: null,
       };
+    }
+
+    if (retryStatuses.has(response.status) && attempt <= maxRetries) {
+      const retryAfterMs = parseGhlRetryAfterMilliseconds(response.headers);
+      const retryDelayMs = computeGhlRetryDelayMs(attempt, retryAfterMs);
+      await delayMs(retryDelayMs);
+      continue;
     }
 
     const details = sanitizeTextValue(
@@ -12648,11 +12740,7 @@ async function requestGhlApi(pathname, options = {}) {
     );
   }
 
-  return {
-    ok: true,
-    status: response.status,
-    body,
-  };
+  throw createHttpError(`GHL API request failed (${pathname}) after ${maxRetries + 1} attempts.`, 503);
 }
 
 function extractGhlContactsFromPayload(payload) {
@@ -13210,6 +13298,9 @@ async function searchGhlContactsByClientName(clientName) {
       response = await attempt();
     } catch (error) {
       lastError = error;
+      if (Number(error?.httpStatus) === 429) {
+        break;
+      }
       continue;
     }
 
