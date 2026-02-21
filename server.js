@@ -40,6 +40,31 @@ const TELEGRAM_INIT_DATA_TTL_SEC = parsePositiveInteger(process.env.TELEGRAM_INI
 const TELEGRAM_REQUIRED_CHAT_ID = parseOptionalTelegramChatId(process.env.TELEGRAM_REQUIRED_CHAT_ID);
 const TELEGRAM_NOTIFY_CHAT_ID = (process.env.TELEGRAM_NOTIFY_CHAT_ID || "").toString().trim();
 const TELEGRAM_NOTIFY_THREAD_ID = parseOptionalPositiveInteger(process.env.TELEGRAM_NOTIFY_THREAD_ID);
+const TELEGRAM_API_BASE_URL = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}` : "";
+const TELEGRAM_HTTP_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.TELEGRAM_HTTP_TIMEOUT_MS, 7000), 1000),
+  30000,
+);
+const TELEGRAM_HTTP_MAX_RETRIES = Math.min(
+  Math.max(parsePositiveInteger(process.env.TELEGRAM_HTTP_MAX_RETRIES, 2), 0),
+  8,
+);
+const TELEGRAM_HTTP_RETRY_BASE_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.TELEGRAM_HTTP_RETRY_BASE_MS, 300), 50),
+  10000,
+);
+const TELEGRAM_HTTP_RETRY_JITTER_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.TELEGRAM_HTTP_RETRY_JITTER_MS, 250), 0),
+  10000,
+);
+const TELEGRAM_HTTP_MAX_RETRY_DELAY_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.TELEGRAM_HTTP_MAX_RETRY_DELAY_MS, 10000), 1000),
+  60000,
+);
+const MINI_TELEGRAM_NOTIFICATION_QUEUE_MAX_PENDING = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_TELEGRAM_NOTIFICATION_QUEUE_MAX_PENDING, 200), 10),
+  5000,
+);
 const DEFAULT_WEB_AUTH_USERNAME = "owner";
 const DEFAULT_WEB_AUTH_PASSWORD = "ChangeMe!12345";
 const DEFAULT_WEB_AUTH_OWNER_USERNAME = "owner";
@@ -420,6 +445,21 @@ const ELEVENLABS_TTS_TIMEOUT_MS = Math.min(
   60000,
 );
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
+const TELEGRAM_HTTP_RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const TELEGRAM_HTTP_RETRYABLE_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETRESET",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
 const STATE_ROW_ID = 1;
 const DEFAULT_TABLE_NAME = "client_records_state";
 const TABLE_NAME = resolveTableName(process.env.DB_TABLE_NAME, DEFAULT_TABLE_NAME);
@@ -1075,6 +1115,8 @@ const loginFailureByAccountKey = new Map();
 const loginFailureByIpAccountKey = new Map();
 let miniUploadParseInFlight = 0;
 const miniUploadParseWaiters = [];
+let miniTelegramNotificationQueue = Promise.resolve();
+let miniTelegramNotificationQueueDepth = 0;
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
@@ -15884,6 +15926,177 @@ async function verifyTelegramUserAccess(user) {
   };
 }
 
+function resolveTelegramRetryAfterMs(headers, body) {
+  const bodyRetryAfterSec = Number.parseInt(body?.parameters?.retry_after, 10);
+  if (Number.isFinite(bodyRetryAfterSec) && bodyRetryAfterSec > 0) {
+    return Math.min(bodyRetryAfterSec * 1000, 60 * 1000);
+  }
+
+  const retryAfterRaw = sanitizeTextValue(headers?.get?.("retry-after"), 80);
+  if (!retryAfterRaw) {
+    return 0;
+  }
+
+  const seconds = Number.parseInt(retryAfterRaw, 10);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 60 * 1000);
+  }
+
+  const timestamp = Date.parse(retryAfterRaw);
+  if (!Number.isFinite(timestamp)) {
+    return 0;
+  }
+
+  return Math.min(Math.max(0, timestamp - Date.now()), 60 * 1000);
+}
+
+function computeTelegramRetryDelayMs(attemptNumber, retryAfterMs = 0) {
+  const normalizedAttempt = Math.max(1, Number.parseInt(attemptNumber, 10) || 1);
+  const exponentialDelay = TELEGRAM_HTTP_RETRY_BASE_MS * Math.pow(2, normalizedAttempt - 1);
+  const jitter = Math.floor(Math.random() * (TELEGRAM_HTTP_RETRY_JITTER_MS + 1));
+  return Math.min(TELEGRAM_HTTP_MAX_RETRY_DELAY_MS, Math.max(retryAfterMs, exponentialDelay + jitter));
+}
+
+function isRetryableTelegramNetworkError(error) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  if (error.name === "AbortError") {
+    return true;
+  }
+
+  const errorCode = sanitizeTextValue(error.code, 80).toUpperCase();
+  if (!errorCode) {
+    return false;
+  }
+
+  return TELEGRAM_HTTP_RETRYABLE_ERROR_CODES.has(errorCode);
+}
+
+async function requestTelegramApi(pathWithQuery, options = {}) {
+  const normalizedPath = sanitizeTextValue(pathWithQuery, 3600).replace(/^\/+/, "");
+  const method = sanitizeTextValue(options.method, 12).toUpperCase() || "GET";
+  const requestLabel = sanitizeTextValue(options.requestLabel, 120) || normalizedPath || "request";
+  const timeoutMs = Math.min(
+    Math.max(parsePositiveInteger(options.timeoutMs, TELEGRAM_HTTP_TIMEOUT_MS), 500),
+    60000,
+  );
+  const parsedMaxRetries = Number.parseInt(sanitizeTextValue(options.maxRetries, 20), 10);
+  const maxRetries = Number.isFinite(parsedMaxRetries)
+    ? Math.max(0, Math.min(parsedMaxRetries, 8))
+    : TELEGRAM_HTTP_MAX_RETRIES;
+  const headers = options.headers && typeof options.headers === "object" ? options.headers : undefined;
+
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_API_BASE_URL || !normalizedPath) {
+    return {
+      ok: false,
+      status: 503,
+      httpStatus: 503,
+      body: null,
+      text: "",
+      headers: null,
+      error: "Telegram API is not configured.",
+      attempt: 1,
+    };
+  }
+
+  const endpoint = `${TELEGRAM_API_BASE_URL}/${normalizedPath}`;
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method,
+        headers,
+        body: options.body,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      const retryableNetworkError = isRetryableTelegramNetworkError(error);
+      if (retryableNetworkError && attempt <= maxRetries) {
+        const retryDelayMs = computeTelegramRetryDelayMs(attempt);
+        await delayMs(retryDelayMs);
+        continue;
+      }
+
+      const errorMessage = sanitizeTextValue(error?.message, 300) || `Telegram ${requestLabel} network failure.`;
+      return {
+        ok: false,
+        status: 503,
+        httpStatus: 503,
+        body: null,
+        text: "",
+        headers: null,
+        error: errorMessage,
+        attempt,
+      };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const responseText = await response.text();
+    let body = null;
+    try {
+      body = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      body = null;
+    }
+
+    if (response.ok && (!body || body.ok !== false)) {
+      return {
+        ok: true,
+        status: response.status,
+        httpStatus: response.status,
+        body,
+        text: responseText,
+        headers: response.headers,
+        error: "",
+        attempt,
+      };
+    }
+
+    const telegramErrorCode = Number.parseInt(body?.error_code, 10);
+    const effectiveStatus = Number.isFinite(telegramErrorCode) && telegramErrorCode > 0 ? telegramErrorCode : response.status;
+    const retryableStatus = TELEGRAM_HTTP_RETRYABLE_STATUSES.has(effectiveStatus);
+    if (retryableStatus && attempt <= maxRetries) {
+      const retryAfterMs = resolveTelegramRetryAfterMs(response.headers, body);
+      const retryDelayMs = computeTelegramRetryDelayMs(attempt, retryAfterMs);
+      await delayMs(retryDelayMs);
+      continue;
+    }
+
+    const errorMessage =
+      sanitizeTextValue(body?.description || responseText, 500) || `Telegram ${requestLabel} failed (${effectiveStatus}).`;
+    return {
+      ok: false,
+      status: effectiveStatus || 503,
+      httpStatus: response.status,
+      body,
+      text: responseText,
+      headers: response.headers,
+      error: errorMessage,
+      attempt,
+    };
+  }
+
+  return {
+    ok: false,
+    status: 503,
+    httpStatus: 503,
+    body: null,
+    text: "",
+    headers: null,
+    error: `Telegram ${requestLabel} failed after retries.`,
+    attempt: maxRetries + 1,
+  };
+}
+
 async function verifyTelegramGroupMembership(user) {
   const userId = sanitizeTextValue(user?.id, 50);
   if (!userId) {
@@ -15894,34 +16107,22 @@ async function verifyTelegramGroupMembership(user) {
     };
   }
 
-  let response;
-  try {
-    const query = new URLSearchParams({
-      chat_id: TELEGRAM_REQUIRED_CHAT_ID,
-      user_id: userId,
-    });
-    response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChatMember?${query.toString()}`);
-  } catch (error) {
-    console.error("Telegram getChatMember network failed:", error);
-    return {
-      ok: false,
-      status: 503,
-      error: "Telegram membership check failed. Try again in a moment.",
-    };
-  }
+  const query = new URLSearchParams({
+    chat_id: TELEGRAM_REQUIRED_CHAT_ID,
+    user_id: userId,
+  });
+  const membershipResponse = await requestTelegramApi(`getChatMember?${query.toString()}`, {
+    method: "GET",
+    requestLabel: "getChatMember",
+  });
 
-  const responseText = await response.text();
-  let body = null;
-  try {
-    body = responseText ? JSON.parse(responseText) : null;
-  } catch {
-    body = null;
-  }
-
-  if (!response.ok || !body?.ok) {
-    const description = sanitizeTextValue(body?.description || responseText, 400);
-    if (response.status === 400 || response.status === 403) {
-      console.warn("Telegram getChatMember denied:", description || response.statusText);
+  if (!membershipResponse.ok) {
+    const description = sanitizeTextValue(
+      membershipResponse.body?.description || membershipResponse.text || membershipResponse.error,
+      400,
+    );
+    if (membershipResponse.status === 400 || membershipResponse.status === 403) {
+      console.warn("Telegram getChatMember denied:", description || "forbidden");
       return {
         ok: false,
         status: 403,
@@ -15929,7 +16130,7 @@ async function verifyTelegramGroupMembership(user) {
       };
     }
 
-    console.error("Telegram getChatMember failed:", response.status, description || response.statusText);
+    console.error("Telegram getChatMember failed:", membershipResponse.status, description || membershipResponse.error);
     return {
       ok: false,
       status: 503,
@@ -15937,7 +16138,7 @@ async function verifyTelegramGroupMembership(user) {
     };
   }
 
-  const memberStatus = sanitizeTextValue(body?.result?.status, 40).toLowerCase();
+  const memberStatus = sanitizeTextValue(membershipResponse.body?.result?.status, 40).toLowerCase();
   if (!TELEGRAM_MEMBER_ALLOWED_STATUSES.has(memberStatus)) {
     return {
       ok: false,
@@ -19385,26 +19586,16 @@ async function sendMiniSubmissionTelegramAttachments(submission, attachments = [
     }
     payload.append("document", new Blob([attachment.content], { type: attachment.mimeType }), attachment.fileName);
 
-    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, {
+    const documentResult = await requestTelegramApi("sendDocument", {
       method: "POST",
       body: payload,
+      requestLabel: "sendDocument",
     });
-
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw new Error(`Telegram sendDocument HTTP ${response.status}: ${sanitizeTextValue(responseText, 700)}`);
-    }
-
-    let body;
-    try {
-      body = JSON.parse(responseText);
-    } catch {
-      body = null;
-    }
-
-    if (!body?.ok) {
-      const description = sanitizeTextValue(body?.description || responseText, 700) || "Unknown Telegram API error.";
-      throw new Error(`Telegram sendDocument failed: ${description}`);
+    if (!documentResult.ok) {
+      const description =
+        sanitizeTextValue(documentResult.body?.description || documentResult.text || documentResult.error, 700) ||
+        "Unknown Telegram API error.";
+      throw new Error(`Telegram sendDocument failed (${documentResult.status}): ${description}`);
     }
     return;
   }
@@ -19441,26 +19632,16 @@ async function sendMiniSubmissionTelegramAttachments(submission, attachments = [
     );
   }
 
-  const mediaResponse = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMediaGroup`, {
+  const mediaResult = await requestTelegramApi("sendMediaGroup", {
     method: "POST",
     body: mediaPayload,
+    requestLabel: "sendMediaGroup",
   });
-
-  const mediaResponseText = await mediaResponse.text();
-  if (!mediaResponse.ok) {
-    throw new Error(`Telegram sendMediaGroup HTTP ${mediaResponse.status}: ${sanitizeTextValue(mediaResponseText, 700)}`);
-  }
-
-  let mediaBody;
-  try {
-    mediaBody = JSON.parse(mediaResponseText);
-  } catch {
-    mediaBody = null;
-  }
-
-  if (!mediaBody?.ok) {
-    const description = sanitizeTextValue(mediaBody?.description || mediaResponseText, 700) || "Unknown Telegram API error.";
-    throw new Error(`Telegram sendMediaGroup failed: ${description}`);
+  if (!mediaResult.ok) {
+    const description =
+      sanitizeTextValue(mediaResult.body?.description || mediaResult.text || mediaResult.error, 700) ||
+      "Unknown Telegram API error.";
+    throw new Error(`Telegram sendMediaGroup failed (${mediaResult.status}): ${description}`);
   }
 }
 
@@ -19479,32 +19660,50 @@ async function sendMiniSubmissionTelegramNotification(record, miniData, submissi
     payload.message_thread_id = TELEGRAM_NOTIFY_THREAD_ID;
   }
 
-  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+  const messageResult = await requestTelegramApi("sendMessage", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+    requestLabel: "sendMessage",
   });
-
-  const responseText = await response.text();
-  if (!response.ok) {
-    throw new Error(`Telegram sendMessage HTTP ${response.status}: ${sanitizeTextValue(responseText, 700)}`);
-  }
-
-  let body;
-  try {
-    body = JSON.parse(responseText);
-  } catch {
-    body = null;
-  }
-
-  if (!body?.ok) {
-    const description = sanitizeTextValue(body?.description || responseText, 700) || "Unknown Telegram API error.";
-    throw new Error(`Telegram sendMessage failed: ${description}`);
+  if (!messageResult.ok) {
+    const description =
+      sanitizeTextValue(messageResult.body?.description || messageResult.text || messageResult.error, 700) ||
+      "Unknown Telegram API error.";
+    throw new Error(`Telegram sendMessage failed (${messageResult.status}): ${description}`);
   }
 
   await sendMiniSubmissionTelegramAttachments(submission, attachments);
+}
+
+function enqueueMiniSubmissionTelegramNotification(record, miniData, submission, telegramUser, attachments = []) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_NOTIFY_CHAT_ID) {
+    return;
+  }
+
+  if (miniTelegramNotificationQueueDepth >= MINI_TELEGRAM_NOTIFICATION_QUEUE_MAX_PENDING) {
+    console.warn(
+      `[mini] Telegram notification queue is full (${miniTelegramNotificationQueueDepth}). Notification is skipped.`,
+    );
+    return;
+  }
+
+  miniTelegramNotificationQueueDepth += 1;
+  miniTelegramNotificationQueue = miniTelegramNotificationQueue
+    .catch(() => {
+      // Keep queue chain alive after failures.
+    })
+    .then(async () => {
+      await sendMiniSubmissionTelegramNotification(record, miniData, submission, telegramUser, attachments);
+    })
+    .catch((notificationError) => {
+      console.error("Mini App Telegram notification failed:", notificationError);
+    })
+    .finally(() => {
+      miniTelegramNotificationQueueDepth = Math.max(0, miniTelegramNotificationQueueDepth - 1);
+    });
 }
 
 async function listModerationSubmissions(options = {}) {
@@ -20187,6 +20386,16 @@ function handleApiAuthLogin(req, res) {
 }
 
 function handleApiAuthLogout(req, res) {
+  // Defense in depth: logout must not bypass CSRF when cookie session exists,
+  // even if routing middleware order changes in the future.
+  let csrfPassed = false;
+  requireWebApiCsrf(req, res, () => {
+    csrfPassed = true;
+  });
+  if (!csrfPassed) {
+    return;
+  }
+
   clearWebAuthSessionCookie(req, res);
   res.setHeader("Cache-Control", "no-store, private");
   res.json({
@@ -22124,17 +22333,6 @@ app.post("/api/mini/clients", async (req, res) => {
       creationResult.miniData,
       attachmentsResult.attachments,
     );
-    try {
-      await sendMiniSubmissionTelegramNotification(
-        creationResult.record,
-        creationResult.miniData,
-        submission,
-        authResult.user,
-        attachmentsResult.attachments,
-      );
-    } catch (notificationError) {
-      console.error("Mini App Telegram notification failed:", notificationError);
-    }
 
     res.status(201).json({
       ok: true,
@@ -22143,6 +22341,14 @@ app.post("/api/mini/clients", async (req, res) => {
       submittedAt: submission.submittedAt,
       attachmentsCount: submission.attachmentsCount || 0,
     });
+
+    enqueueMiniSubmissionTelegramNotification(
+      creationResult.record,
+      creationResult.miniData,
+      submission,
+      authResult.user,
+      attachmentsResult.attachments,
+    );
   } catch (error) {
     console.error("POST /api/mini/clients failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to submit client"));
