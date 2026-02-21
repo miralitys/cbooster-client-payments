@@ -96,6 +96,17 @@ const RATE_LIMIT_PROFILE_API_CHAT = Object.freeze({
   maxHitsUser: 35,
   blockMs: 2 * 60 * 1000,
 });
+const RATE_LIMIT_PROFILE_API_MINI_ACCESS = Object.freeze({
+  windowMs: 60 * 1000,
+  maxHitsIp: 90,
+  blockMs: 2 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_API_MINI_WRITE = Object.freeze({
+  windowMs: 60 * 1000,
+  maxHitsIp: 24,
+  maxHitsUser: 12,
+  blockMs: 5 * 60 * 1000,
+});
 const RATE_LIMIT_PROFILE_API_RECORDS_WRITE = Object.freeze({
   windowMs: 60 * 1000,
   maxHitsIp: 300,
@@ -296,7 +307,53 @@ const QUICKBOOKS_QUERY_PAGE_SIZE = 200;
 const QUICKBOOKS_MAX_QUERY_ROWS = 5000;
 const QUICKBOOKS_PAYMENT_DETAILS_CONCURRENCY = 2;
 const QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES = 5;
-const QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS = 250;
+const QUICKBOOKS_HTTP_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_HTTP_TIMEOUT_MS, 15000), 2000),
+  120000,
+);
+const QUICKBOOKS_HTTP_MAX_RETRIES = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_HTTP_MAX_RETRIES, 2), 1),
+  8,
+);
+const QUICKBOOKS_HTTP_RETRY_BASE_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_HTTP_RETRY_BASE_MS, 300), 50),
+  30000,
+);
+const QUICKBOOKS_HTTP_RETRY_JITTER_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_HTTP_RETRY_JITTER_MS, 300), 1),
+  10000,
+);
+const QUICKBOOKS_HTTP_CIRCUIT_FAILURE_THRESHOLD = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_HTTP_CIRCUIT_FAILURE_THRESHOLD, 6), 1),
+  100,
+);
+const QUICKBOOKS_HTTP_CIRCUIT_OPEN_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_HTTP_CIRCUIT_OPEN_MS, 30 * 1000), 1000),
+  10 * 60 * 1000,
+);
+const QUICKBOOKS_SYNC_QUEUE_MAX_PENDING = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_SYNC_QUEUE_MAX_PENDING, 25), 1),
+  500,
+);
+const QUICKBOOKS_SYNC_QUEUE_MAX_AGE_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_SYNC_QUEUE_MAX_AGE_MS, 20 * 60 * 1000), 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
+const QUICKBOOKS_HTTP_RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const QUICKBOOKS_HTTP_RETRYABLE_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETRESET",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
 const QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE = 250;
 const QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT = 0.000001;
 const QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS = 200;
@@ -411,6 +468,11 @@ const ASSISTANT_REVIEW_TABLE_NAME = resolveTableName(
   process.env.DB_ASSISTANT_REVIEW_TABLE_NAME,
   DEFAULT_ASSISTANT_REVIEW_TABLE_NAME,
 );
+const DEFAULT_ASSISTANT_SESSION_SCOPE_TABLE_NAME = "assistant_session_scope";
+const ASSISTANT_SESSION_SCOPE_TABLE_NAME = resolveTableName(
+  process.env.DB_ASSISTANT_SESSION_SCOPE_TABLE_NAME,
+  DEFAULT_ASSISTANT_SESSION_SCOPE_TABLE_NAME,
+);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
@@ -423,6 +485,7 @@ const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MA
 const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CACHE_TABLE_NAME);
 const GHL_LEADS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_LEADS_CACHE_TABLE_NAME);
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
+const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESSION_SCOPE_TABLE_NAME);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
@@ -541,6 +604,16 @@ const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 const MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES = 40 * 1024 * 1024;
+const MINI_UPLOAD_TOKEN_HEADER_NAME = "x-mini-upload-token";
+const MINI_UPLOAD_TOKEN_TTL_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_UPLOAD_TOKEN_TTL_SEC, 600), 60),
+  1800,
+);
+const MINI_UPLOAD_PARSE_MAX_CONCURRENCY = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_UPLOAD_PARSE_MAX_CONCURRENCY, 4), 1),
+  24,
+);
+const MINI_MULTIPART_MAX_CONTENT_LENGTH_BYTES = MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES + 3 * 1024 * 1024;
 const MINI_BLOCKED_FILE_EXTENSIONS = new Set([
   ".html",
   ".htm",
@@ -716,6 +789,7 @@ const ASSISTANT_SESSION_SCOPE_MAX_ENTRIES = Math.min(
   10000,
 );
 const ASSISTANT_SESSION_SCOPE_MAX_CLIENTS = 1200;
+const ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY = "default";
 const ASSISTANT_LLM_MAX_CONTEXT_RECORDS = 18;
 const ASSISTANT_LLM_MAX_NOTES_LENGTH = 220;
 const ASSISTANT_PAYMENT_FIELDS = ["payment1", "payment2", "payment3", "payment4", "payment5", "payment6", "payment7"];
@@ -976,6 +1050,12 @@ const miniAttachmentsUploadDiskMiddleware = ATTACHMENTS_STREAMING_ENABLED
 let dbReadyPromise = null;
 let quickBooksSyncQueue = Promise.resolve();
 const quickBooksSyncJobsById = new Map();
+const quickBooksHttpCircuitState = {
+  consecutiveFailures: 0,
+  openUntilMs: 0,
+  lastFailureAtMs: 0,
+  lastFailureReason: "",
+};
 let quickBooksAutoSyncIntervalId = null;
 let quickBooksAutoSyncInFlightSlotKey = "";
 let quickBooksAutoSyncLastCompletedSlotKey = "";
@@ -987,11 +1067,12 @@ let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
   items: [],
 };
-let assistantSessionScopeCache = new Map();
 let rateLimitSweepCounter = 0;
 const rateLimitRequestBuckets = new Map();
 const loginFailureByAccountKey = new Map();
 const loginFailureByIpAccountKey = new Map();
+let miniUploadParseInFlight = 0;
+const miniUploadParseWaiters = [];
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
@@ -1331,6 +1412,18 @@ function createPerformanceObservabilityState(options = {}) {
       lastErrorMessage: "",
       lastMismatchSummary: null,
     },
+    assistantSessionScope: {
+      store: DATABASE_URL ? "postgres" : "disabled",
+      scopeHit: 0,
+      scopeMiss: 0,
+      scopeSize: 0,
+      scopeEvictions: 0,
+      lastHitAt: null,
+      lastMissAt: null,
+      lastEvictionAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: "",
+    },
   };
 }
 
@@ -1459,6 +1552,50 @@ function recordDualReadCompareError(state, error) {
   state.recordsDualReadCompare.errorCount += 1;
   state.recordsDualReadCompare.lastErrorAt = new Date().toISOString();
   state.recordsDualReadCompare.lastErrorMessage = sanitizeTextValue(error?.message, 600);
+}
+
+function recordAssistantSessionScopeMetricHit(state) {
+  if (!state?.assistantSessionScope) {
+    return;
+  }
+  state.assistantSessionScope.scopeHit += 1;
+  state.assistantSessionScope.lastHitAt = new Date().toISOString();
+}
+
+function recordAssistantSessionScopeMetricMiss(state) {
+  if (!state?.assistantSessionScope) {
+    return;
+  }
+  state.assistantSessionScope.scopeMiss += 1;
+  state.assistantSessionScope.lastMissAt = new Date().toISOString();
+}
+
+function recordAssistantSessionScopeMetricSize(state, rawSize) {
+  if (!state?.assistantSessionScope) {
+    return;
+  }
+  const parsedSize = Number.parseInt(rawSize, 10);
+  state.assistantSessionScope.scopeSize = Number.isFinite(parsedSize) && parsedSize >= 0 ? parsedSize : 0;
+}
+
+function recordAssistantSessionScopeMetricEvictions(state, rawCount) {
+  if (!state?.assistantSessionScope) {
+    return;
+  }
+  const count = Number.parseInt(rawCount, 10);
+  if (!Number.isFinite(count) || count <= 0) {
+    return;
+  }
+  state.assistantSessionScope.scopeEvictions += count;
+  state.assistantSessionScope.lastEvictionAt = new Date().toISOString();
+}
+
+function recordAssistantSessionScopeMetricError(state, error) {
+  if (!state?.assistantSessionScope) {
+    return;
+  }
+  state.assistantSessionScope.lastErrorAt = new Date().toISOString();
+  state.assistantSessionScope.lastErrorMessage = sanitizeTextValue(error?.message, 600);
 }
 
 function startPerformanceObservabilityMonitor(state) {
@@ -1729,6 +1866,7 @@ function buildPerformanceDiagnosticsPayload(state) {
   const eventLoopSorted = getSortedRollingLatencyValues(eventLoopState.sample);
   const dualWriteState = state.recordsDualWrite || {};
   const dualReadCompareState = state.recordsDualReadCompare || {};
+  const assistantSessionScopeState = state.assistantSessionScope || {};
 
   const httpRouteRows = Array.from(httpState.routes.values())
     .sort((left, right) => {
@@ -1854,6 +1992,18 @@ function buildPerformanceDiagnosticsPayload(state) {
       lastMismatchSummary: dualReadCompareState.lastMismatchSummary
         ? buildDualReadCompareSummaryPayload(dualReadCompareState.lastMismatchSummary)
         : null,
+    },
+    assistantSessionScope: {
+      store: sanitizeTextValue(assistantSessionScopeState.store, 40) || "unknown",
+      scope_hit: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeHit),
+      scope_miss: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeMiss),
+      scope_size: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeSize),
+      scope_evictions: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeEvictions),
+      lastHitAt: sanitizeTextValue(assistantSessionScopeState.lastHitAt, 60),
+      lastMissAt: sanitizeTextValue(assistantSessionScopeState.lastMissAt, 60),
+      lastEvictionAt: sanitizeTextValue(assistantSessionScopeState.lastEvictionAt, 60),
+      lastErrorAt: sanitizeTextValue(assistantSessionScopeState.lastErrorAt, 60),
+      lastErrorMessage: sanitizeTextValue(assistantSessionScopeState.lastErrorMessage, 600),
     },
   };
 }
@@ -2070,6 +2220,163 @@ function delayMs(durationMs) {
 function isMultipartRequest(req) {
   const contentType = (req.headers["content-type"] || "").toString().toLowerCase();
   return contentType.includes("multipart/form-data");
+}
+
+function signMiniUploadTokenPayload(encodedPayload) {
+  const payload = sanitizeTextValue(encodedPayload, 8000);
+  return crypto.createHmac("sha256", WEB_AUTH_SESSION_SECRET).update(`mini-upload:${payload}`).digest("hex");
+}
+
+function createMiniUploadToken(user) {
+  const userId = sanitizeTextValue(user?.id, 50);
+  if (!userId) {
+    return {
+      token: "",
+      expiresAtMs: 0,
+    };
+  }
+
+  const expiresAtMs = Date.now() + MINI_UPLOAD_TOKEN_TTL_SEC * 1000;
+  const payload = JSON.stringify({
+    u: userId,
+    e: expiresAtMs,
+  });
+  const encodedPayload = encodeBase64Url(payload);
+  const signature = signMiniUploadTokenPayload(encodedPayload);
+  return {
+    token: `${encodedPayload}.${signature}`,
+    expiresAtMs,
+  };
+}
+
+function parseMiniUploadToken(rawToken) {
+  const token = sanitizeTextValue(rawToken, 1200);
+  if (!token) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Missing upload token. Reopen Mini App.",
+      code: "mini_upload_token_missing",
+    };
+  }
+
+  const separatorIndex = token.lastIndexOf(".");
+  if (separatorIndex <= 0) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Upload token is invalid. Reopen Mini App.",
+      code: "mini_upload_token_invalid",
+    };
+  }
+
+  const encodedPayload = token.slice(0, separatorIndex);
+  const receivedSignature = token.slice(separatorIndex + 1);
+  const expectedSignature = signMiniUploadTokenPayload(encodedPayload);
+  if (!receivedSignature || !safeEqual(receivedSignature, expectedSignature)) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Upload token is invalid. Reopen Mini App.",
+      code: "mini_upload_token_invalid",
+    };
+  }
+
+  let parsedPayload = null;
+  try {
+    parsedPayload = JSON.parse(decodeBase64Url(encodedPayload));
+  } catch {
+    parsedPayload = null;
+  }
+
+  const userId = sanitizeTextValue(parsedPayload?.u, 50);
+  const expiresAtMs = Number.parseInt(parsedPayload?.e, 10);
+  if (!userId || !Number.isFinite(expiresAtMs) || expiresAtMs <= 0) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Upload token is invalid. Reopen Mini App.",
+      code: "mini_upload_token_invalid",
+    };
+  }
+
+  if (expiresAtMs <= Date.now()) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Upload token expired. Tap submit again.",
+      code: "mini_upload_token_expired",
+    };
+  }
+
+  return {
+    ok: true,
+    userId,
+    expiresAtMs,
+  };
+}
+
+function resolveMiniUploadTokenFromRequest(req) {
+  return sanitizeTextValue(req?.headers?.[MINI_UPLOAD_TOKEN_HEADER_NAME], 1200);
+}
+
+function resolveRequestContentLengthBytes(req) {
+  const rawValue = sanitizeTextValue(req?.headers?.["content-length"], 40);
+  if (!rawValue) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function respondMiniRequestEarlyAndClose(req, res, statusCode, payload) {
+  const safeStatus = Number.isFinite(statusCode) ? Math.max(400, Math.min(599, statusCode)) : 400;
+  const safePayload = payload && typeof payload === "object" ? payload : { error: "Request rejected." };
+  res.setHeader("Connection", "close");
+  res.status(safeStatus).json(safePayload);
+  const socket = req?.socket;
+  if (socket && !socket.destroyed) {
+    res.once("finish", () => {
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+    });
+  }
+}
+
+function acquireMiniUploadParseSlot() {
+  if (miniUploadParseInFlight < MINI_UPLOAD_PARSE_MAX_CONCURRENCY) {
+    miniUploadParseInFlight += 1;
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    miniUploadParseWaiters.push(resolve);
+  });
+}
+
+function releaseMiniUploadParseSlot() {
+  const nextWaiter = miniUploadParseWaiters.shift();
+  if (typeof nextWaiter === "function") {
+    nextWaiter();
+    return;
+  }
+
+  miniUploadParseInFlight = Math.max(0, miniUploadParseInFlight - 1);
+}
+
+async function withMiniUploadParseSlot(task) {
+  await acquireMiniUploadParseSlot();
+  try {
+    return await task();
+  } finally {
+    releaseMiniUploadParseSlot();
+  }
 }
 
 function createMiniAttachmentsUploadMiddleware(options = {}) {
@@ -3398,76 +3705,248 @@ function buildAssistantScopeFromEvents(events, range = null, scopeEstablished = 
   return buildAssistantScopeFromComparableList(clientComparables, range, scopeEstablished);
 }
 
-function buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId) {
-  const username = normalizeAssistantComparableText(rawUsername, 160) || "unknown";
-  const sessionId = normalizeAssistantSessionId(rawSessionId) || ASSISTANT_DEFAULT_SESSION_ID;
-  return `${username}::${sessionId}`;
+function normalizeAssistantScopeTenantKey(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 120)
+    .toLowerCase()
+    .replace(/[^a-z0-9_.:-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-._:]+|[-._:]+$/g, "");
+  return normalized || ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY;
 }
 
-function pruneAssistantSessionScopeCache(nowMs = Date.now()) {
-  if (!(assistantSessionScopeCache instanceof Map) || assistantSessionScopeCache.size === 0) {
+function resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId) {
+  const tenantKey = normalizeAssistantScopeTenantKey(rawTenantKey);
+  const userKey = normalizeAssistantComparableText(rawUsername, 160) || "unknown";
+  const sessionKey = normalizeAssistantSessionId(rawSessionId) || ASSISTANT_DEFAULT_SESSION_ID;
+  return {
+    tenantKey,
+    userKey,
+    sessionKey,
+    cacheKey: `${tenantKey}::${userKey}::${sessionKey}`,
+  };
+}
+
+function resolveAssistantSessionScopeTenantKeyFromRequest(req) {
+  const explicitHeaderTenant = sanitizeTextValue(req?.headers?.["x-cbooster-tenant"], 120);
+  const fallbackHeaderTenant = sanitizeTextValue(req?.headers?.["x-tenant-id"], 120);
+  const profileTenant =
+    sanitizeTextValue(req?.webAuthProfile?.tenantId, 120) ||
+    sanitizeTextValue(req?.webAuthProfile?.organizationId, 120) ||
+    sanitizeTextValue(req?.webAuthProfile?.orgId, 120);
+  const hostnameTenant = sanitizeTextValue(req?.hostname, 120);
+  return normalizeAssistantScopeTenantKey(explicitHeaderTenant || fallbackHeaderTenant || profileTenant || hostnameTenant);
+}
+
+function parseAssistantSessionScopeStoreCount(rawValue) {
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+async function getAssistantSessionScopeStoreSize(queryable = pool) {
+  if (!queryable || typeof queryable.query !== "function") {
+    return 0;
+  }
+  const result = await queryable.query(`SELECT COUNT(*)::bigint AS count FROM ${ASSISTANT_SESSION_SCOPE_TABLE}`);
+  return parseAssistantSessionScopeStoreCount(result.rows[0]?.count);
+}
+
+async function pruneAssistantSessionScopeStore(queryable = pool) {
+  if (!queryable || typeof queryable.query !== "function") {
+    return {
+      evictions: 0,
+      size: 0,
+    };
+  }
+
+  let evictions = 0;
+
+  const expiredResult = await queryable.query(`DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE} WHERE expires_at <= NOW()`);
+  evictions += parseAssistantSessionScopeStoreCount(expiredResult?.rowCount);
+
+  let size = await getAssistantSessionScopeStoreSize(queryable);
+  if (size > ASSISTANT_SESSION_SCOPE_MAX_ENTRIES) {
+    const overflow = size - ASSISTANT_SESSION_SCOPE_MAX_ENTRIES;
+    const overflowResult = await queryable.query(
+      `
+        WITH overflow AS (
+          SELECT cache_key
+          FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+          ORDER BY updated_at ASC
+          LIMIT $1
+        )
+        DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+        WHERE cache_key IN (SELECT cache_key FROM overflow)
+      `,
+      [overflow],
+    );
+    const overflowDeleted = parseAssistantSessionScopeStoreCount(overflowResult?.rowCount);
+    evictions += overflowDeleted;
+    size = Math.max(0, size - overflowDeleted);
+  }
+
+  return {
+    evictions,
+    size,
+  };
+}
+
+async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId) {
+  if (!pool) {
+    recordAssistantSessionScopeMetricMiss(performanceObservability);
+    return null;
+  }
+
+  const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
+  try {
+    await ensureDatabaseReady();
+    const result = await pool.query(
+      `
+        SELECT scope
+        FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+        WHERE cache_key = $1
+          AND expires_at > NOW()
+        LIMIT 1
+      `,
+      [identity.cacheKey],
+    );
+
+    if (!result.rows.length) {
+      const expiredDeleteResult = await pool.query(
+        `
+          DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+          WHERE cache_key = $1
+            AND expires_at <= NOW()
+        `,
+        [identity.cacheKey],
+      );
+      const expiredDeleted = parseAssistantSessionScopeStoreCount(expiredDeleteResult?.rowCount);
+      if (expiredDeleted > 0) {
+        recordAssistantSessionScopeMetricEvictions(performanceObservability, expiredDeleted);
+        const size = await getAssistantSessionScopeStoreSize(pool);
+        recordAssistantSessionScopeMetricSize(performanceObservability, size);
+      }
+      recordAssistantSessionScopeMetricMiss(performanceObservability);
+      return null;
+    }
+
+    const normalizedScope = normalizeAssistantScopePayload(result.rows[0]?.scope);
+    if (!normalizedScope) {
+      const invalidDeleteResult = await pool.query(
+        `
+          DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+          WHERE cache_key = $1
+        `,
+        [identity.cacheKey],
+      );
+      const invalidDeleted = parseAssistantSessionScopeStoreCount(invalidDeleteResult?.rowCount);
+      if (invalidDeleted > 0) {
+        recordAssistantSessionScopeMetricEvictions(performanceObservability, invalidDeleted);
+        const size = await getAssistantSessionScopeStoreSize(pool);
+        recordAssistantSessionScopeMetricSize(performanceObservability, size);
+      }
+      recordAssistantSessionScopeMetricMiss(performanceObservability);
+      return null;
+    }
+
+    recordAssistantSessionScopeMetricHit(performanceObservability);
+    return normalizedScope;
+  } catch (error) {
+    recordAssistantSessionScopeMetricError(performanceObservability, error);
+    console.warn(`[assistant][scope-store] get failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
+    return null;
+  }
+}
+
+async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, rawScope) {
+  const scope = normalizeAssistantScopePayload(rawScope);
+  if (!scope || !pool) {
     return;
   }
 
-  for (const [cacheKey, entry] of assistantSessionScopeCache.entries()) {
-    const updatedAtMs = Number.isFinite(entry?.updatedAtMs) ? entry.updatedAtMs : 0;
-    if (!updatedAtMs || nowMs - updatedAtMs > ASSISTANT_SESSION_SCOPE_TTL_MS) {
-      assistantSessionScopeCache.delete(cacheKey);
+  const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
+  const expiresAt = new Date(Date.now() + ASSISTANT_SESSION_SCOPE_TTL_MS).toISOString();
+  let client = null;
+
+  try {
+    await ensureDatabaseReady();
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    await client.query(
+      `
+        INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
+          cache_key,
+          tenant_key,
+          user_key,
+          session_key,
+          scope,
+          updated_at,
+          expires_at
+        )
+        VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), $6::timestamptz)
+        ON CONFLICT (cache_key) DO UPDATE
+        SET tenant_key = EXCLUDED.tenant_key,
+            user_key = EXCLUDED.user_key,
+            session_key = EXCLUDED.session_key,
+            scope = EXCLUDED.scope,
+            updated_at = NOW(),
+            expires_at = EXCLUDED.expires_at
+      `,
+      [identity.cacheKey, identity.tenantKey, identity.userKey, identity.sessionKey, JSON.stringify(scope), expiresAt],
+    );
+
+    const maintenance = await pruneAssistantSessionScopeStore(client);
+    await client.query("COMMIT");
+
+    recordAssistantSessionScopeMetricSize(performanceObservability, maintenance.size);
+    if (maintenance.evictions > 0) {
+      recordAssistantSessionScopeMetricEvictions(performanceObservability, maintenance.evictions);
+    }
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_rollbackError) {
+        // Best effort rollback.
+      }
+    }
+    recordAssistantSessionScopeMetricError(performanceObservability, error);
+    console.warn(`[assistant][scope-store] upsert failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
+  } finally {
+    if (client) {
+      client.release();
     }
   }
+}
 
-  if (assistantSessionScopeCache.size <= ASSISTANT_SESSION_SCOPE_MAX_ENTRIES) {
+async function clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId) {
+  if (!pool) {
+    recordAssistantSessionScopeMetricSize(performanceObservability, 0);
     return;
   }
 
-  const orderedKeys = [...assistantSessionScopeCache.entries()]
-    .sort((left, right) => {
-      const leftUpdatedAt = Number.isFinite(left?.[1]?.updatedAtMs) ? left[1].updatedAtMs : 0;
-      const rightUpdatedAt = Number.isFinite(right?.[1]?.updatedAtMs) ? right[1].updatedAtMs : 0;
-      return leftUpdatedAt - rightUpdatedAt;
-    })
-    .map((entry) => entry[0]);
-
-  const overflow = assistantSessionScopeCache.size - ASSISTANT_SESSION_SCOPE_MAX_ENTRIES;
-  for (let index = 0; index < overflow; index += 1) {
-    assistantSessionScopeCache.delete(orderedKeys[index]);
+  const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
+  try {
+    await ensureDatabaseReady();
+    await pool.query(
+      `
+        DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+        WHERE cache_key = $1
+      `,
+      [identity.cacheKey],
+    );
+    const maintenance = await pruneAssistantSessionScopeStore(pool);
+    recordAssistantSessionScopeMetricSize(performanceObservability, maintenance.size);
+    if (maintenance.evictions > 0) {
+      recordAssistantSessionScopeMetricEvictions(performanceObservability, maintenance.evictions);
+    }
+  } catch (error) {
+    recordAssistantSessionScopeMetricError(performanceObservability, error);
+    console.warn(`[assistant][scope-store] clear failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
   }
-}
-
-function getAssistantSessionScope(rawUsername, rawSessionId) {
-  pruneAssistantSessionScopeCache();
-  const cacheKey = buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId);
-  const cached = assistantSessionScopeCache.get(cacheKey);
-  if (!cached || typeof cached !== "object") {
-    return null;
-  }
-
-  const normalizedScope = normalizeAssistantScopePayload(cached.scope);
-  if (!normalizedScope) {
-    assistantSessionScopeCache.delete(cacheKey);
-    return null;
-  }
-
-  return normalizedScope;
-}
-
-function upsertAssistantSessionScope(rawUsername, rawSessionId, rawScope) {
-  const scope = normalizeAssistantScopePayload(rawScope);
-  if (!scope) {
-    return;
-  }
-
-  pruneAssistantSessionScopeCache();
-  const cacheKey = buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId);
-  assistantSessionScopeCache.set(cacheKey, {
-    updatedAtMs: Date.now(),
-    scope,
-  });
-}
-
-function clearAssistantSessionScope(rawUsername, rawSessionId) {
-  const cacheKey = buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId);
-  assistantSessionScopeCache.delete(cacheKey);
 }
 
 function hasAssistantScopeReferenceInMessage(normalizedMessage) {
@@ -14219,6 +14698,202 @@ function sleepMilliseconds(milliseconds) {
   });
 }
 
+function parseQuickBooksRetryAfterMilliseconds(responseHeaders) {
+  const retryAfterRaw = sanitizeTextValue(responseHeaders?.get?.("retry-after"), 80);
+  if (!retryAfterRaw) {
+    return 0;
+  }
+
+  const seconds = Number.parseInt(retryAfterRaw, 10);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 60 * 1000);
+  }
+
+  const timestamp = Date.parse(retryAfterRaw);
+  if (!Number.isFinite(timestamp)) {
+    return 0;
+  }
+
+  return Math.min(Math.max(0, timestamp - Date.now()), 60 * 1000);
+}
+
+function computeQuickBooksRetryDelayMs(attemptNumber, retryAfterMs = 0) {
+  const normalizedAttempt = Math.max(1, Number.parseInt(attemptNumber, 10) || 1);
+  const exponentialDelay = QUICKBOOKS_HTTP_RETRY_BASE_MS * Math.pow(2, normalizedAttempt - 1);
+  const jitter = Math.floor(Math.random() * (QUICKBOOKS_HTTP_RETRY_JITTER_MS + 1));
+  return Math.min(90 * 1000, Math.max(retryAfterMs, exponentialDelay + jitter));
+}
+
+function isQuickBooksHttpRetryableError(error) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  if (error.name === "AbortError") {
+    return true;
+  }
+
+  const errorCode = sanitizeTextValue(error.code, 80).toUpperCase();
+  if (!errorCode) {
+    return false;
+  }
+
+  return QUICKBOOKS_HTTP_RETRYABLE_ERROR_CODES.has(errorCode);
+}
+
+function isQuickBooksHttpCircuitOpen() {
+  return Date.now() < quickBooksHttpCircuitState.openUntilMs;
+}
+
+function getQuickBooksHttpCircuitRemainingMs() {
+  return Math.max(0, quickBooksHttpCircuitState.openUntilMs - Date.now());
+}
+
+function markQuickBooksHttpSuccess() {
+  quickBooksHttpCircuitState.consecutiveFailures = 0;
+  quickBooksHttpCircuitState.lastFailureAtMs = 0;
+  quickBooksHttpCircuitState.lastFailureReason = "";
+  quickBooksHttpCircuitState.openUntilMs = 0;
+}
+
+function markQuickBooksHttpFailure(reason = "") {
+  quickBooksHttpCircuitState.consecutiveFailures += 1;
+  quickBooksHttpCircuitState.lastFailureAtMs = Date.now();
+  quickBooksHttpCircuitState.lastFailureReason = sanitizeTextValue(reason, 300);
+
+  if (quickBooksHttpCircuitState.consecutiveFailures < QUICKBOOKS_HTTP_CIRCUIT_FAILURE_THRESHOLD) {
+    return;
+  }
+
+  const nextOpenUntil = Date.now() + QUICKBOOKS_HTTP_CIRCUIT_OPEN_MS;
+  const wasOpen = isQuickBooksHttpCircuitOpen();
+  quickBooksHttpCircuitState.openUntilMs = Math.max(quickBooksHttpCircuitState.openUntilMs, nextOpenUntil);
+  if (!wasOpen) {
+    const failureReason = quickBooksHttpCircuitState.lastFailureReason || "unknown";
+    console.warn(
+      `[QuickBooks HTTP] circuit opened for ${Math.round(QUICKBOOKS_HTTP_CIRCUIT_OPEN_MS / 1000)}s after ${quickBooksHttpCircuitState.consecutiveFailures} failures (${failureReason}).`,
+    );
+  }
+}
+
+async function requestQuickBooksJson(url, options = {}) {
+  const endpoint = sanitizeTextValue(url, 3000);
+  const method = sanitizeTextValue(options.method, 12).toUpperCase() || "GET";
+  const requestLabel = sanitizeTextValue(options.requestLabel, 160) || "request";
+  const timeoutMs = Math.min(
+    Math.max(parsePositiveInteger(options.timeoutMs, QUICKBOOKS_HTTP_TIMEOUT_MS), 500),
+    120000,
+  );
+  const rawMaxRetries = Number.parseInt(sanitizeTextValue(options.maxRetries, 20), 10);
+  const maxRetries = Number.isFinite(rawMaxRetries)
+    ? Math.max(0, Math.min(rawMaxRetries, 12))
+    : QUICKBOOKS_HTTP_MAX_RETRIES;
+  const headers = options.headers && typeof options.headers === "object" ? options.headers : {};
+  const retryStatuses =
+    options.retryStatuses instanceof Set && options.retryStatuses.size
+      ? options.retryStatuses
+      : QUICKBOOKS_HTTP_RETRYABLE_STATUSES;
+
+  if (!endpoint) {
+    throw createHttpError(`QuickBooks ${requestLabel} URL is missing.`, 500, "quickbooks_request_invalid");
+  }
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
+    if (isQuickBooksHttpCircuitOpen()) {
+      const retryAfterMs = getQuickBooksHttpCircuitRemainingMs();
+      const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+      const circuitError = createHttpError(
+        `QuickBooks is temporarily unavailable. Retry in ${retryAfterSeconds}s.`,
+        503,
+        "quickbooks_circuit_open",
+      );
+      circuitError.retryAfterSeconds = retryAfterSeconds;
+      throw circuitError;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method,
+        headers,
+        body: options.body,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      const retryableNetworkError = isQuickBooksHttpRetryableError(error);
+      if (retryableNetworkError) {
+        markQuickBooksHttpFailure(`${requestLabel}: ${sanitizeTextValue(error?.name || error?.code || "network", 80)}`);
+      }
+
+      if (retryableNetworkError && attempt <= maxRetries) {
+        const delayMs = computeQuickBooksRetryDelayMs(attempt);
+        await sleepMilliseconds(delayMs);
+        continue;
+      }
+
+      if (error?.name === "AbortError") {
+        throw createHttpError(`QuickBooks ${requestLabel} timed out after ${timeoutMs}ms.`, 504, "quickbooks_timeout");
+      }
+
+      const errorMessage = sanitizeTextValue(error?.message, 300) || "Network error.";
+      throw createHttpError(`QuickBooks ${requestLabel} request failed: ${errorMessage}`, 503, "quickbooks_http_unavailable");
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const responseText = await response.text();
+    let body = null;
+    try {
+      body = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      body = null;
+    }
+
+    if (response.ok) {
+      markQuickBooksHttpSuccess();
+      return {
+        ok: true,
+        status: response.status,
+        body,
+        text: responseText,
+        headers: response.headers,
+      };
+    }
+
+    const shouldRetry = retryStatuses.has(response.status);
+    if (shouldRetry) {
+      markQuickBooksHttpFailure(`${requestLabel}: http_${response.status}`);
+    }
+
+    if (shouldRetry && attempt <= maxRetries) {
+      const retryAfterMs = parseQuickBooksRetryAfterMilliseconds(response.headers);
+      const retryDelayMs = computeQuickBooksRetryDelayMs(attempt, retryAfterMs);
+      await sleepMilliseconds(retryDelayMs);
+      continue;
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      body,
+      text: responseText,
+      headers: response.headers,
+    };
+  }
+
+  throw createHttpError(
+    `QuickBooks ${requestLabel} failed after retries.`,
+    503,
+    "quickbooks_http_unavailable",
+  );
+}
+
 function parseQuickBooksTokenLifetimeSeconds(rawValue) {
   const parsed = Number.parseInt(sanitizeTextValue(rawValue, 40), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -14303,10 +14978,13 @@ async function requestQuickBooksAccessTokenWithRefreshToken(refreshTokenValue) {
     payload.set("redirect_uri", QUICKBOOKS_REDIRECT_URI);
   }
 
-  let response;
+  let result;
   try {
-    response = await fetch(QUICKBOOKS_TOKEN_URL, {
+    result = await requestQuickBooksJson(QUICKBOOKS_TOKEN_URL, {
       method: "POST",
+      requestLabel: "auth token refresh",
+      timeoutMs: QUICKBOOKS_HTTP_TIMEOUT_MS,
+      maxRetries: QUICKBOOKS_HTTP_MAX_RETRIES,
       headers: {
         Authorization: `Basic ${basicCredentials}`,
         Accept: "application/json",
@@ -14317,21 +14995,16 @@ async function requestQuickBooksAccessTokenWithRefreshToken(refreshTokenValue) {
   } catch (error) {
     return {
       ok: false,
-      message: `QuickBooks token request failed: ${sanitizeTextValue(error?.message, 300)}`,
+      message: `QuickBooks token request failed: ${sanitizeTextValue(error?.message, 300) || "Network error."}`,
       invalidRefreshToken: false,
-      httpStatus: 503,
+      httpStatus: error?.httpStatus || 503,
     };
   }
 
-  const responseText = await response.text();
-  let body = null;
-  try {
-    body = responseText ? JSON.parse(responseText) : null;
-  } catch {
-    body = null;
-  }
+  const body = result?.body;
+  const responseText = sanitizeTextValue(result?.text, 4000);
 
-  if (!response.ok) {
+  if (!result?.ok) {
     const details = sanitizeTextValue(body?.error_description || body?.error || responseText, 400);
     return {
       ok: false,
@@ -14427,31 +15100,20 @@ async function fetchQuickBooksEntityInRange(accessToken, entityName, fromDate, t
       minorversion: "75",
     });
 
-    let response;
-    try {
-      response = await fetch(`${endpoint}?${queryParams.toString()}`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json",
-        },
-      });
-    } catch (error) {
-      throw createHttpError(
-        `QuickBooks ${requestLabel} request failed: ${sanitizeTextValue(error?.message, 300)}`,
-        503,
-      );
-    }
+    const result = await requestQuickBooksJson(`${endpoint}?${queryParams.toString()}`, {
+      method: "GET",
+      requestLabel: `${requestLabel} query`,
+      timeoutMs: QUICKBOOKS_HTTP_TIMEOUT_MS,
+      maxRetries: QUICKBOOKS_HTTP_MAX_RETRIES,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
 
-    const responseText = await response.text();
-    let body = null;
-    try {
-      body = responseText ? JSON.parse(responseText) : null;
-    } catch {
-      body = null;
-    }
-
-    if (!response.ok) {
+    if (!result.ok) {
+      const body = result.body;
+      const responseText = result.text;
       const faultError = body?.Fault?.Error?.[0];
       const message = sanitizeTextValue(
         faultError?.Detail || faultError?.Message || responseText || "Unknown QuickBooks API error.",
@@ -14460,6 +15122,7 @@ async function fetchQuickBooksEntityInRange(accessToken, entityName, fromDate, t
       throw createHttpError(`QuickBooks ${requestLabel} query failed. ${message}`, 502);
     }
 
+    const body = result.body;
     const responseItems = body?.QueryResponse?.[normalizedEntityName];
     const pageItems = Array.isArray(responseItems)
       ? responseItems
@@ -14501,58 +15164,42 @@ async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
     minorversion: "75",
   });
 
-  for (let attempt = 1; attempt <= QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES; attempt += 1) {
-    let response;
-    try {
-      response = await fetch(`${endpoint}?${queryParams.toString()}`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json",
-        },
-      });
-    } catch (error) {
-      console.warn(
-        "QuickBooks payment detail request failed:",
-        normalizedPaymentId,
-        sanitizeTextValue(error?.message, 300),
-      );
-      return null;
-    }
-
-    const responseText = await response.text();
-    let body = null;
-    try {
-      body = responseText ? JSON.parse(responseText) : null;
-    } catch {
-      body = null;
-    }
-
-    if (response.ok) {
-      const payment = body?.Payment;
-      if (!payment || typeof payment !== "object") {
-        return null;
-      }
-      return payment;
-    }
-
-    const shouldRetry = response.status === 429 && attempt < QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES;
-    if (shouldRetry) {
-      const retryDelay = QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS * attempt;
-      await sleepMilliseconds(retryDelay);
-      continue;
-    }
-
-    const faultError = body?.Fault?.Error?.[0];
+  let result;
+  try {
+    result = await requestQuickBooksJson(`${endpoint}?${queryParams.toString()}`, {
+      method: "GET",
+      requestLabel: `payment detail ${normalizedPaymentId}`,
+      timeoutMs: QUICKBOOKS_HTTP_TIMEOUT_MS,
+      maxRetries: Math.max(0, QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES - 1),
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
+  } catch (error) {
     console.warn(
-      "QuickBooks payment detail query failed:",
+      "QuickBooks payment detail request failed:",
       normalizedPaymentId,
-      sanitizeTextValue(faultError?.Detail || faultError?.Message || responseText, 400),
+      sanitizeTextValue(error?.message, 300),
     );
     return null;
   }
 
-  return null;
+  if (!result.ok) {
+    const faultError = result?.body?.Fault?.Error?.[0];
+    console.warn(
+      "QuickBooks payment detail query failed:",
+      normalizedPaymentId,
+      sanitizeTextValue(faultError?.Detail || faultError?.Message || result?.text, 400),
+    );
+    return null;
+  }
+
+  const payment = result?.body?.Payment;
+  if (!payment || typeof payment !== "object") {
+    return null;
+  }
+  return payment;
 }
 
 function extractQuickBooksCustomerContact(customerRecord) {
@@ -14593,54 +15240,38 @@ async function fetchQuickBooksCustomerById(accessToken, customerId) {
     minorversion: "75",
   });
 
-  for (let attempt = 1; attempt <= QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES; attempt += 1) {
-    let response;
-    try {
-      response = await fetch(`${endpoint}?${queryParams.toString()}`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json",
-        },
-      });
-    } catch (error) {
-      console.warn(
-        "QuickBooks customer request failed:",
-        normalizedCustomerId,
-        sanitizeTextValue(error?.message, 300),
-      );
-      return null;
-    }
-
-    const responseText = await response.text();
-    let body = null;
-    try {
-      body = responseText ? JSON.parse(responseText) : null;
-    } catch {
-      body = null;
-    }
-
-    if (response.ok) {
-      return extractQuickBooksCustomerContact(body?.Customer);
-    }
-
-    const shouldRetry = response.status === 429 && attempt < QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES;
-    if (shouldRetry) {
-      const retryDelay = QUICKBOOKS_PAYMENT_DETAILS_RETRY_BASE_MS * attempt;
-      await sleepMilliseconds(retryDelay);
-      continue;
-    }
-
-    const faultError = body?.Fault?.Error?.[0];
+  let result;
+  try {
+    result = await requestQuickBooksJson(`${endpoint}?${queryParams.toString()}`, {
+      method: "GET",
+      requestLabel: `customer ${normalizedCustomerId}`,
+      timeoutMs: QUICKBOOKS_HTTP_TIMEOUT_MS,
+      maxRetries: Math.max(0, QUICKBOOKS_PAYMENT_DETAILS_MAX_RETRIES - 1),
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
+  } catch (error) {
     console.warn(
-      "QuickBooks customer query failed:",
+      "QuickBooks customer request failed:",
       normalizedCustomerId,
-      sanitizeTextValue(faultError?.Detail || faultError?.Message || responseText, 400),
+      sanitizeTextValue(error?.message, 300),
     );
     return null;
   }
 
-  return null;
+  if (!result.ok) {
+    const faultError = result?.body?.Fault?.Error?.[0];
+    console.warn(
+      "QuickBooks customer query failed:",
+      normalizedCustomerId,
+      sanitizeTextValue(faultError?.Detail || faultError?.Message || result?.text, 400),
+    );
+    return null;
+  }
+
+  return extractQuickBooksCustomerContact(result?.body?.Customer);
 }
 
 function deriveQuickBooksDepositLinkedAmount(payment) {
@@ -15421,6 +16052,33 @@ async function ensureDatabaseReady() {
       await pool.query(`
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE_NAME}_corrected_at_idx
         ON ${ASSISTANT_REVIEW_TABLE} (corrected_at DESC NULLS LAST)
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE} (
+          cache_key TEXT PRIMARY KEY,
+          tenant_key TEXT NOT NULL DEFAULT '${ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY}',
+          user_key TEXT NOT NULL DEFAULT 'unknown',
+          session_key TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_SESSION_ID}',
+          scope JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          expires_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_expires_at_idx
+        ON ${ASSISTANT_SESSION_SCOPE_TABLE} (expires_at ASC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_updated_at_idx
+        ON ${ASSISTANT_SESSION_SCOPE_TABLE} (updated_at ASC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_tenant_user_session_idx
+        ON ${ASSISTANT_SESSION_SCOPE_TABLE} (tenant_key, user_key, session_key)
       `);
     })().catch((error) => {
       dbReadyPromise = null;
@@ -16838,7 +17496,71 @@ function buildQuickBooksSyncJobPayload(job) {
   };
 }
 
+function countQuickBooksSyncJobsByStatuses(statuses) {
+  const allowedStatuses = Array.isArray(statuses) ? new Set(statuses.map((item) => sanitizeTextValue(item, 40))) : new Set();
+  if (!allowedStatuses.size) {
+    return 0;
+  }
+
+  let count = 0;
+  for (const job of quickBooksSyncJobsById.values()) {
+    const jobStatus = sanitizeTextValue(job?.status, 40);
+    if (allowedStatuses.has(jobStatus)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function markQuickBooksSyncJobFailed(job, message) {
+  if (!job || typeof job !== "object") {
+    return;
+  }
+  if (isQuickBooksSyncJobTerminalStatus(job.status)) {
+    return;
+  }
+
+  const nowIso = new Date().toISOString();
+  job.status = "failed";
+  job.error = sanitizeTextValue(message, 600) || "QuickBooks sync failed.";
+  job.finishedAt = nowIso;
+  job.updatedAt = nowIso;
+}
+
+function dropStaleQuickBooksQueuedJobs() {
+  let droppedCount = 0;
+  const nowMs = Date.now();
+
+  for (const job of quickBooksSyncJobsById.values()) {
+    if (!job || job.status !== "queued") {
+      continue;
+    }
+
+    const queuedAtMs = Date.parse(sanitizeTextValue(job.queuedAt, 80));
+    if (!Number.isFinite(queuedAtMs)) {
+      continue;
+    }
+
+    if (nowMs - queuedAtMs <= QUICKBOOKS_SYNC_QUEUE_MAX_AGE_MS) {
+      continue;
+    }
+
+    markQuickBooksSyncJobFailed(job, "QuickBooks sync job dropped from queue due to age.");
+    droppedCount += 1;
+  }
+
+  if (droppedCount > 0) {
+    console.warn(
+      `[QuickBooks Sync Queue] dropped ${droppedCount} stale jobs older than ${Math.round(QUICKBOOKS_SYNC_QUEUE_MAX_AGE_MS / 1000)}s.`,
+    );
+  }
+
+  return droppedCount;
+}
+
 function pruneQuickBooksSyncJobs() {
+  dropStaleQuickBooksQueuedJobs();
+
   const nowMs = Date.now();
   for (const [jobId, job] of quickBooksSyncJobsById.entries()) {
     if (!isQuickBooksSyncJobTerminalStatus(job?.status)) {
@@ -16922,6 +17644,15 @@ function enqueueQuickBooksSyncJob(range, options = {}) {
     };
   }
 
+  const pendingJobsCount = countQuickBooksSyncJobsByStatuses(["queued", "running"]);
+  if (pendingJobsCount >= QUICKBOOKS_SYNC_QUEUE_MAX_PENDING) {
+    throw createHttpError(
+      "QuickBooks sync queue is full. Please wait and retry.",
+      429,
+      "quickbooks_sync_queue_full",
+    );
+  }
+
   const nowIso = new Date().toISOString();
   const job = {
     id: crypto.randomUUID(),
@@ -16944,6 +17675,13 @@ function enqueueQuickBooksSyncJob(range, options = {}) {
   void queueQuickBooksSyncTask(async () => {
     const targetJob = quickBooksSyncJobsById.get(job.id);
     if (!targetJob) {
+      return;
+    }
+
+    const queuedAtMs = Date.parse(sanitizeTextValue(targetJob.queuedAt, 80));
+    if (Number.isFinite(queuedAtMs) && Date.now() - queuedAtMs > QUICKBOOKS_SYNC_QUEUE_MAX_AGE_MS) {
+      markQuickBooksSyncJobFailed(targetJob, "QuickBooks sync job dropped from queue due to age.");
+      pruneQuickBooksSyncJobs();
       return;
     }
 
@@ -19600,10 +20338,21 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
     return;
   }
 
-  const { job, reused } = enqueueQuickBooksSyncJob(range, {
-    fullSync: shouldTotalRefresh,
-    requestedBy: req.webAuthUser,
-  });
+  let enqueueResult;
+  try {
+    enqueueResult = enqueueQuickBooksSyncJob(range, {
+      fullSync: shouldTotalRefresh,
+      requestedBy: req.webAuthUser,
+    });
+  } catch (error) {
+    res.status(error?.httpStatus || 429).json({
+      error: sanitizeTextValue(error?.message, 400) || "QuickBooks sync queue is unavailable.",
+      code: sanitizeTextValue(error?.code, 60) || "quickbooks_sync_queue_error",
+    });
+    return;
+  }
+
+  const { job, reused } = enqueueResult;
   res.status(202).json({
     ok: true,
     queued: true,
@@ -19719,13 +20468,26 @@ app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAY
   }
 });
 
-app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (req, res) => {
-  const sessionId = normalizeAssistantSessionId(req.body?.sessionId) || ASSISTANT_DEFAULT_SESSION_ID;
-  clearAssistantSessionScope(req.webAuthUser, sessionId);
+app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
 
-  res.json({
-    ok: true,
-  });
+  const sessionId = normalizeAssistantSessionId(req.body?.sessionId) || ASSISTANT_DEFAULT_SESSION_ID;
+  const tenantKey = resolveAssistantSessionScopeTenantKeyFromRequest(req);
+
+  try {
+    await clearAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
+    res.json({
+      ok: true,
+    });
+  } catch (error) {
+    console.error("POST /api/assistant/context/reset failed:", error);
+    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to reset assistant context"));
+  }
 });
 
 app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
@@ -19766,6 +20528,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 
   const mode = normalizeAssistantChatMode(req.body?.mode);
   const sessionId = normalizeAssistantSessionId(req.body?.sessionId) || ASSISTANT_DEFAULT_SESSION_ID;
+  const tenantKey = resolveAssistantSessionScopeTenantKeyFromRequest(req);
   const shouldResetContext = /(reset context|clear context|forget context|сбрось контекст|очисти контекст|забудь контекст)/i.test(
     normalizeAssistantSearchText(message),
   );
@@ -19773,7 +20536,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
   try {
     const state = await getStoredRecords();
     const filteredRecords = filterClientRecordsForWebAuthUser(state.records, req.webAuthProfile);
-    const sessionScope = shouldResetContext ? null : getAssistantSessionScope(req.webAuthUser, sessionId);
+    const sessionScope = shouldResetContext ? null : await getAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
     const fallbackPayload = buildAssistantReplyPayload(message, filteredRecords, state.updatedAt, sessionScope);
     let finalReply = normalizeAssistantReplyForDisplay(fallbackPayload.reply);
     let provider = "rules";
@@ -19803,11 +20566,11 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     );
 
     if (shouldResetContext) {
-      clearAssistantSessionScope(req.webAuthUser, sessionId);
+      await clearAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
     } else if (fallbackScope) {
-      upsertAssistantSessionScope(req.webAuthUser, sessionId, fallbackScope);
+      await upsertAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, fallbackScope);
     } else if (mentionScope && mentionScope.scopeEstablished === true) {
-      upsertAssistantSessionScope(req.webAuthUser, sessionId, mentionScope);
+      await upsertAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, mentionScope);
     }
 
     try {
@@ -20744,6 +21507,21 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
 });
 
 app.post("/api/mini/access", async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.mini.access",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_MINI_ACCESS.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.blockMs,
+      },
+      message: "Mini App access check limit reached. Please wait before retrying.",
+      code: "mini_access_rate_limited",
+    })
+  ) {
+    return;
+  }
+
   const authResult = await verifyTelegramInitData(req.body?.initData);
   if (!authResult.ok) {
     res.status(authResult.status).json({
@@ -20752,16 +21530,85 @@ app.post("/api/mini/access", async (req, res) => {
     return;
   }
 
+  const uploadToken = createMiniUploadToken(authResult.user);
   res.json({
     ok: true,
     user: {
       id: sanitizeTextValue(authResult.user?.id, 50),
       username: sanitizeTextValue(authResult.user?.username, 120),
     },
+    uploadToken: uploadToken.token,
+    uploadTokenExpiresAt: uploadToken.expiresAtMs ? new Date(uploadToken.expiresAtMs).toISOString() : null,
+    uploadTokenTtlSec: MINI_UPLOAD_TOKEN_TTL_SEC,
   });
 });
 
 app.post("/api/mini/clients", async (req, res) => {
+  const multipartRequest = isMultipartRequest(req);
+  let parsedUploadToken = null;
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.mini.write",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_MINI_WRITE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.blockMs,
+      },
+      message: "Mini App write limit reached. Please wait before retrying.",
+      code: "mini_write_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  if (multipartRequest) {
+    const uploadTokenRaw = resolveMiniUploadTokenFromRequest(req);
+    if (!uploadTokenRaw) {
+      respondMiniRequestEarlyAndClose(req, res, 401, {
+        error: "Missing upload token. Reopen Mini App.",
+        code: "mini_upload_token_missing",
+      });
+      return;
+    }
+
+    parsedUploadToken = parseMiniUploadToken(uploadTokenRaw);
+    if (!parsedUploadToken.ok) {
+      respondMiniRequestEarlyAndClose(req, res, parsedUploadToken.status || 401, {
+        error: parsedUploadToken.error || "Upload token is invalid. Reopen Mini App.",
+        code: parsedUploadToken.code || "mini_upload_token_invalid",
+      });
+      return;
+    }
+
+    if (
+      !enforceRateLimit(req, res, {
+        scope: "api.mini.write",
+        userProfile: {
+          windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
+          maxHits: RATE_LIMIT_PROFILE_API_MINI_WRITE.maxHitsUser,
+          blockMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.blockMs,
+        },
+        username: parsedUploadToken.userId,
+        message: "Mini App write limit reached. Please wait before retrying.",
+        code: "mini_write_rate_limited",
+      })
+    ) {
+      return;
+    }
+
+    const contentLengthBytes = resolveRequestContentLengthBytes(req);
+    if (
+      Number.isFinite(contentLengthBytes) &&
+      contentLengthBytes > MINI_MULTIPART_MAX_CONTENT_LENGTH_BYTES
+    ) {
+      respondMiniRequestEarlyAndClose(req, res, 413, {
+        error: "Attachment payload is too large.",
+        code: "mini_multipart_too_large",
+      });
+      return;
+    }
+  }
+
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -20770,8 +21617,8 @@ app.post("/api/mini/clients", async (req, res) => {
   }
 
   try {
-    if (isMultipartRequest(req)) {
-      await parseMiniMultipartRequest(req, res);
+    if (multipartRequest) {
+      await withMiniUploadParseSlot(() => parseMiniMultipartRequest(req, res));
     }
   } catch (error) {
     res.status(error.httpStatus || 400).json({
@@ -20792,6 +21639,15 @@ app.post("/api/mini/clients", async (req, res) => {
   if (!authResult.ok) {
     res.status(authResult.status).json({
       error: authResult.error,
+    });
+    return;
+  }
+
+  const authenticatedUserId = sanitizeTextValue(authResult.user?.id, 50);
+  if (parsedUploadToken && (!authenticatedUserId || authenticatedUserId !== parsedUploadToken.userId)) {
+    res.status(401).json({
+      error: "Upload token user mismatch. Reopen Mini App.",
+      code: "mini_upload_token_user_mismatch",
     });
     return;
   }
