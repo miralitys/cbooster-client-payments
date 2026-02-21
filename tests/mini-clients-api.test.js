@@ -17,6 +17,7 @@ const FAKE_PG_PRELOAD = path.join(PROJECT_ROOT, "tests", "helpers", "fake-pg.cjs
 const TELEGRAM_BOT_TOKEN = "test_bot_token_for_mini_clients";
 const TEST_WEB_AUTH_SESSION_SECRET =
   "mini-clients-test-session-secret-mini-clients-test-session-secret-123456";
+const TEST_WEB_AUTH_PASSWORD_HASH = "$2b$10$MpB./1tOb0ZE6.iPuOikWuHbK3svW2fleu34gqhmYNjy4jQLGn3Gi";
 const MINI_UPLOAD_TOKEN_HEADER_NAME = "x-mini-upload-token";
 
 function delay(ms) {
@@ -1266,6 +1267,91 @@ test("POST /api/mini/clients fails closed when AV scan is enabled but unavailabl
         attachments: [
           {
             fileName: "scan.pdf",
+            mimeType: "application/pdf",
+            bytes: makePdfBytes(256),
+          },
+        ],
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 503);
+      assert.equal(typeof body.error, "string");
+      assert.ok(body.error.includes("security scan is unavailable"));
+    },
+  );
+});
+
+test("POST /api/mini/clients enforces AV scan by default in production", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      NODE_ENV: "production",
+      WEB_AUTH_USERNAME: "owner_secure",
+      WEB_AUTH_PASSWORD_HASH: TEST_WEB_AUTH_PASSWORD_HASH,
+      MINI_ATTACHMENT_AV_SCAN_ENABLED: "",
+      MINI_ATTACHMENT_AV_SCAN_BIN: "",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const initData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 709, username: "av_scan_prod_default_user" },
+      });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+      const response = await postMiniClientsMultipart(baseUrl, {
+        initData,
+        uploadToken,
+        client: buildValidMiniClient({ clientName: "AV Scan Prod Default Client" }),
+        attachments: [
+          {
+            fileName: "scan-default.pdf",
+            mimeType: "application/pdf",
+            bytes: makePdfBytes(256),
+          },
+        ],
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 503);
+      assert.equal(typeof body.error, "string");
+      assert.ok(body.error.includes("security scan is unavailable"));
+    },
+  );
+});
+
+test("POST /api/mini/clients ignores AV fail-open mode in production", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      NODE_ENV: "production",
+      WEB_AUTH_USERNAME: "owner_secure",
+      WEB_AUTH_PASSWORD_HASH: TEST_WEB_AUTH_PASSWORD_HASH,
+      MINI_ATTACHMENT_AV_SCAN_ENABLED: "true",
+      MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN: "true",
+      MINI_ATTACHMENT_AV_SCAN_BIN: "",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const initData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 710, username: "av_scan_prod_fail_open_user" },
+      });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+      const response = await postMiniClientsMultipart(baseUrl, {
+        initData,
+        uploadToken,
+        client: buildValidMiniClient({ clientName: "AV Scan Prod Fail Open Client" }),
+        attachments: [
+          {
+            fileName: "scan-fail-open.pdf",
             mimeType: "application/pdf",
             bytes: makePdfBytes(256),
           },
