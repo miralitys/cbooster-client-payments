@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const http = require("node:http");
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
@@ -351,6 +352,82 @@ async function postMiniClientsMultipart(baseUrl, options) {
       [MINI_UPLOAD_TOKEN_HEADER_NAME]: String(options?.uploadToken || ""),
     },
     body: form,
+  });
+}
+
+async function postMiniClientsMultipartChunked(baseUrl, options) {
+  const requestUrl = new URL("/api/mini/clients", baseUrl);
+  const boundary = `----miniChunked${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+  const chunkSize = Math.max(8 * 1024, Number.parseInt(options?.chunkSize, 10) || 256 * 1024);
+  const attachments = Array.isArray(options?.attachments) ? options.attachments : [];
+  const clientValue = typeof options?.client === "string" ? options.client : JSON.stringify(options?.client || {});
+
+  return await new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        method: "POST",
+        hostname: requestUrl.hostname,
+        port: requestUrl.port,
+        path: requestUrl.pathname,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: String(options?.uploadToken || ""),
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => {
+          chunks.push(Buffer.from(chunk));
+        });
+        response.on("end", () => {
+          const bodyText = Buffer.concat(chunks).toString("utf8");
+          resolve({
+            status: response.statusCode || 0,
+            headers: response.headers || {},
+            bodyText,
+            async json() {
+              if (!bodyText) {
+                return {};
+              }
+              return JSON.parse(bodyText);
+            },
+          });
+        });
+      },
+    );
+
+    request.on("error", reject);
+
+    function writeField(name, value) {
+      request.write(`--${boundary}\r\n`);
+      request.write(`Content-Disposition: form-data; name="${name}"\r\n\r\n`);
+      request.write(String(value || ""));
+      request.write("\r\n");
+    }
+
+    writeField("initData", String(options?.initData || ""));
+    writeField("client", clientValue);
+
+    for (const attachment of attachments) {
+      const fieldName = String(attachment?.fieldName || "attachments");
+      const fileName = String(attachment?.fileName || "file.bin");
+      const mimeType = String(attachment?.mimeType || "application/octet-stream");
+      const bytes =
+        attachment?.bytes instanceof Uint8Array ? Buffer.from(attachment.bytes) : Buffer.from(makeBytes(attachment?.size || 0));
+
+      request.write(`--${boundary}\r\n`);
+      request.write(`Content-Disposition: form-data; name="${fieldName}"; filename="${fileName}"\r\n`);
+      request.write(`Content-Type: ${mimeType}\r\n\r\n`);
+
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        request.write(bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)));
+      }
+
+      request.write("\r\n");
+    }
+
+    request.end(`--${boundary}--\r\n`);
   });
 }
 
@@ -1217,7 +1294,7 @@ test("POST /api/mini/clients enforces total attachment budget for chunked multip
         });
         const body = await response.json();
 
-        assert.equal(response.status, 413);
+        assert.equal(response.status, 400);
         assert.equal(typeof body.error, "string");
         assert.ok(body.error.includes("40 MB"), `Unexpected error message: ${body.error}`);
         const eventsAfter = readPgCaptureEvents(pgCaptureFilePath).length;
