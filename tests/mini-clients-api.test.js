@@ -291,7 +291,8 @@ async function postMiniClientsMultipart(baseUrl, options) {
     const blob = new Blob([bytes], {
       type: String(attachment?.mimeType || "application/octet-stream"),
     });
-    form.append("attachments", blob, String(attachment?.fileName || "file.bin"));
+    const fieldName = String(attachment?.fieldName || "attachments");
+    form.append(fieldName, blob, String(attachment?.fileName || "file.bin"));
   }
 
   return await fetch(`${baseUrl}/api/mini/clients`, {
@@ -442,17 +443,16 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
 });
 
 test("POST /api/mini/clients validates and normalizes Mini payload fields", async (t) => {
-  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-capture-"));
-  const captureFilePath = path.join(captureDir, "telegram-requests.jsonl");
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-normalization-"));
+  const pgCaptureFilePath = path.join(captureDir, "pg-events.jsonl");
 
   try {
     await withServer(
       {
         DATABASE_URL: "postgres://fake/fake",
         TEST_USE_FAKE_PG: "1",
+        TEST_PG_CAPTURE_FILE: pgCaptureFilePath,
         TELEGRAM_BOT_TOKEN,
-        TELEGRAM_NOTIFY_CHAT_ID: "-100700700700",
-        TEST_TELEGRAM_CAPTURE_FILE: captureFilePath,
         TELEGRAM_INIT_DATA_TTL_SEC: "120",
       },
       async ({ baseUrl }) => {
@@ -542,14 +542,21 @@ test("POST /api/mini/clients validates and normalizes Mini payload fields", asyn
           assert.equal(body.ok, true);
           assert.equal(body.status, "pending");
 
-          const messageText = readCapturedSendMessageText(captureFilePath);
-          assert.ok(messageText.includes("- Payment 1 date: 02/03/2026"));
-          assert.ok(messageText.includes("- SSN: 123-45-6789"));
-          assert.ok(messageText.includes("- Client phone number: +1(123)456-7890"));
-          assert.ok(messageText.includes("- Client email address: normalized@example.com"));
-          assert.ok(messageText.includes("- After result: Yes"));
-          assert.ok(messageText.includes("- Written off: Yes"));
-          assert.match(messageText, /- Date when written off: \d{2}\/\d{2}\/\d{4}/);
+          const events = readPgCaptureEvents(pgCaptureFilePath);
+          const submissionInsert = [...events].reverse().find((event) => event.type === "submission_insert");
+          assert.ok(submissionInsert && typeof submissionInsert === "object");
+
+          const record = submissionInsert.record || {};
+          const miniData = submissionInsert.miniData || {};
+
+          assert.equal(record.payment1Date, "02/03/2026");
+          assert.equal(record.afterResult, "Yes");
+          assert.equal(record.writtenOff, "Yes");
+          assert.match(String(record.dateWhenWrittenOff || ""), /^\d{2}\/\d{2}\/\d{4}$/);
+
+          assert.equal(miniData.ssn, "123-45-6789");
+          assert.equal(miniData.clientPhoneNumber, "+1(123)456-7890");
+          assert.equal(miniData.clientEmailAddress, "normalized@example.com");
         });
       },
     );
@@ -883,4 +890,83 @@ test("POST /api/mini/clients enforces attachment security before DB write", asyn
   } finally {
     fs.rmSync(captureDir, { recursive: true, force: true });
   }
+});
+
+test("POST /api/mini/clients maps multer limit errors to safe 400 responses", async (t) => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const initData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 707, username: "multer_limits_user" },
+      });
+      const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+      function assertNoInternalLeak(errorText) {
+        const normalized = String(errorText || "");
+        assert.ok(normalized.length > 0);
+        assert.equal(normalized.includes("MulterError"), false);
+        assert.equal(normalized.includes("stack"), false);
+        assert.equal(/\bat\s+\S+/.test(normalized), false);
+      }
+
+      async function assertMulterErrorCase(attachments, expectedMessagePart) {
+        const response = await postMiniClientsMultipart(baseUrl, {
+          initData,
+          uploadToken,
+          client: { clientName: "Multer Limits Client" },
+          attachments,
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 400);
+        assert.equal(typeof body.error, "string");
+        assert.ok(body.error.includes(expectedMessagePart), `Unexpected error: ${body.error}`);
+        assertNoInternalLeak(body.error);
+      }
+
+      await t.test("LIMIT_FILE_COUNT -> readable 400", async () => {
+        const attachments = Array.from({ length: 11 }, (_, index) => ({
+          fileName: `too-many-${index + 1}.txt`,
+          mimeType: "text/plain",
+          bytes: makeBytes(10),
+        }));
+
+        await assertMulterErrorCase(attachments, "You can upload up to 10 files.");
+      });
+
+      await t.test("LIMIT_FILE_SIZE -> readable 400", async () => {
+        await assertMulterErrorCase(
+          [
+            {
+              fileName: "large.pdf",
+              mimeType: "application/pdf",
+              bytes: makeBytes(10 * 1024 * 1024 + 1),
+            },
+          ],
+          "Each file must be up to 10 MB.",
+        );
+      });
+
+      await t.test("LIMIT_UNEXPECTED_FILE -> readable 400", async () => {
+        await assertMulterErrorCase(
+          [
+            {
+              fieldName: "unexpectedFileField",
+              fileName: "unexpected.pdf",
+              mimeType: "application/pdf",
+              bytes: makeBytes(64),
+            },
+          ],
+          "You can upload up to 10 files.",
+        );
+      });
+    },
+  );
 });
