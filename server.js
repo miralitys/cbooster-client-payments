@@ -23972,8 +23972,8 @@ app.get("*", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, re
   res.redirect(302, "/app/dashboard");
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+function logServerStartupSummary(port) {
+  console.log(`Server is running on port ${port}`);
   console.log("Web auth is enabled. Sign in at /login.");
   console.log(`Web auth users loaded: ${listWebAuthUsers().length}. Owner: ${WEB_AUTH_OWNER_USERNAME}.`);
   if (webAppDistAvailable) {
@@ -24101,4 +24101,23 @@ app.listen(PORT, () => {
   } else {
     console.warn("Assistant voice is running in browser fallback mode. Set ELEVENLABS_API_KEY to enable ElevenLabs TTS.");
   }
-});
+}
+
+function startServer(port = PORT) {
+  return app.listen(port, () => {
+    logServerStartupSummary(port);
+  });
+}
+
+const isDirectServerExecution = require.main === module;
+const isTestRuntime = (process.env.NODE_ENV || "").toString().trim().toLowerCase() === "test";
+const forceAutostartInTestRuntime = resolveOptionalBoolean(process.env.SERVER_AUTOSTART_IN_TEST) === true;
+
+if (isDirectServerExecution && (!isTestRuntime || forceAutostartInTestRuntime)) {
+  startServer(PORT);
+}
+
+module.exports = {
+  app,
+  startServer,
+};
