@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -222,6 +222,13 @@ const SUBMISSION_PRIMARY_FIELDS = [
   "futurePayment",
   "identityIq",
 ];
+const SENSITIVE_DETAIL_FIELDS = new Set([
+  "ssn",
+  "identityIq",
+  "clientEmailAddress",
+  "clientPhoneNumber",
+]);
+const SENSITIVE_REVEAL_DURATION_MS = 45 * 1000;
 
 const MONEY_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -276,6 +283,12 @@ export default function App() {
   const [isLoadingSubmissionFiles, setIsLoadingSubmissionFiles] = useState(false);
   const [submissionFilesError, setSubmissionFilesError] = useState("");
   const [isModerationActionRunning, setIsModerationActionRunning] = useState(false);
+  const [isSensitiveVisible, setIsSensitiveVisible] = useState(false);
+  const [isSensitiveAuthModalVisible, setIsSensitiveAuthModalVisible] = useState(false);
+  const [sensitiveAuthPassword, setSensitiveAuthPassword] = useState("");
+  const [sensitiveAuthError, setSensitiveAuthError] = useState("");
+  const [isSensitiveAuthSubmitting, setIsSensitiveAuthSubmitting] = useState(false);
+  const sensitiveRevealTimeoutRef = useRef(null);
 
   const isAuthenticated = authState === AUTH_STATE_SIGNED_IN;
 
@@ -297,6 +310,10 @@ export default function App() {
   );
 
   const resetAppDataForSignedOut = useCallback(() => {
+    if (sensitiveRevealTimeoutRef.current) {
+      clearTimeout(sensitiveRevealTimeoutRef.current);
+      sensitiveRevealTimeoutRef.current = null;
+    }
     setActiveTab(DEFAULT_TAB);
     setRecords([]);
     setRecordsUpdatedAt("");
@@ -307,6 +324,11 @@ export default function App() {
     setSubmissionFiles([]);
     setSubmissionFilesError("");
     setEditingRecordId("");
+    setIsSensitiveVisible(false);
+    setIsSensitiveAuthModalVisible(false);
+    setSensitiveAuthPassword("");
+    setSensitiveAuthError("");
+    setIsSensitiveAuthSubmitting(false);
     setIsLoadingRecords(false);
     setIsLoadingModeration(false);
     setIsLoadingSubmissionFiles(false);
@@ -398,6 +420,95 @@ export default function App() {
     setAuthError("");
     resetAppDataForSignedOut();
   }, [requestApiJson, resetAppDataForSignedOut]);
+
+  const hideSensitiveDetails = useCallback(() => {
+    if (sensitiveRevealTimeoutRef.current) {
+      clearTimeout(sensitiveRevealTimeoutRef.current);
+      sensitiveRevealTimeoutRef.current = null;
+    }
+    setIsSensitiveVisible(false);
+  }, []);
+
+  const closeRecordDetailsModal = useCallback(() => {
+    setEditingRecordId("");
+    hideSensitiveDetails();
+    setIsSensitiveAuthModalVisible(false);
+    setSensitiveAuthPassword("");
+    setSensitiveAuthError("");
+    setIsSensitiveAuthSubmitting(false);
+  }, [hideSensitiveDetails]);
+
+  const openSensitiveRevealAuth = useCallback(() => {
+    setSensitiveAuthPassword("");
+    setSensitiveAuthError("");
+    setIsSensitiveAuthModalVisible(true);
+  }, []);
+
+  const closeSensitiveRevealAuth = useCallback(() => {
+    if (isSensitiveAuthSubmitting) {
+      return;
+    }
+    setIsSensitiveAuthModalVisible(false);
+    setSensitiveAuthPassword("");
+    setSensitiveAuthError("");
+  }, [isSensitiveAuthSubmitting]);
+
+  const revealSensitiveDetails = useCallback(async () => {
+    const password = sensitiveAuthPassword;
+    const username = (authUser || "").toString().trim();
+
+    if (!password) {
+      setSensitiveAuthError("Enter your password.");
+      return;
+    }
+
+    if (!username) {
+      applyUnauthorizedState("Session expired. Sign in again.");
+      return;
+    }
+
+    setIsSensitiveAuthSubmitting(true);
+    setSensitiveAuthError("");
+
+    try {
+      const body = await requestJson("/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username,
+          password,
+        }),
+      });
+
+      const nextToken = (body?.sessionToken || "").toString();
+      if (nextToken) {
+        setMobileSessionToken(nextToken);
+      }
+      setAuthUser((body?.user?.username || username).toString());
+      setIsSensitiveAuthModalVisible(false);
+      setSensitiveAuthPassword("");
+      setSensitiveAuthError("");
+      setIsSensitiveVisible(true);
+
+      if (sensitiveRevealTimeoutRef.current) {
+        clearTimeout(sensitiveRevealTimeoutRef.current);
+      }
+      sensitiveRevealTimeoutRef.current = setTimeout(() => {
+        setIsSensitiveVisible(false);
+        sensitiveRevealTimeoutRef.current = null;
+      }, SENSITIVE_REVEAL_DURATION_MS);
+    } catch (error) {
+      if (error?.status === 401) {
+        setSensitiveAuthError("Invalid password.");
+      } else {
+        setSensitiveAuthError(error.message || "Failed to verify password.");
+      }
+    } finally {
+      setIsSensitiveAuthSubmitting(false);
+    }
+  }, [applyUnauthorizedState, authUser, sensitiveAuthPassword]);
 
   const loadRecords = useCallback(async () => {
     setRecordsError("");
@@ -570,6 +681,14 @@ export default function App() {
       setEditingRecordId("");
     }
   }, [editingRecordId, editingRecord]);
+
+  useEffect(() => {
+    return () => {
+      if (sensitiveRevealTimeoutRef.current) {
+        clearTimeout(sensitiveRevealTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const dashboardMetrics = useMemo(() => {
     return buildOverviewMetrics(records, overviewPeriod);
@@ -802,18 +921,88 @@ export default function App() {
             visible={Boolean(editingRecord)}
             animationType="slide"
             presentationStyle="pageSheet"
-            onRequestClose={() => setEditingRecordId("")}
+            onRequestClose={closeRecordDetailsModal}
           >
             <SafeAreaView style={styles.modalRoot}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Client Details</Text>
-                <Pressable style={styles.ghostButton} onPress={() => setEditingRecordId("")}>
-                  <Text style={styles.ghostButtonText}>Close</Text>
-                </Pressable>
+                <View style={styles.modalHeaderActions}>
+                  <Pressable
+                    style={[styles.ghostButton, isSensitiveVisible ? styles.warnGhostButton : null]}
+                    onPress={() => {
+                      if (isSensitiveVisible) {
+                        hideSensitiveDetails();
+                      } else {
+                        openSensitiveRevealAuth();
+                      }
+                    }}
+                  >
+                    <Text style={[styles.ghostButtonText, isSensitiveVisible ? styles.warnGhostButtonText : null]}>
+                      {isSensitiveVisible ? "Hide Sensitive" : "Reveal Sensitive"}
+                    </Text>
+                  </Pressable>
+                  <Pressable style={styles.ghostButton} onPress={closeRecordDetailsModal}>
+                    <Text style={styles.ghostButtonText}>Close</Text>
+                  </Pressable>
+                </View>
               </View>
 
-              {editingRecord ? <RecordDetails record={editingRecord} /> : null}
+              {editingRecord ? <RecordDetails record={editingRecord} revealSensitive={isSensitiveVisible} /> : null}
             </SafeAreaView>
+          </Modal>
+
+          <Modal
+            visible={isSensitiveAuthModalVisible}
+            animationType="fade"
+            transparent
+            onRequestClose={closeSensitiveRevealAuth}
+          >
+            <View style={styles.overlayBackdrop}>
+              <View style={styles.overlayCard}>
+                <Text style={styles.overlayTitle}>Reveal sensitive details</Text>
+                <Text style={styles.overlayText}>
+                  Confirm your password to view SSN, phone, email, and IdentityIQ for 45 seconds.
+                </Text>
+
+                {sensitiveAuthError ? <Text style={styles.errorText}>{sensitiveAuthError}</Text> : null}
+
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>Password</Text>
+                  <TextInput
+                    value={sensitiveAuthPassword}
+                    onChangeText={setSensitiveAuthPassword}
+                    placeholder="Password"
+                    placeholderTextColor="#7b8ba5"
+                    style={styles.fieldInput}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    secureTextEntry
+                    editable={!isSensitiveAuthSubmitting}
+                  />
+                </View>
+
+                <View style={styles.overlayActions}>
+                  <Pressable
+                    style={[styles.ghostButton, isSensitiveAuthSubmitting ? styles.disabledButton : null]}
+                    onPress={closeSensitiveRevealAuth}
+                    disabled={isSensitiveAuthSubmitting}
+                  >
+                    <Text style={styles.ghostButtonText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.submitButton, styles.overlayPrimaryButton, isSensitiveAuthSubmitting ? styles.disabledButton : null]}
+                    onPress={() => {
+                      void revealSensitiveDetails();
+                    }}
+                    disabled={isSensitiveAuthSubmitting}
+                  >
+                    <Text style={styles.submitButtonText}>
+                      {isSensitiveAuthSubmitting ? "Verifying..." : "Verify"}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
           </Modal>
 
           <Modal
@@ -1112,8 +1301,11 @@ function ClientsScreen({
   );
 }
 
-function RecordDetails({ record }) {
-  const details = useMemo(() => buildRecordDetails(record), [record]);
+function RecordDetails({ record, revealSensitive }) {
+  const details = useMemo(
+    () => buildRecordDetails(record, Boolean(revealSensitive)),
+    [record, revealSensitive],
+  );
 
   return (
     <ScrollView contentContainerStyle={styles.modalContent}>
@@ -2134,7 +2326,41 @@ function getSubmissionClientField(submission, key) {
   return (client[key] || "").toString().trim();
 }
 
-function buildRecordDetails(record) {
+function maskSensitiveFieldValue(fieldKey, rawValue) {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return "";
+  }
+
+  if (fieldKey === "ssn") {
+    const digits = value.replace(/\D/g, "");
+    if (digits.length) {
+      return `***-**-${digits.slice(-4).padStart(4, "*")}`;
+    }
+    return "***-**-****";
+  }
+
+  if (fieldKey === "clientPhoneNumber") {
+    const digits = value.replace(/\D/g, "");
+    if (digits.length) {
+      return `***-***-${digits.slice(-4).padStart(4, "*")}`;
+    }
+    return "***-***-****";
+  }
+
+  if (fieldKey === "clientEmailAddress") {
+    const [localPart, domain] = value.split("@");
+    if (!localPart || !domain) {
+      return "***";
+    }
+    const maskedLocal = `${localPart.slice(0, 1)}***`;
+    return `${maskedLocal}@${domain}`;
+  }
+
+  return "***";
+}
+
+function buildRecordDetails(record, revealSensitive = false) {
   const source = record && typeof record === "object" ? record : {};
   const details = [];
   const shown = new Set();
@@ -2192,6 +2418,10 @@ function buildRecordDetails(record) {
       continue;
     }
 
+    if (!revealSensitive && SENSITIVE_DETAIL_FIELDS.has(key)) {
+      value = maskSensitiveFieldValue(key, value);
+    }
+
     details.push({
       label: FIELD_LABELS[key] || humanizeKey(key),
       value: value || "-",
@@ -2209,9 +2439,14 @@ function buildRecordDetails(record) {
       continue;
     }
 
+    const visibleValue =
+      !revealSensitive && SENSITIVE_DETAIL_FIELDS.has(key)
+        ? maskSensitiveFieldValue(key, value)
+        : value;
+
     details.push({
       label: FIELD_LABELS[key] || humanizeKey(key),
-      value,
+      value: visibleValue || "-",
     });
   }
 
@@ -2888,6 +3123,11 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: "#0f172a",
   },
+  modalHeaderActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   ghostButton: {
     borderRadius: 10,
     borderWidth: 1,
@@ -2901,10 +3141,53 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontSize: 12,
   },
+  warnGhostButton: {
+    borderColor: "#f2a8a8",
+    backgroundColor: "#fff4f4",
+  },
+  warnGhostButtonText: {
+    color: "#b91c1c",
+  },
   modalContent: {
     padding: 14,
     gap: 12,
     paddingBottom: 22,
+  },
+  overlayBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+  },
+  overlayCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#d6e1ec",
+    padding: 16,
+    gap: 10,
+  },
+  overlayTitle: {
+    fontSize: 20,
+    fontWeight: "800",
+    color: "#0f172a",
+  },
+  overlayText: {
+    fontSize: 13,
+    color: "#526a86",
+  },
+  overlayActions: {
+    marginTop: 4,
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    gap: 8,
+  },
+  overlayPrimaryButton: {
+    marginTop: 0,
+    minWidth: 120,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
   },
   submissionCard: {
     backgroundColor: "#ffffff",
