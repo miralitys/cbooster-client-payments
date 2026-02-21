@@ -845,8 +845,23 @@ const ASSISTANT_SESSION_SCOPE_TTL_MS = Math.min(
 );
 const ASSISTANT_DEFAULT_SESSION_ID = "default";
 const ASSISTANT_SESSION_SCOPE_MAX_ENTRIES = Math.min(
-  Math.max(parsePositiveInteger(process.env.ASSISTANT_SESSION_SCOPE_MAX_ENTRIES, 3000), 100),
-  10000,
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_SESSION_SCOPE_MAX_ENTRIES, 1800), 100),
+  6000,
+);
+const ASSISTANT_SESSION_SCOPE_MAX_SESSIONS_PER_USER = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_SESSION_SCOPE_MAX_SESSIONS_PER_USER, 40), 5),
+  500,
+);
+const ASSISTANT_SESSION_SCOPE_MAX_SCOPE_BYTES = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_SESSION_SCOPE_MAX_SCOPE_BYTES, 48 * 1024), 4 * 1024),
+  512 * 1024,
+);
+const ASSISTANT_SESSION_SCOPE_MAX_TOTAL_BYTES = Math.min(
+  Math.max(
+    parsePositiveInteger(process.env.ASSISTANT_SESSION_SCOPE_MAX_TOTAL_BYTES, 32 * 1024 * 1024),
+    ASSISTANT_SESSION_SCOPE_MAX_SCOPE_BYTES * 4,
+  ),
+  512 * 1024 * 1024,
 );
 const ASSISTANT_SESSION_SCOPE_MAX_CLIENTS = 1200;
 const ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY = "default";
@@ -1513,6 +1528,7 @@ function createPerformanceObservabilityState(options = {}) {
       scopeHit: 0,
       scopeMiss: 0,
       scopeSize: 0,
+      scopeBytes: 0,
       scopeEvictions: 0,
       lastHitAt: null,
       lastMissAt: null,
@@ -1672,6 +1688,14 @@ function recordAssistantSessionScopeMetricSize(state, rawSize) {
   }
   const parsedSize = Number.parseInt(rawSize, 10);
   state.assistantSessionScope.scopeSize = Number.isFinite(parsedSize) && parsedSize >= 0 ? parsedSize : 0;
+}
+
+function recordAssistantSessionScopeMetricBytes(state, rawBytes) {
+  if (!state?.assistantSessionScope) {
+    return;
+  }
+  const parsedBytes = Number.parseInt(rawBytes, 10);
+  state.assistantSessionScope.scopeBytes = Number.isFinite(parsedBytes) && parsedBytes >= 0 ? parsedBytes : 0;
 }
 
 function recordAssistantSessionScopeMetricEvictions(state, rawCount) {
@@ -2094,6 +2118,7 @@ function buildPerformanceDiagnosticsPayload(state) {
       scope_hit: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeHit),
       scope_miss: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeMiss),
       scope_size: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeSize),
+      scope_total_bytes: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeBytes),
       scope_evictions: normalizeDualWriteSummaryValue(assistantSessionScopeState.scopeEvictions),
       lastHitAt: sanitizeTextValue(assistantSessionScopeState.lastHitAt, 60),
       lastMissAt: sanitizeTextValue(assistantSessionScopeState.lastMissAt, 60),
@@ -4066,12 +4091,120 @@ function parseAssistantSessionScopeStoreCount(rawValue) {
   return parsed;
 }
 
-async function getAssistantSessionScopeStoreSize(queryable = pool) {
-  if (!queryable || typeof queryable.query !== "function") {
+function parseAssistantSessionScopeStoreBytes(rawValue) {
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
     return 0;
   }
-  const result = await queryable.query(`SELECT COUNT(*)::bigint AS count FROM ${ASSISTANT_SESSION_SCOPE_TABLE}`);
-  return parseAssistantSessionScopeStoreCount(result.rows[0]?.count);
+  return parsed;
+}
+
+function buildAssistantScopeStoragePayload(rawScope) {
+  const scope = normalizeAssistantScopePayload(rawScope);
+  if (!scope) {
+    return null;
+  }
+
+  const comparables = Array.isArray(scope.clientComparables) ? scope.clientComparables : [];
+  if (!comparables.length) {
+    return null;
+  }
+
+  let left = 1;
+  let right = comparables.length;
+  let bestComparableCount = 0;
+  let bestScopeJson = "";
+  let bestScopeBytes = 0;
+
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2);
+    const candidateScope = {
+      ...scope,
+      clientComparables: comparables.slice(0, mid),
+    };
+    const candidateJson = JSON.stringify(candidateScope);
+    const candidateBytes = Buffer.byteLength(candidateJson, "utf8");
+    if (candidateBytes <= ASSISTANT_SESSION_SCOPE_MAX_SCOPE_BYTES) {
+      bestComparableCount = mid;
+      bestScopeJson = candidateJson;
+      bestScopeBytes = candidateBytes;
+      left = mid + 1;
+    } else {
+      right = mid - 1;
+    }
+  }
+
+  if (bestComparableCount <= 0 || !bestScopeJson) {
+    return null;
+  }
+
+  const storedScope =
+    bestComparableCount === comparables.length
+      ? scope
+      : {
+          ...scope,
+          clientComparables: comparables.slice(0, bestComparableCount),
+        };
+
+  return {
+    scope: storedScope,
+    scopeJson: bestScopeJson,
+    scopeBytes: bestScopeBytes,
+    truncated: bestComparableCount < comparables.length,
+  };
+}
+
+async function getAssistantSessionScopeStoreStats(queryable = pool) {
+  if (!queryable || typeof queryable.query !== "function") {
+    return {
+      size: 0,
+      totalBytes: 0,
+    };
+  }
+
+  const result = await queryable.query(`
+    SELECT
+      COUNT(*)::bigint AS count,
+      COALESCE(SUM(scope_bytes), 0)::bigint AS total_bytes
+    FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+  `);
+  return {
+    size: parseAssistantSessionScopeStoreCount(result.rows[0]?.count),
+    totalBytes: parseAssistantSessionScopeStoreBytes(result.rows[0]?.total_bytes),
+  };
+}
+
+async function pruneAssistantSessionScopeStoreForUser(identity, queryable = pool) {
+  if (!queryable || typeof queryable.query !== "function") {
+    return {
+      evictions: 0,
+    };
+  }
+
+  const perUserOverflowResult = await queryable.query(
+    `
+      WITH ranked AS (
+        SELECT
+          cache_key,
+          ROW_NUMBER() OVER (ORDER BY updated_at DESC, cache_key DESC) AS rn
+        FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+        WHERE tenant_key = $1
+          AND user_key = $2
+      ),
+      overflow AS (
+        SELECT cache_key
+        FROM ranked
+        WHERE rn > $3
+      )
+      DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+      WHERE cache_key IN (SELECT cache_key FROM overflow)
+    `,
+    [identity.tenantKey, identity.userKey, ASSISTANT_SESSION_SCOPE_MAX_SESSIONS_PER_USER],
+  );
+
+  return {
+    evictions: parseAssistantSessionScopeStoreCount(perUserOverflowResult?.rowCount),
+  };
 }
 
 async function pruneAssistantSessionScopeStore(queryable = pool) {
@@ -4079,6 +4212,7 @@ async function pruneAssistantSessionScopeStore(queryable = pool) {
     return {
       evictions: 0,
       size: 0,
+      totalBytes: 0,
     };
   }
 
@@ -4087,30 +4221,39 @@ async function pruneAssistantSessionScopeStore(queryable = pool) {
   const expiredResult = await queryable.query(`DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE} WHERE expires_at <= NOW()`);
   evictions += parseAssistantSessionScopeStoreCount(expiredResult?.rowCount);
 
-  let size = await getAssistantSessionScopeStoreSize(queryable);
-  if (size > ASSISTANT_SESSION_SCOPE_MAX_ENTRIES) {
-    const overflow = size - ASSISTANT_SESSION_SCOPE_MAX_ENTRIES;
+  let stats = await getAssistantSessionScopeStoreStats(queryable);
+  if (stats.size > ASSISTANT_SESSION_SCOPE_MAX_ENTRIES || stats.totalBytes > ASSISTANT_SESSION_SCOPE_MAX_TOTAL_BYTES) {
     const overflowResult = await queryable.query(
       `
-        WITH overflow AS (
-          SELECT cache_key
+        WITH ranked AS (
+          SELECT
+            cache_key,
+            ROW_NUMBER() OVER (ORDER BY updated_at DESC, cache_key DESC) AS rn,
+            SUM(scope_bytes) OVER (ORDER BY updated_at DESC, cache_key DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS bytes_kept
           FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
-          ORDER BY updated_at ASC
-          LIMIT $1
+        ),
+        overflow AS (
+          SELECT cache_key
+          FROM ranked
+          WHERE rn > $1
+             OR bytes_kept > $2
         )
         DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
         WHERE cache_key IN (SELECT cache_key FROM overflow)
       `,
-      [overflow],
+      [ASSISTANT_SESSION_SCOPE_MAX_ENTRIES, ASSISTANT_SESSION_SCOPE_MAX_TOTAL_BYTES],
     );
     const overflowDeleted = parseAssistantSessionScopeStoreCount(overflowResult?.rowCount);
     evictions += overflowDeleted;
-    size = Math.max(0, size - overflowDeleted);
+    if (overflowDeleted > 0) {
+      stats = await getAssistantSessionScopeStoreStats(queryable);
+    }
   }
 
   return {
     evictions,
-    size,
+    size: stats.size,
+    totalBytes: stats.totalBytes,
   };
 }
 
@@ -4146,8 +4289,6 @@ async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId)
       const expiredDeleted = parseAssistantSessionScopeStoreCount(expiredDeleteResult?.rowCount);
       if (expiredDeleted > 0) {
         recordAssistantSessionScopeMetricEvictions(performanceObservability, expiredDeleted);
-        const size = await getAssistantSessionScopeStoreSize(pool);
-        recordAssistantSessionScopeMetricSize(performanceObservability, size);
       }
       recordAssistantSessionScopeMetricMiss(performanceObservability);
       return null;
@@ -4165,8 +4306,6 @@ async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId)
       const invalidDeleted = parseAssistantSessionScopeStoreCount(invalidDeleteResult?.rowCount);
       if (invalidDeleted > 0) {
         recordAssistantSessionScopeMetricEvictions(performanceObservability, invalidDeleted);
-        const size = await getAssistantSessionScopeStoreSize(pool);
-        recordAssistantSessionScopeMetricSize(performanceObservability, size);
       }
       recordAssistantSessionScopeMetricMiss(performanceObservability);
       return null;
@@ -4182,11 +4321,12 @@ async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId)
 }
 
 async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, rawScope) {
-  const scope = normalizeAssistantScopePayload(rawScope);
-  if (!scope || !pool) {
+  const scopeStoragePayload = buildAssistantScopeStoragePayload(rawScope);
+  if (!scopeStoragePayload || !pool) {
     return;
   }
 
+  const { scope, scopeJson, scopeBytes, truncated } = scopeStoragePayload;
   const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
   const expiresAt = new Date(Date.now() + ASSISTANT_SESSION_SCOPE_TTL_MS).toISOString();
   let client = null;
@@ -4204,27 +4344,37 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
           user_key,
           session_key,
           scope,
+          scope_bytes,
           updated_at,
           expires_at
         )
-        VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), $6::timestamptz)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW(), $7::timestamptz)
         ON CONFLICT (cache_key) DO UPDATE
         SET tenant_key = EXCLUDED.tenant_key,
             user_key = EXCLUDED.user_key,
             session_key = EXCLUDED.session_key,
             scope = EXCLUDED.scope,
+            scope_bytes = EXCLUDED.scope_bytes,
             updated_at = NOW(),
             expires_at = EXCLUDED.expires_at
       `,
-      [identity.cacheKey, identity.tenantKey, identity.userKey, identity.sessionKey, JSON.stringify(scope), expiresAt],
+      [identity.cacheKey, identity.tenantKey, identity.userKey, identity.sessionKey, scopeJson, scopeBytes, expiresAt],
     );
 
+    const perUserMaintenance = await pruneAssistantSessionScopeStoreForUser(identity, client);
     const maintenance = await pruneAssistantSessionScopeStore(client);
     await client.query("COMMIT");
 
     recordAssistantSessionScopeMetricSize(performanceObservability, maintenance.size);
-    if (maintenance.evictions > 0) {
-      recordAssistantSessionScopeMetricEvictions(performanceObservability, maintenance.evictions);
+    recordAssistantSessionScopeMetricBytes(performanceObservability, maintenance.totalBytes);
+    const totalEvictions = perUserMaintenance.evictions + maintenance.evictions;
+    if (totalEvictions > 0) {
+      recordAssistantSessionScopeMetricEvictions(performanceObservability, totalEvictions);
+    }
+    if (truncated) {
+      console.warn(
+        `[assistant][scope-store] scope payload truncated to ${scope.clientComparables.length} clients for user=${identity.userKey} session=${identity.sessionKey}`,
+      );
     }
   } catch (error) {
     if (client) {
@@ -4246,6 +4396,7 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
 async function clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId) {
   if (!pool) {
     recordAssistantSessionScopeMetricSize(performanceObservability, 0);
+    recordAssistantSessionScopeMetricBytes(performanceObservability, 0);
     return;
   }
 
@@ -4261,6 +4412,7 @@ async function clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionI
     );
     const maintenance = await pruneAssistantSessionScopeStore(pool);
     recordAssistantSessionScopeMetricSize(performanceObservability, maintenance.size);
+    recordAssistantSessionScopeMetricBytes(performanceObservability, maintenance.totalBytes);
     if (maintenance.evictions > 0) {
       recordAssistantSessionScopeMetricEvictions(performanceObservability, maintenance.evictions);
     }
@@ -16905,9 +17057,21 @@ async function ensureDatabaseReady() {
           user_key TEXT NOT NULL DEFAULT 'unknown',
           session_key TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_SESSION_ID}',
           scope JSONB NOT NULL,
+          scope_bytes INTEGER NOT NULL DEFAULT 0,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           expires_at TIMESTAMPTZ NOT NULL
         )
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${ASSISTANT_SESSION_SCOPE_TABLE}
+        ADD COLUMN IF NOT EXISTS scope_bytes INTEGER NOT NULL DEFAULT 0
+      `);
+
+      await pool.query(`
+        UPDATE ${ASSISTANT_SESSION_SCOPE_TABLE}
+        SET scope_bytes = GREATEST(OCTET_LENGTH(scope::text), 0)
+        WHERE scope_bytes <= 0
       `);
 
       await pool.query(`
@@ -16923,6 +17087,11 @@ async function ensureDatabaseReady() {
       await pool.query(`
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_tenant_user_session_idx
         ON ${ASSISTANT_SESSION_SCOPE_TABLE} (tenant_key, user_key, session_key)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_tenant_user_updated_idx
+        ON ${ASSISTANT_SESSION_SCOPE_TABLE} (tenant_key, user_key, updated_at DESC, cache_key DESC)
       `);
     })().catch((error) => {
       dbReadyPromise = null;
