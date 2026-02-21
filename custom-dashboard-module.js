@@ -2105,6 +2105,12 @@ function registerCustomDashboardModule(config) {
       enabled: false,
       visibleNames: normalizedWidgetSettings.visibleNames,
       managerOptions: [],
+      todaySummary: {
+        outgoing: 0,
+        incoming: 0,
+        missed: 0,
+      },
+      todayByManager: [],
       stats: [],
       missedCalls: [],
     };
@@ -2139,6 +2145,60 @@ function registerCustomDashboardModule(config) {
       }
       if (right.acceptedCalls !== left.acceptedCalls) {
         return right.acceptedCalls - left.acceptedCalls;
+      }
+      return left.managerName.localeCompare(right.managerName, "en-US", { sensitivity: "base" });
+    });
+
+    const todayStart = getCurrentUtcDayStart();
+    const todaySummary = {
+      outgoing: 0,
+      incoming: 0,
+      missed: 0,
+    };
+    const todayMap = new Map();
+
+    for (const call of visibleCalls) {
+      const callDayStart = getUtcDayStart(call.callAtTimestamp);
+      if (callDayStart === null || callDayStart !== todayStart) {
+        continue;
+      }
+
+      const managerName = sanitizeTextValue(call.managerName, 220) || "Unassigned";
+      const key = normalizeComparableText(managerName, 220) || "unassigned";
+      const current = todayMap.get(key) || {
+        managerName,
+        outgoing: 0,
+        incoming: 0,
+        missed: 0,
+      };
+
+      if (call.direction === CUSTOM_DASHBOARD_DIRECTION_OUTGOING) {
+        current.outgoing += 1;
+        todaySummary.outgoing += 1;
+      }
+
+      if (call.direction === CUSTOM_DASHBOARD_DIRECTION_INCOMING) {
+        current.incoming += 1;
+        todaySummary.incoming += 1;
+      }
+
+      if (call.isMissedIncoming) {
+        current.missed += 1;
+        todaySummary.missed += 1;
+      }
+
+      todayMap.set(key, current);
+    }
+
+    const todayByManager = [...todayMap.values()].sort((left, right) => {
+      if (right.outgoing !== left.outgoing) {
+        return right.outgoing - left.outgoing;
+      }
+      if (right.incoming !== left.incoming) {
+        return right.incoming - left.incoming;
+      }
+      if (right.missed !== left.missed) {
+        return right.missed - left.missed;
       }
       return left.managerName.localeCompare(right.managerName, "en-US", { sensitivity: "base" });
     });
@@ -2197,6 +2257,8 @@ function registerCustomDashboardModule(config) {
       enabled: true,
       visibleNames: normalizedWidgetSettings.visibleNames,
       managerOptions,
+      todaySummary,
+      todayByManager,
       stats,
       missedCalls,
     };
