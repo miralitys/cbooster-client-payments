@@ -15682,6 +15682,28 @@ async function fetchQuickBooksChecksInRange(accessToken, fromDate, toDate) {
   });
 }
 
+function isQuickBooksUnsupportedEntityQueryError(error) {
+  const message = sanitizeTextValue(error?.message, 600).toLowerCase();
+  if (!message) {
+    return false;
+  }
+  return message.includes("queryvalidationerror") || message.includes("invalid context declaration");
+}
+
+async function fetchQuickBooksOutgoingEntitySafely(entityLabel, loader) {
+  try {
+    return await loader();
+  } catch (error) {
+    if (!isQuickBooksUnsupportedEntityQueryError(error)) {
+      throw error;
+    }
+    console.warn(
+      `[QuickBooks outgoing] skipped unsupported entity "${sanitizeTextValue(entityLabel, 80) || "unknown"}": ${sanitizeTextValue(error?.message, 300) || "Unknown error."}`,
+    );
+    return [];
+  }
+}
+
 async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
   const normalizedPaymentId = sanitizeTextValue(paymentId, 120);
   if (!normalizedPaymentId) {
@@ -16041,9 +16063,15 @@ function mapQuickBooksCheckAsOutgoing(record) {
 async function listQuickBooksOutgoingTransactionsInRange(fromDate, toDate) {
   const accessToken = await fetchQuickBooksAccessToken();
   const [purchaseRecords, billPaymentRecords, checkRecords] = await Promise.all([
-    fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate),
-    fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate),
-    fetchQuickBooksChecksInRange(accessToken, fromDate, toDate),
+    fetchQuickBooksOutgoingEntitySafely("purchase", () =>
+      fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate),
+    ),
+    fetchQuickBooksOutgoingEntitySafely("billpayment", () =>
+      fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate),
+    ),
+    fetchQuickBooksOutgoingEntitySafely("check", () =>
+      fetchQuickBooksChecksInRange(accessToken, fromDate, toDate),
+    ),
   ]);
 
   const outgoingItems = [
