@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getGhlLeads, getSession } from "@/shared/api";
 import type { GhlLeadRow, GhlLeadsSummary } from "@/shared/types/ghlLeads";
-import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageShell, Panel, Table } from "@/shared/ui";
+import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageShell, Panel, Select, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const EMPTY_SUMMARY: GhlLeadsSummary = {
@@ -15,6 +15,8 @@ const EMPTY_SUMMARY: GhlLeadsSummary = {
 };
 const SPREADSHEET_FORMULA_PREFIX = /^\s*[=+\-@]/;
 type LeadsRangeMode = "today" | "week" | "month";
+const ASSIGNED_FILTER_ALL = "__all__";
+const ASSIGNED_FILTER_UNASSIGNED = "__unassigned__";
 
 export default function LeadsPage() {
   const [items, setItems] = useState<GhlLeadRow[]>([]);
@@ -27,9 +29,53 @@ export default function LeadsPage() {
   const [lastRemovedMissedCallCount, setLastRemovedMissedCallCount] = useState(0);
   const [rangeMode, setRangeMode] = useState<LeadsRangeMode>("today");
   const [isSyncing, setIsSyncing] = useState(false);
+  const [assignedFilter, setAssignedFilter] = useState(ASSIGNED_FILTER_ALL);
+
+  const managerOptions = useMemo(() => {
+    const managersByKey = new Map<string, string>();
+    let hasUnassigned = false;
+
+    for (const item of items) {
+      const assignedTo = (item.assignedTo || "").toString().trim();
+      if (!assignedTo) {
+        hasUnassigned = true;
+        continue;
+      }
+
+      const normalizedKey = assignedTo.toLowerCase();
+      if (!managersByKey.has(normalizedKey)) {
+        managersByKey.set(normalizedKey, assignedTo);
+      }
+    }
+
+    const managers = [...managersByKey.values()].sort((left, right) =>
+      left.localeCompare(right, "en", {
+        sensitivity: "base",
+      }),
+    );
+
+    return {
+      managers,
+      hasUnassigned,
+    };
+  }, [items]);
+
+  const filteredItems = useMemo(() => {
+    if (assignedFilter === ASSIGNED_FILTER_ALL) {
+      return items;
+    }
+
+    if (assignedFilter === ASSIGNED_FILTER_UNASSIGNED) {
+      return items.filter((item) => !(item.assignedTo || "").toString().trim());
+    }
+
+    const normalizedFilter = assignedFilter.toLowerCase();
+    return items.filter((item) => (item.assignedTo || "").toString().trim().toLowerCase() === normalizedFilter);
+  }, [items, assignedFilter]);
 
   const statusText = useMemo(() => {
     const rangeLabel = rangeMode === "week" ? "this week" : rangeMode === "month" ? "this month" : "today";
+    const isManagerFilterActive = assignedFilter !== ASSIGNED_FILTER_ALL;
     if (isLoading) {
       return isSyncing
         ? `Refreshing leads for ${rangeLabel} from GoHighLevel...`
@@ -46,8 +92,24 @@ export default function LeadsPage() {
 
     const excludedMissedCallsText =
       lastRemovedMissedCallCount > 0 ? ` Excluded missed calls: ${lastRemovedMissedCallCount}.` : "";
+    if (isManagerFilterActive) {
+      const selectedManagerLabel =
+        assignedFilter === ASSIGNED_FILTER_UNASSIGNED ? "Unassigned" : assignedFilter;
+      return `Showing ${filteredItems.length} of ${items.length} leads for ${rangeLabel} (${selectedManagerLabel}). Last sync added/updated: ${lastSyncedCount}.${excludedMissedCallsText}`;
+    }
+
     return `Loaded ${items.length} leads for ${rangeLabel}. Last sync added/updated: ${lastSyncedCount}.${excludedMissedCallsText}`;
-  }, [isLoading, isSyncing, items.length, lastSyncedCount, lastRemovedMissedCallCount, loadError, rangeMode]);
+  }, [
+    isLoading,
+    isSyncing,
+    items.length,
+    filteredItems.length,
+    assignedFilter,
+    lastSyncedCount,
+    lastRemovedMissedCallCount,
+    loadError,
+    rangeMode,
+  ]);
 
   const loadLeads = useCallback(async (nextRangeMode: LeadsRangeMode = rangeMode, shouldRefresh = false) => {
     setIsLoading(true);
@@ -80,6 +142,26 @@ export default function LeadsPage() {
       setIsLoading(false);
     }
   }, [canSync, rangeMode]);
+
+  useEffect(() => {
+    if (assignedFilter === ASSIGNED_FILTER_ALL) {
+      return;
+    }
+
+    if (assignedFilter === ASSIGNED_FILTER_UNASSIGNED) {
+      if (managerOptions.hasUnassigned) {
+        return;
+      }
+      setAssignedFilter(ASSIGNED_FILTER_ALL);
+      return;
+    }
+
+    if (managerOptions.managers.includes(assignedFilter)) {
+      return;
+    }
+
+    setAssignedFilter(ASSIGNED_FILTER_ALL);
+  }, [assignedFilter, managerOptions]);
 
   useEffect(() => {
     setIsLoading(false);
@@ -175,12 +257,28 @@ export default function LeadsPage() {
     ];
   }, []);
 
+  const summaryValue = useMemo(() => {
+    if (assignedFilter !== ASSIGNED_FILTER_ALL) {
+      return filteredItems.length;
+    }
+
+    if (rangeMode === "week") {
+      return summary.week || items.length;
+    }
+
+    if (rangeMode === "month") {
+      return summary.month || items.length;
+    }
+
+    return summary.today || items.length;
+  }, [assignedFilter, filteredItems.length, rangeMode, summary, items.length]);
+
   const handleExportCsv = useCallback(() => {
-    if (!items.length) {
+    if (!filteredItems.length) {
       return;
     }
-    exportLeadsToCsv(items, rangeMode);
-  }, [items, rangeMode]);
+    exportLeadsToCsv(filteredItems, rangeMode, assignedFilter);
+  }, [filteredItems, rangeMode, assignedFilter]);
 
   return (
     <PageShell className="leads-react-page">
@@ -216,12 +314,27 @@ export default function LeadsPage() {
             >
               This Month
             </Button>
+            <Select
+              aria-label="Assigned manager filter"
+              className="leads-assigned-filter"
+              value={assignedFilter}
+              onChange={(event) => setAssignedFilter(event.target.value)}
+              disabled={isLoading || !items.length}
+            >
+              <option value={ASSIGNED_FILTER_ALL}>All Managers</option>
+              {managerOptions.hasUnassigned ? <option value={ASSIGNED_FILTER_UNASSIGNED}>Unassigned</option> : null}
+              {managerOptions.managers.map((managerName) => (
+                <option key={managerName} value={managerName}>
+                  {managerName}
+                </option>
+              ))}
+            </Select>
             <Button
               type="button"
               size="sm"
               variant="secondary"
               onClick={handleExportCsv}
-              disabled={isLoading || !items.length}
+              disabled={isLoading || !filteredItems.length}
             >
               Export CSV
             </Button>
@@ -242,7 +355,7 @@ export default function LeadsPage() {
         <div className="leads-summary-react" aria-live="polite">
           <SummaryCard
             title={rangeMode === "week" ? "This Week" : rangeMode === "month" ? "This Month" : "Today"}
-            value={rangeMode === "week" ? summary.week || items.length : rangeMode === "month" ? summary.month || items.length : summary.today || items.length}
+            value={summaryValue}
           />
         </div>
 
@@ -257,23 +370,25 @@ export default function LeadsPage() {
           />
         ) : null}
 
-        {!isLoading && !loadError && !items.length ? (
+        {!isLoading && !loadError && !filteredItems.length ? (
           <EmptyState
             title={
-              rangeMode === "week"
-                ? "Press Refresh to load this week's leads."
-                : rangeMode === "month"
-                  ? "Press Refresh to load this month's leads."
-                  : "Press Refresh to load today's leads."
+              items.length
+                ? "No leads for the selected manager."
+                : rangeMode === "week"
+                  ? "Press Refresh to load this week's leads."
+                  : rangeMode === "month"
+                    ? "Press Refresh to load this month's leads."
+                    : "Press Refresh to load today's leads."
             }
           />
         ) : null}
 
-        {!isLoading && !loadError && items.length ? (
+        {!isLoading && !loadError && filteredItems.length ? (
           <Table
             className="leads-react-table-wrap"
             columns={columns}
-            rows={items}
+            rows={filteredItems}
             rowKey={(item, index) => item.leadId || `${item.createdOn}-${index}`}
             density="compact"
           />
@@ -350,7 +465,7 @@ function formatStatus(statusValue: string): string {
     .replace(/\b\w/g, (symbol) => symbol.toUpperCase());
 }
 
-function exportLeadsToCsv(rows: GhlLeadRow[], filter: string): void {
+function exportLeadsToCsv(rows: GhlLeadRow[], filter: string, assignedFilter: string): void {
   const headers = [
     "Created On",
     "Lead",
@@ -398,7 +513,13 @@ function exportLeadsToCsv(rows: GhlLeadRow[], filter: string): void {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `leads-${filter}-${formatFileDate(new Date())}.csv`;
+  const managerSuffix =
+    assignedFilter === ASSIGNED_FILTER_ALL
+      ? "all-managers"
+      : assignedFilter === ASSIGNED_FILTER_UNASSIGNED
+        ? "unassigned"
+        : sanitizeFileSegment(assignedFilter);
+  link.download = `leads-${filter}-${managerSuffix}-${formatFileDate(new Date())}.csv`;
   document.body.append(link);
   link.click();
   link.remove();
@@ -439,6 +560,18 @@ function formatFileDate(value: Date): string {
   const hours = String(value.getHours()).padStart(2, "0");
   const minutes = String(value.getMinutes()).padStart(2, "0");
   return `${year}${month}${day}-${hours}${minutes}`;
+}
+
+function sanitizeFileSegment(value: string): string {
+  const normalized = (value || "").toString().trim().toLowerCase();
+  if (!normalized) {
+    return "manager";
+  }
+
+  const safe = normalized
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return safe || "manager";
 }
 
 function formatNotesPreview(rawValue: string): string {
