@@ -7,6 +7,29 @@ on:
     branches: [main]
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      mini_changed: ${{ steps.filter.outputs.mini }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed areas
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            mini:
+              - 'mini.js'
+              - 'mini.html'
+              - 'mini-*.js'
+              - 'mini-*.html'
+              - 'tests/mini-*.test.js'
+              - 'tests/mini/**'
+              - 'webapp/src/features/mini-form/**'
+              - 'webapp/scripts/mini-coverage-smoke.mjs'
+
   webapp-quality:
     runs-on: ubuntu-latest
 
@@ -39,6 +62,8 @@ jobs:
         run: npm --prefix webapp run build
 
   mini-app-quality:
+    needs: [changes]
+    if: needs.changes.outputs.mini_changed == 'true'
     runs-on: ubuntu-latest
 
     steps:
