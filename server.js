@@ -20279,6 +20279,23 @@ async function prependSingleRecordToLegacyState(client, record, options = {}) {
   return writeTimestamp;
 }
 
+function shouldWriteLegacyStateOnMiniApproval(options = {}) {
+  const writeV2Enabled = options?.writeV2Enabled === true;
+  const readV2Enabled = options?.readV2Enabled === true;
+  const legacyMirrorEnabled = options?.legacyMirrorEnabled === true;
+
+  if (!writeV2Enabled) {
+    return true;
+  }
+
+  // Keep moderation approve visible in the active read path during mixed-mode rollout.
+  if (!readV2Enabled) {
+    return true;
+  }
+
+  return legacyMirrorEnabled;
+}
+
 async function upsertSingleRecordToV2(client, record, options = {}) {
   const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.writeTimestamp) || new Date().toISOString();
   const snapshot = normalizeLegacyRecordsSnapshot([record], {
@@ -23355,12 +23372,17 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
       );
 
       const approveWriteTimestamp = new Date().toISOString();
+      const shouldWriteLegacyState = shouldWriteLegacyStateOnMiniApproval({
+        writeV2Enabled: WRITE_V2_ENABLED,
+        readV2Enabled: READ_V2_ENABLED,
+        legacyMirrorEnabled: LEGACY_MIRROR_ENABLED,
+      });
       if (WRITE_V2_ENABLED) {
         const v2WriteResult = await upsertSingleRecordToV2(client, submission.record, {
           writeTimestamp: approveWriteTimestamp,
         });
         await upsertLegacyStateRevisionPointer(client, v2WriteResult.writeTimestamp);
-        if (LEGACY_MIRROR_ENABLED) {
+        if (shouldWriteLegacyState) {
           await prependSingleRecordToLegacyState(client, submission.record, {
             writeTimestamp: v2WriteResult.writeTimestamp,
           });
