@@ -6258,6 +6258,33 @@ function hasAssistantScopeReferenceInMessage(normalizedMessage) {
   return hasExplicitEnglishReference || hasExplicitRussianReference;
 }
 
+function resolveAssistantScopeSourceMetadata(options = {}) {
+  const explicitPersisted = options?.explicitPersisted === true;
+  const mentionEphemeral = options?.mentionEphemeral === true;
+
+  if (explicitPersisted) {
+    return {
+      scopeSource: "explicit",
+      scopePersisted: true,
+      scopeEphemeralSource: "none",
+    };
+  }
+
+  if (mentionEphemeral) {
+    return {
+      scopeSource: "none",
+      scopePersisted: false,
+      scopeEphemeralSource: "mention",
+    };
+  }
+
+  return {
+    scopeSource: "none",
+    scopePersisted: false,
+    scopeEphemeralSource: "none",
+  };
+}
+
 function hasAssistantExplicitClientListIntent(normalizedMessage) {
   if (!normalizedMessage) {
     return false;
@@ -24713,7 +24740,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
             filteredRecords,
             parsedDateRange || sessionScope?.range || null,
           );
-    let scopeSource = "none";
+    let scopeMetadata = resolveAssistantScopeSourceMetadata();
 
     if (shouldResetContext) {
       const clearResult = await clearAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, {
@@ -24729,14 +24756,18 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
         clientMessageSeq,
       });
       if (upsertResult.applied) {
-        scopeSource = "explicit";
+        scopeMetadata = resolveAssistantScopeSourceMetadata({
+          explicitPersisted: true,
+        });
       } else if (upsertResult.stale) {
         console.info(
           `[assistant][scope-store] stale upsert ignored user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} session=${sessionId} seq=${clientMessageSeq}`,
         );
       }
     } else if (mentionScope && mentionScope.scopeEstablished === true) {
-      scopeSource = "mention";
+      scopeMetadata = resolveAssistantScopeSourceMetadata({
+        mentionEphemeral: true,
+      });
     }
 
     try {
@@ -24757,7 +24788,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     }
 
     console.info(
-      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} seq=${clientMessageSeq || 0} scope_source=${scopeSource} degraded=${isAssistantDegradedMode ? "1" : "0"}`,
+      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} seq=${clientMessageSeq || 0} scope_source=${scopeMetadata.scopeSource} scope_persisted=${scopeMetadata.scopePersisted ? "1" : "0"} scope_ephemeral=${scopeMetadata.scopeEphemeralSource} degraded=${isAssistantDegradedMode ? "1" : "0"}`,
     );
     if (isAssistantDegradedMode) {
       res.setHeader("X-Assistant-Degraded-Mode", "1");
@@ -24767,7 +24798,9 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
       ok: true,
       reply: normalizedReply,
       clientMentions,
-      scope_source: scopeSource,
+      scope_source: scopeMetadata.scopeSource,
+      scope_persisted: scopeMetadata.scopePersisted,
+      scope_ephemeral_source: scopeMetadata.scopeEphemeralSource,
       suggestions: Array.isArray(fallbackPayload.suggestions) ? fallbackPayload.suggestions.slice(0, 8) : [],
       source: {
         recordsUsed: filteredRecords.length,
@@ -26425,6 +26458,7 @@ module.exports = {
     buildAssistantIntentProfile,
     buildAssistantReplyPayload,
     buildAssistantStaleSnapshotFallbackState,
+    resolveAssistantScopeSourceMetadata,
     sanitizeAssistantReviewTextForStorage,
     resolveAssistantReviewPiiMode,
     buildAssistantReviewRetentionCutoffIso,

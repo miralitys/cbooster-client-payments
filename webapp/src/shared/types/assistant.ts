@@ -1,5 +1,6 @@
 export type AssistantMode = "text" | "voice";
 export type AssistantScopeSource = "explicit" | "mention" | "none";
+export type AssistantScopeEphemeralSource = "mention" | "none";
 
 export interface AssistantChatRequest {
   message: string;
@@ -22,6 +23,8 @@ export interface AssistantChatResponse {
   reply: string;
   clientMentions?: string[];
   scope_source?: AssistantScopeSource;
+  scope_persisted?: boolean;
+  scope_ephemeral_source?: AssistantScopeEphemeralSource;
   suggestions?: string[];
   source?: AssistantChatSource;
 }

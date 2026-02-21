@@ -97,3 +97,24 @@ test("assistant stale snapshot fallback returns null when cache is too old", () 
 
   assert.equal(fallbackState, null);
 });
+
+test("assistant scope source metadata marks mention as ephemeral and non-persistent", () => {
+  const metadata = __assistantInternals.resolveAssistantScopeSourceMetadata({
+    mentionEphemeral: true,
+  });
+
+  assert.equal(metadata.scopeSource, "none");
+  assert.equal(metadata.scopePersisted, false);
+  assert.equal(metadata.scopeEphemeralSource, "mention");
+});
+
+test("assistant scope source metadata marks explicit scope as persisted", () => {
+  const metadata = __assistantInternals.resolveAssistantScopeSourceMetadata({
+    explicitPersisted: true,
+    mentionEphemeral: true,
+  });
+
+  assert.equal(metadata.scopeSource, "explicit");
+  assert.equal(metadata.scopePersisted, true);
+  assert.equal(metadata.scopeEphemeralSource, "none");
+});
