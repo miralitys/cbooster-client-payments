@@ -12,11 +12,32 @@
 		13B07FC11A68108700A75B9A /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 13B07FB71A68108700A75B9A /* main.m */; };
 		329DAD5EA6F0451C860BFEB6 /* noop-file.swift in Sources */ = {isa = PBXBuildFile; fileRef = 263D3F44093E43E5A3F72AD5 /* noop-file.swift */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
+		551E45963812645118ED4DC0 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BD731386451841BD3596CC04 /* Foundation.framework */; };
 		96905EF65AED1B983A6B3ABC /* libPods-CBoosterPayments.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 58EEBF8E8E6FB1BC6CAF49B5 /* libPods-CBoosterPayments.a */; };
+		9926F34559C6455EEAEA89A3 /* CBoosterPaymentsTests.m in Sources */ = {isa = PBXBuildFile; fileRef = D0C38422D51BA1266207D15E /* CBoosterPaymentsTests.m */; };
+		9CFC23360B8F527BF92745F3 /* CBoosterPaymentsUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = DD34FC07F72B44C456E99F36 /* CBoosterPaymentsUITests.m */; };
+		AB45AF0821040393505C3F0A /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BD731386451841BD3596CC04 /* Foundation.framework */; };
 		B18059E884C0ABDD17F3DC3D /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC715A2D49A985799AEE119 /* ExpoModulesProvider.swift */; };
 		B97F237568F5558AE9AE4F3D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 64B64FB99730113C25B5A8EF /* PrivacyInfo.xcprivacy */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		18E329E3769E6AD0B53721C6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 13B07F861A680F5B00A75B9A;
+			remoteInfo = CBoosterPayments;
+		};
+		C14FD9A7476C52B463DA578A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 13B07F861A680F5B00A75B9A;
+			remoteInfo = CBoosterPayments;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		13B07F961A680F5B00A75B9A /* CBoosterPayments.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CBoosterPayments.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -28,11 +49,16 @@
 		263D3F44093E43E5A3F72AD5 /* noop-file.swift */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = sourcecode.swift; name = "noop-file.swift"; path = "CBoosterPayments/noop-file.swift"; sourceTree = "<group>"; };
 		58EEBF8E8E6FB1BC6CAF49B5 /* libPods-CBoosterPayments.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-CBoosterPayments.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		64B64FB99730113C25B5A8EF /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = CBoosterPayments/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		69615BA9D765C78B09BE1D53 /* CBoosterPaymentsUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CBoosterPaymentsUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6C2E3173556A471DD304B334 /* Pods-CBoosterPayments.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-CBoosterPayments.debug.xcconfig"; path = "Target Support Files/Pods-CBoosterPayments/Pods-CBoosterPayments.debug.xcconfig"; sourceTree = "<group>"; };
 		7A4D352CD337FB3A3BF06240 /* Pods-CBoosterPayments.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-CBoosterPayments.release.xcconfig"; path = "Target Support Files/Pods-CBoosterPayments/Pods-CBoosterPayments.release.xcconfig"; sourceTree = "<group>"; };
+		925A065FDAFADE58CCAA1619 /* CBoosterPaymentsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CBoosterPaymentsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		94820BC02F3D448DBC14A4A7 /* CBoosterPayments-Bridging-Header.h */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = sourcecode.c.h; name = "CBoosterPayments-Bridging-Header.h"; path = "CBoosterPayments/CBoosterPayments-Bridging-Header.h"; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = CBoosterPayments/SplashScreen.storyboard; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
+		BD731386451841BD3596CC04 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		D0C38422D51BA1266207D15E /* CBoosterPaymentsTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = CBoosterPaymentsTests.m; sourceTree = "<group>"; };
+		DD34FC07F72B44C456E99F36 /* CBoosterPaymentsUITests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = CBoosterPaymentsUITests.m; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		FAC715A2D49A985799AEE119 /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-CBoosterPayments/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -43,6 +69,22 @@
 			buildActionMask = 2147483647;
 			files = (
 				96905EF65AED1B983A6B3ABC /* libPods-CBoosterPayments.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A50BB63E17A346FFF7613891 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AB45AF0821040393505C3F0A /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CA84A5A529BB33C1F764C5EE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				551E45963812645118ED4DC0 /* Foundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,8 +113,18 @@
 			children = (
 				ED297162215061F000B7C4FE /* JavaScriptCore.framework */,
 				58EEBF8E8E6FB1BC6CAF49B5 /* libPods-CBoosterPayments.a */,
+				BB543DCB90275B1C9410FEAB /* iOS */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		47A58D49F9D0FB21DA564DA6 /* CBoosterPaymentsTests */ = {
+			isa = PBXGroup;
+			children = (
+				D0C38422D51BA1266207D15E /* CBoosterPaymentsTests.m */,
+			);
+			name = CBoosterPaymentsTests;
+			path = CBoosterPaymentsTests;
 			sourceTree = "<group>";
 		};
 		832341AE1AAA6A7D00B99B32 /* Libraries */ = {
@@ -91,6 +143,8 @@
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
 				D65327D7A22EEC0BE12398D9 /* Pods */,
 				D7E4C46ADA2E9064B798F356 /* ExpoModulesProviders */,
+				47A58D49F9D0FB21DA564DA6 /* CBoosterPaymentsTests */,
+				DB6E2B9AF05E419EABBA0D10 /* CBoosterPaymentsUITests */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -101,6 +155,8 @@
 			isa = PBXGroup;
 			children = (
 				13B07F961A680F5B00A75B9A /* CBoosterPayments.app */,
+				925A065FDAFADE58CCAA1619 /* CBoosterPaymentsTests.xctest */,
+				69615BA9D765C78B09BE1D53 /* CBoosterPaymentsUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -122,6 +178,14 @@
 			path = CBoosterPayments/Supporting;
 			sourceTree = "<group>";
 		};
+		BB543DCB90275B1C9410FEAB /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				BD731386451841BD3596CC04 /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
 		D65327D7A22EEC0BE12398D9 /* Pods */ = {
 			isa = PBXGroup;
 			children = (
@@ -137,6 +201,15 @@
 				92DBD88DE9BF7D494EA9DA96 /* CBoosterPayments */,
 			);
 			name = ExpoModulesProviders;
+			sourceTree = "<group>";
+		};
+		DB6E2B9AF05E419EABBA0D10 /* CBoosterPaymentsUITests */ = {
+			isa = PBXGroup;
+			children = (
+				DD34FC07F72B44C456E99F36 /* CBoosterPaymentsUITests.m */,
+			);
+			name = CBoosterPaymentsUITests;
+			path = CBoosterPaymentsUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -163,6 +236,42 @@
 			productName = CBoosterPayments;
 			productReference = 13B07F961A680F5B00A75B9A /* CBoosterPayments.app */;
 			productType = "com.apple.product-type.application";
+		};
+		312D0612956C853D14F4579B /* CBoosterPaymentsUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6E3DD999FC7D24912A679C3E /* Build configuration list for PBXNativeTarget "CBoosterPaymentsUITests" */;
+			buildPhases = (
+				761E2D198E028995B4DF0F64 /* Sources */,
+				CA84A5A529BB33C1F764C5EE /* Frameworks */,
+				EB737A4EE01915EBB9C20D24 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B5FED1B7EE75A642E3C5B2FB /* PBXTargetDependency */,
+			);
+			name = CBoosterPaymentsUITests;
+			productName = CBoosterPaymentsUITests;
+			productReference = 69615BA9D765C78B09BE1D53 /* CBoosterPaymentsUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		7B3A9DDD5697B74A118F158A /* CBoosterPaymentsTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B58C10D96980F70070EB8383 /* Build configuration list for PBXNativeTarget "CBoosterPaymentsTests" */;
+			buildPhases = (
+				52BE49B30AA874F4FF70A4FA /* Sources */,
+				A50BB63E17A346FFF7613891 /* Frameworks */,
+				D696E6739D1403CB47AB21B9 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				68A1E6F47CCC0D06E63E1EDD /* PBXTargetDependency */,
+			);
+			name = CBoosterPaymentsTests;
+			productName = CBoosterPaymentsTests;
+			productReference = 925A065FDAFADE58CCAA1619 /* CBoosterPaymentsTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -191,6 +300,8 @@
 			projectRoot = "";
 			targets = (
 				13B07F861A680F5B00A75B9A /* CBoosterPayments */,
+				7B3A9DDD5697B74A118F158A /* CBoosterPaymentsTests */,
+				312D0612956C853D14F4579B /* CBoosterPaymentsUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -204,6 +315,20 @@
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
 				B97F237568F5558AE9AE4F3D /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D696E6739D1403CB47AB21B9 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EB737A4EE01915EBB9C20D24 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -328,7 +453,38 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		52BE49B30AA874F4FF70A4FA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9926F34559C6455EEAEA89A3 /* CBoosterPaymentsTests.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		761E2D198E028995B4DF0F64 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9CFC23360B8F527BF92745F3 /* CBoosterPaymentsUITests.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		68A1E6F47CCC0D06E63E1EDD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CBoosterPayments;
+			target = 13B07F861A680F5B00A75B9A /* CBoosterPayments */;
+			targetProxy = C14FD9A7476C52B463DA578A /* PBXContainerItemProxy */;
+		};
+		B5FED1B7EE75A642E3C5B2FB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CBoosterPayments;
+			target = 13B07F861A680F5B00A75B9A /* CBoosterPayments */;
+			targetProxy = 18E329E3769E6AD0B53721C6 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		13B07F941A680F5B00A75B9A /* Debug */ = {
@@ -400,6 +556,37 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		367EAEDE1183D8F9AFE8A7FC /* Debug */ = {
+			isa = XCBuildConfiguration;
+				buildSettings = {
+					CLANG_ENABLE_OBJC_WEAK = NO;
+					CODE_SIGN_STYLE = Automatic;
+					GENERATE_INFOPLIST_FILE = YES;
+					IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+					PRODUCT_BUNDLE_IDENTIFIER = com.cbooster.payments.uitests;
+					PRODUCT_NAME = "$(TARGET_NAME)";
+					SDKROOT = iphoneos;
+					SWIFT_VERSION = 5.0;
+					TEST_TARGET_NAME = CBoosterPayments;
+				};
+			name = Debug;
+		};
+		62CC38F8281FDA9DF7ED0BB6 /* Release */ = {
+			isa = XCBuildConfiguration;
+				buildSettings = {
+					CLANG_ENABLE_OBJC_WEAK = NO;
+					CODE_SIGN_STYLE = Automatic;
+					GENERATE_INFOPLIST_FILE = YES;
+					IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+					PRODUCT_BUNDLE_IDENTIFIER = com.cbooster.payments.uitests;
+					PRODUCT_NAME = "$(TARGET_NAME)";
+					SDKROOT = iphoneos;
+					SWIFT_VERSION = 5.0;
+					TEST_TARGET_NAME = CBoosterPayments;
+					VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
 		};
@@ -527,6 +714,39 @@
 			};
 			name = Release;
 		};
+		988EBEBD6E29B1EA18533B93 /* Debug */ = {
+			isa = XCBuildConfiguration;
+				buildSettings = {
+					BUNDLE_LOADER = "$(TEST_HOST)";
+					CLANG_ENABLE_OBJC_WEAK = NO;
+					CODE_SIGN_STYLE = Automatic;
+					GENERATE_INFOPLIST_FILE = YES;
+					IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+					PRODUCT_BUNDLE_IDENTIFIER = com.cbooster.payments.tests;
+					PRODUCT_NAME = "$(TARGET_NAME)";
+					SDKROOT = iphoneos;
+					SWIFT_VERSION = 5.0;
+					TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CBoosterPayments.app/CBoosterPayments";
+				};
+			name = Debug;
+		};
+		D5309C8F7EEDD775D7F0C54A /* Release */ = {
+			isa = XCBuildConfiguration;
+				buildSettings = {
+					BUNDLE_LOADER = "$(TEST_HOST)";
+					CLANG_ENABLE_OBJC_WEAK = NO;
+					CODE_SIGN_STYLE = Automatic;
+					GENERATE_INFOPLIST_FILE = YES;
+					IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+					PRODUCT_BUNDLE_IDENTIFIER = com.cbooster.payments.tests;
+					PRODUCT_NAME = "$(TARGET_NAME)";
+					SDKROOT = iphoneos;
+					SWIFT_VERSION = 5.0;
+					TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CBoosterPayments.app/CBoosterPayments";
+					VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -539,11 +759,29 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		6E3DD999FC7D24912A679C3E /* Build configuration list for PBXNativeTarget "CBoosterPaymentsUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				62CC38F8281FDA9DF7ED0BB6 /* Release */,
+				367EAEDE1183D8F9AFE8A7FC /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		83CBB9FA1A601CBA00E9B192 /* Build configuration list for PBXProject "CBoosterPayments" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				83CBBA201A601CBA00E9B192 /* Debug */,
 				83CBBA211A601CBA00E9B192 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B58C10D96980F70070EB8383 /* Build configuration list for PBXNativeTarget "CBoosterPaymentsTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D5309C8F7EEDD775D7F0C54A /* Release */,
+				988EBEBD6E29B1EA18533B93 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
