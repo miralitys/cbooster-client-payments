@@ -1,4 +1,5 @@
 export interface QuickBooksPaymentRow {
+  transactionId?: string;
   clientName: string;
   clientPhone: string;
   clientEmail: string;
