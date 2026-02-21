@@ -71,7 +71,7 @@ export default function GhlContractsPage() {
 
   const handleDownload = useCallback(async (item: GhlClientContractRow) => {
     const status = normalizeStatus(item.status);
-    if (status !== "ready") {
+    if (status !== "ready" && status !== "no_contract") {
       return;
     }
 
