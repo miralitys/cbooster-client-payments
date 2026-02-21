@@ -27,6 +27,7 @@ const DEFAULT_SUBMIT_BUTTON_LABEL = "Add Client";
 const MINI_ACCESS_RETRY_BASE_DELAY_MS = 1200;
 const MINI_ACCESS_RETRY_MAX_DELAY_MS = 12000;
 const MINI_ACCESS_RETRY_MAX_ATTEMPTS = 4;
+const MINI_ACCESS_FETCH_TIMEOUT_MS = 8000;
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
   ".html",
   ".htm",
@@ -227,14 +228,7 @@ async function verifyMiniAccess(options = {}) {
   updateFormInteractivity();
 
   try {
-    const response = await fetch("/api/mini/access", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ initData }),
-    });
+    const response = await fetchMiniAccessWithTimeout();
 
     const responseBody = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -262,6 +256,7 @@ async function verifyMiniAccess(options = {}) {
     miniUploadToken = "";
     isMiniAccessAllowed = false;
     isAccessCheckInProgress = false;
+    const hadRecoverableAccessError = hasRecoverableAccessError;
     const recoverableError = isRecoverableMiniAccessFailure(error);
     if (recoverableError) {
       hasRecoverableAccessError = true;
@@ -272,6 +267,9 @@ async function verifyMiniAccess(options = {}) {
       miniAccessRetryAttempt = 0;
     }
     updateFormInteractivity();
+    if (quiet && hadRecoverableAccessError && !recoverableError) {
+      setMessage(error.message || "Access denied for Mini App.", "error");
+    }
     if (!quiet) {
       if (recoverableError) {
         setMessage("Temporary access issue. We will retry automatically. Tap Retry access to try now.", "error");
@@ -280,6 +278,54 @@ async function verifyMiniAccess(options = {}) {
       }
     }
   }
+}
+
+async function fetchMiniAccessWithTimeout() {
+  const requestOptions = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ initData }),
+  };
+
+  const supportsAbortController = typeof AbortController === "function";
+  const abortController = supportsAbortController ? new AbortController() : null;
+  let timedOut = false;
+  let timeoutId = 0;
+  const fetchPromise = fetch("/api/mini/access", {
+    ...requestOptions,
+    ...(abortController ? { signal: abortController.signal } : {}),
+  });
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      abortController?.abort();
+      reject(createMiniAccessTimeoutError());
+    }, MINI_ACCESS_FETCH_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([fetchPromise, timeoutPromise]);
+  } catch (error) {
+    if (timedOut) {
+      void fetchPromise.catch(() => {});
+      throw createMiniAccessTimeoutError();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function createMiniAccessTimeoutError() {
+  const timeoutError = new Error("Access check timed out. Please retry.");
+  timeoutError.name = "AbortError";
+  timeoutError.code = "mini_access_timeout";
+  timeoutError.httpStatus = 408;
+  return timeoutError;
 }
 
 function clearMiniAccessRetryTimer() {
@@ -327,12 +373,12 @@ function isRecoverableMiniAccessFailure(error) {
   }
 
   const errorCode = normalizeValue(error?.code);
-  if (new Set(["failed_to_fetch", "networkerror"]).has(errorCode)) {
+  if (new Set(["failed_to_fetch", "networkerror", "mini_access_timeout"]).has(errorCode)) {
     return true;
   }
 
   const errorName = normalizeValue(error?.name);
-  if (errorName === "typeerror") {
+  if (errorName === "typeerror" || errorName === "aborterror") {
     return true;
   }
 

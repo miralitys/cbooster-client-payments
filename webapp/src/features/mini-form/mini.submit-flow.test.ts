@@ -200,6 +200,12 @@ function toFetchResponse(response: FetchResponseConfig) {
   };
 }
 
+function createAbortError() {
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
 function createDeferredFetchMock() {
   const fetchCalls: FetchCall[] = [];
   const pendingResolvers: Array<(response: ReturnType<typeof toFetchResponse>) => void> = [];
@@ -446,7 +452,77 @@ describe("mini.js submit flow", () => {
     expect(fetchCalls).toHaveLength(1);
 
     retryButton.click();
-    await flushAsync();
+    await flushMicrotasks(20);
+
+    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls[1]?.url).toBe("/api/mini/access");
+    expect(getSubmitButton().disabled).toBe(false);
+    expect(retryButton.hidden).toBe(true);
+  });
+
+  it("unblocks Retry access after timeout and allows manual retry", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const telegram = createTelegramWebApp("auth_payload");
+    const fetchCalls: FetchCall[] = [];
+    let accessAttempt = 0;
+    const fetchMock = (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      fetchCalls.push({ url, init });
+
+      if (url !== "/api/mini/access") {
+        throw new Error(`Unexpected fetch call: ${url}`);
+      }
+
+      accessAttempt += 1;
+      if (accessAttempt === 1) {
+        return new Promise<ReturnType<typeof toFetchResponse>>((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal | undefined;
+          if (signal?.aborted) {
+            reject(createAbortError());
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => {
+              reject(createAbortError());
+            },
+            { once: true },
+          );
+        });
+      }
+
+      return Promise.resolve(
+        toFetchResponse({
+          ok: true,
+          status: 200,
+          body: { ok: true, uploadToken: "token-timeout-retry" },
+        }),
+      );
+    };
+
+    loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchMock,
+    });
+
+    fillRequiredClientName("John");
+    await flushMicrotasks();
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(getSubmitButton().disabled).toBe(true);
+
+    vi.advanceTimersByTime(8100);
+    await flushMicrotasks();
+
+    const retryButton = getAccessRetryButton();
+    expect(getMessageText()).toBe("Temporary access issue. We will retry automatically. Tap Retry access to try now.");
+    expect(retryButton.hidden).toBe(false);
+    expect(retryButton.disabled).toBe(false);
+
+    retryButton.click();
+    await flushMicrotasks(20);
 
     expect(fetchCalls).toHaveLength(2);
     expect(fetchCalls[1]?.url).toBe("/api/mini/access");
@@ -468,19 +544,50 @@ describe("mini.js submit flow", () => {
     });
 
     fillRequiredClientName("John");
-    await flushMicrotasks();
+    await flushMicrotasks(20);
 
     expect(fetchCalls).toHaveLength(1);
     expect(getAccessRetryButton().hidden).toBe(false);
     expect(getSubmitButton().disabled).toBe(true);
 
     vi.advanceTimersByTime(2000);
-    await flushMicrotasks();
+    await flushMicrotasks(20);
 
     expect(fetchCalls).toHaveLength(2);
     expect(fetchCalls[1]?.url).toBe("/api/mini/access");
     expect(getAccessRetryButton().hidden).toBe(true);
     expect(getSubmitButton().disabled).toBe(false);
+  });
+
+  it("updates message when auto-retry ends with non-recoverable access error", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const telegram = createTelegramWebApp("auth_payload");
+    const { fetchCalls } = loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchResponses: [
+        { ok: false, status: 503, body: { error: "Temporary outage." } },
+        { ok: false, status: 403, body: { error: "Access denied for Mini App." } },
+      ],
+    });
+
+    fillRequiredClientName("John");
+    await flushMicrotasks(20);
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(getMessageText()).toBe("Temporary access issue. We will retry automatically. Tap Retry access to try now.");
+    expect(getAccessRetryButton().hidden).toBe(false);
+    expect(getSubmitButton().disabled).toBe(true);
+
+    vi.advanceTimersByTime(2000);
+    await flushMicrotasks(20);
+
+    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls[1]?.url).toBe("/api/mini/access");
+    expect(getMessageText()).toBe("Access denied for Mini App.");
+    expect(getAccessRetryButton().hidden).toBe(true);
+    expect(getSubmitButton().disabled).toBe(true);
   });
 
   it("shows API error and triggers error haptic on submit failure", async () => {
