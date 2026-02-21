@@ -2736,6 +2736,12 @@ a {
   gap: var(--layout-block-gap);
 }
 
+.custom-dashboard-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+}
+
 .custom-dashboard-header-actions {
   display: inline-flex;
   flex-wrap: wrap;
@@ -3193,6 +3199,10 @@ a {
   .custom-dashboard-header-actions,
   .custom-dashboard-settings-actions {
     width: 100%;
+    justify-content: flex-start;
+  }
+
+  .custom-dashboard-toolbar {
     justify-content: flex-start;
   }
 
