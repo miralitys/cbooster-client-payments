@@ -37,6 +37,16 @@ const SIMULATE_SLOW_RECORDS_DELAY_MS = 35_000;
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const TELEGRAM_ALLOWED_USER_IDS = parseTelegramAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS);
 const TELEGRAM_INIT_DATA_TTL_SEC = parsePositiveInteger(process.env.TELEGRAM_INIT_DATA_TTL_SEC, 86400);
+const TELEGRAM_INIT_DATA_WRITE_TTL_SEC = Math.min(
+  Math.max(
+    parsePositiveInteger(
+      process.env.TELEGRAM_INIT_DATA_WRITE_TTL_SEC,
+      Math.min(TELEGRAM_INIT_DATA_TTL_SEC, 15 * 60),
+    ),
+    30,
+  ),
+  TELEGRAM_INIT_DATA_TTL_SEC,
+);
 const TELEGRAM_REQUIRED_CHAT_ID = parseOptionalTelegramChatId(process.env.TELEGRAM_REQUIRED_CHAT_ID);
 const TELEGRAM_NOTIFY_CHAT_ID = (process.env.TELEGRAM_NOTIFY_CHAT_ID || "").toString().trim();
 const TELEGRAM_NOTIFY_THREAD_ID = parseOptionalPositiveInteger(process.env.TELEGRAM_NOTIFY_THREAD_ID);
@@ -658,6 +668,21 @@ const MINI_UPLOAD_PARSE_MAX_CONCURRENCY = Math.min(
   24,
 );
 const MINI_MULTIPART_MAX_CONTENT_LENGTH_BYTES = MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES + 3 * 1024 * 1024;
+const MINI_WRITE_INIT_DATA_REPLAY_MAX_KEYS = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_WRITE_INIT_DATA_REPLAY_MAX_KEYS, 50000), 1000),
+  500000,
+);
+const MINI_WRITE_IDEMPOTENCY_TTL_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_WRITE_IDEMPOTENCY_TTL_SEC, 6 * 60 * 60), 60),
+  7 * 24 * 60 * 60,
+);
+const MINI_WRITE_IDEMPOTENCY_MAX_KEYS = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_WRITE_IDEMPOTENCY_MAX_KEYS, 50000), 1000),
+  500000,
+);
+const MINI_WRITE_IDEMPOTENCY_KEY_MIN_LENGTH = 8;
+const MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH = 180;
+const MINI_IDEMPOTENCY_KEY_HEADER_NAMES = ["idempotency-key", "x-idempotency-key"];
 const MINI_REVIEW_PURGE_ENABLED = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_ENABLED) !== false;
 const MINI_REVIEW_PURGE_ATTACHMENTS = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_ATTACHMENTS) !== false;
 const MINI_REVIEW_PURGE_SENSITIVE_DATA = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_SENSITIVE_DATA) !== false;
@@ -1171,6 +1196,11 @@ let miniUploadParseInFlight = 0;
 const miniUploadParseWaiters = [];
 let miniTelegramNotificationQueue = Promise.resolve();
 let miniTelegramNotificationQueueDepth = 0;
+let miniRetentionSweepIntervalId = null;
+let miniRetentionSweepInFlight = false;
+const miniWriteInitDataReplayUsedByKey = new Map();
+const miniWriteInitDataReplayInFlightByKey = new Map();
+const miniWriteIdempotencyByKey = new Map();
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
@@ -2439,6 +2469,230 @@ function parseMiniUploadToken(rawToken) {
     userId,
     expiresAtMs,
   };
+}
+
+function resolveMiniIdempotencyKeyFromRequest(req) {
+  for (const headerName of MINI_IDEMPOTENCY_KEY_HEADER_NAMES) {
+    const headerValue = sanitizeTextValue(req?.headers?.[headerName], MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH + 40);
+    if (!headerValue) {
+      continue;
+    }
+
+    const normalizedKey = headerValue.trim();
+    if (
+      normalizedKey.length < MINI_WRITE_IDEMPOTENCY_KEY_MIN_LENGTH ||
+      normalizedKey.length > MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH ||
+      !/^[A-Za-z0-9._:-]+$/.test(normalizedKey)
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Invalid Idempotency-Key header. Use ${MINI_WRITE_IDEMPOTENCY_KEY_MIN_LENGTH}-${MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH} chars: letters, digits, ., _, :, -.`,
+        code: "mini_idempotency_key_invalid",
+      };
+    }
+
+    return {
+      ok: true,
+      key: normalizedKey,
+    };
+  }
+
+  return {
+    ok: true,
+    key: "",
+  };
+}
+
+function buildMiniWriteInitDataReplayKey(authResult) {
+  const userId = sanitizeTextValue(authResult?.user?.id, 50);
+  const authDate = Number.parseInt(authResult?.authDate, 10);
+  const initDataHash = sanitizeTextValue(authResult?.initDataHash, 128).toLowerCase();
+  const queryId = sanitizeTextValue(authResult?.queryId, 500);
+  if (!userId || !Number.isFinite(authDate) || authDate <= 0 || !initDataHash) {
+    return "";
+  }
+  return `${userId}:${authDate}:${queryId}:${initDataHash}`;
+}
+
+function resolveMiniWriteInitDataReplayExpiresAtMs(authResult) {
+  const authDate = Number.parseInt(authResult?.authDate, 10);
+  const nowMs = Date.now();
+  if (!Number.isFinite(authDate) || authDate <= 0) {
+    return nowMs + TELEGRAM_INIT_DATA_WRITE_TTL_SEC * 1000;
+  }
+  return Math.max(nowMs + 1000, (authDate + TELEGRAM_INIT_DATA_WRITE_TTL_SEC) * 1000);
+}
+
+function sweepMiniWriteInitDataReplayState(nowMs = Date.now()) {
+  for (const [key, expiresAtMs] of miniWriteInitDataReplayUsedByKey.entries()) {
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+      miniWriteInitDataReplayUsedByKey.delete(key);
+    }
+  }
+  for (const [key, expiresAtMs] of miniWriteInitDataReplayInFlightByKey.entries()) {
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+      miniWriteInitDataReplayInFlightByKey.delete(key);
+    }
+  }
+
+  while (miniWriteInitDataReplayUsedByKey.size > MINI_WRITE_INIT_DATA_REPLAY_MAX_KEYS) {
+    const oldestKey = miniWriteInitDataReplayUsedByKey.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    miniWriteInitDataReplayUsedByKey.delete(oldestKey);
+  }
+}
+
+function reserveMiniWriteInitDataReplayKey(replayKey, expiresAtMs) {
+  const normalizedReplayKey = sanitizeTextValue(replayKey, 900);
+  if (!normalizedReplayKey) {
+    return {
+      ok: true,
+      reservation: null,
+    };
+  }
+
+  const nowMs = Date.now();
+  sweepMiniWriteInitDataReplayState(nowMs);
+
+  if (miniWriteInitDataReplayUsedByKey.has(normalizedReplayKey)) {
+    return {
+      ok: false,
+      status: 409,
+      error: "This Telegram session was already used. Reopen Mini App before submitting again.",
+      code: "mini_init_data_replay",
+    };
+  }
+
+  if (miniWriteInitDataReplayInFlightByKey.has(normalizedReplayKey)) {
+    return {
+      ok: false,
+      status: 409,
+      error: "The same Telegram session is already being submitted. Please wait.",
+      code: "mini_init_data_replay_in_flight",
+    };
+  }
+
+  const safeExpiresAtMs = Math.max(nowMs + 1000, Number.isFinite(expiresAtMs) ? expiresAtMs : nowMs + TELEGRAM_INIT_DATA_WRITE_TTL_SEC * 1000);
+  miniWriteInitDataReplayInFlightByKey.set(normalizedReplayKey, safeExpiresAtMs);
+  return {
+    ok: true,
+    reservation: {
+      key: normalizedReplayKey,
+      expiresAtMs: safeExpiresAtMs,
+    },
+  };
+}
+
+function releaseMiniWriteInitDataReplayKeyReservation(reservation, markAsUsed) {
+  if (!reservation || !reservation.key) {
+    return;
+  }
+
+  miniWriteInitDataReplayInFlightByKey.delete(reservation.key);
+  if (markAsUsed) {
+    miniWriteInitDataReplayUsedByKey.set(reservation.key, Math.max(Date.now() + 1000, reservation.expiresAtMs || 0));
+    if (miniWriteInitDataReplayUsedByKey.size > MINI_WRITE_INIT_DATA_REPLAY_MAX_KEYS) {
+      const oldestKey = miniWriteInitDataReplayUsedByKey.keys().next().value;
+      if (oldestKey) {
+        miniWriteInitDataReplayUsedByKey.delete(oldestKey);
+      }
+    }
+  }
+}
+
+function sweepMiniWriteIdempotencyState(nowMs = Date.now()) {
+  for (const [cacheKey, entry] of miniWriteIdempotencyByKey.entries()) {
+    if (!entry || !Number.isFinite(entry.expiresAtMs) || entry.expiresAtMs <= nowMs) {
+      miniWriteIdempotencyByKey.delete(cacheKey);
+    }
+  }
+
+  while (miniWriteIdempotencyByKey.size > MINI_WRITE_IDEMPOTENCY_MAX_KEYS) {
+    const oldestKey = miniWriteIdempotencyByKey.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    miniWriteIdempotencyByKey.delete(oldestKey);
+  }
+}
+
+function reserveMiniWriteIdempotency(userId, rawIdempotencyKey) {
+  const normalizedUserId = sanitizeTextValue(userId, 50);
+  const normalizedIdempotencyKey = sanitizeTextValue(rawIdempotencyKey, MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH);
+  if (!normalizedUserId || !normalizedIdempotencyKey) {
+    return {
+      ok: true,
+      reservation: null,
+    };
+  }
+
+  const cacheKey = `${normalizedUserId}:${normalizedIdempotencyKey}`;
+  const nowMs = Date.now();
+  sweepMiniWriteIdempotencyState(nowMs);
+
+  const existingEntry = miniWriteIdempotencyByKey.get(cacheKey);
+  if (existingEntry && Number.isFinite(existingEntry.expiresAtMs) && existingEntry.expiresAtMs > nowMs) {
+    if (existingEntry.state === "done") {
+      return {
+        ok: false,
+        replayed: true,
+        status: existingEntry.status,
+        body: existingEntry.body,
+      };
+    }
+
+    return {
+      ok: false,
+      status: 409,
+      error: "Duplicate request is already in progress. Please wait and retry.",
+      code: "mini_idempotency_in_flight",
+    };
+  }
+
+  const expiresAtMs = nowMs + MINI_WRITE_IDEMPOTENCY_TTL_SEC * 1000;
+  miniWriteIdempotencyByKey.set(cacheKey, {
+    state: "in_flight",
+    expiresAtMs,
+  });
+  return {
+    ok: true,
+    reservation: {
+      cacheKey,
+      expiresAtMs,
+    },
+  };
+}
+
+function commitMiniWriteIdempotencySuccess(reservation, statusCode, responseBody) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  const safeStatus = Number.isFinite(statusCode) ? Math.max(200, Math.min(299, statusCode)) : 201;
+  const safeBody =
+    responseBody && typeof responseBody === "object" && !Array.isArray(responseBody)
+      ? JSON.parse(JSON.stringify(responseBody))
+      : { ok: true };
+  miniWriteIdempotencyByKey.set(reservation.cacheKey, {
+    state: "done",
+    expiresAtMs: reservation.expiresAtMs || Date.now() + MINI_WRITE_IDEMPOTENCY_TTL_SEC * 1000,
+    status: safeStatus,
+    body: safeBody,
+  });
+}
+
+function releaseMiniWriteIdempotencyReservation(reservation) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  const existingEntry = miniWriteIdempotencyByKey.get(reservation.cacheKey);
+  if (existingEntry && existingEntry.state === "in_flight") {
+    miniWriteIdempotencyByKey.delete(reservation.cacheKey);
+  }
 }
 
 function resolveMiniUploadTokenFromRequest(req) {
@@ -15783,7 +16037,7 @@ function sortQuickBooksTransactionsByDateDesc(items) {
   });
 }
 
-async function verifyTelegramInitData(rawInitData) {
+async function verifyTelegramInitData(rawInitData, options = {}) {
   if (!TELEGRAM_BOT_TOKEN) {
     return {
       ok: false,
@@ -15821,8 +16075,12 @@ async function verifyTelegramInitData(rawInitData) {
     };
   }
 
+  const ttlSec = Math.max(
+    1,
+    parsePositiveInteger(options?.ttlSec, TELEGRAM_INIT_DATA_TTL_SEC),
+  );
   const nowSeconds = Math.floor(Date.now() / 1000);
-  if (Math.abs(nowSeconds - authDate) > TELEGRAM_INIT_DATA_TTL_SEC) {
+  if (Math.abs(nowSeconds - authDate) > ttlSec) {
     return {
       ok: false,
       status: 401,
@@ -15857,6 +16115,8 @@ async function verifyTelegramInitData(rawInitData) {
     ok: true,
     user,
     authDate,
+    initDataHash: receivedHash,
+    queryId: sanitizeTextValue(params.get("query_id"), 500),
   };
 }
 
@@ -22193,11 +22453,21 @@ app.post("/api/mini/access", async (req, res) => {
     uploadToken: uploadToken.token,
     uploadTokenExpiresAt: uploadToken.expiresAtMs ? new Date(uploadToken.expiresAtMs).toISOString() : null,
     uploadTokenTtlSec: MINI_UPLOAD_TOKEN_TTL_SEC,
+    writeInitDataTtlSec: TELEGRAM_INIT_DATA_WRITE_TTL_SEC,
   });
 });
 
 app.post("/api/mini/clients", async (req, res) => {
   const multipartRequest = isMultipartRequest(req);
+  const idempotencyKeyResult = resolveMiniIdempotencyKeyFromRequest(req);
+  if (!idempotencyKeyResult.ok) {
+    res.status(idempotencyKeyResult.status || 400).json({
+      error: idempotencyKeyResult.error || "Invalid Idempotency-Key header.",
+      code: idempotencyKeyResult.code || "mini_idempotency_key_invalid",
+    });
+    return;
+  }
+  const idempotencyKey = idempotencyKeyResult.key;
   let parsedUploadToken = null;
   if (
     !enforceRateLimit(req, res, {
@@ -22288,7 +22558,9 @@ app.post("/api/mini/clients", async (req, res) => {
     return;
   }
 
-  const authResult = await verifyTelegramInitData(parsedPayload.initData);
+  const authResult = await verifyTelegramInitData(parsedPayload.initData, {
+    ttlSec: TELEGRAM_INIT_DATA_WRITE_TTL_SEC,
+  });
   if (!authResult.ok) {
     res.status(authResult.status).json({
       error: authResult.error,
@@ -22339,7 +22611,43 @@ app.post("/api/mini/clients", async (req, res) => {
     return;
   }
 
+  let writeReplayReservation = null;
+  let writeReplayReservationShouldPersist = false;
+  let writeIdempotencyReservation = null;
   try {
+    const idempotencyReservationResult = reserveMiniWriteIdempotency(authenticatedUserId, idempotencyKey);
+    if (!idempotencyReservationResult.ok) {
+      if (idempotencyReservationResult.replayed) {
+        res.setHeader("Idempotency-Replayed", "true");
+        res.status(idempotencyReservationResult.status || 201).json(
+          idempotencyReservationResult.body && typeof idempotencyReservationResult.body === "object"
+            ? idempotencyReservationResult.body
+            : { ok: true },
+        );
+        return;
+      }
+
+      res.status(idempotencyReservationResult.status || 409).json({
+        error: idempotencyReservationResult.error || "Duplicate request.",
+        code: idempotencyReservationResult.code || "mini_idempotency_conflict",
+      });
+      return;
+    }
+    writeIdempotencyReservation = idempotencyReservationResult.reservation;
+
+    const replayReservationResult = reserveMiniWriteInitDataReplayKey(
+      buildMiniWriteInitDataReplayKey(authResult),
+      resolveMiniWriteInitDataReplayExpiresAtMs(authResult),
+    );
+    if (!replayReservationResult.ok) {
+      res.status(replayReservationResult.status || 409).json({
+        error: replayReservationResult.error || "Duplicate request.",
+        code: replayReservationResult.code || "mini_init_data_replay",
+      });
+      return;
+    }
+    writeReplayReservation = replayReservationResult.reservation;
+
     const submission = await queueClientSubmission(
       creationResult.record,
       authResult.user,
@@ -22347,13 +22655,16 @@ app.post("/api/mini/clients", async (req, res) => {
       attachmentsResult.attachments,
     );
 
-    res.status(201).json({
+    const successResponsePayload = {
       ok: true,
       status: submission.status,
       submissionId: submission.id,
       submittedAt: submission.submittedAt,
       attachmentsCount: submission.attachmentsCount || 0,
-    });
+    };
+    commitMiniWriteIdempotencySuccess(writeIdempotencyReservation, 201, successResponsePayload);
+    writeReplayReservationShouldPersist = true;
+    res.status(201).json(successResponsePayload);
 
     enqueueMiniSubmissionTelegramNotification(
       creationResult.record,
@@ -22366,6 +22677,11 @@ app.post("/api/mini/clients", async (req, res) => {
     console.error("POST /api/mini/clients failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to submit client"));
   } finally {
+    releaseMiniWriteIdempotencyReservation(writeIdempotencyReservation);
+    releaseMiniWriteInitDataReplayKeyReservation(
+      writeReplayReservation,
+      writeReplayReservationShouldPersist,
+    );
     await cleanupTemporaryAttachmentFiles(attachmentsResult.attachments || []);
     await cleanupTemporaryUploadFiles(req.files);
   }
