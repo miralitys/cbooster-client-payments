@@ -176,6 +176,13 @@ function assertExactObjectKeys(value, expectedKeys) {
   assert.deepEqual(actualKeys, normalizedExpectedKeys);
 }
 
+function assertObjectContainsKeys(value, requiredKeys) {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value));
+  for (const key of requiredKeys) {
+    assert.ok(Object.prototype.hasOwnProperty.call(value, key), `Expected key "${key}" in payload.`);
+  }
+}
+
 test("POST /api/mini/access returns 503 when Telegram auth token is missing", async () => {
   await withServer(
     {
@@ -320,12 +327,18 @@ test("POST /api/mini/access keeps stable response contract for auth fail/success
         const body = await response.json();
 
         assert.equal(response.status, 200);
-        assertExactObjectKeys(body, ["ok", "user"]);
+        assertObjectContainsKeys(body, ["ok", "user", "uploadToken", "uploadTokenExpiresAt", "uploadTokenTtlSec"]);
         assert.equal(body.ok, true);
         assert.ok(body.user && typeof body.user === "object" && !Array.isArray(body.user));
         assertExactObjectKeys(body.user, ["id", "username"]);
         assert.equal(body.user.id, "456");
         assert.equal(body.user.username, "contract_user");
+        assert.equal(typeof body.uploadToken, "string");
+        assert.ok(body.uploadToken.length > 20);
+        assert.equal(typeof body.uploadTokenTtlSec, "number");
+        assert.ok(Number.isFinite(body.uploadTokenTtlSec));
+        assert.equal(typeof body.uploadTokenExpiresAt, "string");
+        assert.ok(!Number.isNaN(Date.parse(body.uploadTokenExpiresAt)));
       });
     },
   );
