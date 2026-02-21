@@ -340,6 +340,20 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
 const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_RAW = normalizeWebAuthConfigValue(
+  process.env.QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY,
+);
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID =
+  sanitizeTextValue(process.env.QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID, 120) || "default";
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_ALGORITHM = "aes-256-gcm";
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_IV_LENGTH_BYTES = 12;
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_AUTH_TAG_LENGTH_BYTES = 16;
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY = deriveQuickBooksRefreshTokenEncryptionKey(
+  QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_RAW || WEB_AUTH_SESSION_SECRET,
+);
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_SOURCE = QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_RAW
+  ? "QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY"
+  : "WEB_AUTH_SESSION_SECRET";
 const QUICKBOOKS_REALM_ID = (process.env.QUICKBOOKS_REALM_ID || "").toString().trim();
 const QUICKBOOKS_REDIRECT_URI = (process.env.QUICKBOOKS_REDIRECT_URI || "").toString().trim();
 const QUICKBOOKS_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
@@ -16432,8 +16446,116 @@ function toIsoTimestampFromNow(secondsFromNow) {
   return new Date(Date.now() + secondsFromNow * 1000).toISOString();
 }
 
-async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIso = "") {
-  if (!pool) {
+function deriveQuickBooksRefreshTokenEncryptionKey(rawKeySeed) {
+  const normalizedSeed = normalizeWebAuthConfigValue(rawKeySeed);
+  if (!normalizedSeed) {
+    return null;
+  }
+
+  return crypto.createHash("sha256").update(normalizedSeed, "utf8").digest();
+}
+
+function encryptQuickBooksRefreshTokenForStorage(refreshToken) {
+  const normalizedRefreshToken = sanitizeTextValue(refreshToken, 6000);
+  if (!normalizedRefreshToken || !QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY) {
+    return null;
+  }
+
+  const iv = crypto.randomBytes(QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_IV_LENGTH_BYTES);
+  const cipher = crypto.createCipheriv(
+    QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_ALGORITHM,
+    QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY,
+    iv,
+    {
+      authTagLength: QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_AUTH_TAG_LENGTH_BYTES,
+    },
+  );
+  const encryptedBuffer = Buffer.concat([
+    cipher.update(normalizedRefreshToken, "utf8"),
+    cipher.final(),
+  ]);
+  const authTag = cipher.getAuthTag();
+
+  return {
+    refreshTokenEncrypted: encryptedBuffer.toString("base64"),
+    refreshTokenIv: iv.toString("base64"),
+    refreshTokenAuthTag: authTag.toString("base64"),
+    refreshTokenKeyId: QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID,
+  };
+}
+
+function decryptQuickBooksRefreshTokenFromStorageRow(row) {
+  if (!row || !QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY) {
+    return "";
+  }
+
+  const refreshTokenEncrypted = sanitizeTextValue(row?.refresh_token_encrypted, 12000);
+  const refreshTokenIv = sanitizeTextValue(row?.refresh_token_iv, 200);
+  const refreshTokenAuthTag = sanitizeTextValue(row?.refresh_token_auth_tag, 200);
+  if (!refreshTokenEncrypted || !refreshTokenIv || !refreshTokenAuthTag) {
+    return "";
+  }
+
+  try {
+    const encryptedBuffer = Buffer.from(refreshTokenEncrypted, "base64");
+    const ivBuffer = Buffer.from(refreshTokenIv, "base64");
+    const authTagBuffer = Buffer.from(refreshTokenAuthTag, "base64");
+    const decipher = crypto.createDecipheriv(
+      QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_ALGORITHM,
+      QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY,
+      ivBuffer,
+      {
+        authTagLength: QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_AUTH_TAG_LENGTH_BYTES,
+      },
+    );
+    decipher.setAuthTag(authTagBuffer);
+    const decryptedBuffer = Buffer.concat([decipher.update(encryptedBuffer), decipher.final()]);
+    return sanitizeTextValue(decryptedBuffer.toString("utf8"), 6000);
+  } catch (error) {
+    console.warn(
+      "QuickBooks refresh token decrypt failed:",
+      sanitizeTextValue(error?.message, 220) || "Unknown error.",
+    );
+    return "";
+  }
+}
+
+function hasQuickBooksEncryptedRefreshToken(row) {
+  return Boolean(
+    sanitizeTextValue(row?.refresh_token_encrypted, 12000) &&
+      sanitizeTextValue(row?.refresh_token_iv, 200) &&
+      sanitizeTextValue(row?.refresh_token_auth_tag, 200),
+  );
+}
+
+function resolveQuickBooksRefreshTokenFromAuthStateRow(row) {
+  if (!row || typeof row !== "object") {
+    return "";
+  }
+
+  const encryptedToken = decryptQuickBooksRefreshTokenFromStorageRow(row);
+  if (encryptedToken) {
+    return encryptedToken;
+  }
+
+  return sanitizeTextValue(row?.refresh_token, 6000);
+}
+
+function shouldMigrateQuickBooksRefreshTokenRowToEncrypted(row) {
+  if (!row || typeof row !== "object" || !QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY) {
+    return false;
+  }
+
+  const plainToken = sanitizeTextValue(row?.refresh_token, 6000);
+  if (!plainToken) {
+    return false;
+  }
+
+  return !hasQuickBooksEncryptedRefreshToken(row);
+}
+
+async function persistQuickBooksRefreshTokenWithQueryable(queryable, tokenValue, refreshTokenExpiresAtIso = "") {
+  if (!queryable || typeof queryable.query !== "function") {
     return;
   }
 
@@ -16443,25 +16565,51 @@ async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIs
   }
 
   const normalizedRefreshTokenExpiresAt = sanitizeTextValue(refreshTokenExpiresAtIso, 80) || null;
+  const encryptedTokenPayload = encryptQuickBooksRefreshTokenForStorage(normalizedToken);
+  const legacyRefreshToken = encryptedTokenPayload ? "" : normalizedToken;
 
-  await ensureDatabaseReady();
-  await pool.query(
+  await queryable.query(
     `
       INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (
         id,
         refresh_token,
+        refresh_token_encrypted,
+        refresh_token_iv,
+        refresh_token_auth_tag,
+        refresh_token_key_id,
         refresh_token_expires_at,
         updated_at
       )
-      VALUES ($1, $2, $3::timestamptz, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, NOW())
       ON CONFLICT (id)
       DO UPDATE SET
         refresh_token = EXCLUDED.refresh_token,
+        refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+        refresh_token_iv = EXCLUDED.refresh_token_iv,
+        refresh_token_auth_tag = EXCLUDED.refresh_token_auth_tag,
+        refresh_token_key_id = EXCLUDED.refresh_token_key_id,
         refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
         updated_at = NOW()
     `,
-    [QUICKBOOKS_AUTH_STATE_ROW_ID, normalizedToken, normalizedRefreshTokenExpiresAt],
+    [
+      QUICKBOOKS_AUTH_STATE_ROW_ID,
+      legacyRefreshToken,
+      encryptedTokenPayload?.refreshTokenEncrypted || "",
+      encryptedTokenPayload?.refreshTokenIv || "",
+      encryptedTokenPayload?.refreshTokenAuthTag || "",
+      encryptedTokenPayload?.refreshTokenKeyId || "",
+      normalizedRefreshTokenExpiresAt,
+    ],
   );
+}
+
+async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIso = "") {
+  if (!pool) {
+    return;
+  }
+
+  await ensureDatabaseReady();
+  await persistQuickBooksRefreshTokenWithQueryable(pool, tokenValue, refreshTokenExpiresAtIso);
 }
 
 function isQuickBooksInvalidRefreshTokenDetails(detailsText) {
@@ -17759,46 +17907,79 @@ async function ensureDatabaseReady() {
         CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_AUTH_STATE_TABLE} (
           id BIGINT PRIMARY KEY,
           refresh_token TEXT NOT NULL DEFAULT '',
+          refresh_token_encrypted TEXT NOT NULL DEFAULT '',
+          refresh_token_iv TEXT NOT NULL DEFAULT '',
+          refresh_token_auth_tag TEXT NOT NULL DEFAULT '',
+          refresh_token_key_id TEXT NOT NULL DEFAULT '',
           refresh_token_expires_at TIMESTAMPTZ,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
 
+      await pool.query(`
+        ALTER TABLE ${QUICKBOOKS_AUTH_STATE_TABLE}
+        ADD COLUMN IF NOT EXISTS refresh_token_encrypted TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${QUICKBOOKS_AUTH_STATE_TABLE}
+        ADD COLUMN IF NOT EXISTS refresh_token_iv TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${QUICKBOOKS_AUTH_STATE_TABLE}
+        ADD COLUMN IF NOT EXISTS refresh_token_auth_tag TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${QUICKBOOKS_AUTH_STATE_TABLE}
+        ADD COLUMN IF NOT EXISTS refresh_token_key_id TEXT NOT NULL DEFAULT ''
+      `);
+
       await pool.query(
         `
-          INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (
-            id,
-            refresh_token
-          )
-          VALUES ($1, $2)
+          INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (id)
+          VALUES ($1)
           ON CONFLICT (id) DO NOTHING
         `,
-        [QUICKBOOKS_AUTH_STATE_ROW_ID, sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)],
+        [QUICKBOOKS_AUTH_STATE_ROW_ID],
       );
-
-      if (sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)) {
-        await pool.query(
-          `
-            UPDATE ${QUICKBOOKS_AUTH_STATE_TABLE}
-            SET refresh_token = $2,
-                updated_at = NOW()
-            WHERE id = $1
-              AND COALESCE(refresh_token, '') = ''
-          `,
-          [QUICKBOOKS_AUTH_STATE_ROW_ID, sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)],
-        );
-      }
 
       const quickBooksAuthStateResult = await pool.query(
         `
-          SELECT refresh_token
+          SELECT
+            refresh_token,
+            refresh_token_encrypted,
+            refresh_token_iv,
+            refresh_token_auth_tag,
+            refresh_token_key_id,
+            refresh_token_expires_at
           FROM ${QUICKBOOKS_AUTH_STATE_TABLE}
           WHERE id = $1
           LIMIT 1
         `,
         [QUICKBOOKS_AUTH_STATE_ROW_ID],
       );
-      const storedQuickBooksRefreshToken = sanitizeTextValue(quickBooksAuthStateResult.rows[0]?.refresh_token, 6000);
+
+      const quickBooksAuthStateRow = quickBooksAuthStateResult.rows[0] || null;
+      const envQuickBooksRefreshToken = sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000);
+      let storedQuickBooksRefreshToken = resolveQuickBooksRefreshTokenFromAuthStateRow(quickBooksAuthStateRow);
+
+      if (!storedQuickBooksRefreshToken && envQuickBooksRefreshToken) {
+        await persistQuickBooksRefreshTokenWithQueryable(pool, envQuickBooksRefreshToken);
+        storedQuickBooksRefreshToken = envQuickBooksRefreshToken;
+      } else if (shouldMigrateQuickBooksRefreshTokenRowToEncrypted(quickBooksAuthStateRow)) {
+        const refreshTokenExpiresAtIso = normalizeIsoTimestampOrNull(
+          quickBooksAuthStateRow?.refresh_token_expires_at,
+        );
+        await persistQuickBooksRefreshTokenWithQueryable(
+          pool,
+          sanitizeTextValue(quickBooksAuthStateRow?.refresh_token, 6000),
+          refreshTokenExpiresAtIso,
+        );
+        storedQuickBooksRefreshToken = sanitizeTextValue(quickBooksAuthStateRow?.refresh_token, 6000);
+      }
+
       if (storedQuickBooksRefreshToken) {
         quickBooksRuntimeRefreshToken = storedQuickBooksRefreshToken;
       }
@@ -24534,6 +24715,13 @@ function logServerStartupSummary(port) {
     );
   }
   const quickBooksConfigured = isQuickBooksConfigured();
+  if (QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY) {
+    console.log(
+      `QuickBooks refresh token encryption is enabled (${QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_SOURCE}, key id: ${QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID}).`,
+    );
+  } else {
+    console.warn("QuickBooks refresh token encryption is disabled. QUICKBOOKS_REFRESH_TOKEN may be stored in plaintext.");
+  }
   if (!quickBooksConfigured) {
     console.warn("QuickBooks test API is disabled. Set QUICKBOOKS_CLIENT_ID/SECRET/REFRESH_TOKEN/REALM_ID.");
   }
