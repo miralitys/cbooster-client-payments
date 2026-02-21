@@ -69,7 +69,7 @@ const WIDGET_LABELS: Record<CustomDashboardWidgetKey, string> = {
 type SettingsTab = "dashboard" | "settings";
 type TasksViewKey = (typeof TASK_VIEW_OPTIONS)[number]["key"];
 type CallsViewKey = (typeof CALLS_VIEW_OPTIONS)[number]["key"];
-type UploadType = "tasks" | "contacts" | "calls";
+type UploadType = "contacts" | "calls";
 
 export default function CustomDashboardPage() {
   const location = useLocation();
@@ -90,7 +90,6 @@ export default function CustomDashboardPage() {
   const [taskMovementsError, setTaskMovementsError] = useState("");
   const [selectedTaskMovementManager, setSelectedTaskMovementManager] = useState("");
   const taskMovementsLoadedRef = useRef(false);
-  const tasksFileInputRef = useRef<HTMLInputElement | null>(null);
   const contactsFileInputRef = useRef<HTMLInputElement | null>(null);
   const callsFileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -645,9 +644,6 @@ export default function CustomDashboardPage() {
     if (!uploadingType) {
       return "";
     }
-    if (uploadingType === "tasks") {
-      return "Uploading tasks file...";
-    }
     if (uploadingType === "contacts") {
       return "Uploading contacts file...";
     }
@@ -983,13 +979,6 @@ export default function CustomDashboardPage() {
 
                   <div className="custom-dashboard-upload-grid">
                     <UploadCard
-                      title="Tasks"
-                      meta={dashboard.uploads.tasks}
-                      disabled={Boolean(uploadingType)}
-                      loading={uploadingType === "tasks"}
-                      onUploadClick={() => tasksFileInputRef.current?.click()}
-                    />
-                    <UploadCard
                       title="Contacts"
                       meta={dashboard.uploads.contacts}
                       disabled={Boolean(uploadingType)}
@@ -1005,19 +994,6 @@ export default function CustomDashboardPage() {
                     />
                   </div>
 
-                  <input
-                    ref={tasksFileInputRef}
-                    type="file"
-                    accept=".csv,.tsv,.txt"
-                    className="custom-dashboard-upload-input"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        void onUploadSelected("tasks", file);
-                      }
-                      event.currentTarget.value = "";
-                    }}
-                  />
                   <input
                     ref={contactsFileInputRef}
                     type="file"
@@ -1496,13 +1472,7 @@ function cloneWidgetSettings(settings: CustomDashboardWidgetSettings): CustomDas
 }
 
 function toUploadTitle(type: UploadType): string {
-  if (type === "tasks") {
-    return "Tasks";
-  }
-  if (type === "contacts") {
-    return "Contacts";
-  }
-  return "Calls";
+  return type === "contacts" ? "Contacts" : "Calls";
 }
 
 function formatDateTimeOrDash(rawValue: string): string {
