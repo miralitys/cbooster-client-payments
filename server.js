@@ -18346,9 +18346,39 @@ async function fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate)
 }
 
 async function fetchQuickBooksChecksInRange(accessToken, fromDate, toDate) {
-  return fetchQuickBooksEntityInRange(accessToken, "Check", fromDate, toDate, "checks", {
-    selectFields: ["Id", "TotalAmt", "TxnDate", "PayeeRef"],
-  });
+  try {
+    return await fetchQuickBooksEntityInRange(accessToken, "Check", fromDate, toDate, "checks", {
+      selectFields: ["Id", "TotalAmt", "TxnDate", "PayeeRef"],
+    });
+  } catch (error) {
+    if (!isQuickBooksUnsupportedChecksQueryError(error)) {
+      throw error;
+    }
+
+    console.warn(
+      "QuickBooks checks query is not supported for this company. Continuing without Check entity:",
+      sanitizeTextValue(error?.message, 320),
+    );
+    return [];
+  }
+}
+
+function isQuickBooksUnsupportedChecksQueryError(rawError) {
+  const message = sanitizeTextValue(rawError?.message, 600).toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  const hasChecksContext = message.includes("checks query failed") || message.includes("from check") || message.includes(": check");
+  if (!hasChecksContext) {
+    return false;
+  }
+
+  return (
+    message.includes("invalid context declaration") ||
+    message.includes("queryvalidationerror") ||
+    message.includes("object not found")
+  );
 }
 
 async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
