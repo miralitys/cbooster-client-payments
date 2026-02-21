@@ -132,6 +132,19 @@ export interface CustomDashboardCallsStatsRow {
   over30Sec: number;
 }
 
+export interface CustomDashboardCallsTodaySummary {
+  outgoing: number;
+  incoming: number;
+  missed: number;
+}
+
+export interface CustomDashboardCallsTodayRow {
+  managerName: string;
+  outgoing: number;
+  incoming: number;
+  missed: number;
+}
+
 export interface CustomDashboardMissedCallRow {
   id: string;
   managerName: string;
@@ -146,6 +159,8 @@ export interface CustomDashboardCallsWidget {
   enabled: boolean;
   visibleNames: string[];
   managerOptions: string[];
+  todaySummary: CustomDashboardCallsTodaySummary;
+  todayByManager: CustomDashboardCallsTodayRow[];
   stats: CustomDashboardCallsStatsRow[];
   missedCalls: CustomDashboardMissedCallRow[];
 }
