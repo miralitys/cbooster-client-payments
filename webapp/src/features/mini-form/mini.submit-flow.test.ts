@@ -62,6 +62,13 @@ type TelegramHarness = {
   expandCalls: number;
   hapticCalls: string[];
   popupCalls: unknown[];
+  alertCalls: string[];
+  notificationOrder: string[];
+};
+
+type TelegramWebAppOptions = {
+  showPopup?: "ok" | "throw" | "omit";
+  showAlert?: "ok" | "throw" | "omit";
 };
 
 type MiniAppHarness = {
@@ -85,6 +92,8 @@ type VmSandbox = Record<string, unknown> & {
 };
 
 let miniSource = "";
+const ORIGINAL_WINDOW_ALERT = window.alert;
+const POPUP_FALLBACK_MESSAGE = "Клиент отправлен на модерацию. Он появится после подтверждения.";
 
 beforeAll(() => {
   miniSource = fs.readFileSync(MINI_JS_PATH, "utf8");
@@ -98,18 +107,23 @@ afterEach(() => {
   };
 
   delete windowWithTelegram.Telegram;
+  window.alert = ORIGINAL_WINDOW_ALERT;
   document.body.innerHTML = "";
 });
 
-function createTelegramWebApp(initData: string): TelegramHarness {
+function createTelegramWebApp(initData: string, options: TelegramWebAppOptions = {}): TelegramHarness {
   const hapticCalls: string[] = [];
   const popupCalls: unknown[] = [];
+  const alertCalls: string[] = [];
+  const notificationOrder: string[] = [];
 
   const harness: TelegramHarness = {
     readyCalls: 0,
     expandCalls: 0,
     hapticCalls,
     popupCalls,
+    alertCalls,
+    notificationOrder,
     webApp: {
       initData,
       ready: () => {
@@ -123,14 +137,28 @@ function createTelegramWebApp(initData: string): TelegramHarness {
           hapticCalls.push(type);
         },
       },
-      showPopup: (params: unknown) => {
-        popupCalls.push(params);
-      },
-      showAlert: (message: string) => {
-        popupCalls.push({ message });
-      },
     },
   };
+
+  if (options.showPopup !== "omit") {
+    harness.webApp.showPopup = (params: unknown) => {
+      notificationOrder.push("showPopup");
+      popupCalls.push(params);
+      if (options.showPopup === "throw") {
+        throw new Error("showPopup failed");
+      }
+    };
+  }
+
+  if (options.showAlert !== "omit") {
+    harness.webApp.showAlert = (message: string) => {
+      notificationOrder.push("showAlert");
+      alertCalls.push(message);
+      if (options.showAlert === "throw") {
+        throw new Error("showAlert failed");
+      }
+    };
+  }
 
   return harness;
 }
@@ -559,5 +587,62 @@ describe("mini.js submit flow", () => {
       body: { ok: true },
     });
     await flushAsync();
+  });
+
+  it("falls back from showPopup to showAlert when showPopup throws", async () => {
+    const telegram = createTelegramWebApp("auth_payload", {
+      showPopup: "throw",
+      showAlert: "ok",
+    });
+    const browserAlertCalls: string[] = [];
+    window.alert = ((message?: string) => {
+      browserAlertCalls.push((message || "").toString());
+    }) as typeof window.alert;
+
+    loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchResponses: [
+        { ok: true, status: 200, body: { ok: true, uploadToken: "token-popup-fallback" } },
+        { ok: true, status: 201, body: { ok: true } },
+      ],
+    });
+
+    fillRequiredClientName("John");
+    await flushAsync();
+    await submitForm();
+
+    expect(telegram.notificationOrder).toEqual(["showPopup", "showAlert"]);
+    expect(telegram.popupCalls).toHaveLength(1);
+    expect(telegram.alertCalls).toEqual([POPUP_FALLBACK_MESSAGE]);
+    expect(browserAlertCalls).toEqual([]);
+    expect(getMessageText()).toBe("Submitted for moderation. Client will appear after approval.");
+  });
+
+  it("falls back to window.alert when showPopup and showAlert throw", async () => {
+    const telegram = createTelegramWebApp("auth_payload", {
+      showPopup: "throw",
+      showAlert: "throw",
+    });
+    const browserAlertCalls: string[] = [];
+    window.alert = ((message?: string) => {
+      browserAlertCalls.push((message || "").toString());
+    }) as typeof window.alert;
+
+    loadMiniApp({
+      telegramWebApp: telegram.webApp,
+      fetchResponses: [
+        { ok: true, status: 200, body: { ok: true, uploadToken: "token-window-alert" } },
+        { ok: true, status: 201, body: { ok: true } },
+      ],
+    });
+
+    fillRequiredClientName("John");
+    await flushAsync();
+    await submitForm();
+
+    expect(telegram.notificationOrder).toEqual(["showPopup", "showAlert"]);
+    expect(telegram.alertCalls).toEqual([POPUP_FALLBACK_MESSAGE]);
+    expect(browserAlertCalls).toEqual([POPUP_FALLBACK_MESSAGE]);
+    expect(getMessageText()).toBe("Submitted for moderation. Client will appear after approval.");
   });
 });
