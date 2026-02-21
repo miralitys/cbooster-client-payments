@@ -646,6 +646,18 @@ const GHL_CLIENT_CONTRACT_TEXT_MAX_CANDIDATES = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_MAX_CANDIDATES, 12), 1),
   40,
 );
+const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_PAGES = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_PAGES, 80), 1),
+  300,
+);
+const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_LINES_PER_PAGE = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_LINES_PER_PAGE, 52), 10),
+  100,
+);
+const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_CHARS_PER_LINE = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_CHARS_PER_LINE, 96), 30),
+  180,
+);
 const GHL_CLIENT_CONTRACT_ALLOWED_DOWNLOAD_HOST_SUFFIXES = [
   ".leadconnectorhq.com",
   ".gohighlevel.com",
@@ -25851,6 +25863,237 @@ function ensurePdfFileName(rawFileName, fallbackBaseName = "contract") {
   return normalized.toLowerCase().endsWith(".pdf") ? normalized : `${normalized}.pdf`;
 }
 
+function normalizeGhlContractTextForPdf(rawValue) {
+  const value = sanitizeTextValue(rawValue, GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS + 2000);
+  if (!value) {
+    return "";
+  }
+
+  let normalized = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    const codePoint = value.charCodeAt(index);
+    if (character === "\n") {
+      normalized += "\n";
+      continue;
+    }
+    if (character === "\r") {
+      continue;
+    }
+    if (character === "\t") {
+      normalized += "  ";
+      continue;
+    }
+    if (codePoint >= 32 && codePoint <= 126) {
+      normalized += character;
+      continue;
+    }
+    if (codePoint === 160) {
+      normalized += " ";
+      continue;
+    }
+    normalized += "?";
+  }
+
+  return normalized
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function wrapGhlContractTextForPdf(rawText, maxCharsPerLine) {
+  const normalizedText = normalizeGhlContractTextForPdf(rawText);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const maxChars = Math.max(30, Math.min(maxCharsPerLine || 96, 240));
+  const wrappedLines = [];
+  const sourceLines = normalizedText.split("\n");
+
+  function pushWrappedLine(rawLine) {
+    const line = sanitizeTextValue(rawLine, 2000);
+    if (!line) {
+      wrappedLines.push("");
+      return;
+    }
+
+    const words = line.split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      wrappedLines.push("");
+      return;
+    }
+
+    let currentLine = "";
+    for (const word of words) {
+      if (!currentLine) {
+        if (word.length <= maxChars) {
+          currentLine = word;
+          continue;
+        }
+
+        let cursor = 0;
+        while (cursor < word.length) {
+          wrappedLines.push(word.slice(cursor, cursor + maxChars));
+          cursor += maxChars;
+        }
+        currentLine = "";
+        continue;
+      }
+
+      const nextLine = `${currentLine} ${word}`;
+      if (nextLine.length <= maxChars) {
+        currentLine = nextLine;
+        continue;
+      }
+
+      wrappedLines.push(currentLine);
+      if (word.length <= maxChars) {
+        currentLine = word;
+        continue;
+      }
+
+      let cursor = 0;
+      while (cursor < word.length) {
+        const chunk = word.slice(cursor, cursor + maxChars);
+        cursor += maxChars;
+        if (cursor >= word.length) {
+          currentLine = chunk;
+        } else {
+          wrappedLines.push(chunk);
+        }
+      }
+    }
+
+    if (currentLine) {
+      wrappedLines.push(currentLine);
+    }
+  }
+
+  for (const sourceLine of sourceLines) {
+    pushWrappedLine(sourceLine);
+  }
+
+  return wrappedLines;
+}
+
+function escapePdfTextLiteral(rawValue) {
+  const value = sanitizeTextValue(rawValue, 4000);
+  if (!value) {
+    return "";
+  }
+  return value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+}
+
+function buildGhlContractTextFallbackPdfBuffer(rawText, options = {}) {
+  const clientName = sanitizeTextValue(options?.clientName, 300) || "Client";
+  const contactName = sanitizeTextValue(options?.contactName, 300) || clientName;
+  const contractTitle = sanitizeTextValue(options?.contractTitle, 300) || "Contract";
+  const candidateId = sanitizeTextValue(options?.candidateId, 220);
+  const source = sanitizeTextValue(options?.source, 220);
+  const generatedAt = new Date().toISOString().replace("T", " ").replace(/\..+$/, " UTC");
+  const headerLines = [
+    "Credit Booster Contract Fallback (Text Extraction)",
+    `Client: ${clientName}`,
+    `Contact: ${contactName}`,
+    `Contract: ${contractTitle}`,
+    candidateId ? `Candidate ID: ${candidateId}` : "",
+    source ? `Source: ${source}` : "",
+    `Generated: ${generatedAt}`,
+    "",
+  ].filter((line, index) => Boolean(line) || index >= 7);
+
+  const bodyLines = wrapGhlContractTextForPdf(rawText, GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_CHARS_PER_LINE);
+  const allLines = [...headerLines, ...(bodyLines.length ? bodyLines : ["No contract text was extracted."])];
+
+  const maxLinesPerPage = GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_LINES_PER_PAGE;
+  const pages = [];
+  for (let offset = 0; offset < allLines.length; offset += maxLinesPerPage) {
+    if (pages.length >= GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_PAGES) {
+      break;
+    }
+    pages.push(allLines.slice(offset, offset + maxLinesPerPage));
+  }
+  if (!pages.length) {
+    pages.push(["No contract text was extracted."]);
+  }
+
+  if (allLines.length > maxLinesPerPage * GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_PAGES) {
+    const lastPage = pages[pages.length - 1] || [];
+    if (lastPage.length >= maxLinesPerPage) {
+      lastPage[lastPage.length - 1] = "... [truncated]";
+    } else {
+      lastPage.push("... [truncated]");
+    }
+  }
+
+  const pageStreams = pages.map((lines) => {
+    const commands = ["BT", "/F1 10 Tf", "13 TL", "40 800 Td"];
+    if (!lines.length) {
+      commands.push("() Tj");
+    } else {
+      lines.forEach((line, index) => {
+        const escapedLine = escapePdfTextLiteral(line);
+        if (index === 0) {
+          commands.push(`(${escapedLine}) Tj`);
+        } else {
+          commands.push("T*");
+          commands.push(`(${escapedLine}) Tj`);
+        }
+      });
+    }
+    commands.push("ET");
+    return commands.join("\n");
+  });
+
+  const pageCount = pageStreams.length;
+  const fontObjectId = 3 + pageCount * 2;
+  const maxObjectId = fontObjectId;
+  const objectBodies = new Array(maxObjectId + 1).fill("");
+  objectBodies[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objectBodies[fontObjectId] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+
+  const pageRefs = [];
+  for (let index = 0; index < pageCount; index += 1) {
+    const pageObjectId = 3 + index * 2;
+    const contentObjectId = pageObjectId + 1;
+    pageRefs.push(`${pageObjectId} 0 R`);
+    const stream = pageStreams[index];
+    const streamLength = Buffer.byteLength(stream, "ascii");
+    objectBodies[pageObjectId] =
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] ` +
+      `/Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`;
+    objectBodies[contentObjectId] = `<< /Length ${streamLength} >>\nstream\n${stream}\nendstream`;
+  }
+  objectBodies[2] = `<< /Type /Pages /Kids [${pageRefs.join(" ")}] /Count ${pageCount} >>`;
+
+  const chunks = [];
+  let cursor = 0;
+  const offsets = new Array(maxObjectId + 1).fill(0);
+  function appendAscii(value) {
+    const chunk = Buffer.from(value, "ascii");
+    chunks.push(chunk);
+    cursor += chunk.length;
+  }
+
+  appendAscii("%PDF-1.4\n%1234\n");
+  for (let objectId = 1; objectId <= maxObjectId; objectId += 1) {
+    offsets[objectId] = cursor;
+    appendAscii(`${objectId} 0 obj\n${objectBodies[objectId]}\nendobj\n`);
+  }
+
+  const xrefOffset = cursor;
+  appendAscii(`xref\n0 ${maxObjectId + 1}\n`);
+  appendAscii("0000000000 65535 f \n");
+  for (let objectId = 1; objectId <= maxObjectId; objectId += 1) {
+    appendAscii(`${String(offsets[objectId]).padStart(10, "0")} 00000 n \n`);
+  }
+  appendAscii(`trailer\n<< /Size ${maxObjectId + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
+
+  return Buffer.concat(chunks);
+}
+
 const GHL_CONTRACT_TEXT_KEY_HINT_PATTERN =
   /\b(contract|agreement|terms?|clause|section|body|content|html|message|description|template|document)\b/i;
 
@@ -27311,6 +27554,156 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
   return null;
 }
 
+async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, options = {}) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return null;
+  }
+
+  const normalizedPreferredContactId = sanitizeTextValue(options?.preferredContactId, 160);
+  const requestedCandidateId = extractLikelyGhlEntityId(options?.candidateId);
+  const normalizedLookupRow =
+    lookupRow && typeof lookupRow === "object"
+      ? lookupRow
+      : await resolveGhlClientContractDownloadRow(normalizedClientName, {
+          preferredContactId: normalizedPreferredContactId,
+          debugEnabled: true,
+        });
+
+  const lookupStatus = normalizeGhlClientContractDownloadStatus(normalizedLookupRow?.status);
+  if (lookupStatus === "error") {
+    throw createHttpError(
+      sanitizeTextValue(normalizedLookupRow?.error, 500) || "Failed to locate contract in GoHighLevel.",
+      502,
+    );
+  }
+  if (lookupStatus === "no_contact") {
+    return null;
+  }
+
+  const resolvedContactId = sanitizeTextValue(normalizedLookupRow?.contactId, 160) || normalizedPreferredContactId;
+  const resolvedContactName = sanitizeTextValue(normalizedLookupRow?.contactName, 300) || normalizedClientName;
+
+  const candidatesById = new Map();
+  function pushCandidate(rawCandidate, fallback = {}) {
+    if (!rawCandidate || typeof rawCandidate !== "object") {
+      return;
+    }
+    const candidateId = extractLikelyGhlEntityId(rawCandidate?.candidateId || rawCandidate?.id || rawCandidate?.documentId);
+    if (!candidateId) {
+      return;
+    }
+
+    const score = Number.isFinite(rawCandidate?.score) ? rawCandidate.score : Number.isFinite(fallback?.score) ? fallback.score : 0;
+    const nextCandidate = {
+      candidateId,
+      contactId: sanitizeTextValue(rawCandidate?.contactId || fallback?.contactId, 160) || resolvedContactId,
+      contactName: sanitizeTextValue(rawCandidate?.contactName || fallback?.contactName, 300) || resolvedContactName,
+      source: sanitizeTextValue(rawCandidate?.source || fallback?.source, 200),
+      score,
+    };
+    const previous = candidatesById.get(candidateId);
+    if (!previous || score > Number(previous?.score || 0)) {
+      candidatesById.set(candidateId, nextCandidate);
+      return;
+    }
+
+    if (!previous.contactId && nextCandidate.contactId) {
+      previous.contactId = nextCandidate.contactId;
+    }
+    if (!previous.contactName && nextCandidate.contactName) {
+      previous.contactName = nextCandidate.contactName;
+    }
+    if (!previous.source && nextCandidate.source) {
+      previous.source = nextCandidate.source;
+    }
+  }
+
+  if (requestedCandidateId) {
+    pushCandidate(
+      {
+        candidateId: requestedCandidateId,
+      },
+      {
+        contactId: resolvedContactId,
+        contactName: resolvedContactName,
+        source: "query.candidate_id",
+        score: 9999,
+      },
+    );
+  }
+
+  const lookupCandidates = collectGhlContractTextLookupCandidates(normalizedLookupRow);
+  for (const candidate of lookupCandidates) {
+    pushCandidate(candidate, {
+      contactId: resolvedContactId,
+      contactName: resolvedContactName,
+      source: "lookup.candidates",
+      score: 100,
+    });
+  }
+
+  if (!candidatesById.size && resolvedContactId) {
+    const quickCandidates = await listGhlContractDownloadCandidatesForContact(resolvedContactId, {
+      contactName: resolvedContactName,
+      clientName: normalizedClientName,
+      quickMode: true,
+    });
+    for (const candidate of quickCandidates) {
+      pushCandidate(candidate, {
+        contactId: resolvedContactId,
+        contactName: resolvedContactName,
+        source: "contact.quick_search",
+        score: 30,
+      });
+    }
+  }
+
+  if (!candidatesById.size) {
+    const byNameCandidates = await listGhlContractDownloadCandidatesForClientName(normalizedClientName);
+    for (const candidate of byNameCandidates) {
+      pushCandidate(candidate, {
+        contactId: resolvedContactId,
+        contactName: resolvedContactName,
+        source: "client_name.search",
+        score: 20,
+      });
+    }
+  }
+
+  const candidatesToProbe = [...candidatesById.values()]
+    .sort((left, right) => Number(right?.score || 0) - Number(left?.score || 0))
+    .slice(0, GHL_CLIENT_CONTRACT_TEXT_MAX_CANDIDATES);
+  if (!candidatesToProbe.length) {
+    return null;
+  }
+
+  for (const candidate of candidatesToProbe) {
+    const textResult = await resolveGhlContractTextByCandidateId(candidate.candidateId, {
+      contactId: candidate.contactId || resolvedContactId,
+      contactName: candidate.contactName || resolvedContactName,
+      clientName: normalizedClientName,
+    });
+    if (!textResult?.text) {
+      continue;
+    }
+
+    return {
+      clientName: normalizedClientName,
+      contactId: candidate.contactId || resolvedContactId,
+      contactName: candidate.contactName || resolvedContactName,
+      candidateId: candidate.candidateId,
+      source: sanitizeTextValue(textResult.source, 220) || sanitizeTextValue(candidate.source, 220),
+      text: textResult.text,
+      textLength: Number.isFinite(textResult.textLength) ? textResult.textLength : textResult.text.length,
+      lookupStatus,
+      lookupRow: normalizedLookupRow,
+    };
+  }
+
+  return null;
+}
+
 async function listGhlContractDownloadCandidatesForContact(contactId, options = {}) {
   const normalizedContactId = sanitizeTextValue(contactId, 160);
   if (!normalizedContactId) {
@@ -28364,7 +28757,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-10",
+      matcherVersion: "ghl-contract-download-v2026-02-21-11",
       debugMode,
     });
   } catch (error) {
@@ -28435,26 +28828,64 @@ app.get("/api/ghl/client-contracts/download", requireWebPermission(WEB_AUTH_PERM
 
     const lookupRow = await resolveGhlClientContractDownloadRow(matchedClientName, {
       preferredContactId: requestedContactId,
+      debugEnabled: true,
     });
     const lookupStatus = normalizeGhlClientContractDownloadStatus(lookupRow?.status);
     if (lookupStatus === "error") {
       throw createHttpError(sanitizeTextValue(lookupRow?.error, 500) || "Failed to locate contract in GoHighLevel.", 502);
     }
-    if (lookupStatus !== "ready" || !lookupRow?.contractUrl) {
+    if (lookupStatus === "no_contact") {
       res.status(404).json({
-        error: `No PDF contract found for client "${matchedClientName}".`,
+        error: `No GoHighLevel contact found for client "${matchedClientName}".`,
       });
       return;
     }
 
-    const downloadResult = await fetchGhlContractFileForDownload(lookupRow.contractUrl);
     const fallbackBaseName = sanitizeTextValue(`${matchedClientName} contract`, 180) || "contract";
-    const fileName = ensurePdfFileName(downloadResult.fileName || lookupRow.contractTitle, fallbackBaseName);
+    let directDownloadErrorMessage = "";
+    if (lookupStatus === "ready" && lookupRow?.contractUrl) {
+      try {
+        const downloadResult = await fetchGhlContractFileForDownload(lookupRow.contractUrl);
+        const fileName = ensurePdfFileName(downloadResult.fileName || lookupRow.contractTitle, fallbackBaseName);
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Length", String(downloadResult.buffer.length));
+        res.setHeader("Content-Disposition", buildContentDisposition("attachment", fileName));
+        res.setHeader("X-Contract-Download-Mode", "direct");
+        res.status(200).send(downloadResult.buffer);
+        return;
+      } catch (directDownloadError) {
+        directDownloadErrorMessage = sanitizeTextValue(directDownloadError?.message, 260);
+      }
+    }
+
+    const textFallback = await resolveGhlContractTextForDownloadFallback(matchedClientName, lookupRow, {
+      preferredContactId: requestedContactId,
+    });
+    if (!textFallback?.text) {
+      const fallbackHint = directDownloadErrorMessage
+        ? ` Direct PDF fetch failed: ${directDownloadErrorMessage}.`
+        : "";
+      res.status(404).json({
+        error: `No downloadable contract found for client "${matchedClientName}".${fallbackHint}`,
+      });
+      return;
+    }
+
+    const fallbackPdfBuffer = buildGhlContractTextFallbackPdfBuffer(textFallback.text, {
+      clientName: matchedClientName,
+      contactName: textFallback.contactName || lookupRow?.contactName,
+      contractTitle: lookupRow?.contractTitle,
+      candidateId: textFallback.candidateId,
+      source: textFallback.source,
+    });
+    const fallbackFileName = ensurePdfFileName(`${fallbackBaseName} text fallback`, `${fallbackBaseName} text fallback`);
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Length", String(downloadResult.buffer.length));
-    res.setHeader("Content-Disposition", buildContentDisposition("attachment", fileName));
-    res.status(200).send(downloadResult.buffer);
+    res.setHeader("Content-Length", String(fallbackPdfBuffer.length));
+    res.setHeader("Content-Disposition", buildContentDisposition("attachment", fallbackFileName));
+    res.setHeader("X-Contract-Download-Mode", "text-fallback");
+    res.status(200).send(fallbackPdfBuffer);
   } catch (error) {
     console.error("GET /api/ghl/client-contracts/download failed:", error);
     res.status(error.httpStatus || 502).json({
