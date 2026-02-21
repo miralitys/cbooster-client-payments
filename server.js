@@ -14436,8 +14436,8 @@ function dedupeGhlContractCandidates(candidates) {
 function isGhlContractCandidateRelatedToContact(candidate, contactName, contactId) {
   const normalizedContactId = sanitizeTextValue(contactId, 160).toLowerCase();
   const candidateContactId = sanitizeTextValue(candidate?.contactId, 160).toLowerCase();
-  if (normalizedContactId && candidateContactId && candidateContactId === normalizedContactId) {
-    return true;
+  if (normalizedContactId && candidateContactId) {
+    return candidateContactId === normalizedContactId;
   }
 
   const normalizedContactName = normalizeNameForLookup(contactName);
@@ -26043,6 +26043,256 @@ function pickBestGhlContractDownloadCandidate(candidates, context = {}, options 
   };
 }
 
+async function probeGhlContractDownloadUrlByCandidateId(candidateId, context = {}, debugTrace = null) {
+  const normalizedCandidateId = extractLikelyGhlEntityId(candidateId);
+  if (!normalizedCandidateId) {
+    return null;
+  }
+
+  const encodedCandidateId = encodeURIComponent(normalizedCandidateId);
+  const normalizedContactId = sanitizeTextValue(context?.contactId, 160);
+  const encodedContactId = encodeURIComponent(normalizedContactId);
+
+  const attempts = [];
+  if (normalizedContactId) {
+    attempts.push(
+      {
+        source: "probe.contacts.documents.by_id",
+        pathname: `/contacts/${encodedContactId}/documents/${encodedCandidateId}`,
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+      },
+      {
+        source: "probe.contacts.documents.by_id.download",
+        pathname: `/contacts/${encodedContactId}/documents/${encodedCandidateId}/download`,
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+      },
+      {
+        source: "probe.contacts.files.by_id",
+        pathname: `/contacts/${encodedContactId}/files/${encodedCandidateId}`,
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+      },
+      {
+        source: "probe.contacts.files.by_id.download",
+        pathname: `/contacts/${encodedContactId}/files/${encodedCandidateId}/download`,
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+      },
+      {
+        source: "probe.contacts.attachments.by_id",
+        pathname: `/contacts/${encodedContactId}/attachments/${encodedCandidateId}`,
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+      },
+      {
+        source: "probe.contacts.attachments.by_id.download",
+        pathname: `/contacts/${encodedContactId}/attachments/${encodedCandidateId}/download`,
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
+      },
+    );
+  }
+
+  attempts.push(
+    {
+      source: "probe.proposals.document.by_id",
+      pathname: `/proposals/document/${encodedCandidateId}`,
+      query: {
+        locationId: GHL_LOCATION_ID,
+      },
+    },
+    {
+      source: "probe.proposals.document.by_id.download",
+      pathname: `/proposals/document/${encodedCandidateId}/download`,
+      query: {
+        locationId: GHL_LOCATION_ID,
+      },
+    },
+    {
+      source: "probe.proposals.documents.by_id",
+      pathname: `/proposals/documents/${encodedCandidateId}`,
+      query: {
+        locationId: GHL_LOCATION_ID,
+      },
+    },
+    {
+      source: "probe.proposals.documents.by_id.download",
+      pathname: `/proposals/documents/${encodedCandidateId}/download`,
+      query: {
+        locationId: GHL_LOCATION_ID,
+      },
+    },
+    {
+      source: "probe.proposals.document.download_path",
+      pathname: `/proposals/document/download/${encodedCandidateId}`,
+      query: {
+        locationId: GHL_LOCATION_ID,
+      },
+    },
+    {
+      source: "probe.proposals.documents.download_path",
+      pathname: `/proposals/documents/download/${encodedCandidateId}`,
+      query: {
+        locationId: GHL_LOCATION_ID,
+      },
+    },
+    {
+      source: "probe.proposals.document.download_query.documentId",
+      pathname: "/proposals/document/download",
+      query: {
+        locationId: GHL_LOCATION_ID,
+        documentId: normalizedCandidateId,
+      },
+    },
+    {
+      source: "probe.proposals.document.download_query.id",
+      pathname: "/proposals/document/download",
+      query: {
+        locationId: GHL_LOCATION_ID,
+        id: normalizedCandidateId,
+      },
+    },
+    {
+      source: "probe.documents.by_id.download",
+      pathname: `/documents/${encodedCandidateId}/download`,
+      query: {
+        locationId: GHL_LOCATION_ID,
+      },
+    },
+    {
+      source: "probe.files.by_id.download",
+      pathname: `/files/${encodedCandidateId}/download`,
+      query: {
+        locationId: GHL_LOCATION_ID,
+      },
+    },
+  );
+
+  if (debugTrace && typeof debugTrace === "object") {
+    debugTrace.candidateId = normalizedCandidateId;
+    debugTrace.attempts = [];
+  }
+
+  for (const attempt of attempts) {
+    const url = buildGhlUrl(attempt.pathname, attempt.query || {});
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, Math.min(GHL_REQUEST_TIMEOUT_MS, 15000));
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers: {
+          ...buildGhlRequestHeaders(false),
+          Accept: "application/pdf,application/octet-stream,application/json,*/*",
+        },
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (debugTrace?.attempts instanceof Array) {
+        debugTrace.attempts.push({
+          source: attempt.source,
+          ok: false,
+          reason: error?.name === "AbortError" ? "timeout" : "request_failed",
+          error: sanitizeTextValue(error?.message, 200),
+        });
+      }
+      continue;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const status = Number.isFinite(response.status) ? response.status : 0;
+    const finalUrl = sanitizeTextValue(response.url, 2000) || url.toString();
+    const contentType = normalizeAttachmentMimeType(response.headers.get("content-type"));
+    const contentDisposition = sanitizeTextValue(response.headers.get("content-disposition"), 500).toLowerCase();
+    const isPdfLikeResponse =
+      contentType.includes("pdf") ||
+      /\.pdf(?:[\?#].*)?$/i.test(finalUrl) ||
+      contentDisposition.includes(".pdf");
+
+    if (!response.ok) {
+      if (debugTrace?.attempts instanceof Array) {
+        debugTrace.attempts.push({
+          source: attempt.source,
+          ok: false,
+          status,
+          contentType,
+          finalUrl,
+        });
+      }
+      await response.body?.cancel?.().catch(() => {});
+      continue;
+    }
+
+    if (isPdfLikeResponse && isAllowedGhlContractDownloadUrl(finalUrl)) {
+      if (debugTrace?.attempts instanceof Array) {
+        debugTrace.attempts.push({
+          source: attempt.source,
+          ok: true,
+          status,
+          contentType,
+          finalUrl,
+          resolved: true,
+        });
+      }
+      await response.body?.cancel?.().catch(() => {});
+      return {
+        url: finalUrl,
+        source: attempt.source,
+      };
+    }
+
+    const responseText = await response.text().catch(() => "");
+    let body = null;
+    try {
+      body = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      body = null;
+    }
+
+    const extractedFromPayload = body ? extractGhlContractCandidatesFromPayload(body, attempt.source) : [];
+    const extractedUrlCandidate =
+      extractedFromPayload
+        .map((item) => extractGhlUrlsFromText(item?.url)[0] || "")
+        .find((value) => value && isAllowedGhlContractDownloadUrl(value)) ||
+      extractGhlUrlsFromText(responseText).find((value) => isAllowedGhlContractDownloadUrl(value)) ||
+      "";
+
+    if (debugTrace?.attempts instanceof Array) {
+      debugTrace.attempts.push({
+        source: attempt.source,
+        ok: true,
+        status,
+        contentType,
+        finalUrl,
+        extractedCount: extractedFromPayload.length,
+        resolved: Boolean(extractedUrlCandidate),
+      });
+    }
+
+    if (extractedUrlCandidate) {
+      return {
+        url: extractedUrlCandidate,
+        source: attempt.source,
+      };
+    }
+  }
+
+  return null;
+}
+
 async function resolveGhlContractDownloadCandidateViaId(candidate, context = {}, debugTrace = null) {
   const normalizedCandidate = normalizeGhlContractCandidate(candidate);
   if (!normalizedCandidate) {
@@ -26231,12 +26481,13 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {},
     let response;
     try {
       response = await attempt.request();
-    } catch {
+    } catch (error) {
       if (debugTrace?.attempts instanceof Array) {
         debugTrace.attempts.push({
           source: attempt.source,
           ok: false,
           reason: "request_failed",
+          error: sanitizeTextValue(error?.message, 200),
         });
       }
       continue;
@@ -26309,6 +26560,36 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {},
         candidateId,
       };
     }
+  }
+
+  const probeTrace = debugTrace ? {} : null;
+  const probed = await probeGhlContractDownloadUrlByCandidateId(
+    candidateId,
+    {
+      contactId: normalizedContactId,
+    },
+    probeTrace,
+  );
+  if (debugTrace && typeof debugTrace === "object") {
+    debugTrace.probe = probeTrace;
+  }
+  if (probed?.url) {
+    const resolvedViaProbe = {
+      ...normalizedCandidate,
+      url: sanitizeTextValue(probed.url, 2000),
+      source: sanitizeTextValue(probed.source, 160) || sanitizeTextValue(normalizedCandidate.source, 160),
+      candidateId,
+    };
+    if (debugTrace && typeof debugTrace === "object") {
+      debugTrace.resolved = true;
+      debugTrace.method = "resolved_by_probe";
+      debugTrace.result = summarizeGhlContractDownloadCandidateForDebug(resolvedViaProbe, {
+        contactName: normalizedContactName || normalizedClientName,
+        contactId: normalizedContactId,
+        clientName: normalizedClientName,
+      });
+    }
+    return resolvedViaProbe;
   }
 
   if (debugTrace && typeof debugTrace === "object") {
@@ -26448,10 +26729,23 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
     }
 
     for (const candidate of extracted) {
+      const enrichedContactName = sanitizeTextValue(candidate?.contactName, 300) || normalizedContactName;
+      const enrichedContactId = sanitizeTextValue(candidate?.contactId, 160) || normalizedContactId;
+      if (!isGhlContractCandidateRelatedToContact(
+        {
+          ...candidate,
+          contactName: enrichedContactName,
+          contactId: enrichedContactId,
+        },
+        normalizedContactName,
+        normalizedContactId,
+      )) {
+        continue;
+      }
       candidates.push({
         ...candidate,
-        contactName: sanitizeTextValue(candidate?.contactName, 300) || normalizedContactName,
-        contactId: sanitizeTextValue(candidate?.contactId, 160) || normalizedContactId,
+        contactName: enrichedContactName,
+        contactId: enrichedContactId,
       });
     }
   }
@@ -27288,7 +27582,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-5",
+      matcherVersion: "ghl-contract-download-v2026-02-21-6",
       debugMode,
     });
   } catch (error) {
