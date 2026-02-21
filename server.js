@@ -864,6 +864,14 @@ const ASSISTANT_SESSION_SCOPE_MAX_TOTAL_BYTES = Math.min(
   ),
   512 * 1024 * 1024,
 );
+const ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES, 120), 10),
+  2000,
+);
+const ASSISTANT_PREPARED_DATA_CACHE_TTL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_PREPARED_DATA_CACHE_TTL_MS, 15 * 60 * 1000), 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
 const ASSISTANT_SESSION_SCOPE_MAX_CLIENTS = 1200;
 const ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY = "default";
 const ASSISTANT_LLM_MAX_CONTEXT_RECORDS = 18;
@@ -1187,6 +1195,8 @@ let miniUploadParseInFlight = 0;
 const miniUploadParseWaiters = [];
 let miniTelegramNotificationQueue = Promise.resolve();
 let miniTelegramNotificationQueueDepth = 0;
+let assistantRecordsSnapshotCache = null;
+const assistantPreparedDataCache = new Map();
 let miniRetentionSweepIntervalId = null;
 let miniRetentionSweepInFlight = false;
 
@@ -7211,7 +7221,7 @@ function buildAssistantStoppedPayingAfterDateReply(rows, cutoffTimestamp, isRuss
   return lines.join("\n");
 }
 
-function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = null) {
+function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = null, preparedData = null) {
   const normalizedMessage = normalizeAssistantSearchText(message);
   const isRussian = /[а-яё]/i.test(normalizedMessage);
   const suggestions = getAssistantDefaultSuggestions(isRussian);
@@ -7305,9 +7315,16 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
     );
   }
 
-  const analyzedRows = buildAssistantAnalyzedRows(visibleRecords);
-  const managerEntries = buildAssistantDistinctEntityEntries(analyzedRows, "manager");
-  const companyEntries = buildAssistantDistinctEntityEntries(analyzedRows, "company");
+  const cachedPreparedData = preparedData && typeof preparedData === "object" ? preparedData : null;
+  const analyzedRows = Array.isArray(cachedPreparedData?.analyzedRows)
+    ? cachedPreparedData.analyzedRows
+    : buildAssistantAnalyzedRows(visibleRecords);
+  const managerEntries = Array.isArray(cachedPreparedData?.managerEntries)
+    ? cachedPreparedData.managerEntries
+    : buildAssistantDistinctEntityEntries(analyzedRows, "manager");
+  const companyEntries = Array.isArray(cachedPreparedData?.companyEntries)
+    ? cachedPreparedData.companyEntries
+    : buildAssistantDistinctEntityEntries(analyzedRows, "company");
   const managerMatches = findAssistantEntityMatchesInMessage(message, managerEntries, 3);
   const companyMatches = findAssistantEntityMatchesInMessage(message, companyEntries, 2);
   const primaryManager = managerMatches[0] || null;
@@ -7329,7 +7346,17 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
     wantsNewClients ||
     wantsScopeReference ||
     (wantsClientLookup && Boolean(parsedDateRange));
-  const paymentEvents = needsPaymentEvents ? buildAssistantPaymentEvents(visibleRecords) : [];
+  let paymentEvents = [];
+  if (needsPaymentEvents) {
+    if (Array.isArray(cachedPreparedData?.paymentEvents)) {
+      paymentEvents = cachedPreparedData.paymentEvents;
+    } else {
+      paymentEvents = buildAssistantPaymentEvents(visibleRecords);
+      if (cachedPreparedData && cachedPreparedData.paymentEvents === null) {
+        cachedPreparedData.paymentEvents = paymentEvents;
+      }
+    }
+  }
 
   if (wantsScopeReference) {
     if (!activeScope || !activeScope.clientComparables.length || activeScope.scopeEstablished !== true) {
@@ -17260,6 +17287,139 @@ async function getStoredRecordsFromV2() {
   };
 }
 
+function normalizeAssistantRecordsSnapshotVersion(rawUpdatedAt) {
+  const normalizedTimestamp = normalizeRecordStateTimestamp(rawUpdatedAt);
+  if (normalizedTimestamp === null) {
+    return "none";
+  }
+  return new Date(normalizedTimestamp).toISOString();
+}
+
+function buildAssistantVisibilitySignature(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return "anonymous";
+  }
+
+  const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
+  const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
+  const normalizedUsername = normalizeWebAuthUsername(userProfile.username);
+  const normalizedDisplayName = sanitizeTextValue(userProfile.displayName, 200).toLowerCase();
+  const teamUsernames = normalizeWebAuthTeamUsernames(userProfile.teamUsernames).join(",");
+
+  return [
+    userProfile.isOwner === true ? "owner" : "user",
+    departmentId || "",
+    roleId || "",
+    normalizedUsername || "",
+    normalizedDisplayName || "",
+    teamUsernames,
+  ].join("|");
+}
+
+function buildAssistantPreparedDataCacheKey(stateUpdatedAt, rawTenantKey, rawUsername, userProfile) {
+  const snapshotVersion = normalizeAssistantRecordsSnapshotVersion(stateUpdatedAt);
+  const tenantKey = normalizeAssistantScopeTenantKey(rawTenantKey);
+  const userKey = normalizeAuthUsernameForScopeKey(rawUsername) || "unknown";
+  const visibilitySignature = buildAssistantVisibilitySignature(userProfile);
+  const visibilityHash = crypto.createHash("sha1").update(visibilitySignature).digest("hex");
+  return `${snapshotVersion}::${tenantKey}::${userKey}::${visibilityHash}`;
+}
+
+function pruneAssistantPreparedDataCache(nowMs = Date.now()) {
+  if (!assistantPreparedDataCache.size) {
+    return;
+  }
+
+  for (const [cacheKey, entry] of assistantPreparedDataCache.entries()) {
+    if (!entry || nowMs - entry.lastUsedAtMs > ASSISTANT_PREPARED_DATA_CACHE_TTL_MS) {
+      assistantPreparedDataCache.delete(cacheKey);
+    }
+  }
+
+  if (assistantPreparedDataCache.size <= ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES) {
+    return;
+  }
+
+  const overflow = assistantPreparedDataCache.size - ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES;
+  const evictionCandidates = [...assistantPreparedDataCache.entries()].sort(
+    (left, right) => left[1].lastUsedAtMs - right[1].lastUsedAtMs,
+  );
+  for (let index = 0; index < overflow; index += 1) {
+    assistantPreparedDataCache.delete(evictionCandidates[index][0]);
+  }
+}
+
+async function getStoredRecordsHeadRevision() {
+  await ensureDatabaseReady();
+  const revisionResult = await pool.query(`SELECT updated_at FROM ${STATE_TABLE} WHERE id = $1`, [STATE_ROW_ID]);
+  return revisionResult.rows[0]?.updated_at || null;
+}
+
+async function getStoredRecordsForAssistantChat() {
+  const headRevision = await getStoredRecordsHeadRevision();
+  const headRevisionVersion = normalizeAssistantRecordsSnapshotVersion(headRevision);
+
+  if (assistantRecordsSnapshotCache?.snapshotVersion === headRevisionVersion) {
+    return {
+      records: assistantRecordsSnapshotCache.records,
+      updatedAt: assistantRecordsSnapshotCache.updatedAt,
+      source: assistantRecordsSnapshotCache.source,
+      fallbackFromV2: assistantRecordsSnapshotCache.fallbackFromV2,
+    };
+  }
+
+  const state = await getStoredRecordsForApiRecordsRoute();
+  const normalizedStateUpdatedAt = normalizeAssistantRecordsSnapshotVersion(state.updatedAt);
+  if (assistantRecordsSnapshotCache?.snapshotVersion && assistantRecordsSnapshotCache.snapshotVersion !== headRevisionVersion) {
+    assistantPreparedDataCache.clear();
+  }
+
+  assistantRecordsSnapshotCache = {
+    snapshotVersion: headRevisionVersion,
+    updatedAt: normalizedStateUpdatedAt === "none" ? null : normalizedStateUpdatedAt,
+    records: Array.isArray(state.records) ? state.records : [],
+    source: sanitizeTextValue(state.source, 40) || (READ_V2_ENABLED ? "v2" : "legacy"),
+    fallbackFromV2: state.fallbackFromV2 === true,
+  };
+
+  return {
+    records: assistantRecordsSnapshotCache.records,
+    updatedAt: assistantRecordsSnapshotCache.updatedAt,
+    source: assistantRecordsSnapshotCache.source,
+    fallbackFromV2: assistantRecordsSnapshotCache.fallbackFromV2,
+  };
+}
+
+function getAssistantPreparedDataForUserScope(recordsState, rawTenantKey, rawUsername, userProfile) {
+  const nowMs = Date.now();
+  pruneAssistantPreparedDataCache(nowMs);
+
+  const cacheKey = buildAssistantPreparedDataCacheKey(recordsState?.updatedAt, rawTenantKey, rawUsername, userProfile);
+  const cachedEntry = assistantPreparedDataCache.get(cacheKey);
+  if (cachedEntry?.payload) {
+    cachedEntry.lastUsedAtMs = nowMs;
+    return cachedEntry.payload;
+  }
+
+  const allRecords = Array.isArray(recordsState?.records) ? recordsState.records : [];
+  const visibleRecords = filterClientRecordsForWebAuthUser(allRecords, userProfile);
+  const analyzedRows = buildAssistantAnalyzedRows(visibleRecords);
+  const payload = {
+    visibleRecords,
+    analyzedRows,
+    managerEntries: buildAssistantDistinctEntityEntries(analyzedRows, "manager"),
+    companyEntries: buildAssistantDistinctEntityEntries(analyzedRows, "company"),
+    paymentEvents: null,
+  };
+
+  assistantPreparedDataCache.set(cacheKey, {
+    lastUsedAtMs: nowMs,
+    payload,
+  });
+  pruneAssistantPreparedDataCache(nowMs);
+  return payload;
+}
+
 async function getStoredRecordsForApiRecordsRoute() {
   if (!READ_V2_ENABLED) {
     const legacyState = await getStoredRecords();
@@ -21832,10 +21992,11 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
   );
 
   try {
-    const state = await getStoredRecords();
-    const filteredRecords = filterClientRecordsForWebAuthUser(state.records, req.webAuthProfile);
+    const state = await getStoredRecordsForAssistantChat();
+    const preparedData = getAssistantPreparedDataForUserScope(state, tenantKey, req.webAuthUser, req.webAuthProfile);
+    const filteredRecords = preparedData.visibleRecords;
     const sessionScope = shouldResetContext ? null : await getAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
-    const fallbackPayload = buildAssistantReplyPayload(message, filteredRecords, state.updatedAt, sessionScope);
+    const fallbackPayload = buildAssistantReplyPayload(message, filteredRecords, state.updatedAt, sessionScope, preparedData);
     let finalReply = normalizeAssistantReplyForDisplay(fallbackPayload.reply);
     let provider = "rules";
 
