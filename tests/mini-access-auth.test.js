@@ -12,6 +12,8 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SERVER_ENTRY = path.join(PROJECT_ROOT, "server.js");
 const TELEGRAM_FETCH_PRELOAD = path.join(PROJECT_ROOT, "tests", "helpers", "telegram-fetch-mock.cjs");
 const TELEGRAM_BOT_TOKEN = "test_bot_token_for_mini_access";
+const TEST_SERVER_STARTUP_TIMEOUT_MS = 30000;
+const TEST_SERVER_STARTUP_ATTEMPTS = 2;
 
 function delay(ms) {
   return new Promise((resolve) => {
@@ -67,49 +69,61 @@ async function waitForServerReady(baseUrl, child, timeoutMs = 20000) {
 }
 
 async function startServer(envOverrides = {}) {
-  const port = await reserveFreePort();
-  const env = {
-    ...process.env,
-    NODE_ENV: "test",
-    SERVER_AUTOSTART_IN_TEST: "true",
-    PORT: String(port),
-    DATABASE_URL: "",
-    TELEGRAM_ALLOWED_USER_IDS: "",
-    TELEGRAM_REQUIRED_CHAT_ID: "",
-    TELEGRAM_NOTIFY_CHAT_ID: "",
-    TELEGRAM_NOTIFY_THREAD_ID: "",
-    ...envOverrides,
-  };
+  let lastStartupError = null;
 
-  const child = spawn(process.execPath, ["--require", TELEGRAM_FETCH_PRELOAD, SERVER_ENTRY], {
-    cwd: PROJECT_ROOT,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  for (let attempt = 1; attempt <= TEST_SERVER_STARTUP_ATTEMPTS; attempt += 1) {
+    const requestedPort = envOverrides && Object.prototype.hasOwnProperty.call(envOverrides, "PORT")
+      ? String(envOverrides.PORT || "")
+      : "";
+    const port = requestedPort || String(await reserveFreePort());
+    const env = {
+      ...process.env,
+      NODE_ENV: "test",
+      SERVER_AUTOSTART_IN_TEST: "true",
+      PORT: port,
+      DATABASE_URL: "",
+      TELEGRAM_ALLOWED_USER_IDS: "",
+      TELEGRAM_REQUIRED_CHAT_ID: "",
+      TELEGRAM_NOTIFY_CHAT_ID: "",
+      TELEGRAM_NOTIFY_THREAD_ID: "",
+      ...envOverrides,
+    };
 
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
+    const child = spawn(process.execPath, ["--require", TELEGRAM_FETCH_PRELOAD, SERVER_ENTRY], {
+      cwd: PROJECT_ROOT,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
-  const baseUrl = `http://127.0.0.1:${port}`;
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
 
-  try {
-    await waitForServerReady(baseUrl, child);
-  } catch (error) {
-    await stopServer(child);
-    const details = `${error.message}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`;
-    throw new Error(details);
+    const baseUrl = `http://127.0.0.1:${env.PORT}`;
+
+    try {
+      await waitForServerReady(baseUrl, child, TEST_SERVER_STARTUP_TIMEOUT_MS);
+      return {
+        child,
+        baseUrl,
+      };
+    } catch (error) {
+      await stopServer(child);
+      lastStartupError = new Error(
+        `Attempt ${attempt}/${TEST_SERVER_STARTUP_ATTEMPTS}: ${error.message}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
+      );
+      if (attempt < TEST_SERVER_STARTUP_ATTEMPTS) {
+        await delay(250);
+      }
+    }
   }
 
-  return {
-    child,
-    baseUrl,
-  };
+  throw lastStartupError || new Error("Failed to start test server.");
 }
 
 async function stopServer(child) {
