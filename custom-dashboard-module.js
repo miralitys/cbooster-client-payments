@@ -1657,23 +1657,85 @@ function registerCustomDashboardModule(config) {
     return Math.max(0, asInteger);
   }
 
-  function resolveGhlCallManagerName(rawMessage, usersIndex) {
+  async function resolveGhlManagerNameById(managerId, usersIndex, managerNameCache) {
+    const normalizedManagerId = sanitizeTextValue(managerId, 160);
+    if (!normalizedManagerId) {
+      return "";
+    }
+
+    if (managerNameCache instanceof Map && managerNameCache.has(normalizedManagerId)) {
+      return sanitizeTextValue(managerNameCache.get(normalizedManagerId), 220);
+    }
+
+    const indexedName = sanitizeTextValue(usersIndex?.get(normalizedManagerId), 220);
+    if (indexedName && !looksLikeOpaqueUserId(indexedName)) {
+      if (managerNameCache instanceof Map) {
+        managerNameCache.set(normalizedManagerId, indexedName);
+      }
+      return indexedName;
+    }
+
+    const response = await requestGhlApi(`/users/${encodeURIComponent(normalizedManagerId)}`, {
+      method: "GET",
+      query: {
+        locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
+      },
+      tolerateNotFound: true,
+    });
+
+    if (!response.ok) {
+      if (managerNameCache instanceof Map) {
+        managerNameCache.set(normalizedManagerId, normalizedManagerId);
+      }
+      return normalizedManagerId;
+    }
+
+    const user = response.body?.user && typeof response.body.user === "object"
+      ? response.body.user
+      : response.body?.data && typeof response.body.data === "object"
+        ? response.body.data
+        : response.body;
+    const userName = buildFullName(
+      sanitizeTextValue(pickValueFromObject(user, ["firstName", "firstname", "first_name"]), 120),
+      sanitizeTextValue(pickValueFromObject(user, ["lastName", "lastname", "last_name"]), 120),
+    );
+    const fallbackName = sanitizeTextValue(
+      pickValueFromObject(user, ["name", "fullName", "displayName", "email", "username"]),
+      220,
+    );
+    const resolved = userName || fallbackName || normalizedManagerId;
+
+    if (managerNameCache instanceof Map) {
+      managerNameCache.set(normalizedManagerId, resolved);
+    }
+    if (!looksLikeOpaqueUserId(resolved) && usersIndex instanceof Map) {
+      usersIndex.set(normalizedManagerId, resolved);
+    }
+    return resolved;
+  }
+
+  async function resolveGhlCallManagerName(rawMessage, usersIndex, managerNameCache) {
     const direct = sanitizeTextValue(pickValueFromObject(rawMessage, GHL_CALL_USER_NAME_FIELDS), 220);
     if (direct && !looksLikeOpaqueUserId(direct)) {
-      return direct;
+      return {
+        managerName: direct,
+        managerId: sanitizeTextValue(pickValueFromObject(rawMessage, GHL_CALL_USER_ID_FIELDS), 160),
+      };
     }
 
     const userId = sanitizeTextValue(pickValueFromObject(rawMessage, GHL_CALL_USER_ID_FIELDS), 160);
     if (!userId) {
-      return "";
+      return {
+        managerName: "",
+        managerId: "",
+      };
     }
 
-    const resolvedFromIndex = sanitizeTextValue(usersIndex.get(userId), 220);
-    if (resolvedFromIndex && !looksLikeOpaqueUserId(resolvedFromIndex)) {
-      return resolvedFromIndex;
-    }
-
-    return userId;
+    const resolvedName = await resolveGhlManagerNameById(userId, usersIndex, managerNameCache);
+    return {
+      managerName: sanitizeTextValue(resolvedName, 220) || userId,
+      managerId: userId,
+    };
   }
 
   function resolveGhlCallClientName(rawMessage) {
@@ -1716,7 +1778,7 @@ function registerCustomDashboardModule(config) {
     return fromNumber || toNumber;
   }
 
-  function normalizeGhlCallMessage(rawMessage, context) {
+  async function normalizeGhlCallMessage(rawMessage, context) {
     const callIdRaw = sanitizeTextValue(pickValueFromObject(rawMessage, GHL_CALL_ID_FIELDS), 220);
     const status = sanitizeTextValue(pickValueFromObject(rawMessage, GHL_CALL_STATUS_FIELDS), 220) || "unknown";
     const directionRaw = sanitizeTextValue(pickValueFromObject(rawMessage, GHL_CALL_DIRECTION_FIELDS), 120);
@@ -1734,7 +1796,12 @@ function registerCustomDashboardModule(config) {
       return null;
     }
 
-    const managerName = resolveGhlCallManagerName(rawMessage, context.usersIndex) || "Unassigned";
+    const managerResolved = await resolveGhlCallManagerName(rawMessage, context.usersIndex, context.managerNameCache);
+    const managerName = sanitizeTextValue(managerResolved.managerName, 220) || "Unassigned";
+    const sourceManagerId = sanitizeTextValue(
+      managerResolved.managerId || (looksLikeOpaqueUserId(managerName) ? managerName : ""),
+      160,
+    );
     const clientName = resolveGhlCallClientName(rawMessage);
     const phone = resolveGhlCallPhone(rawMessage, direction);
     const phoneNormalized = normalizePhone(phone);
@@ -1770,8 +1837,39 @@ function registerCustomDashboardModule(config) {
       isOver30Sec: durationSec > 30,
       source: "ghl",
       sourceCallId,
+      sourceManagerId,
       sourceUpdatedAt: Number.isFinite(updatedTimestamp) ? new Date(updatedTimestamp).toISOString() : "",
     };
+  }
+
+  async function remapLegacyCallManagers(callsMap, usersIndex, managerNameCache) {
+    for (const [cacheKey, rawValue] of callsMap.entries()) {
+      if (!rawValue || typeof rawValue !== "object") {
+        continue;
+      }
+
+      const managerName = sanitizeTextValue(rawValue.managerName, 220);
+      const sourceManagerId = sanitizeTextValue(rawValue.sourceManagerId, 160);
+      const candidateId = sourceManagerId || (looksLikeOpaqueUserId(managerName) ? managerName : "");
+      if (!candidateId) {
+        continue;
+      }
+
+      const resolved = await resolveGhlManagerNameById(candidateId, usersIndex, managerNameCache);
+      const resolvedName = sanitizeTextValue(resolved, 220);
+      if (resolvedName && !looksLikeOpaqueUserId(resolvedName)) {
+        callsMap.set(cacheKey, {
+          ...rawValue,
+          managerName: resolvedName,
+          sourceManagerId: candidateId,
+        });
+      } else if (!sourceManagerId) {
+        callsMap.set(cacheKey, {
+          ...rawValue,
+          sourceManagerId: candidateId,
+        });
+      }
+    }
   }
 
   async function runGhlCallsSync(options = {}) {
@@ -1807,6 +1905,15 @@ function registerCustomDashboardModule(config) {
       const previousSyncState = normalizeGhlCallsSyncState(previousSyncStateRaw);
       const previousCallsData = normalizeUploadData(previousCallsRaw, "calls");
       const previousItems = Array.isArray(previousCallsData.items) ? previousCallsData.items : [];
+      const managerNameCache = new Map();
+      for (const [userId, managerName] of usersIndex.entries()) {
+        const normalizedUserId = sanitizeTextValue(userId, 160);
+        const normalizedManagerName = sanitizeTextValue(managerName, 220);
+        if (!normalizedUserId || !normalizedManagerName) {
+          continue;
+        }
+        managerNameCache.set(normalizedUserId, normalizedManagerName);
+      }
       const previousSource = normalizeComparableText(previousCallsData.source || previousCallsData.fileName, 80);
       const canRunDeltaFromPrevious =
         requestedMode === "delta" &&
@@ -1822,6 +1929,8 @@ function registerCustomDashboardModule(config) {
           }
           callsMap.set(key, previousItem);
         }
+
+        await remapLegacyCallManagers(callsMap, usersIndex, managerNameCache);
       }
 
       const previousCursorTimestamp = parseDateTimeValue(previousSyncState.cursorUpdatedAt);
@@ -1861,8 +1970,9 @@ function registerCustomDashboardModule(config) {
         for (let index = 0; index < messages.length; index += 1) {
           const rawMessage = messages[index];
           scannedMessages += 1;
-          const normalizedCall = normalizeGhlCallMessage(rawMessage, {
+          const normalizedCall = await normalizeGhlCallMessage(rawMessage, {
             usersIndex,
+            managerNameCache,
             syncedAtIso: startedAt,
           });
           if (!normalizedCall) {
