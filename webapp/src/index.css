@@ -1641,12 +1641,25 @@ a {
   margin: 0;
 }
 
-.quickbooks-refund-filter {
-  min-width: 160px;
+.quickbooks-toggle-filter {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 36px;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  padding: 8px 10px;
+  font-weight: 600;
+  color: var(--color-text);
+  user-select: none;
 }
 
-.quickbooks-uncategorized-filter {
-  min-width: 210px;
+.quickbooks-toggle-filter input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
 }
 
 .quickbooks-range {
@@ -2917,11 +2930,7 @@ a {
     min-width: 100%;
   }
 
-  .quickbooks-refund-filter {
-    width: 100%;
-  }
-
-  .quickbooks-uncategorized-filter {
+  .quickbooks-toggle-filter {
     width: 100%;
   }
 
