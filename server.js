@@ -388,6 +388,10 @@ const QUICKBOOKS_HTTP_MAX_RETRIES = Math.min(
   Math.max(parsePositiveInteger(process.env.QUICKBOOKS_HTTP_MAX_RETRIES, 2), 1),
   8,
 );
+const QUICKBOOKS_ACCESS_TOKEN_REFRESH_SKEW_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.QUICKBOOKS_ACCESS_TOKEN_REFRESH_SKEW_SEC, 90), 5),
+  600,
+);
 const QUICKBOOKS_HTTP_RETRY_BASE_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.QUICKBOOKS_HTTP_RETRY_BASE_MS, 300), 50),
   30000,
@@ -1484,6 +1488,9 @@ let ghlBasicNoteAutoRefreshIntervalId = null;
 let ghlBasicNoteAutoRefreshInFlight = false;
 let ghlBasicNoteManualRefreshState = createInitialGhlBasicNoteManualRefreshState();
 let quickBooksRuntimeRefreshToken = QUICKBOOKS_REFRESH_TOKEN;
+let quickBooksRuntimeAccessToken = "";
+let quickBooksRuntimeAccessTokenExpiresAtMs = 0;
+let quickBooksAccessTokenRefreshPromise = null;
 let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
   items: [],
@@ -18130,6 +18137,28 @@ function toIsoTimestampFromNow(secondsFromNow) {
   return new Date(Date.now() + secondsFromNow * 1000).toISOString();
 }
 
+function isQuickBooksRuntimeAccessTokenUsable() {
+  const token = sanitizeTextValue(quickBooksRuntimeAccessToken, 5000);
+  if (!token) {
+    return false;
+  }
+
+  const expiresAtMs = Number.parseInt(String(quickBooksRuntimeAccessTokenExpiresAtMs || ""), 10);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= 0) {
+    return false;
+  }
+
+  const refreshSkewMs = QUICKBOOKS_ACCESS_TOKEN_REFRESH_SKEW_SEC * 1000;
+  return Date.now() + refreshSkewMs < expiresAtMs;
+}
+
+function rememberQuickBooksRuntimeAccessToken(tokenValue, expiresAtMs = 0) {
+  quickBooksRuntimeAccessToken = sanitizeTextValue(tokenValue, 5000);
+  const normalizedExpiresAtMs = Number.parseInt(String(expiresAtMs || ""), 10);
+  quickBooksRuntimeAccessTokenExpiresAtMs =
+    Number.isFinite(normalizedExpiresAtMs) && normalizedExpiresAtMs > 0 ? normalizedExpiresAtMs : 0;
+}
+
 async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIso = "") {
   if (!pool) {
     return;
@@ -18244,55 +18273,80 @@ async function requestQuickBooksAccessTokenWithRefreshToken(refreshTokenValue) {
   }
 
   const rotatedRefreshToken = sanitizeTextValue(body?.refresh_token, 6000) || normalizedRefreshToken;
+  const accessTokenLifetimeSec = parseQuickBooksTokenLifetimeSeconds(body?.expires_in);
+  const accessTokenExpiresAtMs =
+    Number.isFinite(accessTokenLifetimeSec) && accessTokenLifetimeSec > 0
+      ? Date.now() + accessTokenLifetimeSec * 1000
+      : 0;
   const refreshTokenLifetimeSec = parseQuickBooksTokenLifetimeSeconds(body?.x_refresh_token_expires_in);
   const refreshTokenExpiresAtIso = toIsoTimestampFromNow(refreshTokenLifetimeSec || 0);
 
   return {
     ok: true,
     accessToken,
+    accessTokenExpiresAtMs,
     refreshToken: rotatedRefreshToken,
     refreshTokenExpiresAtIso,
   };
 }
 
 async function fetchQuickBooksAccessToken() {
-  const activeRefreshToken = getActiveQuickBooksRefreshToken();
-  const envRefreshToken = sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000);
-  const attemptedTokens = new Set();
-
-  let authResult = null;
-  if (activeRefreshToken) {
-    attemptedTokens.add(activeRefreshToken);
-    authResult = await requestQuickBooksAccessTokenWithRefreshToken(activeRefreshToken);
+  if (isQuickBooksRuntimeAccessTokenUsable()) {
+    return sanitizeTextValue(quickBooksRuntimeAccessToken, 5000);
   }
 
-  if (
-    authResult &&
-    !authResult.ok &&
-    authResult.invalidRefreshToken &&
-    envRefreshToken &&
-    !attemptedTokens.has(envRefreshToken)
-  ) {
-    attemptedTokens.add(envRefreshToken);
-    authResult = await requestQuickBooksAccessTokenWithRefreshToken(envRefreshToken);
+  if (!quickBooksAccessTokenRefreshPromise) {
+    quickBooksAccessTokenRefreshPromise = (async () => {
+      if (isQuickBooksRuntimeAccessTokenUsable()) {
+        return sanitizeTextValue(quickBooksRuntimeAccessToken, 5000);
+      }
+
+      const activeRefreshToken = getActiveQuickBooksRefreshToken();
+      const envRefreshToken = sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000);
+      const attemptedTokens = new Set();
+
+      let authResult = null;
+      if (activeRefreshToken) {
+        attemptedTokens.add(activeRefreshToken);
+        authResult = await requestQuickBooksAccessTokenWithRefreshToken(activeRefreshToken);
+      }
+
+      if (
+        authResult &&
+        !authResult.ok &&
+        authResult.invalidRefreshToken &&
+        envRefreshToken &&
+        !attemptedTokens.has(envRefreshToken)
+      ) {
+        attemptedTokens.add(envRefreshToken);
+        authResult = await requestQuickBooksAccessTokenWithRefreshToken(envRefreshToken);
+      }
+
+      if (!authResult) {
+        throw createHttpError("QuickBooks auth failed. Refresh token is missing.", 503);
+      }
+
+      if (!authResult.ok) {
+        throw createHttpError(authResult.message || "QuickBooks auth failed.", authResult.httpStatus || 502);
+      }
+
+      quickBooksRuntimeRefreshToken = authResult.refreshToken;
+      rememberQuickBooksRuntimeAccessToken(authResult.accessToken, authResult.accessTokenExpiresAtMs);
+      try {
+        await persistQuickBooksRefreshToken(authResult.refreshToken, authResult.refreshTokenExpiresAtIso);
+      } catch (error) {
+        console.warn("QuickBooks token refresh state was not persisted:", sanitizeTextValue(error?.message, 220) || "Unknown error.");
+      }
+
+      return sanitizeTextValue(quickBooksRuntimeAccessToken, 5000);
+    })();
   }
 
-  if (!authResult) {
-    throw createHttpError("QuickBooks auth failed. Refresh token is missing.", 503);
-  }
-
-  if (!authResult.ok) {
-    throw createHttpError(authResult.message || "QuickBooks auth failed.", authResult.httpStatus || 502);
-  }
-
-  quickBooksRuntimeRefreshToken = authResult.refreshToken;
   try {
-    await persistQuickBooksRefreshToken(authResult.refreshToken, authResult.refreshTokenExpiresAtIso);
-  } catch (error) {
-    console.warn("QuickBooks token refresh state was not persisted:", sanitizeTextValue(error?.message, 220) || "Unknown error.");
+    return await quickBooksAccessTokenRefreshPromise;
+  } finally {
+    quickBooksAccessTokenRefreshPromise = null;
   }
-
-  return authResult.accessToken;
 }
 
 function normalizeQuickBooksQueryFieldName(rawValue) {
