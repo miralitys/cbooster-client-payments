@@ -244,7 +244,7 @@ export default function QuickBooksPage() {
     setIsLoading(true);
     setLoadError("");
     setSyncWarning("");
-    setStatusText("Loading outgoing transactions from QuickBooks...");
+    setStatusText("Loading expense transactions from QuickBooks...");
 
     try {
       const payload = await getQuickBooksOutgoingPayments({
@@ -262,7 +262,7 @@ export default function QuickBooksPage() {
       setLastLoadPrefix(buildOutgoingLoadPrefixFromPayload(payload));
       setSyncWarning("");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load outgoing transactions.";
+      const message = error instanceof Error ? error.message : "Failed to load expense transactions.";
       if (!previousItems.length) {
         setLoadError(message);
         setStatusText(message);
@@ -272,7 +272,7 @@ export default function QuickBooksPage() {
       } else {
         setLoadError("");
         setSyncWarning(message);
-        setStatusText(`Previous outgoing data is shown. Latest QuickBooks read failed: ${message}`);
+        setStatusText(`Previous expense data is shown. Latest QuickBooks read failed: ${message}`);
         setOutgoingTransactions(previousItems);
       }
     } finally {
@@ -394,7 +394,7 @@ export default function QuickBooksPage() {
 
       <Panel
         className="table-panel quickbooks-table-panel"
-        title={activeTab === "incoming" ? "Incoming Transactions" : "Outgoing Transactions"}
+        title={activeTab === "incoming" ? "Incoming Transactions" : "Expense Transactions"}
         actions={
           <div className="quickbooks-toolbar-react">
             <div className="quickbooks-tabs-wrap">
@@ -448,7 +448,7 @@ export default function QuickBooksPage() {
         {isLoading ? <LoadingSkeleton rows={7} /> : null}
         {!isLoading && loadError && !filteredTransactions.length ? (
           <ErrorState
-            title={activeTab === "incoming" ? "Failed to load incoming transactions" : "Failed to load outgoing transactions"}
+            title={activeTab === "incoming" ? "Failed to load incoming transactions" : "Failed to load expense transactions"}
             description={loadError}
             actionLabel="Retry"
             onAction={retryLoad}
@@ -466,8 +466,8 @@ export default function QuickBooksPage() {
                     ? "No refunds found for the selected period."
                     : "No transactions found for the selected period."
                 : search.trim()
-                  ? `No outgoing transactions found for "${search.trim()}".`
-                  : "No outgoing transactions found for the selected period."
+                  ? `No expense transactions found for "${search.trim()}".`
+                  : "No expense transactions found for the selected period."
             }
           />
         ) : null}
@@ -529,11 +529,11 @@ function buildFilterStatusMessage(
   if (tab === "outgoing") {
     let outgoingMessage = "";
     if (!normalizedQuery) {
-      outgoingMessage = `Loaded ${totalCount} outgoing transaction${totalCount === 1 ? "" : "s"}.`;
+      outgoingMessage = `Loaded ${totalCount} expense transaction${totalCount === 1 ? "" : "s"}.`;
     } else if (visibleCount === 0) {
-      outgoingMessage = `No outgoing transactions found for "${normalizedQuery}".`;
+      outgoingMessage = `No expense transactions found for "${normalizedQuery}".`;
     } else {
-      outgoingMessage = `Showing ${visibleCount} of ${totalCount} outgoing transactions for "${normalizedQuery}".`;
+      outgoingMessage = `Showing ${visibleCount} of ${totalCount} expense transactions for "${normalizedQuery}".`;
     }
     return normalizedPrefix ? `${normalizedPrefix} ${outgoingMessage}` : outgoingMessage;
   }
@@ -665,7 +665,7 @@ function buildOutgoingLoadPrefixFromPayload(payload: { source?: string }): strin
   if (source === "quickbooks_live") {
     return "QuickBooks live data:";
   }
-  return "Outgoing data:";
+  return "Expense data:";
 }
 
 function formatQuickBooksClientLabel(clientName: string, transactionType: string, amount: number): string {
@@ -687,11 +687,11 @@ function formatQuickBooksPayeeLabel(payeeName: string): string {
 
 function formatQuickBooksOutgoingTypeLabel(transactionType: string): string {
   const normalizedType = String(transactionType || "").trim().toLowerCase();
+  if (normalizedType === "expense" || normalizedType === "purchase") {
+    return "Expense";
+  }
   if (normalizedType === "billpayment") {
     return "Bill Payment";
-  }
-  if (normalizedType === "purchase") {
-    return "Purchase";
   }
   if (normalizedType === "check") {
     return "Check";

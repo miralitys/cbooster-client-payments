@@ -15881,40 +15881,6 @@ async function fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate) {
   });
 }
 
-async function fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate) {
-  return fetchQuickBooksEntityInRange(accessToken, "BillPayment", fromDate, toDate, "bill payments", {
-    selectFields: ["Id", "TotalAmt", "TxnDate", "VendorRef", "APAccountRef"],
-  });
-}
-
-async function fetchQuickBooksChecksInRange(accessToken, fromDate, toDate) {
-  return fetchQuickBooksEntityInRange(accessToken, "Check", fromDate, toDate, "checks", {
-    selectFields: ["Id", "TotalAmt", "TxnDate", "PayeeRef", "AccountRef", "Line"],
-  });
-}
-
-function isQuickBooksUnsupportedEntityQueryError(error) {
-  const message = sanitizeTextValue(error?.message, 600).toLowerCase();
-  if (!message) {
-    return false;
-  }
-  return message.includes("queryvalidationerror") || message.includes("invalid context declaration");
-}
-
-async function fetchQuickBooksOutgoingEntitySafely(entityLabel, loader) {
-  try {
-    return await loader();
-  } catch (error) {
-    if (!isQuickBooksUnsupportedEntityQueryError(error)) {
-      throw error;
-    }
-    console.warn(
-      `[QuickBooks outgoing] skipped unsupported entity "${sanitizeTextValue(entityLabel, 80) || "unknown"}": ${sanitizeTextValue(error?.message, 300) || "Unknown error."}`,
-    );
-    return [];
-  }
-}
-
 async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
   const normalizedPaymentId = sanitizeTextValue(paymentId, 120);
   if (!normalizedPaymentId) {
@@ -16180,7 +16146,7 @@ function mapQuickBooksRefund(record) {
 
 function normalizeQuickBooksOutgoingTransaction(item) {
   const transactionType = sanitizeTextValue(item?.transactionType, 40).toLowerCase();
-  if (transactionType !== "purchase" && transactionType !== "billpayment" && transactionType !== "check") {
+  if (transactionType !== "purchase" && transactionType !== "expense") {
     return null;
   }
 
@@ -16202,7 +16168,7 @@ function normalizeQuickBooksOutgoingTransaction(item) {
   }
 
   return {
-    transactionType,
+    transactionType: "expense",
     transactionId,
     customerId,
     clientName,
@@ -16260,9 +16226,6 @@ function extractQuickBooksOutgoingCategoryName(record) {
     categoryCandidates.push(normalizedValue);
   }
 
-  pushCandidate(resolveQuickBooksReferenceLabel(normalizedRecord?.APAccountRef, "AP Account"));
-  pushCandidate(resolveQuickBooksReferenceLabel(normalizedRecord?.AccountRef, "Account"));
-
   const lines = Array.isArray(normalizedRecord?.Line) ? normalizedRecord.Line : [];
   for (const line of lines) {
     const normalizedLine = line && typeof line === "object" ? line : {};
@@ -16283,37 +16246,7 @@ function extractQuickBooksOutgoingCategoryName(record) {
 function mapQuickBooksPurchaseAsOutgoing(record) {
   const payeeReference = resolveQuickBooksPayeeReference(record?.EntityRef, "Payee");
   return normalizeQuickBooksOutgoingTransaction({
-    transactionType: "purchase",
-    transactionId: record?.Id,
-    customerId: payeeReference.payeeId,
-    clientName: payeeReference.payeeName,
-    clientPhone: "",
-    clientEmail: "",
-    categoryName: extractQuickBooksOutgoingCategoryName(record),
-    paymentAmount: record?.TotalAmt,
-    paymentDate: record?.TxnDate,
-  });
-}
-
-function mapQuickBooksBillPaymentAsOutgoing(record) {
-  const payeeReference = resolveQuickBooksPayeeReference(record?.VendorRef, "Vendor");
-  return normalizeQuickBooksOutgoingTransaction({
-    transactionType: "billpayment",
-    transactionId: record?.Id,
-    customerId: payeeReference.payeeId,
-    clientName: payeeReference.payeeName,
-    clientPhone: "",
-    clientEmail: "",
-    categoryName: extractQuickBooksOutgoingCategoryName(record),
-    paymentAmount: record?.TotalAmt,
-    paymentDate: record?.TxnDate,
-  });
-}
-
-function mapQuickBooksCheckAsOutgoing(record) {
-  const payeeReference = resolveQuickBooksPayeeReference(record?.PayeeRef, "Payee");
-  return normalizeQuickBooksOutgoingTransaction({
-    transactionType: "check",
+    transactionType: "expense",
     transactionId: record?.Id,
     customerId: payeeReference.payeeId,
     clientName: payeeReference.payeeName,
@@ -16327,23 +16260,10 @@ function mapQuickBooksCheckAsOutgoing(record) {
 
 async function listQuickBooksOutgoingTransactionsInRange(fromDate, toDate) {
   const accessToken = await fetchQuickBooksAccessToken();
-  const [purchaseRecords, billPaymentRecords, checkRecords] = await Promise.all([
-    fetchQuickBooksOutgoingEntitySafely("purchase", () =>
-      fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate),
-    ),
-    fetchQuickBooksOutgoingEntitySafely("billpayment", () =>
-      fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate),
-    ),
-    fetchQuickBooksOutgoingEntitySafely("check", () =>
-      fetchQuickBooksChecksInRange(accessToken, fromDate, toDate),
-    ),
-  ]);
+  const purchaseRecords = await fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate);
 
-  const outgoingItems = [
-    ...purchaseRecords.map(mapQuickBooksPurchaseAsOutgoing),
-    ...billPaymentRecords.map(mapQuickBooksBillPaymentAsOutgoing),
-    ...checkRecords.map(mapQuickBooksCheckAsOutgoing),
-  ]
+  const outgoingItems = purchaseRecords
+    .map(mapQuickBooksPurchaseAsOutgoing)
     .filter((item) => item && typeof item === "object")
     .filter((item) => Math.abs(item.paymentAmount) >= QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT);
 
