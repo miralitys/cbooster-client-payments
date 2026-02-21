@@ -769,7 +769,7 @@ export default function ClientPaymentsPage() {
                 disabled={isManagersLoading || !canSyncClientManagers}
                 isLoading={isManagersLoading && managersRefreshMode === "incremental"}
               >
-                Refresh Managers
+                Refresh Manager
               </Button>
               <Button
                 variant="secondary"
@@ -778,7 +778,7 @@ export default function ClientPaymentsPage() {
                 disabled={isManagersLoading || !canSyncClientManagers}
                 isLoading={isManagersLoading && managersRefreshMode === "full"}
               >
-                Total Refresh Managers
+                Total Refresh Manager
               </Button>
             </div>
           }
