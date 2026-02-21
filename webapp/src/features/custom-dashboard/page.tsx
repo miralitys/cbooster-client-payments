@@ -69,10 +69,15 @@ const WIDGET_LABELS: Record<CustomDashboardWidgetKey, string> = {
   callsByManager: "Calls by Manager",
 };
 const MANAGER_COLUMN_CLASS = "custom-dashboard-manager-column";
+const DASHBOARD_SECTION_OPTIONS = [
+  { key: "tasks", label: "Tasks" },
+  { key: "calls", label: "Calls" },
+] as const;
 
 type SettingsTab = "dashboard" | "settings";
 type TasksViewKey = (typeof TASK_VIEW_OPTIONS)[number]["key"];
 type CallsViewKey = (typeof CALLS_VIEW_OPTIONS)[number]["key"];
+type DashboardSectionKey = (typeof DASHBOARD_SECTION_OPTIONS)[number]["key"];
 type UploadType = "contacts" | "calls";
 
 export default function CustomDashboardPage() {
@@ -85,6 +90,7 @@ export default function CustomDashboardPage() {
 
   const [tasksView, setTasksView] = useState<TasksViewKey>("totals");
   const [callsView, setCallsView] = useState<CallsViewKey>("today");
+  const [dashboardSection, setDashboardSection] = useState<DashboardSectionKey>("tasks");
   const [selectedSpecialist, setSelectedSpecialist] = useState("");
   const [selectedCallsManager, setSelectedCallsManager] = useState("");
 
@@ -1000,10 +1006,33 @@ export default function CustomDashboardPage() {
         <>
           {activeTab === "dashboard" ? (
             <>
+              <div className="custom-dashboard-section-switcher">
+                <SegmentedControl
+                  value={dashboardSection}
+                  options={DASHBOARD_SECTION_OPTIONS.map((option) => ({
+                    key: option.key,
+                    label: option.label,
+                  }))}
+                  onChange={(value) => {
+                    if (value === "tasks" || value === "calls") {
+                      setDashboardSection(value);
+                    }
+                  }}
+                />
+              </div>
+
               {canManage ? (
-                <Panel title="Uploads" className="custom-dashboard-uploads-panel">
-                  <p className="dashboard-message">Upload data files for tasks, contacts and calls.</p>
-                  <div className="custom-dashboard-tasks-source-card">
+                <Panel
+                  title={dashboardSection === "tasks" ? "Task Operations" : "Calls & Contacts Data"}
+                  className="custom-dashboard-uploads-panel"
+                >
+                  <p className="dashboard-message">
+                    {dashboardSection === "tasks"
+                      ? "Track task movements from GoHighLevel."
+                      : "Upload contacts/calls files or sync calls from GoHighLevel."}
+                  </p>
+                  {dashboardSection === "tasks" ? (
+                    <div className="custom-dashboard-tasks-source-card">
                     <div className="custom-dashboard-tasks-source-head">
                       <h3>Task Movements (Last 24 Hours)</h3>
                       <div className="custom-dashboard-tasks-source-actions">
@@ -1092,78 +1121,83 @@ export default function CustomDashboardPage() {
                         )}
                       </>
                     ) : null}
-                  </div>
-                  {uploadStateLabel ? <p className="dashboard-message">{uploadStateLabel}</p> : null}
-                  {dashboard.callsSync.configured ? (
-                    <p className="dashboard-message">
-                      Calls sync: last synced {formatDateTimeOrDash(dashboard.callsSync.lastSyncedAt)}. Next auto sync:{" "}
-                      {formatDateTimeOrDash(dashboard.callsSync.autoSync.nextRunAt)} ({dashboard.callsSync.autoSync.timeZone}).
-                    </p>
-                  ) : (
-                    <p className="dashboard-message error">
-                      GoHighLevel is not configured for calls sync. Add `GHL_API_KEY` and `GHL_LOCATION_ID`.
-                    </p>
-                  )}
-                  {dashboard.callsSync.lastError ? (
-                    <p className="dashboard-message error">Last calls sync error: {dashboard.callsSync.lastError}</p>
+                    </div>
                   ) : null}
+                  {dashboardSection === "calls" ? (
+                    <>
+                      {uploadStateLabel ? <p className="dashboard-message">{uploadStateLabel}</p> : null}
+                      {dashboard.callsSync.configured ? (
+                        <p className="dashboard-message">
+                          Calls sync: last synced {formatDateTimeOrDash(dashboard.callsSync.lastSyncedAt)}. Next auto sync:{" "}
+                          {formatDateTimeOrDash(dashboard.callsSync.autoSync.nextRunAt)} ({dashboard.callsSync.autoSync.timeZone}).
+                        </p>
+                      ) : (
+                        <p className="dashboard-message error">
+                          GoHighLevel is not configured for calls sync. Add `GHL_API_KEY` and `GHL_LOCATION_ID`.
+                        </p>
+                      )}
+                      {dashboard.callsSync.lastError ? (
+                        <p className="dashboard-message error">Last calls sync error: {dashboard.callsSync.lastError}</p>
+                      ) : null}
 
-                  <div className="custom-dashboard-upload-grid">
-                    <UploadCard
-                      title="Contacts"
-                      meta={dashboard.uploads.contacts}
-                      disabled={Boolean(uploadingType)}
-                      loading={uploadingType === "contacts"}
-                      onUploadClick={() => contactsFileInputRef.current?.click()}
-                    />
-                    <UploadCard
-                      title="Calls"
-                      meta={dashboard.uploads.calls}
-                      disabled={Boolean(uploadingType)}
-                      loading={uploadingType === "calls"}
-                      onUploadClick={() => callsFileInputRef.current?.click()}
-                      secondaryActionLabel="Sync from GHL"
-                      onSecondaryAction={() => void onSyncCallsFromGhl("delta")}
-                      secondaryDisabled={
-                        Boolean(uploadingType) ||
-                        callsSyncLoading ||
-                        dashboard.callsSync.syncInFlight ||
-                        !dashboard.callsSync.configured
-                      }
-                      secondaryLoading={callsSyncLoading || dashboard.callsSync.syncInFlight}
-                    />
-                  </div>
+                      <div className="custom-dashboard-upload-grid">
+                        <UploadCard
+                          title="Contacts"
+                          meta={dashboard.uploads.contacts}
+                          disabled={Boolean(uploadingType)}
+                          loading={uploadingType === "contacts"}
+                          onUploadClick={() => contactsFileInputRef.current?.click()}
+                        />
+                        <UploadCard
+                          title="Calls"
+                          meta={dashboard.uploads.calls}
+                          disabled={Boolean(uploadingType)}
+                          loading={uploadingType === "calls"}
+                          onUploadClick={() => callsFileInputRef.current?.click()}
+                          secondaryActionLabel="Sync from GHL"
+                          onSecondaryAction={() => void onSyncCallsFromGhl("delta")}
+                          secondaryDisabled={
+                            Boolean(uploadingType) ||
+                            callsSyncLoading ||
+                            dashboard.callsSync.syncInFlight ||
+                            !dashboard.callsSync.configured
+                          }
+                          secondaryLoading={callsSyncLoading || dashboard.callsSync.syncInFlight}
+                        />
+                      </div>
 
-                  <input
-                    ref={contactsFileInputRef}
-                    type="file"
-                    accept=".csv,.tsv,.txt"
-                    className="custom-dashboard-upload-input"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        void onUploadSelected("contacts", file);
-                      }
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                  <input
-                    ref={callsFileInputRef}
-                    type="file"
-                    accept=".csv,.tsv,.txt"
-                    className="custom-dashboard-upload-input"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        void onUploadSelected("calls", file);
-                      }
-                      event.currentTarget.value = "";
-                    }}
-                  />
+                      <input
+                        ref={contactsFileInputRef}
+                        type="file"
+                        accept=".csv,.tsv,.txt"
+                        className="custom-dashboard-upload-input"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) {
+                            void onUploadSelected("contacts", file);
+                          }
+                          event.currentTarget.value = "";
+                        }}
+                      />
+                      <input
+                        ref={callsFileInputRef}
+                        type="file"
+                        accept=".csv,.tsv,.txt"
+                        className="custom-dashboard-upload-input"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) {
+                            void onUploadSelected("calls", file);
+                          }
+                          event.currentTarget.value = "";
+                        }}
+                      />
+                    </>
+                  ) : null}
                 </Panel>
               ) : null}
 
-              {dashboard.managerTasks.enabled && dashboard.managerTasks.rows.length ? (
+              {dashboardSection === "tasks" && dashboard.managerTasks.enabled && dashboard.managerTasks.rows.length ? (
                 <Panel title="Manager Tasks" className="custom-dashboard-widget-panel">
                   <div className="custom-dashboard-kpi-row">
                     <KpiCard label="Managers" value={String(dashboard.managerTasks.totals.managers)} />
@@ -1186,7 +1220,7 @@ export default function CustomDashboardPage() {
                 </Panel>
               ) : null}
 
-              {dashboard.specialistTasks.enabled && dashboard.specialistTasks.specialistOptions.length ? (
+              {dashboardSection === "tasks" && dashboard.specialistTasks.enabled && dashboard.specialistTasks.specialistOptions.length ? (
                 <Panel
                   title="Specialist Tasks"
                   className="custom-dashboard-widget-panel"
@@ -1268,6 +1302,7 @@ export default function CustomDashboardPage() {
                 </Panel>
               ) : null}
 
+              {dashboardSection === "calls" ? (
               <Panel title="Sales Report" className="custom-dashboard-widget-panel">
                 {!dashboard.salesReport.enabled ? (
                   <EmptyState title="Widget is disabled for your account." />
@@ -1307,7 +1342,9 @@ export default function CustomDashboardPage() {
                   </>
                 )}
               </Panel>
+              ) : null}
 
+              {dashboardSection === "calls" ? (
               <Panel
                 title="Calls by Manager"
                 className="custom-dashboard-widget-panel"
@@ -1396,6 +1433,7 @@ export default function CustomDashboardPage() {
                   </>
                 )}
               </Panel>
+              ) : null}
             </>
           ) : null}
 
