@@ -275,4 +275,19 @@ export interface CustomDashboardTaskMovementsResponse {
   truncatedRows: boolean;
   rows: CustomDashboardTaskMovementRow[];
   managerSummary: CustomDashboardTaskMovementManagerRow[];
+  cachedAt?: string;
+  cacheTrigger?: string;
+  fromCache?: boolean;
+  autoSync?: {
+    enabled: boolean;
+    timeZone: string;
+    hour: number;
+    minute: number;
+    inFlight: boolean;
+    nextRunAt: string;
+    lastStartedAt: string;
+    lastFinishedAt: string;
+    lastSuccessAt: string;
+    lastError: string;
+  };
 }
