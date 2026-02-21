@@ -14259,6 +14259,57 @@ function extractGhlUrlsFromText(rawValue) {
   return [...deduped];
 }
 
+function extractGhlResolvableUrls(rawValue) {
+  const deduped = new Set(extractGhlUrlsFromText(rawValue));
+  const value = sanitizeTextValue(rawValue, 4000);
+  if (!value) {
+    return [...deduped];
+  }
+
+  const candidatePaths = new Set();
+  const directValue = value.trim();
+  if (directValue) {
+    candidatePaths.add(directValue);
+  }
+
+  const pathMatches = value.match(/(?:\/)?(?:contacts|proposals|documents|files|attachments)\/[^\s<>"')]+/gi);
+  if (Array.isArray(pathMatches)) {
+    for (const match of pathMatches) {
+      const normalizedMatch = sanitizeTextValue(match, 2000);
+      if (normalizedMatch) {
+        candidatePaths.add(normalizedMatch);
+      }
+    }
+  }
+
+  for (const rawPath of candidatePaths) {
+    const pathValue = sanitizeTextValue(rawPath, 2000);
+    if (!pathValue) {
+      continue;
+    }
+    if (/^https?:\/\//i.test(pathValue)) {
+      deduped.add(pathValue);
+      continue;
+    }
+
+    const normalizedPath = pathValue.startsWith("/") ? pathValue : `/${pathValue}`;
+    if (!/^\/(?:contacts|proposals|documents|files|attachments)\b/i.test(normalizedPath)) {
+      continue;
+    }
+
+    try {
+      const absoluteUrl = buildGhlUrl(normalizedPath, {}).toString();
+      if (absoluteUrl) {
+        deduped.add(absoluteUrl);
+      }
+    } catch {
+      // ignored
+    }
+  }
+
+  return [...deduped];
+}
+
 function extractLikelyGhlEntityId(rawValue) {
   const value = sanitizeTextValue(rawValue, 220);
   if (!value) {
@@ -14287,7 +14338,7 @@ function normalizeGhlContractCandidate(candidate, fallbackSource = "") {
   }
 
   const title = sanitizeTextValue(candidate.title, 300);
-  const url = extractGhlUrlsFromText(candidate.url)[0] || "";
+  const url = extractGhlResolvableUrls(candidate.url)[0] || "";
   const snippet = sanitizeTextValue(candidate.snippet, 300);
   const source = sanitizeTextValue(candidate.source || fallbackSource, 120) || "unknown";
   const contactName = sanitizeTextValue(candidate.contactName, 300);
@@ -14629,7 +14680,7 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
   }
 
   if (typeof node === "string") {
-    for (const url of extractGhlUrlsFromText(node)) {
+    for (const url of extractGhlResolvableUrls(node)) {
       target.push({
         title: "",
         url,
@@ -14755,7 +14806,7 @@ function collectGhlContractCandidatesFromPayloadNode(node, target, sourceLabel, 
   ];
   const extractedUrls = [];
   for (const urlCandidate of urlCandidates) {
-    extractedUrls.push(...extractGhlUrlsFromText(urlCandidate));
+    extractedUrls.push(...extractGhlResolvableUrls(urlCandidate));
   }
 
   if (extractedUrls.length) {
@@ -14818,7 +14869,7 @@ function extractGhlContractCandidatesFromContact(contact) {
   ];
 
   for (const field of directFields) {
-    const urls = extractGhlUrlsFromText(field.value);
+      const urls = extractGhlResolvableUrls(field.value);
     for (const url of urls) {
       rawCandidates.push({
         title: "Contact Link",
@@ -14899,7 +14950,7 @@ function extractGhlContractCandidatesFromContact(contact) {
           continue;
         }
 
-        const urls = extractGhlUrlsFromText(textValue);
+        const urls = extractGhlResolvableUrls(textValue);
         if (urls.length) {
           for (const url of urls) {
             rawCandidates.push({
@@ -15019,7 +15070,7 @@ function buildGhlClientDocumentItems(candidates) {
       continue;
     }
 
-    const url = extractGhlUrlsFromText(candidate?.url)[0] || "";
+    const url = extractGhlResolvableUrls(candidate?.url)[0] || "";
     const titleFromUrl = extractGhlFileNameFromUrl(url);
     const title =
       sanitizeTextValue(candidate?.title, 300) ||
@@ -25870,7 +25921,7 @@ function summarizeGhlContractDownloadCandidateForDebug(candidate, context = {}) 
   }
 
   const source = sanitizeTextValue(candidate?.source, 160).toLowerCase();
-  const url = extractGhlUrlsFromText(candidate?.url)[0] || "";
+  const url = extractGhlResolvableUrls(candidate?.url)[0] || "";
   const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
   const signal = normalizeGhlContractComparableText(
     `${candidate?.title || ""} ${candidate?.snippet || ""} ${source} ${candidateId || ""}`,
@@ -25906,7 +25957,7 @@ function buildTopGhlContractDownloadCandidatesForDebug(candidates, context = {},
   const normalizedCandidates = dedupeGhlContractCandidates(candidates)
     .map((candidate) => ({
       ...candidate,
-      url: extractGhlUrlsFromText(candidate?.url)[0] || "",
+      url: extractGhlResolvableUrls(candidate?.url)[0] || "",
       candidateId: extractLikelyGhlEntityId(candidate?.candidateId),
     }))
     .map((candidate) => summarizeGhlContractDownloadCandidateForDebug(candidate, context))
@@ -25929,7 +25980,7 @@ function buildTopGhlContractDownloadCandidatesForDebug(candidates, context = {},
 function computeGhlContractDownloadCandidateScore(candidate, context = {}) {
   const source = sanitizeTextValue(candidate?.source, 160).toLowerCase();
   const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
-  const hasUrl = Boolean(extractGhlUrlsFromText(candidate?.url)[0]);
+  const hasUrl = Boolean(extractGhlResolvableUrls(candidate?.url)[0]);
   const signal = normalizeGhlContractComparableText(
     `${candidate?.title || ""} ${candidate?.snippet || ""} ${source} ${candidateId || ""}`,
   );
@@ -25991,7 +26042,7 @@ function isGhlContractDownloadCandidate(candidate, context = {}) {
     return false;
   }
 
-  const url = extractGhlUrlsFromText(candidate.url)[0] || "";
+  const url = extractGhlResolvableUrls(candidate.url)[0] || "";
   const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
   const hasAllowedUrl = Boolean(url && isAllowedGhlContractDownloadUrl(url));
   if (!hasAllowedUrl && !candidateId) {
@@ -26041,7 +26092,7 @@ function pickBestGhlContractDownloadCandidate(candidates, context = {}, options 
   let bestScore = -1;
 
   for (const candidate of normalizedCandidates) {
-    const normalizedUrl = extractGhlUrlsFromText(candidate?.url)[0] || "";
+    const normalizedUrl = extractGhlResolvableUrls(candidate?.url)[0] || "";
     const normalizedCandidateId = extractLikelyGhlEntityId(candidate?.candidateId);
     if (requireUrl && !normalizedUrl) {
       continue;
@@ -26082,7 +26133,7 @@ function rankGhlContractDownloadCandidates(candidates, context = {}, options = {
   const ranked = [];
 
   for (const candidate of normalizedCandidates) {
-    const normalizedUrl = extractGhlUrlsFromText(candidate?.url)[0] || "";
+    const normalizedUrl = extractGhlResolvableUrls(candidate?.url)[0] || "";
     const normalizedCandidateId = extractLikelyGhlEntityId(candidate?.candidateId);
     if (requireUrl && !normalizedUrl) {
       continue;
@@ -26340,9 +26391,9 @@ async function probeGhlContractDownloadUrlByCandidateId(candidateId, context = {
     const extractedFromPayload = body ? extractGhlContractCandidatesFromPayload(body, attempt.source) : [];
     const extractedUrlCandidate =
       extractedFromPayload
-        .map((item) => extractGhlUrlsFromText(item?.url)[0] || "")
+        .map((item) => extractGhlResolvableUrls(item?.url)[0] || "")
         .find((value) => value && isAllowedGhlContractDownloadUrl(value)) ||
-      extractGhlUrlsFromText(responseText).find((value) => isAllowedGhlContractDownloadUrl(value)) ||
+      extractGhlResolvableUrls(responseText).find((value) => isAllowedGhlContractDownloadUrl(value)) ||
       "";
 
     if (debugTrace?.attempts instanceof Array) {
@@ -26377,7 +26428,7 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {},
     return null;
   }
 
-  const directUrl = extractGhlUrlsFromText(normalizedCandidate.url)[0] || "";
+  const directUrl = extractGhlResolvableUrls(normalizedCandidate.url)[0] || "";
   if (directUrl && isAllowedGhlContractDownloadUrl(directUrl)) {
     if (debugTrace && typeof debugTrace === "object") {
       debugTrace.resolved = true;
@@ -27715,7 +27766,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-7",
+      matcherVersion: "ghl-contract-download-v2026-02-21-8",
       debugMode,
     });
   } catch (error) {
