@@ -13431,14 +13431,15 @@ function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", 
     180,
   );
   const contactName = resolveGhlLeadContactName(rawOpportunity);
-  const opportunityName = sanitizeTextValue(
+  const rawOpportunityName = sanitizeTextValue(
     rawOpportunity?.opportunityName ||
       rawOpportunity?.title ||
       rawOpportunity?.opportunity_title ||
       rawOpportunity?.dealName ||
       rawOpportunity?.name,
     320,
-  ) || contactName || leadId;
+  );
+  const opportunityName = normalizeGhlLeadContactDisplayName(rawOpportunityName, 320) || contactName || leadId;
   const leadSource = sanitizeGhlLeadSourceForDisplay(resolveGhlLeadSource(rawOpportunity) || source);
   const leadType = resolveGhlLeadTypeFromSource(leadSource);
   const assignedTo = resolveGhlLeadAssignedTo(rawOpportunity);
@@ -13978,7 +13979,7 @@ function mergeGhlLeadRows(baseRow, patchRow) {
     leadId: sanitizeTextValue(base.leadId || patch.leadId, 180),
     contactId: sanitizeTextValue(base.contactId || patch.contactId, 180),
     contactName: normalizeGhlLeadContactDisplayName(base.contactName || patch.contactName, 320),
-    opportunityName: sanitizeTextValue(base.opportunityName || patch.opportunityName, 320),
+    opportunityName: normalizeGhlLeadContactDisplayName(base.opportunityName || patch.opportunityName, 320),
     leadType: sanitizeTextValue(base.leadType || patch.leadType, 120),
     pipelineId: sanitizeTextValue(base.pipelineId || patch.pipelineId, 180),
     pipelineName: sanitizeTextValue(base.pipelineName || patch.pipelineName, 320),
@@ -14330,7 +14331,7 @@ function normalizeGhlLeadRowForCache(row) {
     leadId,
     contactId: sanitizeTextValue(row?.contactId, 180),
     contactName: normalizeGhlLeadContactDisplayName(row?.contactName, 320),
-    opportunityName: sanitizeTextValue(row?.opportunityName, 320),
+    opportunityName: normalizeGhlLeadContactDisplayName(row?.opportunityName, 320),
     leadType: sanitizeTextValue(row?.leadType, 120),
     pipelineId: sanitizeTextValue(row?.pipelineId, 180),
     pipelineName: sanitizeTextValue(row?.pipelineName, 320),
@@ -14364,7 +14365,7 @@ function mapGhlLeadCacheRow(row) {
     leadId,
     contactId: sanitizeTextValue(row?.contact_id, 180),
     contactName: normalizeGhlLeadContactDisplayName(row?.contact_name, 320),
-    opportunityName: sanitizeTextValue(row?.opportunity_name, 320),
+    opportunityName: normalizeGhlLeadContactDisplayName(row?.opportunity_name, 320),
     leadType: sanitizeTextValue(row?.lead_type, 120),
     pipelineId: sanitizeTextValue(row?.pipeline_id, 180),
     pipelineName: sanitizeTextValue(row?.pipeline_name, 320),
