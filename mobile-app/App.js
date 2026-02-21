@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   Linking,
   Modal,
   Pressable,
@@ -24,6 +25,44 @@ const MOBILE_REQUEST_ID_HEADER_NAME = "X-CBooster-Request-Id";
 const AUTH_STATE_CHECKING = "checking";
 const AUTH_STATE_SIGNED_OUT = "signedOut";
 const AUTH_STATE_SIGNED_IN = "signedIn";
+const API_REQUEST_TIMEOUT_MS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_REQUEST_TIMEOUT_MS,
+  15000,
+  3000,
+  120000,
+);
+const API_GET_RETRY_ATTEMPTS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_GET_RETRY_ATTEMPTS,
+  2,
+  0,
+  5,
+);
+const API_GET_RETRY_BASE_DELAY_MS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_GET_RETRY_BASE_DELAY_MS,
+  450,
+  100,
+  5000,
+);
+const API_GET_RETRY_MAX_DELAY_MS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_GET_RETRY_MAX_DELAY_MS,
+  3000,
+  200,
+  12000,
+);
+const API_IN_FLIGHT_MAX_KEYS = clampPositiveInteger(
+  process.env.EXPO_PUBLIC_API_IN_FLIGHT_MAX_KEYS,
+  120,
+  20,
+  1000,
+);
+const inFlightRequestPromisesByKey = new Map();
+const CLIENTS_LIST_INITIAL_NUM_TO_RENDER = 12;
+const CLIENTS_LIST_MAX_TO_RENDER_PER_BATCH = 12;
+const CLIENTS_LIST_WINDOW_SIZE = 11;
+const MODERATION_LIST_INITIAL_NUM_TO_RENDER = 10;
+const MODERATION_LIST_MAX_TO_RENDER_PER_BATCH = 10;
+const MODERATION_LIST_WINDOW_SIZE = 9;
+const LIST_ITEM_SEPARATOR_HEIGHT = 10;
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const ZERO_TOLERANCE = 0.005;
@@ -276,6 +315,7 @@ export default function App() {
   const [overviewPeriod, setOverviewPeriod] = useState(DEFAULT_PERIOD);
 
   const [editingRecordId, setEditingRecordId] = useState("");
+  const [isEditingRecord, setIsEditingRecord] = useState(false);
 
   const [pendingSubmissions, setPendingSubmissions] = useState([]);
   const [isLoadingModeration, setIsLoadingModeration] = useState(false);
@@ -330,6 +370,7 @@ export default function App() {
     setSubmissionFiles([]);
     setSubmissionFilesError("");
     setEditingRecordId("");
+    setIsEditingRecord(false);
     setIsSensitiveVisible(false);
     setIsSensitiveAuthModalVisible(false);
     setSensitiveAuthPassword("");
@@ -385,22 +426,18 @@ export default function App() {
     setAuthError("");
 
     try {
-      const body = await requestJson(
-        "/api/mobile/auth/login",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            username,
-            password,
-          }),
+      const body = await requestJson("/api/mobile/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-        {
-          deviceId: mobileDeviceIdRef.current,
-        },
-      );
+        body: JSON.stringify({
+          username,
+          password,
+        }),
+      }, {
+        deviceId: mobileDeviceIdRef.current,
+      });
 
       const sessionToken = (body?.sessionToken || "").toString();
       const nextUsername = (body?.user?.username || username).toString();
@@ -446,12 +483,27 @@ export default function App() {
 
   const closeRecordDetailsModal = useCallback(() => {
     setEditingRecordId("");
+    setIsEditingRecord(false);
     hideSensitiveDetails();
     setIsSensitiveAuthModalVisible(false);
     setSensitiveAuthPassword("");
     setSensitiveAuthError("");
     setIsSensitiveAuthSubmitting(false);
   }, [hideSensitiveDetails]);
+
+  const openRecordDetailsModal = useCallback(
+    (recordId) => {
+      const nextRecordId = (recordId || "").toString();
+      setEditingRecordId(nextRecordId);
+      setIsEditingRecord(false);
+      hideSensitiveDetails();
+      setIsSensitiveAuthModalVisible(false);
+      setSensitiveAuthPassword("");
+      setSensitiveAuthError("");
+      setIsSensitiveAuthSubmitting(false);
+    },
+    [hideSensitiveDetails],
+  );
 
   const openSensitiveRevealAuth = useCallback(() => {
     setSensitiveAuthPassword("");
@@ -486,22 +538,18 @@ export default function App() {
     setSensitiveAuthError("");
 
     try {
-      const body = await requestJson(
-        "/api/mobile/auth/login",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            username,
-            password,
-          }),
+      const body = await requestJson("/api/mobile/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-        {
-          deviceId: mobileDeviceIdRef.current,
-        },
-      );
+        body: JSON.stringify({
+          username,
+          password,
+        }),
+      }, {
+        deviceId: mobileDeviceIdRef.current,
+      });
 
       const nextToken = (body?.sessionToken || "").toString();
       if (nextToken) {
@@ -722,8 +770,10 @@ export default function App() {
   useEffect(() => {
     if (editingRecordId && !editingRecord) {
       setEditingRecordId("");
+      setIsEditingRecord(false);
+      hideSensitiveDetails();
     }
-  }, [editingRecordId, editingRecord]);
+  }, [editingRecordId, editingRecord, hideSensitiveDetails]);
 
   useEffect(() => {
     return () => {
@@ -737,34 +787,34 @@ export default function App() {
     return buildOverviewMetrics(records, overviewPeriod);
   }, [records, overviewPeriod]);
 
-  const visibleRecords = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-
-    return [...records]
-      .filter((record) => {
-        if (!query) {
-          return true;
-        }
-
-        const searchable = [
-          record.clientName,
-          record.companyName,
-          record.closedBy,
-          record.serviceType,
-          record.clientEmailAddress,
-        ]
-          .map((value) => (value || "").toString().toLowerCase())
-          .join(" ");
-
-        return searchable.includes(query);
+  const recordSearchIndex = useMemo(() => {
+    return records
+      .map((record) => {
+        return {
+          record,
+          createdAtMs: resolveRecordCreatedAtTimestamp(record?.createdAt),
+          searchableText: buildRecordSearchableText(record),
+        };
       })
-      .filter((record) => matchesStatusFilter(record, statusFilter, overdueRangeFilter))
-      .sort((left, right) => {
-        const leftTime = Date.parse((left.createdAt || "").toString()) || 0;
-        const rightTime = Date.parse((right.createdAt || "").toString()) || 0;
-        return rightTime - leftTime;
-      });
-  }, [records, searchQuery, statusFilter, overdueRangeFilter]);
+      .sort((left, right) => right.createdAtMs - left.createdAtMs);
+  }, [records]);
+
+  const visibleRecords = useMemo(() => {
+    const query = (searchQuery || "").toString().trim().toLowerCase();
+    const result = [];
+
+    for (const indexedRecord of recordSearchIndex) {
+      if (query && !indexedRecord.searchableText.includes(query)) {
+        continue;
+      }
+      if (!matchesStatusFilter(indexedRecord.record, statusFilter, overdueRangeFilter)) {
+        continue;
+      }
+      result.push(indexedRecord.record);
+    }
+
+    return result;
+  }, [recordSearchIndex, searchQuery, statusFilter, overdueRangeFilter]);
 
   const handleCreateRecord = useCallback(
     async (record) => {
@@ -788,6 +838,7 @@ export default function App() {
 
       const result = await saveRecords(nextRecords);
       if (result.ok) {
+        setIsEditingRecord(false);
         setEditingRecordId("");
       }
 
@@ -936,7 +987,7 @@ export default function App() {
               setOverviewPeriod={setOverviewPeriod}
               dashboardMetrics={dashboardMetrics}
               onRefresh={loadRecords}
-              onEditRecord={(recordId) => setEditingRecordId(recordId)}
+              onEditRecord={openRecordDetailsModal}
             />
           ) : null}
 
@@ -968,29 +1019,62 @@ export default function App() {
           >
             <SafeAreaView style={styles.modalRoot}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Client Details</Text>
+                <Text style={styles.modalTitle}>{isEditingRecord ? "Edit Client" : "Client Details"}</Text>
                 <View style={styles.modalHeaderActions}>
-                  <Pressable
-                    style={[styles.ghostButton, isSensitiveVisible ? styles.warnGhostButton : null]}
-                    onPress={() => {
-                      if (isSensitiveVisible) {
+                  {editingRecord ? (
+                    <Pressable
+                      style={styles.ghostButton}
+                      onPress={() => {
+                        if (isEditingRecord) {
+                          setIsEditingRecord(false);
+                          return;
+                        }
                         hideSensitiveDetails();
-                      } else {
-                        openSensitiveRevealAuth();
-                      }
-                    }}
-                  >
-                    <Text style={[styles.ghostButtonText, isSensitiveVisible ? styles.warnGhostButtonText : null]}>
-                      {isSensitiveVisible ? "Hide Sensitive" : "Reveal Sensitive"}
-                    </Text>
-                  </Pressable>
+                        setIsSensitiveAuthModalVisible(false);
+                        setSensitiveAuthPassword("");
+                        setSensitiveAuthError("");
+                        setIsSensitiveAuthSubmitting(false);
+                        setIsEditingRecord(true);
+                      }}
+                    >
+                      <Text style={styles.ghostButtonText}>{isEditingRecord ? "View" : "Edit"}</Text>
+                    </Pressable>
+                  ) : null}
+                  {!isEditingRecord ? (
+                    <Pressable
+                      style={[styles.ghostButton, isSensitiveVisible ? styles.warnGhostButton : null]}
+                      onPress={() => {
+                        if (isSensitiveVisible) {
+                          hideSensitiveDetails();
+                        } else {
+                          openSensitiveRevealAuth();
+                        }
+                      }}
+                    >
+                      <Text style={[styles.ghostButtonText, isSensitiveVisible ? styles.warnGhostButtonText : null]}>
+                        {isSensitiveVisible ? "Hide Sensitive" : "Reveal Sensitive"}
+                      </Text>
+                    </Pressable>
+                  ) : null}
                   <Pressable style={styles.ghostButton} onPress={closeRecordDetailsModal}>
                     <Text style={styles.ghostButtonText}>Close</Text>
                   </Pressable>
                 </View>
               </View>
 
-              {editingRecord ? <RecordDetails record={editingRecord} revealSensitive={isSensitiveVisible} /> : null}
+              {editingRecord ? (
+                isEditingRecord ? (
+                  <RecordForm
+                    mode="edit"
+                    initialRecord={editingRecord}
+                    isSavingRecords={isSavingRecords}
+                    onSubmit={handleEditRecord}
+                    onCancel={() => setIsEditingRecord(false)}
+                  />
+                ) : (
+                  <RecordDetails record={editingRecord} revealSensitive={isSensitiveVisible} />
+                )
+              ) : null}
             </SafeAreaView>
           </Modal>
 
@@ -1183,9 +1267,62 @@ function ClientsScreen({
   onEditRecord,
 }) {
   const updatedAtLabel = recordsUpdatedAt ? formatDateTime(recordsUpdatedAt) : "-";
+  const renderRecordItem = useCallback(
+    ({ item: record }) => {
+      const status = getRecordStatusFlags(record);
+      const statusChips = getStatusChipConfig(status);
 
-  return (
-    <ScrollView contentContainerStyle={styles.screenContent}>
+      return (
+        <Pressable
+          style={({ pressed }) => [styles.recordCard, pressed && styles.recordCardPressed]}
+          onPress={() => onEditRecord(record.id)}
+        >
+          <View style={styles.recordCardHeader}>
+            <View style={styles.recordTitleWrap}>
+              <Text style={styles.recordTitle}>{record.clientName || "Unnamed client"}</Text>
+              <Text style={styles.recordSubtitle}>{record.companyName || "-"}</Text>
+            </View>
+          </View>
+
+          <Text style={styles.recordMetaLine}>Closed by: {record.closedBy || "-"}</Text>
+          <Text style={styles.recordMetaLine}>Service: {record.serviceType || "-"}</Text>
+
+          <View style={styles.statusChipRow}>
+            {statusChips.map((chip) => (
+              <StatusChip key={`${record.id}-${chip.label}`} label={chip.label} tone={chip.tone} />
+            ))}
+          </View>
+
+          <View style={styles.recordNumbersRow}>
+            <View style={styles.recordNumberCell}>
+              <Text style={styles.recordNumberLabel}>Contract</Text>
+              <Text style={styles.recordNumberValue}>{formatMoneyText(record.contractTotals)}</Text>
+            </View>
+            <View style={styles.recordNumberCell}>
+              <Text style={styles.recordNumberLabel}>Paid</Text>
+              <Text style={styles.recordNumberValue}>{formatMoneyText(record.totalPayments)}</Text>
+            </View>
+            <View style={styles.recordNumberCell}>
+              <Text style={styles.recordNumberLabel}>Balance</Text>
+              <Text style={styles.recordNumberValue}>{formatMoneyText(record.futurePayments)}</Text>
+            </View>
+          </View>
+        </Pressable>
+      );
+    },
+    [onEditRecord],
+  );
+
+  const keyExtractor = useCallback((item, index) => {
+    const itemId = (item?.id || "").toString().trim();
+    if (itemId) {
+      return itemId;
+    }
+    return `record-${index}`;
+  }, []);
+
+  const listHeaderComponent = (
+    <>
       <View style={styles.sectionCard}>
         <Text style={styles.sectionTitle}>Overview</Text>
 
@@ -1216,8 +1353,12 @@ function ClientsScreen({
       <View style={styles.sectionCard}>
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionTitle}>Records</Text>
-          <Pressable style={styles.secondaryActionButton} onPress={() => void onRefresh()}>
-            <Text style={styles.secondaryActionButtonText}>Refresh</Text>
+          <Pressable
+            style={[styles.secondaryActionButton, isLoadingRecords && styles.disabledButton]}
+            disabled={isLoadingRecords}
+            onPress={() => void onRefresh()}
+          >
+            <Text style={styles.secondaryActionButtonText}>{isLoadingRecords ? "Refreshing..." : "Refresh"}</Text>
           </Pressable>
         </View>
 
@@ -1288,57 +1429,34 @@ function ClientsScreen({
             <Text style={styles.sectionTitle}>Clients ({visibleRecords.length})</Text>
             {isSavingRecords ? <Text style={styles.savingLabel}>Syncing...</Text> : null}
           </View>
-
           {!visibleRecords.length ? <Text style={styles.mutedText}>No records found.</Text> : null}
-
-          {visibleRecords.map((record) => {
-            const status = getRecordStatusFlags(record);
-            const statusChips = getStatusChipConfig(status);
-
-            return (
-              <Pressable
-                style={({ pressed }) => [styles.recordCard, pressed && styles.recordCardPressed]}
-                key={record.id}
-                onPress={() => onEditRecord(record.id)}
-              >
-                <View style={styles.recordCardHeader}>
-                  <View style={styles.recordTitleWrap}>
-                    <Text style={styles.recordTitle}>{record.clientName || "Unnamed client"}</Text>
-                    <Text style={styles.recordSubtitle}>{record.companyName || "-"}</Text>
-                  </View>
-                </View>
-
-                <Text style={styles.recordMetaLine}>Closed by: {record.closedBy || "-"}</Text>
-                <Text style={styles.recordMetaLine}>Service: {record.serviceType || "-"}</Text>
-
-                <View style={styles.statusChipRow}>
-                  {statusChips.map((chip) => (
-                    <StatusChip key={`${record.id}-${chip.label}`} label={chip.label} tone={chip.tone} />
-                  ))}
-                </View>
-
-                <View style={styles.recordNumbersRow}>
-                  <View style={styles.recordNumberCell}>
-                    <Text style={styles.recordNumberLabel}>Contract</Text>
-                    <Text style={styles.recordNumberValue}>{formatMoneyText(record.contractTotals)}</Text>
-                  </View>
-                  <View style={styles.recordNumberCell}>
-                    <Text style={styles.recordNumberLabel}>Paid</Text>
-                    <Text style={styles.recordNumberValue}>{formatMoneyText(record.totalPayments)}</Text>
-                  </View>
-                  <View style={styles.recordNumberCell}>
-                    <Text style={styles.recordNumberLabel}>Balance</Text>
-                    <Text style={styles.recordNumberValue}>{formatMoneyText(record.futurePayments)}</Text>
-                  </View>
-                </View>
-              </Pressable>
-            );
-          })}
-
-          <Text style={styles.metaText}>Total records in DB: {records.length}</Text>
         </View>
       ) : null}
-    </ScrollView>
+    </>
+  );
+
+  const listFooterComponent = !isLoadingRecords ? (
+    <View style={styles.sectionCard}>
+      <Text style={styles.metaText}>Total records in DB: {records.length}</Text>
+    </View>
+  ) : null;
+
+  return (
+    <FlatList
+      data={isLoadingRecords ? [] : visibleRecords}
+      renderItem={renderRecordItem}
+      keyExtractor={keyExtractor}
+      ItemSeparatorComponent={() => <View style={styles.listItemSeparator} />}
+      ListHeaderComponent={listHeaderComponent}
+      ListFooterComponent={listFooterComponent}
+      contentContainerStyle={styles.screenContent}
+      keyboardShouldPersistTaps="handled"
+      removeClippedSubviews
+      initialNumToRender={CLIENTS_LIST_INITIAL_NUM_TO_RENDER}
+      maxToRenderPerBatch={CLIENTS_LIST_MAX_TO_RENDER_PER_BATCH}
+      windowSize={CLIENTS_LIST_WINDOW_SIZE}
+      updateCellsBatchingPeriod={50}
+    />
   );
 }
 
@@ -1430,57 +1548,87 @@ function ModerationScreen({
   onRefresh,
   onOpenSubmission,
 }) {
-  return (
-    <ScrollView contentContainerStyle={styles.screenContent}>
-      <View style={styles.sectionCard}>
-        <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>Moderation Queue</Text>
-          <Pressable style={styles.secondaryActionButton} onPress={() => void onRefresh()}>
-            <Text style={styles.secondaryActionButtonText}>Refresh</Text>
-          </Pressable>
-        </View>
+  const renderSubmissionItem = useCallback(
+    ({ item: submission }) => {
+      const name = getSubmissionClientField(submission, "clientName") || "Unnamed";
+      const company = getSubmissionClientField(submission, "companyName") || "-";
+      const closedBy =
+        getSubmissionClientField(submission, "closedBy") ||
+        formatSubmittedBy(submission.submittedBy) ||
+        "-";
 
-        {isLoadingModeration ? (
-          <View style={styles.inlineLoadingRow}>
-            <ActivityIndicator size="small" color="#102a56" />
-            <Text style={styles.inlineLoadingText}>Loading submissions...</Text>
+      return (
+        <View style={styles.recordCard}>
+          <Text style={styles.recordTitle}>{name}</Text>
+          <Text style={styles.recordSubtitle}>{company}</Text>
+          <Text style={styles.recordMetaLine}>Closed by: {closedBy}</Text>
+          <Text style={styles.recordMetaLine}>Submitted: {formatDateTime(submission.submittedAt)}</Text>
+
+          <View style={styles.recordCardActionsRow}>
+            <Pressable
+              style={styles.primaryActionButton}
+              onPress={() => onOpenSubmission(submission.id)}
+            >
+              <Text style={styles.primaryActionButtonText}>Open</Text>
+            </Pressable>
           </View>
-        ) : null}
+        </View>
+      );
+    },
+    [onOpenSubmission],
+  );
 
-        {moderationError ? <Text style={styles.errorText}>{moderationError}</Text> : null}
+  const keyExtractor = useCallback((item, index) => {
+    const itemId = (item?.id || "").toString().trim();
+    if (itemId) {
+      return itemId;
+    }
+    return `submission-${index}`;
+  }, []);
 
-        {!isLoadingModeration && !pendingSubmissions.length ? (
-          <Text style={styles.mutedText}>No pending submissions.</Text>
-        ) : null}
-
-        {pendingSubmissions.map((submission) => {
-          const name = getSubmissionClientField(submission, "clientName") || "Unnamed";
-          const company = getSubmissionClientField(submission, "companyName") || "-";
-          const closedBy =
-            getSubmissionClientField(submission, "closedBy") ||
-            formatSubmittedBy(submission.submittedBy) ||
-            "-";
-
-          return (
-            <View style={styles.recordCard} key={submission.id}>
-              <Text style={styles.recordTitle}>{name}</Text>
-              <Text style={styles.recordSubtitle}>{company}</Text>
-              <Text style={styles.recordMetaLine}>Closed by: {closedBy}</Text>
-              <Text style={styles.recordMetaLine}>Submitted: {formatDateTime(submission.submittedAt)}</Text>
-
-              <View style={styles.recordCardActionsRow}>
-                <Pressable
-                  style={styles.primaryActionButton}
-                  onPress={() => onOpenSubmission(submission.id)}
-                >
-                  <Text style={styles.primaryActionButtonText}>Open</Text>
-                </Pressable>
-              </View>
-            </View>
-          );
-        })}
+  const listHeaderComponent = (
+    <View style={styles.sectionCard}>
+      <View style={styles.sectionHeaderRow}>
+        <Text style={styles.sectionTitle}>Moderation Queue</Text>
+        <Pressable
+          style={[styles.secondaryActionButton, isLoadingModeration && styles.disabledButton]}
+          disabled={isLoadingModeration}
+          onPress={() => void onRefresh()}
+        >
+          <Text style={styles.secondaryActionButtonText}>{isLoadingModeration ? "Refreshing..." : "Refresh"}</Text>
+        </Pressable>
       </View>
-    </ScrollView>
+
+      {isLoadingModeration ? (
+        <View style={styles.inlineLoadingRow}>
+          <ActivityIndicator size="small" color="#102a56" />
+          <Text style={styles.inlineLoadingText}>Loading submissions...</Text>
+        </View>
+      ) : null}
+
+      {moderationError ? <Text style={styles.errorText}>{moderationError}</Text> : null}
+
+      {!isLoadingModeration && !pendingSubmissions.length ? (
+        <Text style={styles.mutedText}>No pending submissions.</Text>
+      ) : null}
+    </View>
+  );
+
+  return (
+    <FlatList
+      data={pendingSubmissions}
+      renderItem={renderSubmissionItem}
+      keyExtractor={keyExtractor}
+      ItemSeparatorComponent={() => <View style={styles.listItemSeparator} />}
+      ListHeaderComponent={listHeaderComponent}
+      contentContainerStyle={styles.screenContent}
+      keyboardShouldPersistTaps="handled"
+      removeClippedSubviews
+      initialNumToRender={MODERATION_LIST_INITIAL_NUM_TO_RENDER}
+      maxToRenderPerBatch={MODERATION_LIST_MAX_TO_RENDER_PER_BATCH}
+      windowSize={MODERATION_LIST_WINDOW_SIZE}
+      updateCellsBatchingPeriod={50}
+    />
   );
 }
 
@@ -1930,6 +2078,27 @@ function normalizeCreatedAt(rawValue) {
   }
 
   return new Date(timestamp).toISOString();
+}
+
+function resolveRecordCreatedAtTimestamp(rawValue) {
+  const timestamp = Date.parse((rawValue || "").toString());
+  if (Number.isFinite(timestamp)) {
+    return timestamp;
+  }
+  return 0;
+}
+
+function buildRecordSearchableText(record) {
+  const source = record && typeof record === "object" ? record : {};
+  return [
+    source.clientName,
+    source.companyName,
+    source.closedBy,
+    source.serviceType,
+    source.clientEmailAddress,
+  ]
+    .map((value) => (value || "").toString().toLowerCase())
+    .join(" ");
 }
 
 function buildOverviewMetrics(records, periodKey) {
@@ -2673,6 +2842,128 @@ function toAbsoluteApiUrl(pathOrUrl) {
   return candidateUrl.toString();
 }
 
+function clampPositiveInteger(rawValue, fallbackValue, minValue = 1, maxValue = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number.parseInt(rawValue, 10);
+  const baseValue = Number.isFinite(parsed) ? parsed : fallbackValue;
+  return Math.min(Math.max(baseValue, minValue), maxValue);
+}
+
+function normalizeRequestMethod(rawMethod) {
+  const method = (rawMethod || "GET").toString().trim().toUpperCase();
+  return method || "GET";
+}
+
+function shouldRetryHttpStatus(statusCode) {
+  return statusCode === 408 || statusCode === 429 || (statusCode >= 500 && statusCode <= 599);
+}
+
+function shouldRetryFetchError(error) {
+  if (!error) {
+    return false;
+  }
+
+  const errorName = (error.name || "").toString().toLowerCase();
+  if (errorName === "aborterror") {
+    return false;
+  }
+
+  const message = (error.message || "").toString().toLowerCase();
+  return (
+    errorName === "typeerror" ||
+    message.includes("network request failed") ||
+    message.includes("network error") ||
+    message.includes("failed to fetch") ||
+    message.includes("timed out")
+  );
+}
+
+function resolveRequestBodyKeyPart(rawBody) {
+  if (!rawBody) {
+    return "";
+  }
+
+  if (typeof rawBody === "string") {
+    if (rawBody.length <= 700) {
+      return rawBody;
+    }
+    return `${rawBody.slice(0, 700)}..${rawBody.length}`;
+  }
+
+  try {
+    const serialized = JSON.stringify(rawBody);
+    if (!serialized) {
+      return "";
+    }
+    if (serialized.length <= 700) {
+      return serialized;
+    }
+    return `${serialized.slice(0, 700)}..${serialized.length}`;
+  } catch {
+    return Object.prototype.toString.call(rawBody);
+  }
+}
+
+function buildInFlightRequestKey({ method, url, sessionToken, body, dedupeKey = "" }) {
+  const explicitKey = (dedupeKey || "").toString().trim();
+  if (explicitKey) {
+    return `custom:${explicitKey}`;
+  }
+
+  const methodPart = normalizeRequestMethod(method);
+  const sessionPart = sessionToken ? `${sessionToken.length}:${sessionToken.slice(-16)}` : "";
+  const bodyPart = resolveRequestBodyKeyPart(body);
+  return `${methodPart}::${url}::${sessionPart}::${bodyPart}`;
+}
+
+function computeRetryDelayMs(nextAttemptNumber) {
+  const normalizedAttempt = Math.max(1, Number.parseInt(nextAttemptNumber, 10) || 1);
+  const exponentialDelay = API_GET_RETRY_BASE_DELAY_MS * 2 ** (normalizedAttempt - 1);
+  const cappedDelay = Math.min(exponentialDelay, API_GET_RETRY_MAX_DELAY_MS);
+  const jitterMs = Math.floor(Math.random() * Math.max(80, Math.round(cappedDelay * 0.2)));
+  return cappedDelay + jitterMs;
+}
+
+function waitForDelay(ms, abortSignal) {
+  const duration = Math.max(0, Number.parseInt(ms, 10) || 0);
+  if (!duration) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let timerId = null;
+    const cleanup = () => {
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+      if (abortSignal && typeof abortSignal.removeEventListener === "function") {
+        abortSignal.removeEventListener("abort", handleAbort);
+      }
+    };
+    const handleAbort = () => {
+      cleanup();
+      const canceledError = new Error("Request was canceled.");
+      canceledError.name = "AbortError";
+      canceledError.status = 499;
+      reject(canceledError);
+    };
+
+    if (abortSignal?.aborted) {
+      handleAbort();
+      return;
+    }
+
+    if (abortSignal && typeof abortSignal.addEventListener === "function") {
+      abortSignal.addEventListener("abort", handleAbort, { once: true });
+    }
+
+    timerId = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, duration);
+  });
+}
+
 async function requestJson(path, options = {}, authContext = {}) {
   const url = toAbsoluteApiUrl(path);
   if (!url) {
@@ -2687,43 +2978,154 @@ async function requestJson(path, options = {}, authContext = {}) {
         };
   const sessionToken = (context.sessionToken || "").toString().trim();
   const deviceId = (context.deviceId || "").toString().trim();
+  const normalizedOptions = options && typeof options === "object" ? options : {};
+  const {
+    timeoutMs: optionTimeoutMs,
+    retryAttempts: optionRetryAttempts,
+    dedupeKey: optionDedupeKey,
+    disableInFlightDedupe,
+    signal: optionSignal,
+    ...fetchOptions
+  } = normalizedOptions;
+  const method = normalizeRequestMethod(fetchOptions.method);
+  const timeoutMs = clampPositiveInteger(optionTimeoutMs, API_REQUEST_TIMEOUT_MS, 1000, 180000);
+  const retryAttempts = method === "GET"
+    ? clampPositiveInteger(optionRetryAttempts, API_GET_RETRY_ATTEMPTS, 0, 6)
+    : 0;
 
-  const nextHeaders = {
-    ...(options.headers || {}),
-    [MOBILE_REQUEST_ID_HEADER_NAME]: createClientEntropyId("req"),
+  const baseHeaders = {
+    ...(fetchOptions.headers || {}),
   };
   if (sessionToken) {
-    nextHeaders.Authorization = `${MOBILE_AUTHORIZATION_SCHEME} ${sessionToken}`;
+    baseHeaders.Authorization = `${MOBILE_AUTHORIZATION_SCHEME} ${sessionToken}`;
   }
   if (deviceId) {
-    nextHeaders[MOBILE_DEVICE_ID_HEADER_NAME] = deviceId;
+    baseHeaders[MOBILE_DEVICE_ID_HEADER_NAME] = deviceId;
   }
 
-  const response = await fetch(url, {
-    ...options,
-    credentials: "include",
-    headers: nextHeaders,
-  });
-  const text = await response.text();
+  const executeRequest = async () => {
+    for (let attempt = 0; attempt <= retryAttempts; attempt += 1) {
+      const attemptController = new AbortController();
+      let didTimeout = false;
+      const handleTimeout = setTimeout(() => {
+        didTimeout = true;
+        attemptController.abort();
+      }, timeoutMs);
+      const handleExternalAbort = () => {
+        attemptController.abort();
+      };
+      if (optionSignal && typeof optionSignal.addEventListener === "function") {
+        if (optionSignal.aborted) {
+          attemptController.abort();
+        } else {
+          optionSignal.addEventListener("abort", handleExternalAbort, { once: true });
+        }
+      }
 
-  let body = {};
-  if (text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = {};
+      try {
+        const response = await fetch(url, {
+          ...fetchOptions,
+          method,
+          credentials: "include",
+          headers: {
+            ...baseHeaders,
+            [MOBILE_REQUEST_ID_HEADER_NAME]: createClientEntropyId("req"),
+          },
+          signal: attemptController.signal,
+        });
+        const text = await response.text();
+
+        let body = {};
+        if (text) {
+          try {
+            body = JSON.parse(text);
+          } catch {
+            body = {};
+          }
+        }
+
+        if (!response.ok) {
+          const error = new Error(
+            body.error || body.details || `Request failed (${response.status})`,
+          );
+          error.status = response.status;
+          if (method === "GET" && attempt < retryAttempts && shouldRetryHttpStatus(response.status)) {
+            await waitForDelay(computeRetryDelayMs(attempt + 1), optionSignal);
+            continue;
+          }
+          throw error;
+        }
+
+        return body;
+      } catch (error) {
+        if (didTimeout) {
+          if (method === "GET" && attempt < retryAttempts) {
+            await waitForDelay(computeRetryDelayMs(attempt + 1), optionSignal);
+            continue;
+          }
+          const timeoutError = new Error("Request timed out. Check your connection and try again.");
+          timeoutError.status = 408;
+          timeoutError.code = "request_timeout";
+          throw timeoutError;
+        }
+
+        if (optionSignal?.aborted) {
+          const canceledError = new Error("Request was canceled.");
+          canceledError.status = 499;
+          canceledError.code = "request_aborted";
+          throw canceledError;
+        }
+
+        if (method === "GET" && attempt < retryAttempts && shouldRetryFetchError(error)) {
+          await waitForDelay(computeRetryDelayMs(attempt + 1), optionSignal);
+          continue;
+        }
+
+        throw error;
+      } finally {
+        clearTimeout(handleTimeout);
+        if (optionSignal && typeof optionSignal.removeEventListener === "function") {
+          optionSignal.removeEventListener("abort", handleExternalAbort);
+        }
+      }
     }
+
+    throw new Error("Request failed.");
+  };
+
+  if (disableInFlightDedupe) {
+    return executeRequest();
   }
 
-  if (!response.ok) {
-    const error = new Error(
-      body.error || body.details || `Request failed (${response.status})`,
-    );
-    error.status = response.status;
-    throw error;
+  const inFlightKey = buildInFlightRequestKey({
+    method,
+    url,
+    sessionToken,
+    dedupeKey: optionDedupeKey,
+    body: fetchOptions.body,
+  });
+  const existingRequest = inFlightRequestPromisesByKey.get(inFlightKey);
+  if (existingRequest) {
+    return existingRequest;
   }
 
-  return body;
+  let requestPromise;
+  requestPromise = executeRequest().finally(() => {
+    if (inFlightRequestPromisesByKey.get(inFlightKey) === requestPromise) {
+      inFlightRequestPromisesByKey.delete(inFlightKey);
+    }
+  });
+  inFlightRequestPromisesByKey.set(inFlightKey, requestPromise);
+
+  while (inFlightRequestPromisesByKey.size > API_IN_FLIGHT_MAX_KEYS) {
+    const oldestKey = inFlightRequestPromisesByKey.keys().next().value;
+    if (!oldestKey || oldestKey === inFlightKey) {
+      break;
+    }
+    inFlightRequestPromisesByKey.delete(oldestKey);
+  }
+
+  return requestPromise;
 }
 
 const styles = StyleSheet.create({
@@ -2994,6 +3396,9 @@ const styles = StyleSheet.create({
     color: "#1d3a59",
     fontWeight: "700",
     fontSize: 12,
+  },
+  listItemSeparator: {
+    height: LIST_ITEM_SEPARATOR_HEIGHT,
   },
   statusChipRow: {
     flexDirection: "row",
