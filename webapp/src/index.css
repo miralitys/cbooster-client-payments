@@ -2155,7 +2155,7 @@ a {
 
 .client-managers-react-page .table-panel,
 .leads-react-page .table-panel,
-.ghl-documents-react-page .table-panel,
+.ghl-contracts-react-page .table-panel,
 .access-control-react-page .table-panel {
   grid-column: 1 / -1;
   grid-row: auto;
@@ -2235,51 +2235,42 @@ a {
   resize: vertical;
 }
 
-.ghl-documents-status {
+.ghl-contracts-status {
   margin: 0;
 }
 
-.ghl-documents-react-table-wrap {
+.ghl-contracts-react-table-wrap {
   min-height: 280px;
   height: auto;
   max-height: 72vh;
   resize: vertical;
 }
 
-.ghl-documents-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: var(--space-2);
-}
-
-.ghl-documents-list__item {
+.ghl-contracts-contract-cell {
   display: grid;
   gap: 2px;
 }
 
-.ghl-documents-link {
+.ghl-contracts-contract-title {
+  font-weight: 600;
+}
+
+.ghl-contracts-open-link {
   width: fit-content;
   color: var(--color-primary);
-  font-weight: 600;
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
-.ghl-documents-link:hover,
-.ghl-documents-link:focus-visible {
+.ghl-contracts-open-link:hover,
+.ghl-contracts-open-link:focus-visible {
   color: var(--color-primary-hover);
 }
 
-.ghl-documents-link--plain {
-  text-decoration: none;
-  cursor: default;
-}
-
-.ghl-documents-meta {
-  font-size: var(--font-size-xxs);
-  color: var(--color-text-muted);
+.ghl-contracts-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .access-control-react-page {
