@@ -211,6 +211,80 @@ test("POST /api/mini/clients returns 400 for invalid payload", async () => {
   );
 });
 
+test("POST /api/mini/clients parses client object/JSON string and rejects invalid client formats", async (t) => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "120",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const initData = buildTelegramInitData({
+        authDate: nowSeconds,
+        user: { id: 111, username: "parse_payload_user" },
+      });
+
+      async function expectInvalidClient(clientValue) {
+        const response = await postMiniClients(baseUrl, {
+          initData,
+          client: clientValue,
+        });
+        const body = await response.json();
+        assert.equal(response.status, 400);
+        assert.equal(body.error, "Payload must include `client` object.");
+      }
+
+      await t.test("accepts object client payload", async () => {
+        const response = await postMiniClients(baseUrl, {
+          initData,
+          client: {
+            clientName: "Object Client",
+            notes: "object payload",
+          },
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 201);
+        assert.equal(body.ok, true);
+        assert.equal(body.status, "pending");
+      });
+
+      await t.test("accepts JSON string client payload", async () => {
+        const response = await postMiniClients(baseUrl, {
+          initData,
+          client: JSON.stringify({
+            clientName: "JSON Client",
+            notes: "json string payload",
+          }),
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 201);
+        assert.equal(body.ok, true);
+        assert.equal(body.status, "pending");
+      });
+
+      await t.test("rejects garbage JSON string", async () => {
+        await expectInvalidClient("{not-json");
+      });
+
+      await t.test("rejects empty client string", async () => {
+        await expectInvalidClient("");
+      });
+
+      await t.test("rejects JSON array string", async () => {
+        await expectInvalidClient("[]");
+      });
+
+      await t.test("rejects null client value", async () => {
+        await expectInvalidClient(null);
+      });
+    },
+  );
+});
+
 test("POST /api/mini/clients returns 401 for Telegram auth fail", async () => {
   await withServer(
     {
@@ -333,4 +407,3 @@ test("POST /api/mini/clients still returns 201 when Telegram notification fails"
     },
   );
 });
-
