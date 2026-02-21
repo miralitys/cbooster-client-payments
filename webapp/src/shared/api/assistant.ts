@@ -6,6 +6,15 @@ import type {
   AssistantMode,
 } from "@/shared/types/assistant";
 
+const ASSISTANT_CONTEXT_RESET_PATH = "/api/assistant/context/reset";
+const WEB_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
+
+interface AssistantContextResetOptions {
+  signal?: AbortSignal;
+  keepalive?: boolean;
+  timeoutMs?: number;
+}
+
 export async function sendAssistantMessage(
   message: string,
   mode: AssistantMode = "text",
@@ -32,19 +41,75 @@ export async function sendAssistantMessage(
 
 export async function resetAssistantSessionContext(
   sessionId?: string,
-  signal?: AbortSignal,
+  options: AssistantContextResetOptions = {},
 ): Promise<AssistantContextResetResponse> {
   const payload: { sessionId?: string } = {};
   if (sessionId) {
     payload.sessionId = sessionId;
   }
 
-  return apiRequest<AssistantContextResetResponse>("/api/assistant/context/reset", {
+  return apiRequest<AssistantContextResetResponse>(ASSISTANT_CONTEXT_RESET_PATH, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
-    signal,
+    signal: options.signal,
+    keepalive: options.keepalive,
+    timeoutMs: options.timeoutMs,
   });
+}
+
+export function queueAssistantSessionContextResetBeacon(sessionId?: string): boolean {
+  if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") {
+    return false;
+  }
+
+  const params = new URLSearchParams();
+  if (sessionId) {
+    params.set("sessionId", sessionId);
+  }
+
+  const csrfToken = readCookieValue(WEB_CSRF_COOKIE_NAME);
+  if (csrfToken) {
+    params.set("_csrf", csrfToken);
+  }
+
+  try {
+    return navigator.sendBeacon(ASSISTANT_CONTEXT_RESET_PATH, params);
+  } catch {
+    return false;
+  }
+}
+
+function readCookieValue(cookieName: string): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+
+  const rawCookie = String(document.cookie || "");
+  if (!rawCookie) {
+    return "";
+  }
+
+  const chunks = rawCookie.split(";");
+  for (const chunk of chunks) {
+    const [rawKey, ...rawValueParts] = chunk.split("=");
+    if ((rawKey || "").trim() !== cookieName) {
+      continue;
+    }
+
+    const rawValue = rawValueParts.join("=").trim();
+    if (!rawValue) {
+      return "";
+    }
+
+    try {
+      return decodeURIComponent(rawValue);
+    } catch {
+      return rawValue;
+    }
+  }
+
+  return "";
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import assistantAvatar from "@/assets/assistant-avatar.svg";
-import { ApiError, resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api";
+import { ApiError, queueAssistantSessionContextResetBeacon, resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api";
 import { cx } from "@/shared/lib/cx";
 import type { AssistantMode } from "@/shared/types/assistant";
 
@@ -105,6 +105,9 @@ const FEMALE_VOICE_HINTS = [
 const MALE_VOICE_HINTS = ["male", "man", "alex", "david", "daniel", "george", "sergey", "pavel"];
 const NATURAL_VOICE_HINTS = ["natural", "neural", "premium", "enhanced", "wavenet", "online"];
 const ASSISTANT_CHAT_SESSION_STORAGE_KEY = "cbooster_assistant_chat_session_id";
+const ASSISTANT_CONTEXT_RESET_MAX_ATTEMPTS = 2;
+const ASSISTANT_CONTEXT_RESET_RETRY_DELAY_MS = 350;
+const ASSISTANT_CONTEXT_RESET_TIMEOUT_MS = 4_000;
 
 function resolveSpeechRecognitionConstructor(): SpeechRecognitionConstructorLike | null {
   if (typeof window === "undefined") {
@@ -113,6 +116,41 @@ function resolveSpeechRecognitionConstructor(): SpeechRecognitionConstructorLike
 
   const windowWithSpeech = window as WindowWithSpeechRecognition;
   return windowWithSpeech.SpeechRecognition || windowWithSpeech.webkitSpeechRecognition || null;
+}
+
+function delayMs(durationMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, Math.max(0, durationMs));
+  });
+}
+
+function emitAssistantContextResetFailureMetric(
+  stage: "keepalive_retry_exhausted" | "beacon_failed",
+  sessionId: string,
+  error?: unknown,
+): void {
+  const reason =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "unknown_error";
+  const detail = {
+    stage,
+    sessionId,
+    reason,
+    timestamp: new Date().toISOString(),
+  };
+
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("cb-assistant-context-reset-failure", {
+        detail,
+      }),
+    );
+  }
+
+  console.warn("[assistant.context_reset_failure]", detail);
 }
 
 function generateMessageId(): string {
@@ -492,6 +530,32 @@ export function AssistantWidget() {
     persistAssistantSessionId(nextSessionId);
   }
 
+  async function resetAssistantServerContextOnClose(sessionId: string): Promise<void> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= ASSISTANT_CONTEXT_RESET_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await resetAssistantSessionContext(sessionId, {
+          keepalive: true,
+          timeoutMs: ASSISTANT_CONTEXT_RESET_TIMEOUT_MS,
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+
+      if (attempt < ASSISTANT_CONTEXT_RESET_MAX_ATTEMPTS) {
+        await delayMs(ASSISTANT_CONTEXT_RESET_RETRY_DELAY_MS * attempt);
+      }
+    }
+
+    emitAssistantContextResetFailureMetric("keepalive_retry_exhausted", sessionId, lastError);
+
+    if (!queueAssistantSessionContextResetBeacon(sessionId)) {
+      emitAssistantContextResetFailureMetric("beacon_failed", sessionId, lastError);
+    }
+  }
+
   function resetAssistantConversation(clearServerContext = true): void {
     const currentSessionId = chatSessionIdRef.current;
 
@@ -501,9 +565,7 @@ export function AssistantWidget() {
     stopSpeaking();
 
     if (clearServerContext) {
-      void resetAssistantSessionContext(currentSessionId).catch(() => {
-        // Silently ignore reset failures on close.
-      });
+      void resetAssistantServerContextOnClose(currentSessionId);
     }
 
     setDraft("");
