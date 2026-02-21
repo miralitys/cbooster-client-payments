@@ -98,12 +98,6 @@ export default function GhlContractsPage() {
         ),
       },
       {
-        key: "source",
-        label: "Source",
-        align: "left",
-        cell: (item) => item.source || "-",
-      },
-      {
         key: "status",
         label: "Status",
         align: "left",
