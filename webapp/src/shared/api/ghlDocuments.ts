@@ -4,7 +4,7 @@ import type { GhlClientContractsPayload } from "@/shared/types/ghlDocuments";
 interface DownloadGhlClientContractResult {
   blob: Blob;
   fileName: string;
-  mode: "direct" | "text-fallback";
+  mode: "direct" | "text-fallback" | "diagnostic-fallback";
 }
 
 interface GetGhlClientContractsOptions {
@@ -86,7 +86,8 @@ export async function downloadGhlClientContract(clientName: string, contactId = 
 
   const fileName = parseFileNameFromContentDisposition(response.headers.get("content-disposition")) || "contract.pdf";
   const modeHeader = (response.headers.get("x-contract-download-mode") || "").toString().trim().toLowerCase();
-  const mode: "direct" | "text-fallback" = modeHeader === "text-fallback" ? "text-fallback" : "direct";
+  const mode: "direct" | "text-fallback" | "diagnostic-fallback" =
+    modeHeader === "text-fallback" ? "text-fallback" : modeHeader === "diagnostic-fallback" ? "diagnostic-fallback" : "direct";
   return {
     blob,
     fileName,

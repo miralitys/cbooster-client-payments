@@ -459,6 +459,19 @@ const QUICKBOOKS_AUTO_SYNC_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US"
   minute: "2-digit",
   hour12: false,
 });
+const IDENTITYIQ_MEMBER_BASE_URL = (
+  (process.env.IDENTITYIQ_MEMBER_BASE_URL || "https://member.identityiq.com").toString().trim() ||
+  "https://member.identityiq.com"
+).replace(/\/+$/, "");
+const IDENTITYIQ_MEMBER_LOGIN_URL = `${IDENTITYIQ_MEMBER_BASE_URL}/`;
+const IDENTITYIQ_NAVIGATION_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.IDENTITYIQ_NAVIGATION_TIMEOUT_MS, 25000), 8000),
+  120000,
+);
+const IDENTITYIQ_POST_LOGIN_SETTLE_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.IDENTITYIQ_POST_LOGIN_SETTLE_MS, 2000), 500),
+  12000,
+);
 const GHL_API_KEY = (process.env.GHL_API_KEY || process.env.GOHIGHLEVEL_API_KEY || "").toString().trim();
 const GHL_LOCATION_ID = (process.env.GHL_LOCATION_ID || "").toString().trim();
 const GHL_API_BASE_URL = (
@@ -1527,6 +1540,7 @@ let quickBooksRuntimeRefreshToken = QUICKBOOKS_REFRESH_TOKEN;
 let quickBooksRuntimeAccessToken = "";
 let quickBooksRuntimeAccessTokenExpiresAtMs = 0;
 let quickBooksAccessTokenRefreshPromise = null;
+let identityIqPlaywrightChromiumPromise = null;
 let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
   items: [],
@@ -25135,6 +25149,603 @@ app.post("/api/quickbooks/transaction-insight", requireWebPermission(WEB_AUTH_PE
   }
 });
 
+const IDENTITYIQ_EMAIL_INPUT_SELECTORS = Object.freeze([
+  "input[type='email']",
+  "input[name*='email' i]",
+  "input[id*='email' i]",
+  "input[autocomplete='username']",
+  "input[name*='user' i]",
+  "input[id*='user' i]",
+]);
+const IDENTITYIQ_PASSWORD_INPUT_SELECTORS = Object.freeze([
+  "input[type='password']",
+  "input[name*='password' i]",
+  "input[id*='password' i]",
+  "input[autocomplete='current-password']",
+]);
+const IDENTITYIQ_SSN4_INPUT_SELECTORS = Object.freeze([
+  "input[name*='ssn' i]",
+  "input[id*='ssn' i]",
+  "input[placeholder*='last 4' i]",
+  "input[placeholder*='social' i]",
+  "input[placeholder*='ssn' i]",
+  "input[name*='security' i]",
+]);
+const IDENTITYIQ_PRIMARY_BUTTON_SELECTORS = Object.freeze([
+  "button[type='submit']",
+  "button:has-text('Log In')",
+  "button:has-text('Login')",
+  "button:has-text('Sign In')",
+  "button:has-text('Continue')",
+  "[role='button']:has-text('Continue')",
+]);
+const IDENTITYIQ_BUREAU_SCORE_PATTERNS = Object.freeze([
+  { bureau: "TransUnion", pattern: /transunion[^0-9]{0,32}([2-9]\d{2})/gi },
+  { bureau: "Equifax", pattern: /equifax[^0-9]{0,32}([2-9]\d{2})/gi },
+  { bureau: "Experian", pattern: /experian[^0-9]{0,32}([2-9]\d{2})/gi },
+]);
+
+function normalizeIdentityIqEmail(rawValue) {
+  const value = sanitizeTextValue(rawValue, 320).toLowerCase();
+  if (!value || !value.includes("@")) {
+    return "";
+  }
+  return value;
+}
+
+function normalizeIdentityIqSsnLast4(rawValue) {
+  const digits = sanitizeTextValue(rawValue, 40).replace(/\D/g, "");
+  return digits.length === 4 ? digits : "";
+}
+
+function maskIdentityIqEmail(email) {
+  const normalized = normalizeIdentityIqEmail(email);
+  if (!normalized) {
+    return "";
+  }
+  const [localPart = "", domainPart = ""] = normalized.split("@");
+  if (!domainPart) {
+    return normalized;
+  }
+  const trimmedLocal = localPart.trim();
+  if (trimmedLocal.length <= 2) {
+    return `***@${domainPart}`;
+  }
+  return `${trimmedLocal.slice(0, 2)}***@${domainPart}`;
+}
+
+function toIdentityIqOperationError(message, options = {}) {
+  const error = new Error(sanitizeTextValue(message, 360) || "IdentityIQ request failed.");
+  error.code = sanitizeTextValue(options.code, 80) || "identityiq_request_failed";
+  error.httpStatus = Number.isFinite(options.httpStatus) ? options.httpStatus : 502;
+  return error;
+}
+
+async function loadIdentityIqPlaywrightChromium() {
+  if (identityIqPlaywrightChromiumPromise) {
+    return identityIqPlaywrightChromiumPromise;
+  }
+
+  identityIqPlaywrightChromiumPromise = (async () => {
+    try {
+      const playwrightModule = await import("playwright");
+      if (playwrightModule?.chromium && typeof playwrightModule.chromium.launch === "function") {
+        return playwrightModule.chromium;
+      }
+    } catch {
+      // Fallback to CommonJS require below.
+    }
+
+    try {
+      const playwrightModule = require("playwright");
+      if (playwrightModule?.chromium && typeof playwrightModule.chromium.launch === "function") {
+        return playwrightModule.chromium;
+      }
+    } catch {
+      // Handled by the error below.
+    }
+
+    throw toIdentityIqOperationError(
+      "Playwright is not available on this server. Install `playwright` and Chromium runtime first.",
+      {
+        code: "identityiq_playwright_unavailable",
+        httpStatus: 503,
+      },
+    );
+  })().catch((error) => {
+    identityIqPlaywrightChromiumPromise = null;
+    throw error;
+  });
+
+  return identityIqPlaywrightChromiumPromise;
+}
+
+async function waitForIdentityIqAnySelector(page, selectors, timeoutMs = 12000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    for (const selector of selectors) {
+      const locator = page.locator(selector).first();
+      try {
+        const count = await locator.count();
+        if (!count) {
+          continue;
+        }
+        const visible = await locator.isVisible().catch(() => false);
+        if (visible) {
+          return true;
+        }
+      } catch {
+        // Ignore selector failures and continue.
+      }
+    }
+    await page.waitForTimeout(180);
+  }
+  return false;
+}
+
+async function fillIdentityIqInput(page, selectors, value) {
+  const nextValue = sanitizeTextValue(value, 320);
+  if (!nextValue) {
+    return false;
+  }
+
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    try {
+      const count = await locator.count();
+      if (!count) {
+        continue;
+      }
+      await locator.waitFor({ state: "visible", timeout: 2600 });
+      await locator.click({ timeout: 2600 });
+      await locator.fill(nextValue, { timeout: 2600 });
+      return true;
+    } catch {
+      // Continue with the next selector.
+    }
+  }
+
+  return false;
+}
+
+async function clickIdentityIqPrimaryAction(page) {
+  for (const selector of IDENTITYIQ_PRIMARY_BUTTON_SELECTORS) {
+    const locator = page.locator(selector).first();
+    try {
+      const count = await locator.count();
+      if (!count) {
+        continue;
+      }
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const disabled = await locator.isDisabled().catch(() => false);
+      if (disabled) {
+        continue;
+      }
+      await locator.click({ timeout: 4000 });
+      return true;
+    } catch {
+      // Continue with fallback selectors.
+    }
+  }
+
+  for (const selector of IDENTITYIQ_PASSWORD_INPUT_SELECTORS) {
+    const locator = page.locator(selector).first();
+    try {
+      const count = await locator.count();
+      if (!count) {
+        continue;
+      }
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      await locator.press("Enter", { timeout: 1500 });
+      return true;
+    } catch {
+      // Continue with fallback selectors.
+    }
+  }
+
+  return false;
+}
+
+function normalizeIdentityIqPageText(value) {
+  return sanitizeTextValue((value || "").toString().replace(/\s+/g, " "), 60000);
+}
+
+async function readIdentityIqPageSignals(page) {
+  const payload = await page.evaluate(() => {
+    const text = document?.body?.innerText || "";
+    const selectors = ["[data-testid*='score' i]", "[id*='score' i]", "[class*='score' i]", "[aria-label*='score' i]"];
+    const fragments = [];
+
+    for (const selector of selectors) {
+      const nodes = document.querySelectorAll(selector);
+      for (const node of Array.from(nodes).slice(0, 24)) {
+        const value = (node?.textContent || "").replace(/\s+/g, " ").trim();
+        if (value) {
+          fragments.push(value);
+        }
+        if (fragments.length >= 40) {
+          break;
+        }
+      }
+      if (fragments.length >= 40) {
+        break;
+      }
+    }
+
+    return {
+      bodyText: text,
+      fragments,
+    };
+  });
+
+  const bodyText = normalizeIdentityIqPageText(payload?.bodyText || "");
+  const fragments = Array.isArray(payload?.fragments) ? payload.fragments : [];
+  const composite = normalizeIdentityIqPageText([bodyText, ...fragments].join(" "));
+  return {
+    bodyText,
+    compositeText: composite,
+  };
+}
+
+function isIdentityIqCaptchaChallenge(text) {
+  if (!text) {
+    return false;
+  }
+  return /\b(captcha|recaptcha|i am not a robot|human verification)\b/i.test(text);
+}
+
+function isIdentityIqMfaChallenge(text) {
+  if (!text) {
+    return false;
+  }
+  return /\b(verification code|one-time code|two-factor|2fa|authenticator app)\b/i.test(text);
+}
+
+function isIdentityIqInvalidCredentialsText(text) {
+  if (!text) {
+    return false;
+  }
+  return /\b(invalid|incorrect|unable to sign in|could not sign in|credentials|try again)\b/i.test(text);
+}
+
+function parseIdentityIqScoreNumber(value) {
+  const numeric = Number.parseInt(sanitizeTextValue(value, 12), 10);
+  if (!Number.isFinite(numeric) || numeric < 250 || numeric > 900) {
+    return null;
+  }
+  return numeric;
+}
+
+function dedupeIdentityIqBureauScores(items) {
+  const byBureau = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const bureau = sanitizeTextValue(item?.bureau, 32);
+    const score = Number.isFinite(item?.score) ? Number(item.score) : null;
+    if (!bureau || score === null || byBureau.has(bureau)) {
+      continue;
+    }
+    byBureau.set(bureau, {
+      bureau,
+      score,
+    });
+  }
+  return Array.from(byBureau.values());
+}
+
+function parseIdentityIqBureauScores(text) {
+  const normalizedText = normalizeIdentityIqPageText(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const matches = [];
+  for (const entry of IDENTITYIQ_BUREAU_SCORE_PATTERNS) {
+    entry.pattern.lastIndex = 0;
+    let match;
+    while ((match = entry.pattern.exec(normalizedText)) !== null) {
+      const score = parseIdentityIqScoreNumber(match[1]);
+      if (score === null) {
+        continue;
+      }
+      matches.push({
+        bureau: entry.bureau,
+        score,
+      });
+      if (matches.length >= 12) {
+        break;
+      }
+    }
+    if (matches.length >= 12) {
+      break;
+    }
+  }
+
+  return dedupeIdentityIqBureauScores(matches);
+}
+
+function resolveIdentityIqScoreSnippets(text, maxItems = 6) {
+  const normalizedText = normalizeIdentityIqPageText(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const snippets = [];
+  const matcher = /([^|]{0,90}(?:credit score|transunion|equifax|experian|score)[^|]{0,90})/gi;
+  let match;
+  while ((match = matcher.exec(normalizedText)) !== null) {
+    const snippet = sanitizeTextValue(match[1], 220);
+    if (!snippet) {
+      continue;
+    }
+    if (!snippets.includes(snippet)) {
+      snippets.push(snippet);
+    }
+    if (snippets.length >= maxItems) {
+      break;
+    }
+  }
+
+  return snippets;
+}
+
+function parseIdentityIqScoreFromText(text) {
+  const normalizedText = normalizeIdentityIqPageText(text);
+  const bureauScores = parseIdentityIqBureauScores(normalizedText);
+
+  let score = null;
+  const patterns = [
+    /credit\s*score[^0-9]{0,24}([2-9]\d{2})/i,
+    /\boverall[^0-9]{0,24}([2-9]\d{2})/i,
+    /\bscore[^0-9]{0,20}([2-9]\d{2})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = normalizedText.match(pattern);
+    const parsed = parseIdentityIqScoreNumber(match?.[1]);
+    if (parsed !== null) {
+      score = parsed;
+      break;
+    }
+  }
+
+  if (score === null && bureauScores.length) {
+    score = bureauScores[0].score;
+  }
+
+  return {
+    score,
+    bureauScores,
+    snippets: resolveIdentityIqScoreSnippets(normalizedText),
+  };
+}
+
+function isIdentityIqLikelyAuthenticated(url, bodyText, scorePayload) {
+  const normalizedUrl = sanitizeTextValue(url, 600).toLowerCase();
+  const normalizedBody = normalizeIdentityIqPageText(bodyText).toLowerCase();
+  const hasLogoutSignal = /\blog\s*out\b|\bsign\s*out\b/.test(normalizedBody);
+  const hasAccountSignal = /\bdashboard\b|\bmy account\b|\bmonitoring\b|\balerts\b|\bcredit report\b/.test(normalizedBody);
+  const onLoginScreen = /member\.identityiq\.com\/?(?:\?|$)/.test(normalizedUrl) || /\/login\b/.test(normalizedUrl);
+  const hasScoreSignal = Number.isFinite(scorePayload?.score) || (scorePayload?.bureauScores || []).length > 0;
+
+  if (hasLogoutSignal) {
+    return true;
+  }
+  if (hasScoreSignal && hasAccountSignal) {
+    return true;
+  }
+  if (!onLoginScreen && hasAccountSignal) {
+    return true;
+  }
+  return hasScoreSignal;
+}
+
+async function fetchIdentityIqCreditScore(payload) {
+  const chromium = await loadIdentityIqPlaywrightChromium();
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  });
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {
+      width: 1366,
+      height: 920,
+    },
+  });
+  const page = await context.newPage();
+  const startedAt = Date.now();
+  page.setDefaultTimeout(IDENTITYIQ_NAVIGATION_TIMEOUT_MS);
+
+  try {
+    await page.goto(IDENTITYIQ_MEMBER_LOGIN_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: IDENTITYIQ_NAVIGATION_TIMEOUT_MS,
+    });
+    await page.waitForLoadState("networkidle", {
+      timeout: Math.min(IDENTITYIQ_NAVIGATION_TIMEOUT_MS, 15000),
+    }).catch(() => {});
+
+    const loginVisible = await waitForIdentityIqAnySelector(
+      page,
+      [...IDENTITYIQ_EMAIL_INPUT_SELECTORS, ...IDENTITYIQ_PASSWORD_INPUT_SELECTORS],
+      20000,
+    );
+    if (!loginVisible) {
+      throw toIdentityIqOperationError("IdentityIQ login form did not load. Please retry in a few moments.", {
+        code: "identityiq_login_form_unavailable",
+        httpStatus: 502,
+      });
+    }
+
+    const emailFilled = await fillIdentityIqInput(page, IDENTITYIQ_EMAIL_INPUT_SELECTORS, payload.email);
+    const passwordFilled = await fillIdentityIqInput(page, IDENTITYIQ_PASSWORD_INPUT_SELECTORS, payload.password);
+    if (!emailFilled || !passwordFilled) {
+      throw toIdentityIqOperationError("IdentityIQ login fields were not detected on the page.", {
+        code: "identityiq_login_fields_not_found",
+        httpStatus: 502,
+      });
+    }
+
+    const loginClicked = await clickIdentityIqPrimaryAction(page);
+    if (!loginClicked) {
+      throw toIdentityIqOperationError("Unable to submit IdentityIQ login form automatically.", {
+        code: "identityiq_login_submit_unavailable",
+        httpStatus: 502,
+      });
+    }
+
+    await page.waitForTimeout(1200);
+
+    const ssnRequested = await waitForIdentityIqAnySelector(page, IDENTITYIQ_SSN4_INPUT_SELECTORS, 8000);
+    if (ssnRequested) {
+      const ssnFilled = await fillIdentityIqInput(page, IDENTITYIQ_SSN4_INPUT_SELECTORS, payload.ssnLast4);
+      if (!ssnFilled) {
+        throw toIdentityIqOperationError("IdentityIQ requested SSN, but SSN field could not be completed.", {
+          code: "identityiq_ssn_step_failed",
+          httpStatus: 502,
+        });
+      }
+
+      const ssnSubmitted = await clickIdentityIqPrimaryAction(page);
+      if (!ssnSubmitted) {
+        throw toIdentityIqOperationError("Unable to submit SSN verification step in IdentityIQ.", {
+          code: "identityiq_ssn_submit_unavailable",
+          httpStatus: 502,
+        });
+      }
+    }
+
+    await page.waitForLoadState("networkidle", {
+      timeout: IDENTITYIQ_NAVIGATION_TIMEOUT_MS,
+    }).catch(() => {});
+    await page.waitForTimeout(IDENTITYIQ_POST_LOGIN_SETTLE_MS);
+
+    const pageSignals = await readIdentityIqPageSignals(page);
+    if (isIdentityIqCaptchaChallenge(pageSignals.compositeText)) {
+      throw toIdentityIqOperationError(
+        "IdentityIQ requested CAPTCHA/human verification. Complete login manually, then retry.",
+        {
+          code: "identityiq_captcha_required",
+          httpStatus: 409,
+        },
+      );
+    }
+    if (isIdentityIqMfaChallenge(pageSignals.compositeText)) {
+      throw toIdentityIqOperationError(
+        "IdentityIQ requested additional verification code (MFA). This flow currently needs manual confirmation.",
+        {
+          code: "identityiq_mfa_required",
+          httpStatus: 409,
+        },
+      );
+    }
+    if (isIdentityIqInvalidCredentialsText(pageSignals.compositeText)) {
+      throw toIdentityIqOperationError("IdentityIQ rejected the credentials. Check login, password, and SSN4.", {
+        code: "identityiq_invalid_credentials",
+        httpStatus: 401,
+      });
+    }
+
+    const scorePayload = parseIdentityIqScoreFromText(pageSignals.compositeText);
+    const authenticated = isIdentityIqLikelyAuthenticated(page.url(), pageSignals.bodyText, scorePayload);
+
+    if (!authenticated && scorePayload.score === null && scorePayload.bureauScores.length === 0) {
+      throw toIdentityIqOperationError("IdentityIQ login did not expose any score data on the resulting page.", {
+        code: "identityiq_score_not_found",
+        httpStatus: 502,
+      });
+    }
+
+    const scoreState = Number.isFinite(scorePayload.score) ? "ok" : "partial";
+    return {
+      provider: "identityiq",
+      status: scoreState,
+      clientName: sanitizeTextValue(payload.clientName, 160),
+      emailMasked: maskIdentityIqEmail(payload.email),
+      score: Number.isFinite(scorePayload.score) ? scorePayload.score : null,
+      bureauScores: scorePayload.bureauScores,
+      snippets: scorePayload.snippets,
+      dashboardUrl: sanitizeTextValue(page.url(), 600),
+      fetchedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - startedAt,
+      note:
+        scoreState === "partial"
+          ? "Login completed, but only partial score signals were found."
+          : "Score extracted from IdentityIQ member portal.",
+    };
+  } finally {
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
+app.post("/api/identityiq/credit-score", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.identityiq.read",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "IdentityIQ request limit reached. Please wait before retrying.",
+      code: "identityiq_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const clientName = sanitizeTextValue(req.body?.clientName, 160);
+  const email = normalizeIdentityIqEmail(req.body?.email);
+  const password = sanitizeTextValue(req.body?.password, 260);
+  const ssnLast4 = normalizeIdentityIqSsnLast4(req.body?.ssnLast4);
+
+  if (!email || !password || !ssnLast4) {
+    res.status(400).json({
+      error: "client email, password, and SSN last 4 are required.",
+      code: "identityiq_invalid_payload",
+    });
+    return;
+  }
+
+  try {
+    const result = await fetchIdentityIqCreditScore({
+      clientName,
+      email,
+      password,
+      ssnLast4,
+    });
+
+    res.json({
+      ok: true,
+      result,
+    });
+  } catch (error) {
+    console.error("POST /api/identityiq/credit-score failed:", {
+      code: sanitizeTextValue(error?.code, 80),
+      status: Number.isFinite(error?.httpStatus) ? error.httpStatus : "",
+      message: sanitizeTextValue(error?.message, 320),
+      user: sanitizeTextValue(req.webAuthUser, 160),
+      clientName,
+      email: maskIdentityIqEmail(email),
+    });
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 400) || "Failed to load IdentityIQ credit score.",
+      code: sanitizeTextValue(error?.code, 80) || "identityiq_request_failed",
+    });
+  }
+});
+
 app.get("/api/health", async (_req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -26188,6 +26799,91 @@ function buildGhlContractTextFallbackPdfBuffer(rawText, options = {}) {
   appendAscii(`trailer\n<< /Size ${maxObjectId + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
 
   return Buffer.concat(chunks);
+}
+
+function buildGhlContractDownloadDiagnosticFallbackText(clientName, lookupRow, directDownloadErrorMessage = "") {
+  const normalizedClientName = sanitizeTextValue(clientName, 300) || "Unknown client";
+  const normalizedContactName = sanitizeTextValue(lookupRow?.contactName, 300) || "-";
+  const normalizedContactId = sanitizeTextValue(lookupRow?.contactId, 160) || "-";
+  const normalizedLookupStatus = normalizeGhlClientContractDownloadStatus(lookupRow?.status);
+  const diagnostics = lookupRow?.diagnostics && typeof lookupRow.diagnostics === "object" ? lookupRow.diagnostics : null;
+
+  const lines = [
+    "Original GoHighLevel contract PDF was not returned by API.",
+    "",
+    `Client: ${normalizedClientName}`,
+    `Contact: ${normalizedContactName}`,
+    `Contact ID: ${normalizedContactId}`,
+    `Lookup status: ${normalizedLookupStatus}`,
+  ];
+  if (directDownloadErrorMessage) {
+    lines.push(`Direct download error: ${sanitizeTextValue(directDownloadErrorMessage, 280)}`);
+  }
+  lines.push("", "Candidate diagnostics:");
+
+  const candidateMap = new Map();
+  function pushCandidate(rawCandidate, sourceHint = "") {
+    if (!rawCandidate || typeof rawCandidate !== "object") {
+      return;
+    }
+    const candidateId = extractLikelyGhlEntityId(rawCandidate?.candidateId || rawCandidate?.id || rawCandidate?.documentId);
+    const title = sanitizeTextValue(rawCandidate?.title, 220) || "-";
+    const source = sanitizeTextValue(rawCandidate?.source, 180) || sanitizeTextValue(sourceHint, 180) || "-";
+    const key = candidateId || `${source}|${title}`;
+    if (!key) {
+      return;
+    }
+    if (!candidateMap.has(key)) {
+      candidateMap.set(key, {
+        candidateId: candidateId || "",
+        title,
+        source,
+        score: Number.isFinite(rawCandidate?.score) ? Number(rawCandidate.score) : 0,
+      });
+    }
+  }
+
+  pushCandidate(diagnostics?.selectedCandidate, "diagnostics.selected");
+  const diagnosticContacts = Array.isArray(diagnostics?.contacts) ? diagnostics.contacts : [];
+  for (const contact of diagnosticContacts) {
+    pushCandidate(contact?.selectedCandidate, "diagnostics.contact.selected");
+    if (Array.isArray(contact?.topCandidates)) {
+      for (const candidate of contact.topCandidates.slice(0, 6)) {
+        pushCandidate(candidate, "diagnostics.contact.top");
+      }
+    }
+  }
+  pushCandidate(diagnostics?.byNameFallback?.selectedCandidate, "diagnostics.by_name.selected");
+  if (Array.isArray(diagnostics?.byNameFallback?.topCandidates)) {
+    for (const candidate of diagnostics.byNameFallback.topCandidates.slice(0, 6)) {
+      pushCandidate(candidate, "diagnostics.by_name.top");
+    }
+  }
+
+  const topCandidates = [...candidateMap.values()]
+    .sort((left, right) => Number(right?.score || 0) - Number(left?.score || 0))
+    .slice(0, 10);
+  if (!topCandidates.length) {
+    lines.push("No candidate IDs were available in diagnostics.");
+  } else {
+    for (const candidate of topCandidates) {
+      lines.push(
+        [
+          `- id: ${candidate.candidateId || "-"}`,
+          `title: ${candidate.title || "-"}`,
+          `source: ${candidate.source || "-"}`,
+          `score: ${Number.isFinite(candidate.score) ? candidate.score : 0}`,
+        ].join(" | "),
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    "Note:",
+    "This fallback file was generated by the app because GoHighLevel API did not provide downloadable contract content.",
+  );
+  return lines.join("\n");
 }
 
 const GHL_CONTRACT_TEXT_KEY_HINT_PATTERN =
@@ -28897,7 +29593,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-13",
+      matcherVersion: "ghl-contract-download-v2026-02-21-14",
       debugMode,
     });
   } catch (error) {
@@ -29003,12 +29699,27 @@ app.get("/api/ghl/client-contracts/download", requireWebPermission(WEB_AUTH_PERM
       preferredContactId: requestedContactId,
     });
     if (!textFallback?.text) {
-      const fallbackHint = directDownloadErrorMessage
-        ? ` Direct PDF fetch failed: ${directDownloadErrorMessage}.`
-        : "";
-      res.status(404).json({
-        error: `No downloadable contract found for client "${matchedClientName}".${fallbackHint}`,
+      const diagnosticText = buildGhlContractDownloadDiagnosticFallbackText(
+        matchedClientName,
+        lookupRow,
+        directDownloadErrorMessage,
+      );
+      const diagnosticPdfBuffer = buildGhlContractTextFallbackPdfBuffer(diagnosticText, {
+        clientName: matchedClientName,
+        contactName: lookupRow?.contactName,
+        contractTitle: lookupRow?.contractTitle || "Contract unavailable",
+        source: "diagnostic.fallback",
       });
+      const diagnosticFileName = ensurePdfFileName(
+        `${fallbackBaseName} diagnostic fallback`,
+        `${fallbackBaseName} diagnostic fallback`,
+      );
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Length", String(diagnosticPdfBuffer.length));
+      res.setHeader("Content-Disposition", buildContentDisposition("attachment", diagnosticFileName));
+      res.setHeader("X-Contract-Download-Mode", "diagnostic-fallback");
+      res.status(200).send(diagnosticPdfBuffer);
       return;
     }
 

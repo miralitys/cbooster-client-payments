@@ -86,6 +86,8 @@ export default function GhlContractsPage() {
       triggerBlobDownload(blob, ensurePdfFileName(fileName || item.contractTitle || item.clientName));
       if (mode === "text-fallback") {
         setStatusText(`Downloaded fallback PDF (from extracted contract text) for "${item.clientName}".`);
+      } else if (mode === "diagnostic-fallback") {
+        setStatusText(`Downloaded diagnostic fallback PDF for "${item.clientName}" (contract content unavailable from GHL API).`);
       } else {
         setStatusText(`Downloaded PDF contract for "${item.clientName}".`);
       }
