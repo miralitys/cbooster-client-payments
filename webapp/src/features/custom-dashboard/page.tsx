@@ -30,7 +30,6 @@ import {
   EmptyState,
   ErrorState,
   LoadingSkeleton,
-  PageHeader,
   PageShell,
   Panel,
   Select,
@@ -875,44 +874,33 @@ export default function CustomDashboardPage() {
 
   return (
     <PageShell className="custom-dashboard-react-page">
-      <PageHeader
-        title="Custom Dashboard"
-        subtitle="Operational center for sales and CRM"
-        actions={
-          <div className="custom-dashboard-header-actions">
-            {canManage ? (
-              <>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={activeTab === "dashboard" ? "primary" : "secondary"}
-                  onClick={() => setTab("dashboard")}
-                >
-                  Dashboard
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={activeTab === "settings" ? "primary" : "secondary"}
-                  onClick={() => setTab("settings")}
-                >
-                  User Settings
-                </Button>
-              </>
-            ) : null}
-            <Button type="button" size="sm" variant="secondary" onClick={() => void refreshEverything()} disabled={isLoading}>
-              Refresh
-            </Button>
-          </div>
-        }
-        meta={
-          dashboard ? (
-            <p className="custom-dashboard-meta">
-              Signed in as <strong>{dashboard.activeUser.displayName || dashboard.activeUser.username || "User"}</strong> ({dashboard.moduleRole})
-            </p>
-          ) : null
-        }
-      />
+      <div className="custom-dashboard-toolbar">
+        <div className="custom-dashboard-header-actions">
+          {canManage ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant={activeTab === "dashboard" ? "primary" : "secondary"}
+                onClick={() => setTab("dashboard")}
+              >
+                Dashboard
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={activeTab === "settings" ? "primary" : "secondary"}
+                onClick={() => setTab("settings")}
+              >
+                User Settings
+              </Button>
+            </>
+          ) : null}
+          <Button type="button" size="sm" variant="secondary" onClick={() => void refreshEverything()} disabled={isLoading}>
+            Refresh
+          </Button>
+        </div>
+      </div>
 
       {isLoading ? <LoadingSkeleton rows={8} /> : null}
 
