@@ -2107,6 +2107,13 @@ a {
   gap: var(--space-2);
 }
 
+.leads-assigned-filter {
+  width: auto;
+  min-width: 180px;
+  max-width: 260px;
+  min-height: 34px;
+}
+
 .leads-summary-react {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
