@@ -1672,6 +1672,23 @@ a {
   margin: 0;
 }
 
+.quickbooks-outgoing-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.quickbooks-outgoing-layout__sidebar,
+.quickbooks-outgoing-layout__main {
+  min-width: 0;
+}
+
+.quickbooks-outgoing-layout__main {
+  display: grid;
+  gap: var(--space-2);
+}
+
 .quickbooks-expense-summary {
   display: grid;
   gap: 8px;
@@ -2937,6 +2954,10 @@ a {
 
   .quickbooks-toggle-filter {
     width: 100%;
+  }
+
+  .quickbooks-outgoing-layout {
+    grid-template-columns: 1fr;
   }
 
   .quickbooks-expense-summary__row {

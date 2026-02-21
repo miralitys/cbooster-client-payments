@@ -591,6 +591,55 @@ export default function QuickBooksPage() {
     });
   }, [activeTab, allTransactions.length, loadError, retryLoad]);
 
+  const transactionsContent = (
+    <>
+      <p className={`dashboard-message quickbooks-status ${loadError || syncWarning ? "error" : ""}`.trim()}>
+        {syncWarning || statusText}
+      </p>
+
+      {isLoading ? <LoadingSkeleton rows={7} /> : null}
+      {!isLoading && loadError && !filteredTransactions.length ? (
+        <ErrorState
+          title={activeTab === "incoming" ? "Failed to load incoming transactions" : "Failed to load expense transactions"}
+          description={loadError}
+          actionLabel="Retry"
+          onAction={retryLoad}
+        />
+      ) : null}
+      {!isLoading && !loadError && !filteredTransactions.length ? (
+        <EmptyState
+          title={
+            activeTab === "incoming"
+              ? search.trim()
+                ? refundOnly
+                  ? `No refunds found for "${search.trim()}".`
+                  : `No transactions found for "${search.trim()}".`
+                : refundOnly
+                  ? "No refunds found for the selected period."
+                  : "No transactions found for the selected period."
+              : search.trim()
+                ? showOnlyUncategorized
+                  ? `No uncategorized expense transactions found for "${search.trim()}".`
+                  : `No expense transactions found for "${search.trim()}".`
+                : showOnlyUncategorized
+                  ? "No uncategorized expense transactions found for the selected period."
+                  : "No expense transactions found for the selected period."
+          }
+        />
+      ) : null}
+
+      {!isLoading && filteredTransactions.length ? (
+        <Table
+          className="quickbooks-table-wrap"
+          columns={tableColumns}
+          rows={filteredTransactions}
+          rowKey={(item) => item._rowKey}
+          density="compact"
+        />
+      ) : null}
+    </>
+  );
+
   return (
     <PageShell className="quickbooks-react-page">
       <PageHeader
@@ -738,63 +787,27 @@ export default function QuickBooksPage() {
         }
       >
         {activeTab === "outgoing" ? (
-          <div className="quickbooks-expense-summary">
-            <p className="quickbooks-expense-summary__title">Expense Categories</p>
-            <div className="quickbooks-expense-summary__rows">
-              {expenseCategorySummaryRows.map((summaryRow) => (
-                <div key={summaryRow.category} className="quickbooks-expense-summary__row">
-                  <span>{summaryRow.category}</span>
-                  <strong>{CURRENCY_FORMATTER.format(summaryRow.totalAmount)}</strong>
+          <div className="quickbooks-outgoing-layout">
+            <aside className="quickbooks-outgoing-layout__sidebar">
+              <div className="quickbooks-expense-summary">
+                <p className="quickbooks-expense-summary__title">Expense Categories</p>
+                <div className="quickbooks-expense-summary__rows">
+                  {expenseCategorySummaryRows.map((summaryRow) => (
+                    <div key={summaryRow.category} className="quickbooks-expense-summary__row">
+                      <span>{summaryRow.category}</span>
+                      <strong>{CURRENCY_FORMATTER.format(summaryRow.totalAmount)}</strong>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </div>
+            </aside>
+            <div className="quickbooks-outgoing-layout__main">
+              {transactionsContent}
             </div>
           </div>
-        ) : null}
-
-        <p className={`dashboard-message quickbooks-status ${loadError || syncWarning ? "error" : ""}`.trim()}>
-          {syncWarning || statusText}
-        </p>
-
-        {isLoading ? <LoadingSkeleton rows={7} /> : null}
-        {!isLoading && loadError && !filteredTransactions.length ? (
-          <ErrorState
-            title={activeTab === "incoming" ? "Failed to load incoming transactions" : "Failed to load expense transactions"}
-            description={loadError}
-            actionLabel="Retry"
-            onAction={retryLoad}
-          />
-        ) : null}
-        {!isLoading && !loadError && !filteredTransactions.length ? (
-          <EmptyState
-            title={
-              activeTab === "incoming"
-                ? search.trim()
-                  ? refundOnly
-                    ? `No refunds found for "${search.trim()}".`
-                    : `No transactions found for "${search.trim()}".`
-                  : refundOnly
-                    ? "No refunds found for the selected period."
-                    : "No transactions found for the selected period."
-                : search.trim()
-                  ? showOnlyUncategorized
-                    ? `No uncategorized expense transactions found for "${search.trim()}".`
-                    : `No expense transactions found for "${search.trim()}".`
-                  : showOnlyUncategorized
-                    ? "No uncategorized expense transactions found for the selected period."
-                    : "No expense transactions found for the selected period."
-            }
-          />
-        ) : null}
-
-        {!isLoading && filteredTransactions.length ? (
-          <Table
-            className="quickbooks-table-wrap"
-            columns={tableColumns}
-            rows={filteredTransactions}
-            rowKey={(item) => item._rowKey}
-            density="compact"
-          />
-        ) : null}
+        ) : (
+          transactionsContent
+        )}
       </Panel>
     </PageShell>
   );
