@@ -3359,10 +3359,11 @@ function normalizeAssistantScopePayload(rawScope) {
   return {
     clientComparables,
     range: normalizeAssistantDateRange(rawScope.range),
+    scopeEstablished: rawScope.scopeEstablished === true,
   };
 }
 
-function buildAssistantScopeFromComparableList(rawComparables, range = null) {
+function buildAssistantScopeFromComparableList(rawComparables, range = null, scopeEstablished = true) {
   const clientComparables = normalizeAssistantScopeClientComparables(rawComparables);
   if (!clientComparables.length) {
     return null;
@@ -3371,10 +3372,11 @@ function buildAssistantScopeFromComparableList(rawComparables, range = null) {
   return {
     clientComparables,
     range: normalizeAssistantDateRange(range),
+    scopeEstablished: scopeEstablished === true,
   };
 }
 
-function buildAssistantScopeFromRows(rows, range = null) {
+function buildAssistantScopeFromRows(rows, range = null, scopeEstablished = true) {
   const clientComparables = [];
   for (const row of Array.isArray(rows) ? rows : []) {
     if (!row?.clientComparable) {
@@ -3382,10 +3384,10 @@ function buildAssistantScopeFromRows(rows, range = null) {
     }
     clientComparables.push(row.clientComparable);
   }
-  return buildAssistantScopeFromComparableList(clientComparables, range);
+  return buildAssistantScopeFromComparableList(clientComparables, range, scopeEstablished);
 }
 
-function buildAssistantScopeFromEvents(events, range = null) {
+function buildAssistantScopeFromEvents(events, range = null, scopeEstablished = true) {
   const clientComparables = [];
   for (const event of Array.isArray(events) ? events : []) {
     if (!event?.clientComparable) {
@@ -3393,7 +3395,7 @@ function buildAssistantScopeFromEvents(events, range = null) {
     }
     clientComparables.push(event.clientComparable);
   }
-  return buildAssistantScopeFromComparableList(clientComparables, range);
+  return buildAssistantScopeFromComparableList(clientComparables, range, scopeEstablished);
 }
 
 function buildAssistantSessionScopeCacheKey(rawUsername, rawSessionId) {
@@ -3473,14 +3475,16 @@ function hasAssistantScopeReferenceInMessage(normalizedMessage) {
     return false;
   }
 
-  return (
-    /(?:\bthem\b|\btheir\b|\bthose\b|\bthese\b|\bthat list\b|\bprevious list\b|\bfrom that list\b|\bthey\b|\bshe\b|\bhe\b)/i.test(
+  const hasExplicitEnglishReference =
+    /\b(from (?:that|this|the previous) list|in (?:that|this|the previous) list|those clients|these clients|for them|about them)\b/i.test(
       normalizedMessage,
-    ) ||
-    /(этих\s+клиент|эти\s+клиент|этих|эти|по\s+ним|по\s+этим|из\s+них|из\s+этого\s+списк|по\s+предыдущ|они|она|он)/i.test(
+    );
+  const hasExplicitRussianReference =
+    /(?:^|[\s,.;:!?()«»"'`])(по\s+ним|по\s+этим\s+клиент(?:ам|у)?|из\s+(?:этого|того|предыдущего)\s+списк(?:а|е)|этих\s+клиент(?:ов|а)?|эти\s+клиент(?:ы|а)?)(?=$|[\s,.;:!?()«»"'`])/i.test(
       normalizedMessage,
-    )
-  );
+    );
+
+  return hasExplicitEnglishReference || hasExplicitRussianReference;
 }
 
 function tokenizeAssistantText(rawValue) {
@@ -6344,7 +6348,7 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
   const paymentEvents = needsPaymentEvents ? buildAssistantPaymentEvents(visibleRecords) : [];
 
   if (wantsScopeReference) {
-    if (!activeScope || !activeScope.clientComparables.length) {
+    if (!activeScope || !activeScope.clientComparables.length || activeScope.scopeEstablished !== true) {
       return respond(
         isRussian
           ? "Не вижу сохраненного контекста списка клиентов. Сначала сделайте базовый запрос (например: покажи клиентов за последнюю неделю)."
@@ -7189,7 +7193,7 @@ function buildAssistantScopeFromClientMentions(clientMentions, records, range = 
     matchedComparables.push(comparable);
   }
 
-  return buildAssistantScopeFromComparableList(matchedComparables, range);
+  return buildAssistantScopeFromComparableList(matchedComparables, range, false);
 }
 
 async function requestOpenAiAssistantReply(message, mode, records, updatedAt) {
@@ -19802,7 +19806,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
       clearAssistantSessionScope(req.webAuthUser, sessionId);
     } else if (fallbackScope) {
       upsertAssistantSessionScope(req.webAuthUser, sessionId, fallbackScope);
-    } else if (mentionScope) {
+    } else if (mentionScope && mentionScope.scopeEstablished === true) {
       upsertAssistantSessionScope(req.webAuthUser, sessionId, mentionScope);
     }
 
