@@ -15850,19 +15850,19 @@ async function fetchQuickBooksRefundsInRange(accessToken, fromDate, toDate) {
 
 async function fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate) {
   return fetchQuickBooksEntityInRange(accessToken, "Purchase", fromDate, toDate, "purchases", {
-    selectFields: ["Id", "TotalAmt", "TxnDate", "EntityRef"],
+    selectFields: ["Id", "TotalAmt", "TxnDate", "EntityRef", "AccountRef", "Line"],
   });
 }
 
 async function fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate) {
   return fetchQuickBooksEntityInRange(accessToken, "BillPayment", fromDate, toDate, "bill payments", {
-    selectFields: ["Id", "TotalAmt", "TxnDate", "VendorRef"],
+    selectFields: ["Id", "TotalAmt", "TxnDate", "VendorRef", "APAccountRef"],
   });
 }
 
 async function fetchQuickBooksChecksInRange(accessToken, fromDate, toDate) {
   return fetchQuickBooksEntityInRange(accessToken, "Check", fromDate, toDate, "checks", {
-    selectFields: ["Id", "TotalAmt", "TxnDate", "PayeeRef"],
+    selectFields: ["Id", "TotalAmt", "TxnDate", "PayeeRef", "AccountRef", "Line"],
   });
 }
 
@@ -16166,6 +16166,7 @@ function normalizeQuickBooksOutgoingTransaction(item) {
   const customerId = normalizeQuickBooksCustomerId(item?.customerId);
   const clientPhone = normalizeQuickBooksCustomerPhone(item?.clientPhone);
   const clientEmail = normalizeQuickBooksCustomerEmail(item?.clientEmail);
+  const categoryName = sanitizeTextValue(item?.categoryName, 300);
   const parsedAmount = Number.parseFloat(item?.paymentAmount);
   const paymentAmount = Number.isFinite(parsedAmount) ? -Math.abs(parsedAmount) : 0;
   const paymentDate = sanitizeTextValue(item?.paymentDate, 20);
@@ -16180,9 +16181,25 @@ function normalizeQuickBooksOutgoingTransaction(item) {
     clientName,
     clientPhone,
     clientEmail,
+    categoryName,
     paymentAmount,
     paymentDate,
   };
+}
+
+function resolveQuickBooksReferenceLabel(reference, fallbackLabel = "") {
+  const normalizedRef = reference && typeof reference === "object" ? reference : {};
+  const referenceName = sanitizeTextValue(normalizedRef.name, 300);
+  if (referenceName) {
+    return referenceName;
+  }
+
+  const referenceId = sanitizeTextValue(normalizedRef.value, 120);
+  if (!referenceId) {
+    return "";
+  }
+  const fallbackPrefix = sanitizeTextValue(fallbackLabel, 80);
+  return fallbackPrefix ? `${fallbackPrefix} ${referenceId}` : referenceId;
 }
 
 function resolveQuickBooksPayeeReference(reference, fallbackLabel) {
@@ -16202,6 +16219,40 @@ function resolveQuickBooksPayeeReference(reference, fallbackLabel) {
   };
 }
 
+function extractQuickBooksOutgoingCategoryName(record) {
+  const normalizedRecord = record && typeof record === "object" ? record : {};
+  const categoryCandidates = [];
+  const seen = new Set();
+
+  function pushCandidate(value) {
+    const normalizedValue = sanitizeTextValue(value, 300);
+    if (!normalizedValue || seen.has(normalizedValue)) {
+      return;
+    }
+    seen.add(normalizedValue);
+    categoryCandidates.push(normalizedValue);
+  }
+
+  pushCandidate(resolveQuickBooksReferenceLabel(normalizedRecord?.APAccountRef, "AP Account"));
+  pushCandidate(resolveQuickBooksReferenceLabel(normalizedRecord?.AccountRef, "Account"));
+
+  const lines = Array.isArray(normalizedRecord?.Line) ? normalizedRecord.Line : [];
+  for (const line of lines) {
+    const normalizedLine = line && typeof line === "object" ? line : {};
+    pushCandidate(resolveQuickBooksReferenceLabel(normalizedLine?.AccountBasedExpenseLineDetail?.AccountRef, "Account"));
+    pushCandidate(resolveQuickBooksReferenceLabel(normalizedLine?.ItemBasedExpenseLineDetail?.ExpenseAccountRef, "Expense Account"));
+    pushCandidate(resolveQuickBooksReferenceLabel(normalizedLine?.ItemBasedExpenseLineDetail?.ItemRef, "Item"));
+  }
+
+  if (!categoryCandidates.length) {
+    return "";
+  }
+  if (categoryCandidates.length <= 3) {
+    return categoryCandidates.join(", ");
+  }
+  return `${categoryCandidates.slice(0, 3).join(", ")} +${categoryCandidates.length - 3}`;
+}
+
 function mapQuickBooksPurchaseAsOutgoing(record) {
   const payeeReference = resolveQuickBooksPayeeReference(record?.EntityRef, "Payee");
   return normalizeQuickBooksOutgoingTransaction({
@@ -16211,6 +16262,7 @@ function mapQuickBooksPurchaseAsOutgoing(record) {
     clientName: payeeReference.payeeName,
     clientPhone: "",
     clientEmail: "",
+    categoryName: extractQuickBooksOutgoingCategoryName(record),
     paymentAmount: record?.TotalAmt,
     paymentDate: record?.TxnDate,
   });
@@ -16225,6 +16277,7 @@ function mapQuickBooksBillPaymentAsOutgoing(record) {
     clientName: payeeReference.payeeName,
     clientPhone: "",
     clientEmail: "",
+    categoryName: extractQuickBooksOutgoingCategoryName(record),
     paymentAmount: record?.TotalAmt,
     paymentDate: record?.TxnDate,
   });
@@ -16239,6 +16292,7 @@ function mapQuickBooksCheckAsOutgoing(record) {
     clientName: payeeReference.payeeName,
     clientPhone: "",
     clientEmail: "",
+    categoryName: extractQuickBooksOutgoingCategoryName(record),
     paymentAmount: record?.TotalAmt,
     paymentDate: record?.TxnDate,
   });

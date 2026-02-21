@@ -2,6 +2,7 @@ export interface QuickBooksPaymentRow {
   clientName: string;
   clientPhone: string;
   clientEmail: string;
+  categoryName?: string;
   paymentAmount: number;
   paymentDate: string;
   transactionType: string;

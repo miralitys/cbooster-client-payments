@@ -94,6 +94,12 @@ export default function QuickBooksPage() {
           cell: (item) => formatQuickBooksOutgoingTypeLabel(item.transactionType),
         },
         {
+          key: "categoryName",
+          label: "Category",
+          align: "left",
+          cell: (item) => formatQuickBooksOutgoingCategoryLabel(item.categoryName),
+        },
+        {
           key: "paymentAmount",
           label: "Outgoing Amount",
           align: "right",
@@ -502,6 +508,7 @@ function quickBooksRowSignature(row: QuickBooksPaymentRow): string {
     String(row.clientName || "").trim(),
     String(row.clientPhone || "").trim(),
     String(row.clientEmail || "").trim(),
+    String(row.categoryName || "").trim(),
     String(row.paymentDate || "").trim(),
     String(row.paymentAmount ?? "").trim(),
     String(row.transactionType || "").trim(),
@@ -690,6 +697,11 @@ function formatQuickBooksOutgoingTypeLabel(transactionType: string): string {
     return "Check";
   }
   return normalizedType ? normalizedType.charAt(0).toUpperCase() + normalizedType.slice(1) : "-";
+}
+
+function formatQuickBooksOutgoingCategoryLabel(categoryName: string | undefined): string {
+  const normalizedName = String(categoryName || "").trim();
+  return normalizedName || "-";
 }
 
 function formatContactCellValue(value: string): string {
