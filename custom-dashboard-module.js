@@ -831,12 +831,63 @@ function registerCustomDashboardModule(config) {
     };
   }
 
+  function looksLikeOpaqueUserId(value) {
+    const candidate = sanitizeTextValue(value, 240);
+    if (!candidate) {
+      return false;
+    }
+    if (candidate.includes(" ") || candidate.includes("@")) {
+      return false;
+    }
+    return /^[A-Za-z0-9_-]{14,}$/.test(candidate);
+  }
+
   function resolveGhlTaskOwnerName(task, usersIndex) {
+    const ownerNameFromDetails = sanitizeTextValue(
+      pickValueFromObject(task, [
+        "assignedToUserDetails.name",
+        "assignedToUserDetails.fullName",
+        "assignedToUserDetails.displayName",
+        "assignedToUserDetails.userName",
+        "assignedUserDetails.name",
+        "assignedUserDetails.fullName",
+        "assignedUserDetails.displayName",
+        "assignedUserDetails.userName",
+      ]),
+      220,
+    );
+    if (ownerNameFromDetails && !looksLikeOpaqueUserId(ownerNameFromDetails)) {
+      return ownerNameFromDetails;
+    }
+
+    const ownerFirstName = sanitizeTextValue(
+      pickValueFromObject(task, [
+        "assignedToUserDetails.firstName",
+        "assignedToUserDetails.firstname",
+        "assignedUserDetails.firstName",
+        "assignedUserDetails.firstname",
+      ]),
+      120,
+    );
+    const ownerLastName = sanitizeTextValue(
+      pickValueFromObject(task, [
+        "assignedToUserDetails.lastName",
+        "assignedToUserDetails.lastname",
+        "assignedUserDetails.lastName",
+        "assignedUserDetails.lastname",
+      ]),
+      120,
+    );
+    const ownerFullName = buildFullName(ownerFirstName, ownerLastName);
+    if (ownerFullName && !looksLikeOpaqueUserId(ownerFullName)) {
+      return ownerFullName;
+    }
+
     const ownerNameDirect = sanitizeTextValue(
       pickValueFromObject(task, [...GHL_TASK_OWNER_NAME_FIELDS, "assignedTo.name", "assignedUser.name", "owner.name"]),
       220,
     );
-    if (ownerNameDirect) {
+    if (ownerNameDirect && !looksLikeOpaqueUserId(ownerNameDirect)) {
       return ownerNameDirect;
     }
 
@@ -849,7 +900,7 @@ function registerCustomDashboardModule(config) {
           220,
         )
       : "";
-    if (ownerNameFromObject) {
+    if (ownerNameFromObject && !looksLikeOpaqueUserId(ownerNameFromObject)) {
       return ownerNameFromObject;
     }
 
@@ -859,7 +910,11 @@ function registerCustomDashboardModule(config) {
     if (!ownerId) {
       return "";
     }
-    return usersIndex.get(ownerId) || ownerId;
+    const resolvedFromIndex = sanitizeTextValue(usersIndex.get(ownerId), 220);
+    if (resolvedFromIndex && !looksLikeOpaqueUserId(resolvedFromIndex)) {
+      return resolvedFromIndex;
+    }
+    return ownerId;
   }
 
   function resolveGhlTaskClientName(task) {
