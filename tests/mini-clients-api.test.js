@@ -285,6 +285,19 @@ function makeBytes(size, fillValue = 65) {
   return array;
 }
 
+function buildValidMiniClient(overrides = {}) {
+  return {
+    clientName: "Test Client",
+    closedBy: "Sales Manager",
+    companyName: "Test Company",
+    serviceType: "Credit Booster",
+    contractTotals: "200",
+    payment1: "100",
+    payment1Date: "02/18/2026",
+    ...overrides,
+  };
+}
+
 async function postMiniClientsMultipart(baseUrl, options) {
   const form = new FormData();
   form.append("initData", String(options?.initData || ""));
@@ -333,7 +346,7 @@ test("POST /api/mini/clients returns 503 without database", async () => {
 
       const response = await postMiniClients(baseUrl, {
         initData,
-        client: { clientName: "John Doe" },
+        client: buildValidMiniClient({ clientName: "John Doe" }),
       }, {
         [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
@@ -409,10 +422,10 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
       await t.test("accepts object client payload", async () => {
         const response = await postMiniClients(baseUrl, {
           initData,
-          client: {
+          client: buildValidMiniClient({
             clientName: "Object Client",
             notes: "object payload",
-          },
+          }),
         }, {
           [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
         });
@@ -426,10 +439,12 @@ test("POST /api/mini/clients parses client object/JSON string and rejects invali
       await t.test("accepts JSON string client payload", async () => {
         const response = await postMiniClients(baseUrl, {
           initData: secondInitData,
-          client: JSON.stringify({
-            clientName: "JSON Client",
-            notes: "json string payload",
-          }),
+          client: JSON.stringify(
+            buildValidMiniClient({
+              clientName: "JSON Client",
+              notes: "json string payload",
+            }),
+          ),
         }, {
           [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
         });
@@ -480,8 +495,11 @@ test("POST /api/mini/clients validates and normalizes Mini payload fields", asyn
         });
         const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
 
-        async function expect400(client, expectedError) {
-          const response = await postMiniClients(baseUrl, { initData, client }, {
+        async function expect400(clientOverrides, expectedError) {
+          const response = await postMiniClients(baseUrl, {
+            initData,
+            client: buildValidMiniClient(clientOverrides),
+          }, {
             [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
           });
           const body = await response.json();
@@ -541,7 +559,7 @@ test("POST /api/mini/clients validates and normalizes Mini payload fields", asyn
         await t.test("normalizes valid payload fields and auto-fills written-off date", async () => {
           const response = await postMiniClients(baseUrl, {
             initData,
-            client: {
+            client: buildValidMiniClient({
               clientName: "Normalization Client",
               payment1Date: "2026-02-03",
               ssn: "123456789",
@@ -549,7 +567,7 @@ test("POST /api/mini/clients validates and normalizes Mini payload fields", asyn
               clientEmailAddress: "  normalized@example.com  ",
               afterResult: true,
               writtenOff: true,
-            },
+            }),
           }, {
             [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
           });
@@ -605,7 +623,7 @@ test("POST /api/mini/clients returns 401 for Telegram auth fail", async () => {
 
       const response = await postMiniClients(baseUrl, {
         initData: invalidInitData,
-        client: { clientName: "Auth Fail" },
+        client: buildValidMiniClient({ clientName: "Auth Fail" }),
       }, {
         [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
@@ -635,7 +653,7 @@ test("POST /api/mini/clients returns 403 for disallowed user", async () => {
 
       const response = await postMiniClients(baseUrl, {
         initData,
-        client: { clientName: "Forbidden User" },
+        client: buildValidMiniClient({ clientName: "Forbidden User" }),
       }, {
         [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
@@ -665,10 +683,10 @@ test("POST /api/mini/clients returns 201 for successful submission", async () =>
 
       const response = await postMiniClients(baseUrl, {
         initData,
-        client: {
+        client: buildValidMiniClient({
           clientName: "Success Client",
           clientEmailAddress: "success@example.com",
-        },
+        }),
       }, {
         [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
@@ -705,9 +723,9 @@ test("POST /api/mini/clients enforces stricter write TTL than access endpoint", 
       const uploadToken = await fetchUploadTokenFromAccess(baseUrl, staleInitData);
       const response = await postMiniClients(baseUrl, {
         initData: staleInitData,
-        client: {
+        client: buildValidMiniClient({
           clientName: "Write TTL Client",
-        },
+        }),
       }, {
         [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
@@ -744,9 +762,9 @@ test("POST /api/mini/clients blocks replay of the same Telegram initData", async
 
         const firstResponse = await postMiniClients(baseUrl, {
           initData,
-          client: {
+          client: buildValidMiniClient({
             clientName: "Replay Client #1",
-          },
+          }),
         }, {
           [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
         });
@@ -756,9 +774,9 @@ test("POST /api/mini/clients blocks replay of the same Telegram initData", async
 
         const secondResponse = await postMiniClients(baseUrl, {
           initData,
-          client: {
+          client: buildValidMiniClient({
             clientName: "Replay Client #2",
-          },
+          }),
         }, {
           [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
         });
@@ -808,9 +826,9 @@ test("POST /api/mini/clients replays successful response for the same Idempotenc
 
         const firstResponse = await postMiniClients(baseUrl, {
           initData: initDataFirst,
-          client: {
+          client: buildValidMiniClient({
             clientName: "Idempotent Client #1",
-          },
+          }),
         }, {
           [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
           "idempotency-key": idempotencyKey,
@@ -821,9 +839,9 @@ test("POST /api/mini/clients replays successful response for the same Idempotenc
 
         const secondResponse = await postMiniClients(baseUrl, {
           initData: initDataSecond,
-          client: {
+          client: buildValidMiniClient({
             clientName: "Idempotent Client #2",
-          },
+          }),
         }, {
           [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
           "idempotency-key": idempotencyKey,
@@ -869,12 +887,12 @@ test("POST /api/mini/clients masks sensitive fields in Telegram notifications", 
 
         const response = await postMiniClients(baseUrl, {
           initData,
-          client: {
+          client: buildValidMiniClient({
             clientName: "Privacy Client",
             ssn: "123456789",
             clientPhoneNumber: "1234567890",
             clientEmailAddress: "normalized@example.com",
-          },
+          }),
         }, {
           [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
         });
@@ -918,9 +936,9 @@ test("POST /api/mini/clients still returns 201 when Telegram notification fails"
 
       const response = await postMiniClients(baseUrl, {
         initData,
-        client: {
+        client: buildValidMiniClient({
           clientName: "Notify Failure Client",
-        },
+        }),
       }, {
         [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
       });
@@ -960,7 +978,7 @@ test("POST /api/mini/clients enforces attachment security before DB write", asyn
           const response = await postMiniClientsMultipart(baseUrl, {
             initData,
             uploadToken,
-            client: { clientName: "Attachment Client" },
+            client: buildValidMiniClient({ clientName: "Attachment Client" }),
             attachments,
           });
           const body = await response.json();
@@ -1088,7 +1106,7 @@ test("POST /api/mini/clients enforces attachment security before DB write", asyn
           const response = await postMiniClientsMultipart(baseUrl, {
             initData,
             uploadToken,
-            client: { clientName: "Sanitize File Name Client" },
+            client: buildValidMiniClient({ clientName: "Sanitize File Name Client" }),
             attachments: [
               {
                 fileName: "../unsafe<>name?.pdf",
@@ -1149,7 +1167,7 @@ test("POST /api/mini/clients maps multer limit errors to safe 400 responses", as
         const response = await postMiniClientsMultipart(baseUrl, {
           initData,
           uploadToken,
-          client: { clientName: "Multer Limits Client" },
+          client: buildValidMiniClient({ clientName: "Multer Limits Client" }),
           attachments,
         });
         const body = await response.json();

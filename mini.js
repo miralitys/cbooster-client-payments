@@ -13,7 +13,15 @@ const attachmentsUploadButton = document.querySelector("#attachments-upload-butt
 const attachmentsPreview = document.querySelector("#attachments-preview");
 const telegramApp = window.Telegram?.WebApp || null;
 const MAX_ATTACHMENTS_COUNT = 10;
-const REQUIRED_MINI_FIELDS = [{ id: "clientName", label: "Client Name" }];
+const REQUIRED_MINI_FIELDS = [
+  { id: "clientName", label: "Client Name" },
+  { id: "closedBy", label: "Closed By" },
+  { id: "companyName", label: "Company Name" },
+  { id: "serviceType", label: "Service Type" },
+  { id: "contractTotals", label: "Contract Totals" },
+  { id: "payment1", label: "Payment 1" },
+  { id: "payment1Date", label: "Payment 1 Date" },
+];
 const DEFAULT_SUBMIT_BUTTON_LABEL = "Add Client";
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
   ".html",
