@@ -2842,12 +2842,10 @@ a {
 .custom-dashboard-react-page .cb-table td.custom-dashboard-manager-column {
   width: 1%;
   min-width: max-content;
-  max-width: max-content;
+  max-width: 420px;
   white-space: nowrap;
-}
-
-.custom-dashboard-react-page .cb-table {
-  min-width: max-content;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .custom-dashboard-specialist-toolbar {
