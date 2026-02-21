@@ -112,6 +112,7 @@ export default function CustomDashboardPage() {
     }
     return "dashboard";
   }, [canManage, location.search]);
+  const showDashboardSectionToggle = Boolean(!isLoading && !loadError && dashboard && activeTab === "dashboard");
 
   const setTab = useCallback(
     (nextTab: SettingsTab) => {
@@ -875,6 +876,24 @@ export default function CustomDashboardPage() {
   return (
     <PageShell className="custom-dashboard-react-page">
       <div className="custom-dashboard-toolbar">
+        {showDashboardSectionToggle ? (
+          <div className="custom-dashboard-section-switcher">
+            <SegmentedControl
+              value={dashboardSection}
+              options={DASHBOARD_SECTION_OPTIONS.map((option) => ({
+                key: option.key,
+                label: option.label,
+              }))}
+              onChange={(value) => {
+                if (value === "tasks" || value === "calls") {
+                  setDashboardSection(value);
+                }
+              }}
+            />
+          </div>
+        ) : (
+          <div className="custom-dashboard-section-switcher custom-dashboard-section-switcher--empty" />
+        )}
         <div className="custom-dashboard-header-actions">
           {canManage ? (
             <>
@@ -917,21 +936,6 @@ export default function CustomDashboardPage() {
         <>
           {activeTab === "dashboard" ? (
             <>
-              <div className="custom-dashboard-section-switcher">
-                <SegmentedControl
-                  value={dashboardSection}
-                  options={DASHBOARD_SECTION_OPTIONS.map((option) => ({
-                    key: option.key,
-                    label: option.label,
-                  }))}
-                  onChange={(value) => {
-                    if (value === "tasks" || value === "calls") {
-                      setDashboardSection(value);
-                    }
-                  }}
-                />
-              </div>
-
               {canManage && dashboardSection === "tasks" ? (
                 <Panel title="Task Operations" className="custom-dashboard-uploads-panel">
                   <p className="dashboard-message">Track task movements from GoHighLevel.</p>

@@ -2739,7 +2739,13 @@ a {
 .custom-dashboard-toolbar {
   grid-column: 1 / -1;
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  background: var(--color-surface);
 }
 
 .custom-dashboard-header-actions {
@@ -2756,7 +2762,11 @@ a {
 }
 
 .custom-dashboard-section-switcher {
-  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.custom-dashboard-section-switcher--empty {
+  display: none;
 }
 
 .custom-dashboard-widget-panel,
@@ -3204,6 +3214,7 @@ a {
 
   .custom-dashboard-toolbar {
     justify-content: flex-start;
+    align-items: flex-start;
   }
 
   .custom-dashboard-specialist-toolbar {
