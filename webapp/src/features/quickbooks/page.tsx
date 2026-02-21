@@ -716,24 +716,26 @@ export default function QuickBooksPage() {
       {activeTab === "outgoing" ? (
         <div className="quickbooks-bulk-actions">
           <div className="quickbooks-bulk-actions__selection">
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={selectAllFilteredOutgoingTransactions}
-              disabled={!filteredOutgoingSelectionKeys.length || allFilteredSelected}
-            >
-              Select all
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={clearFilteredOutgoingSelection}
-              disabled={!selectedFilteredCount}
-            >
-              Clear selected
-            </Button>
+            <div className="quickbooks-bulk-actions__buttons">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={selectAllFilteredOutgoingTransactions}
+                disabled={!filteredOutgoingSelectionKeys.length || allFilteredSelected}
+              >
+                Select all
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={clearFilteredOutgoingSelection}
+                disabled={!selectedFilteredCount}
+              >
+                Clear selected
+              </Button>
+            </div>
             <span className="quickbooks-bulk-actions__meta">Selected: {selectedOutgoingKeys.length}</span>
           </div>
           <div className="quickbooks-bulk-actions__assign">
@@ -749,10 +751,22 @@ export default function QuickBooksPage() {
                 </option>
               ))}
             </Select>
-            <Button type="button" variant="secondary" size="sm" onClick={addBulkQuickBooksExpenseCategoryFromPrompt}>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="quickbooks-bulk-actions__add"
+              onClick={addBulkQuickBooksExpenseCategoryFromPrompt}
+            >
               Add
             </Button>
-            <Button type="button" size="sm" onClick={applyBulkQuickBooksExpenseCategory} disabled={!canApplyBulkCategory}>
+            <Button
+              type="button"
+              size="sm"
+              className="quickbooks-bulk-actions__apply"
+              onClick={applyBulkQuickBooksExpenseCategory}
+              disabled={!canApplyBulkCategory}
+            >
               Apply to selected
             </Button>
           </div>
@@ -873,7 +887,7 @@ export default function QuickBooksPage() {
                 />
               </div>
             </div>
-            <div className="quickbooks-search-field">
+            <div className="quickbooks-search-field quickbooks-period-field">
               <label htmlFor="quickbooks-month-select" className="search-label quickbooks-search-field__label">
                 Month-Year
               </label>
@@ -914,7 +928,7 @@ export default function QuickBooksPage() {
                 </Select>
               </div>
             </div>
-            <div className="quickbooks-search-field">
+            <div className="quickbooks-search-field quickbooks-search-field--query">
               <label htmlFor="quickbooks-client-search" className="search-label quickbooks-search-field__label">
                 {activeTab === "incoming" ? "Search by client" : "Search by payee"}
               </label>
