@@ -14303,6 +14303,9 @@ function extractGhlResolvableUrls(rawValue) {
     if (!/^\/(?:contacts|proposals|documents|files|attachments)\b/i.test(normalizedPath)) {
       continue;
     }
+    if (!isLikelyGhlContractDownloadPath(normalizedPath)) {
+      continue;
+    }
 
     try {
       const absoluteUrl = buildGhlUrl(normalizedPath, {}).toString();
@@ -25802,6 +25805,38 @@ function resolveAbsoluteGhlContractDownloadUrl(rawUrl) {
   }
 }
 
+function isLikelyGhlContractDownloadPath(rawPathname) {
+  const pathname = sanitizeTextValue(rawPathname, 2000);
+  if (!pathname) {
+    return false;
+  }
+
+  const pathOnly = pathname.split("?")[0].split("#")[0];
+  const normalizedPath = `/${pathOnly.replace(/^\/+/, "")}`.toLowerCase();
+  if (!/^\/(?:contacts|proposals|documents|files|attachments)\b/.test(normalizedPath)) {
+    return false;
+  }
+
+  if (normalizedPath.includes("/download") || normalizedPath.endsWith(".pdf")) {
+    return true;
+  }
+
+  const segments = normalizedPath.split("/").filter(Boolean);
+  if (!segments.length) {
+    return false;
+  }
+
+  if (segments[0] === "contacts") {
+    return segments.length >= 4 && ["documents", "files", "attachments"].includes(segments[2]);
+  }
+
+  if (segments[0] === "proposals") {
+    return segments.length >= 3 && ["document", "documents"].includes(segments[1]);
+  }
+
+  return segments.length >= 2;
+}
+
 function isAllowedGhlContractDownloadUrl(rawUrl) {
   const url = resolveAbsoluteGhlContractDownloadUrl(rawUrl);
   if (!url) {
@@ -25823,6 +25858,14 @@ function isAllowedGhlContractDownloadUrl(rawUrl) {
   }
   if (isPrivateIpv4Hostname(hostname) || isPrivateIpv6Hostname(hostname)) {
     return false;
+  }
+
+  const pathname = sanitizeTextValue(url.pathname, 2000);
+  const hasApiRootPath = /^\/(?:contacts|proposals|documents|files|attachments)\b/i.test(pathname);
+  if ((GHL_API_BASE_HOSTNAME && hostname === GHL_API_BASE_HOSTNAME) || hasApiRootPath) {
+    if (!isLikelyGhlContractDownloadPath(pathname)) {
+      return false;
+    }
   }
 
   if (GHL_API_BASE_HOSTNAME && hostname === GHL_API_BASE_HOSTNAME) {
@@ -26107,10 +26150,19 @@ function isGhlContractDownloadCandidate(candidate, context = {}) {
   const signal = normalizeGhlContractComparableText(
     `${candidate?.title || ""} ${candidate?.snippet || ""} ${source} ${candidateId || ""}`,
   );
+  const contextContactId = sanitizeTextValue(context?.contactId, 160).toLowerCase();
+  const candidateContactId = sanitizeTextValue(candidate?.contactId, 160).toLowerCase();
+  if (contextContactId && candidateContactId && contextContactId !== candidateContactId) {
+    return false;
+  }
   const hasPdfHint = (hasAllowedUrl && isLikelyGhlPdfUrl(url)) || /\bpdf\b/.test(signal);
   const hasContractKeyword = hasGhlContractOrAgreementKeyword(candidate);
   const isRelatedToContact = isGhlContractCandidateRelatedToContact(candidate, context?.contactName, context?.contactId);
   const isProposalSource = source.startsWith("proposals.");
+
+  if (contextContactId && hasAllowedUrl && isProposalSource && !isRelatedToContact) {
+    return false;
+  }
 
   if (isProposalSource && !isRelatedToContact && !hasContractKeyword && !candidateId) {
     return false;
@@ -27820,7 +27872,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-8",
+      matcherVersion: "ghl-contract-download-v2026-02-21-9",
       debugMode,
     });
   } catch (error) {
