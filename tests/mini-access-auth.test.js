@@ -169,6 +169,13 @@ function buildTelegramInitData({ botToken, authDate, user, includeHash = true, h
   return params.toString();
 }
 
+function assertExactObjectKeys(value, expectedKeys) {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value));
+  const actualKeys = Object.keys(value).sort();
+  const normalizedExpectedKeys = [...expectedKeys].sort();
+  assert.deepEqual(actualKeys, normalizedExpectedKeys);
+}
+
 test("POST /api/mini/access returns 503 when Telegram auth token is missing", async () => {
   await withServer(
     {
@@ -275,6 +282,50 @@ test("POST /api/mini/access validates Telegram initData signature and TTL", asyn
           id: "12345",
           username: "mini_tester",
         });
+      });
+    },
+  );
+});
+
+test("POST /api/mini/access keeps stable response contract for auth fail/success", async (t) => {
+  await withServer(
+    {
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "120",
+    },
+    async ({ baseUrl }) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+
+      await t.test("auth fail response shape", async () => {
+        const response = await postMiniAccess(baseUrl, { initData: "" });
+        const body = await response.json();
+
+        assert.equal(response.status, 401);
+        assertExactObjectKeys(body, ["error"]);
+        assert.equal(typeof body.error, "string");
+        assert.ok(body.error.length > 0);
+      });
+
+      await t.test("auth success response shape", async () => {
+        const initData = buildTelegramInitData({
+          botToken: TELEGRAM_BOT_TOKEN,
+          authDate: nowSeconds,
+          user: {
+            id: 456,
+            username: "contract_user",
+          },
+        });
+
+        const response = await postMiniAccess(baseUrl, { initData });
+        const body = await response.json();
+
+        assert.equal(response.status, 200);
+        assertExactObjectKeys(body, ["ok", "user"]);
+        assert.equal(body.ok, true);
+        assert.ok(body.user && typeof body.user === "object" && !Array.isArray(body.user));
+        assertExactObjectKeys(body.user, ["id", "username"]);
+        assert.equal(body.user.id, "456");
+        assert.equal(body.user.username, "contract_user");
       });
     },
   );
