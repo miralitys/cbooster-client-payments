@@ -116,6 +116,7 @@ export default function QuickBooksPage() {
 
   const [search, setSearch] = useState("");
   const [refundOnly, setRefundOnly] = useState(false);
+  const [uncategorizedOnly, setUncategorizedOnly] = useState(false);
   const [savedExpenseCategories, setSavedExpenseCategories] = useState<string[]>(() =>
     buildQuickBooksExpenseCategoryOptions(readQuickBooksExpenseCategoriesList()),
   );
@@ -130,11 +131,32 @@ export default function QuickBooksPage() {
   const rowKeySequenceRef = useRef(0);
   const allTransactions = activeTab === "incoming" ? incomingTransactions : outgoingTransactions;
   const showOnlyRefunds = activeTab === "incoming" && refundOnly;
+  const showOnlyUncategorized = activeTab === "outgoing" && uncategorizedOnly;
 
-  const filteredTransactions = useMemo(
-    () => filterTransactions(allTransactions, search, showOnlyRefunds),
-    [allTransactions, search, showOnlyRefunds],
-  );
+  const filteredTransactions = useMemo(() => {
+    const baseTransactions = filterTransactions(allTransactions, search, showOnlyRefunds);
+    if (!showOnlyUncategorized) {
+      return baseTransactions;
+    }
+    return baseTransactions.filter(
+      (item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap, expenseCategoryFingerprintMap),
+    );
+  }, [
+    allTransactions,
+    expenseCategoryFingerprintMap,
+    expenseCategoryMap,
+    search,
+    showOnlyRefunds,
+    showOnlyUncategorized,
+  ]);
+  const uncategorizedTransactionsCount = useMemo(() => {
+    if (activeTab !== "outgoing") {
+      return 0;
+    }
+    return allTransactions.filter(
+      (item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap, expenseCategoryFingerprintMap),
+    ).length;
+  }, [activeTab, allTransactions, expenseCategoryFingerprintMap, expenseCategoryMap]);
   const yearOptions = useMemo(() => {
     const years: number[] = [];
     for (let year = currentYear; year >= minQuickBooksYear; year -= 1) {
@@ -523,15 +545,25 @@ export default function QuickBooksPage() {
   useEffect(() => {
     setStatusText(
       buildFilterStatusMessage(
-        allTransactions.length,
+        showOnlyUncategorized ? uncategorizedTransactionsCount : allTransactions.length,
         filteredTransactions.length,
         search,
         showOnlyRefunds,
+        showOnlyUncategorized,
         lastLoadPrefix,
         activeTab,
       ),
     );
-  }, [activeTab, allTransactions.length, filteredTransactions.length, lastLoadPrefix, search, showOnlyRefunds]);
+  }, [
+    activeTab,
+    allTransactions.length,
+    filteredTransactions.length,
+    lastLoadPrefix,
+    search,
+    showOnlyRefunds,
+    showOnlyUncategorized,
+    uncategorizedTransactionsCount,
+  ]);
 
   const retryLoad = useCallback(() => {
     if (activeTab === "incoming") {
@@ -690,7 +722,17 @@ export default function QuickBooksPage() {
                 />
                 Only refunds
               </label>
-            ) : null}
+            ) : (
+              <label htmlFor="quickbooks-uncategorized-only" className="cb-checkbox-row quickbooks-uncategorized-filter">
+                <input
+                  id="quickbooks-uncategorized-only"
+                  type="checkbox"
+                  checked={uncategorizedOnly}
+                  onChange={(event) => setUncategorizedOnly(event.target.checked)}
+                />
+                Только без категории
+              </label>
+            )}
           </div>
         }
       >
@@ -733,8 +775,12 @@ export default function QuickBooksPage() {
                     ? "No refunds found for the selected period."
                     : "No transactions found for the selected period."
                 : search.trim()
-                  ? `No expense transactions found for "${search.trim()}".`
-                  : "No expense transactions found for the selected period."
+                  ? showOnlyUncategorized
+                    ? `No uncategorized expense transactions found for "${search.trim()}".`
+                    : `No expense transactions found for "${search.trim()}".`
+                  : showOnlyUncategorized
+                    ? "No uncategorized expense transactions found for the selected period."
+                    : "No expense transactions found for the selected period."
             }
           />
         ) : null}
@@ -939,6 +985,7 @@ function buildFilterStatusMessage(
   visibleCount: number,
   query: string,
   showOnlyRefunds: boolean,
+  showOnlyUncategorized = false,
   prefix = "",
   tab: QuickBooksTab = "incoming",
 ): string {
@@ -946,13 +993,14 @@ function buildFilterStatusMessage(
   const normalizedPrefix = prefix.trim();
 
   if (tab === "outgoing") {
+    const nounPhrase = showOnlyUncategorized ? "uncategorized expense transaction" : "expense transaction";
     let outgoingMessage = "";
     if (!normalizedQuery) {
-      outgoingMessage = `Loaded ${totalCount} expense transaction${totalCount === 1 ? "" : "s"}.`;
+      outgoingMessage = `Loaded ${totalCount} ${nounPhrase}${totalCount === 1 ? "" : "s"}.`;
     } else if (visibleCount === 0) {
-      outgoingMessage = `No expense transactions found for "${normalizedQuery}".`;
+      outgoingMessage = `No ${showOnlyUncategorized ? "uncategorized expense" : "expense"} transactions found for "${normalizedQuery}".`;
     } else {
-      outgoingMessage = `Showing ${visibleCount} of ${totalCount} expense transactions for "${normalizedQuery}".`;
+      outgoingMessage = `Showing ${visibleCount} of ${totalCount} ${showOnlyUncategorized ? "uncategorized expense" : "expense"} transactions for "${normalizedQuery}".`;
     }
     return normalizedPrefix ? `${normalizedPrefix} ${outgoingMessage}` : outgoingMessage;
   }
