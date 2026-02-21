@@ -475,6 +475,10 @@ const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4.1-mini").toString().tri
 const OPENAI_API_BASE_URL = ((process.env.OPENAI_API_BASE_URL || "https://api.openai.com").toString().trim() || "https://api.openai.com").replace(/\/+$/, "");
 const ASSISTANT_LLM_PII_MODES = new Set(["redact", "minimal", "full"]);
 const ASSISTANT_LLM_PII_MODE = resolveAssistantLlmPiiMode(process.env.LLM_PII_MODE || process.env.OPENAI_LLM_PII_MODE || "minimal");
+const ASSISTANT_REVIEW_PII_MODES = new Set(["redact", "minimal", "full"]);
+const ASSISTANT_REVIEW_PII_MODE = resolveAssistantReviewPiiMode(
+  process.env.ASSISTANT_REVIEW_PII_MODE || process.env.ASSISTANT_REVIEW_LOG_MODE || "minimal",
+);
 const OPENAI_ASSISTANT_TIMEOUT_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.OPENAI_ASSISTANT_TIMEOUT_MS, 15000), 3000),
   60000,
@@ -1009,6 +1013,21 @@ const ASSISTANT_REVIEW_MAX_TEXT_LENGTH = 8000;
 const ASSISTANT_REVIEW_MAX_COMMENT_LENGTH = 4000;
 const ASSISTANT_REVIEW_DEFAULT_LIMIT = 60;
 const ASSISTANT_REVIEW_MAX_LIMIT = 200;
+const ASSISTANT_REVIEW_REDACTED_VALUE = "[redacted]";
+const ASSISTANT_REVIEW_REDACTED_TEXT = "[redacted by assistant review policy]";
+const ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED = resolveOptionalBoolean(process.env.ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED) !== false;
+const ASSISTANT_REVIEW_RETENTION_DAYS = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_REVIEW_RETENTION_DAYS, 90), 1),
+  3650,
+);
+const ASSISTANT_REVIEW_RETENTION_SWEEP_INTERVAL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_REVIEW_RETENTION_SWEEP_INTERVAL_MS, 4 * 60 * 60 * 1000), 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
+const ASSISTANT_REVIEW_RETENTION_SWEEP_BATCH_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_REVIEW_RETENTION_SWEEP_BATCH_LIMIT, 500), 1),
+  10000,
+);
 const ASSISTANT_ZERO_TOLERANCE = 0.000001;
 const ASSISTANT_DAY_IN_MS = 24 * 60 * 60 * 1000;
 const ASSISTANT_SESSION_SCOPE_TTL_MS = Math.min(
@@ -1372,6 +1391,8 @@ let assistantRecordsSnapshotCache = null;
 const assistantPreparedDataCache = new Map();
 let miniRetentionSweepIntervalId = null;
 let miniRetentionSweepInFlight = false;
+let assistantReviewRetentionSweepIntervalId = null;
+let assistantReviewRetentionSweepInFlight = false;
 const miniWriteInitDataReplayUsedByKey = new Map();
 const miniWriteInitDataReplayInFlightByKey = new Map();
 const miniWriteIdempotencyByKey = new Map();
@@ -21153,6 +21174,122 @@ function resolveAssistantLlmPiiMode(rawMode) {
   return "minimal";
 }
 
+function resolveAssistantReviewPiiMode(rawMode) {
+  const normalized = sanitizeTextValue(rawMode, 20).toLowerCase();
+  if (!normalized) {
+    return "minimal";
+  }
+  if (ASSISTANT_REVIEW_PII_MODES.has(normalized)) {
+    return normalized;
+  }
+  return "minimal";
+}
+
+function escapeAssistantRegexLiteral(rawValue) {
+  return (rawValue || "").toString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeAssistantReviewClientMentions(rawMentions) {
+  const items = [];
+  const seen = new Set();
+
+  for (const rawValue of Array.isArray(rawMentions) ? rawMentions : []) {
+    const mention = sanitizeTextValue(rawValue, 220);
+    const comparable = normalizeAssistantComparableText(mention, 220);
+    if (!mention || !comparable || seen.has(comparable)) {
+      continue;
+    }
+    seen.add(comparable);
+    items.push(mention);
+  }
+
+  items.sort((left, right) => right.length - left.length);
+  return items;
+}
+
+function redactAssistantReviewClientMentionsInText(rawText, rawMentions) {
+  let text = sanitizeTextValue(rawText, ASSISTANT_REVIEW_MAX_TEXT_LENGTH);
+  if (!text) {
+    return "";
+  }
+
+  const mentions = normalizeAssistantReviewClientMentions(rawMentions);
+  for (const mention of mentions) {
+    const escapedMention = escapeAssistantRegexLiteral(mention);
+    if (!escapedMention || escapedMention.length < 2) {
+      continue;
+    }
+    text = text.replace(new RegExp(escapedMention, "gi"), ASSISTANT_REVIEW_REDACTED_VALUE);
+  }
+
+  return text;
+}
+
+function redactAssistantReviewStructuredFields(rawText) {
+  let text = sanitizeTextValue(rawText, ASSISTANT_REVIEW_MAX_TEXT_LENGTH);
+  if (!text) {
+    return "";
+  }
+
+  const labeledFieldPatterns = [
+    /(^|\n)(\s*(?:клиент|client)\s*:\s*)([^\n]*)/gi,
+    /(^|\n)(\s*(?:менеджер|manager)\s*:\s*)([^\n]*)/gi,
+    /(^|\n)(\s*(?:компан(?:ия|ии)|company)\s*:\s*)([^\n]*)/gi,
+    /(^|\n)(\s*(?:примечани(?:е|я)|note|notes)\s*:\s*)([^\n]*)/gi,
+  ];
+
+  for (const pattern of labeledFieldPatterns) {
+    text = text.replace(pattern, (_match, lineStart, labelPrefix) => {
+      return `${lineStart}${labelPrefix}${ASSISTANT_REVIEW_REDACTED_VALUE}`;
+    });
+  }
+
+  return text;
+}
+
+function redactAssistantReviewSensitiveTokens(rawText) {
+  let text = sanitizeTextValue(rawText, ASSISTANT_REVIEW_MAX_TEXT_LENGTH);
+  if (!text) {
+    return "";
+  }
+
+  text = text.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]");
+  text = text.replace(/\b\d{3}-?\d{2}-?\d{4}\b/g, "[redacted-ssn]");
+  text = text.replace(/\+?[\d().\-\s]{10,24}\d/g, (candidate) => {
+    const digitsOnly = candidate.replace(/\D/g, "");
+    if (digitsOnly.length < 10 || digitsOnly.length > 15) {
+      return candidate;
+    }
+    return "[redacted-phone]";
+  });
+  text = text.replace(/(?:USD|US\$|\$)\s*\d[\d,]*(?:\.\d{1,2})?/gi, "[redacted-amount]");
+
+  return text;
+}
+
+function sanitizeAssistantReviewTextForStorage(rawText, options = {}) {
+  const parsedMaxLength = Number.parseInt(options.maxLength, 10);
+  const maxLength = Number.isFinite(parsedMaxLength) && parsedMaxLength > 0 ? parsedMaxLength : ASSISTANT_REVIEW_MAX_TEXT_LENGTH;
+  const piiMode = resolveAssistantReviewPiiMode(options.piiMode || ASSISTANT_REVIEW_PII_MODE);
+  const normalizedText = sanitizeTextValue(rawText, maxLength);
+
+  if (!normalizedText) {
+    return piiMode === "redact" ? sanitizeTextValue(ASSISTANT_REVIEW_REDACTED_TEXT, maxLength) : "";
+  }
+  if (piiMode === "full") {
+    return normalizedText;
+  }
+  if (piiMode === "redact") {
+    return sanitizeTextValue(ASSISTANT_REVIEW_REDACTED_TEXT, maxLength);
+  }
+
+  let redactedText = normalizedText;
+  redactedText = redactAssistantReviewStructuredFields(redactedText);
+  redactedText = redactAssistantReviewClientMentionsInText(redactedText, options.clientMentions);
+  redactedText = redactAssistantReviewSensitiveTokens(redactedText);
+  return sanitizeTextValue(redactedText, maxLength);
+}
+
 function mapAssistantReviewRow(row) {
   const idValue = Number.parseInt(row?.id, 10);
   const recordsUsedValue = Number.parseInt(row?.records_used, 10);
@@ -21190,15 +21327,82 @@ function normalizeAssistantReviewOffset(rawOffset) {
   return Math.min(parsed, 5000);
 }
 
+function buildAssistantReviewRetentionCutoffIso(nowMs = Date.now()) {
+  const retentionWindowMs = ASSISTANT_REVIEW_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  return new Date(nowMs - retentionWindowMs).toISOString();
+}
+
+async function runAssistantReviewRetentionSweep() {
+  if (!ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED || !pool) {
+    return;
+  }
+  if (assistantReviewRetentionSweepInFlight) {
+    return;
+  }
+
+  assistantReviewRetentionSweepInFlight = true;
+  try {
+    await ensureDatabaseReady();
+    const deleteResult = await pool.query(
+      `
+        WITH candidates AS (
+          SELECT id
+          FROM ${ASSISTANT_REVIEW_TABLE}
+          WHERE asked_at < $1::timestamptz
+          ORDER BY asked_at ASC, id ASC
+          LIMIT $2
+        )
+        DELETE FROM ${ASSISTANT_REVIEW_TABLE}
+        WHERE id IN (SELECT id FROM candidates)
+      `,
+      [buildAssistantReviewRetentionCutoffIso(), ASSISTANT_REVIEW_RETENTION_SWEEP_BATCH_LIMIT],
+    );
+    const deletedCount = Number.isFinite(deleteResult?.rowCount) ? deleteResult.rowCount : 0;
+    if (deletedCount > 0) {
+      console.log(
+        `[assistant review retention] purged=${deletedCount} older_than_days=${ASSISTANT_REVIEW_RETENTION_DAYS}`,
+      );
+    }
+  } catch (error) {
+    console.error("[assistant review retention] sweep failed:", error);
+  } finally {
+    assistantReviewRetentionSweepInFlight = false;
+  }
+}
+
+function startAssistantReviewRetentionSweepScheduler() {
+  if (!ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED || !pool) {
+    return false;
+  }
+  if (assistantReviewRetentionSweepIntervalId) {
+    return true;
+  }
+
+  assistantReviewRetentionSweepIntervalId = setInterval(() => {
+    void runAssistantReviewRetentionSweep();
+  }, ASSISTANT_REVIEW_RETENTION_SWEEP_INTERVAL_MS);
+  void runAssistantReviewRetentionSweep();
+  return true;
+}
+
 async function logAssistantReviewQuestion(entry) {
   await ensureDatabaseReady();
 
-  const question = sanitizeTextValue(entry?.question, ASSISTANT_MAX_MESSAGE_LENGTH);
+  const reviewClientMentions = normalizeAssistantReviewClientMentions(entry?.clientMentions);
+  const question = sanitizeAssistantReviewTextForStorage(entry?.question, {
+    maxLength: ASSISTANT_MAX_MESSAGE_LENGTH,
+    piiMode: ASSISTANT_REVIEW_PII_MODE,
+    clientMentions: reviewClientMentions,
+  });
   if (!question) {
     return null;
   }
 
-  const assistantReply = sanitizeTextValue(entry?.assistantReply, ASSISTANT_REVIEW_MAX_TEXT_LENGTH);
+  const assistantReply = sanitizeAssistantReviewTextForStorage(entry?.assistantReply, {
+    maxLength: ASSISTANT_REVIEW_MAX_TEXT_LENGTH,
+    piiMode: ASSISTANT_REVIEW_PII_MODE,
+    clientMentions: reviewClientMentions,
+  });
   const askedByUsername = sanitizeTextValue(entry?.askedByUsername, 200);
   const askedByDisplayName = sanitizeTextValue(entry?.askedByDisplayName, 220);
   const mode = normalizeAssistantChatMode(entry?.mode);
@@ -23571,6 +23775,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
       await logAssistantReviewQuestion({
         question: message,
         assistantReply: normalizedReply,
+        clientMentions,
         mode,
         provider,
         recordsUsed: filteredRecords.length,
@@ -25171,6 +25376,24 @@ function logServerStartupSummary(port) {
   } else if (startMiniRetentionSweepScheduler()) {
     console.log(
       `Mini retention sweep started: every ${Math.round(MINI_RETENTION_SWEEP_INTERVAL_MS / (60 * 1000))} min, retention ${MINI_RETENTION_DAYS} days, batch ${MINI_RETENTION_SWEEP_BATCH_LIMIT}.`,
+    );
+  }
+  if (ASSISTANT_REVIEW_PII_MODE === "full") {
+    console.warn(
+      "Assistant review queue stores full text without redaction (ASSISTANT_REVIEW_PII_MODE=full).",
+    );
+  } else {
+    console.log(`Assistant review queue redaction mode: ${ASSISTANT_REVIEW_PII_MODE}.`);
+  }
+  if (!ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED) {
+    console.warn("Assistant review retention sweep is disabled (ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED=false).");
+  } else if (!pool) {
+    console.warn("Assistant review retention sweep is disabled because DATABASE_URL is missing.");
+  } else if (startAssistantReviewRetentionSweepScheduler()) {
+    console.log(
+      `Assistant review retention sweep started: every ${Math.round(
+        ASSISTANT_REVIEW_RETENTION_SWEEP_INTERVAL_MS / (60 * 1000),
+      )} min, retention ${ASSISTANT_REVIEW_RETENTION_DAYS} days, batch ${ASSISTANT_REVIEW_RETENTION_SWEEP_BATCH_LIMIT}.`,
     );
   }
   const quickBooksConfigured = isQuickBooksConfigured();
