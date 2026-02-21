@@ -12,6 +12,9 @@ export interface AssistantChatSource {
   recordsUsed: number;
   updatedAt: string | null;
   provider?: string;
+  degradedMode?: boolean;
+  degradedReason?: string;
+  staleSnapshotAgeMs?: number;
 }
 
 export interface AssistantChatResponse {
