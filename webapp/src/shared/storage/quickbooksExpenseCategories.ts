@@ -1,9 +1,12 @@
 export type QuickBooksExpenseCategoryMap = Record<string, string>;
+export type QuickBooksExpenseCategoryFingerprintMap = Record<string, string>;
 
 const QUICKBOOKS_EXPENSE_CATEGORIES_STORAGE_KEY = "cbooster_quickbooks_expense_categories_v1";
 const QUICKBOOKS_EXPENSE_CATEGORIES_LIST_STORAGE_KEY = "cbooster_quickbooks_expense_categories_list_v1";
+const QUICKBOOKS_EXPENSE_CATEGORIES_FINGERPRINT_STORAGE_KEY = "cbooster_quickbooks_expense_categories_fingerprint_v1";
 const QUICKBOOKS_CATEGORY_MAX_LENGTH = 120;
 const QUICKBOOKS_TRANSACTION_ID_MAX_LENGTH = 180;
+const QUICKBOOKS_FINGERPRINT_MAX_LENGTH = 400;
 
 export function readQuickBooksExpenseCategoryMap(): QuickBooksExpenseCategoryMap {
   if (typeof window === "undefined") {
@@ -43,6 +46,36 @@ export function writeQuickBooksExpenseCategoryMap(map: QuickBooksExpenseCategory
   const normalized = normalizeQuickBooksExpenseCategoryMap(map);
   try {
     window.localStorage.setItem(QUICKBOOKS_EXPENSE_CATEGORIES_STORAGE_KEY, JSON.stringify(normalized));
+  } catch {
+    // Ignore localStorage write errors.
+  }
+}
+
+export function readQuickBooksExpenseCategoryFingerprintMap(): QuickBooksExpenseCategoryFingerprintMap {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(QUICKBOOKS_EXPENSE_CATEGORIES_FINGERPRINT_STORAGE_KEY);
+    if (!rawValue) {
+      return {};
+    }
+    const parsed = JSON.parse(rawValue);
+    return normalizeQuickBooksExpenseCategoryFingerprintMap(parsed);
+  } catch {
+    return {};
+  }
+}
+
+export function writeQuickBooksExpenseCategoryFingerprintMap(map: QuickBooksExpenseCategoryFingerprintMap): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const normalized = normalizeQuickBooksExpenseCategoryFingerprintMap(map);
+  try {
+    window.localStorage.setItem(QUICKBOOKS_EXPENSE_CATEGORIES_FINGERPRINT_STORAGE_KEY, JSON.stringify(normalized));
   } catch {
     // Ignore localStorage write errors.
   }
@@ -90,6 +123,22 @@ export function normalizeQuickBooksExpenseCategoryMap(
       continue;
     }
     normalized[transactionId] = category;
+  }
+  return normalized;
+}
+
+export function normalizeQuickBooksExpenseCategoryFingerprintMap(
+  map: QuickBooksExpenseCategoryFingerprintMap | null | undefined,
+): QuickBooksExpenseCategoryFingerprintMap {
+  const source = map && typeof map === "object" ? map : {};
+  const normalized: QuickBooksExpenseCategoryFingerprintMap = {};
+  for (const [rawFingerprint, rawCategory] of Object.entries(source)) {
+    const fingerprint = sanitizeStorageText(rawFingerprint, QUICKBOOKS_FINGERPRINT_MAX_LENGTH);
+    const category = sanitizeStorageText(rawCategory, QUICKBOOKS_CATEGORY_MAX_LENGTH);
+    if (!fingerprint || !category) {
+      continue;
+    }
+    normalized[fingerprint] = category;
   }
   return normalized;
 }

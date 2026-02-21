@@ -4,11 +4,15 @@ import { showToast } from "@/shared/lib/toast";
 import { withStableRowKeys, type RowWithKey } from "@/shared/lib/stableRowKeys";
 import {
   normalizeQuickBooksExpenseCategoryMap,
+  normalizeQuickBooksExpenseCategoryFingerprintMap,
   normalizeQuickBooksExpenseCategoriesList,
+  readQuickBooksExpenseCategoryFingerprintMap,
   readQuickBooksExpenseCategoryMap,
   readQuickBooksExpenseCategoriesList,
+  writeQuickBooksExpenseCategoryFingerprintMap,
   writeQuickBooksExpenseCategoryMap,
   writeQuickBooksExpenseCategoriesList,
+  type QuickBooksExpenseCategoryFingerprintMap,
   type QuickBooksExpenseCategoryMap,
 } from "@/shared/storage/quickbooksExpenseCategories";
 import {
@@ -118,6 +122,9 @@ export default function QuickBooksPage() {
   const [expenseCategoryMap, setExpenseCategoryMap] = useState<QuickBooksExpenseCategoryMap>(() =>
     readQuickBooksExpenseCategoryMap(),
   );
+  const [expenseCategoryFingerprintMap, setExpenseCategoryFingerprintMap] = useState<QuickBooksExpenseCategoryFingerprintMap>(
+    () => readQuickBooksExpenseCategoryFingerprintMap(),
+  );
   const incomingTransactionsRef = useRef<QuickBooksViewRow[]>([]);
   const outgoingTransactionsRef = useRef<QuickBooksViewRow[]>([]);
   const rowKeySequenceRef = useRef(0);
@@ -145,12 +152,24 @@ export default function QuickBooksPage() {
     [selectedMonth, selectedYear, todayDate],
   );
   const expenseCategoryOptions = useMemo(
-    () => buildQuickBooksExpenseCategoryOptions(savedExpenseCategories, outgoingTransactions, expenseCategoryMap),
-    [expenseCategoryMap, outgoingTransactions, savedExpenseCategories],
+    () =>
+      buildQuickBooksExpenseCategoryOptions(
+        savedExpenseCategories,
+        outgoingTransactions,
+        expenseCategoryMap,
+        expenseCategoryFingerprintMap,
+      ),
+    [expenseCategoryFingerprintMap, expenseCategoryMap, outgoingTransactions, savedExpenseCategories],
   );
   const expenseCategorySummaryRows = useMemo(
-    () => buildQuickBooksExpenseCategorySummaryRows(outgoingTransactions, expenseCategoryMap, expenseCategoryOptions),
-    [expenseCategoryMap, expenseCategoryOptions, outgoingTransactions],
+    () =>
+      buildQuickBooksExpenseCategorySummaryRows(
+        outgoingTransactions,
+        expenseCategoryMap,
+        expenseCategoryFingerprintMap,
+        expenseCategoryOptions,
+      ),
+    [expenseCategoryFingerprintMap, expenseCategoryMap, expenseCategoryOptions, outgoingTransactions],
   );
 
   useEffect(() => {
@@ -176,6 +195,10 @@ export default function QuickBooksPage() {
     writeQuickBooksExpenseCategoriesList(savedExpenseCategories);
   }, [savedExpenseCategories]);
 
+  useEffect(() => {
+    writeQuickBooksExpenseCategoryFingerprintMap(expenseCategoryFingerprintMap);
+  }, [expenseCategoryFingerprintMap]);
+
   const setQuickBooksExpenseCategory = useCallback((row: QuickBooksViewRow, rawValue: string) => {
     const transactionId = sanitizeQuickBooksTransactionId(row?.transactionId);
     if (!transactionId) {
@@ -183,6 +206,7 @@ export default function QuickBooksPage() {
     }
 
     const normalizedValue = normalizeQuickBooksExpenseCategoryLabel(rawValue);
+    const rowFingerprint = buildQuickBooksExpenseFingerprint(row);
     setExpenseCategoryMap((previousMap) => {
       const normalizedMap = normalizeQuickBooksExpenseCategoryMap(previousMap);
       if (!normalizedValue) {
@@ -201,6 +225,19 @@ export default function QuickBooksPage() {
         [transactionId]: normalizedValue,
       };
     });
+
+    if (normalizedValue && rowFingerprint) {
+      setExpenseCategoryFingerprintMap((previousMap) => {
+        const normalizedMap = normalizeQuickBooksExpenseCategoryFingerprintMap(previousMap);
+        if (normalizedMap[rowFingerprint] === normalizedValue) {
+          return previousMap;
+        }
+        return {
+          ...normalizedMap,
+          [rowFingerprint]: normalizedValue,
+        };
+      });
+    }
   }, []);
 
   const addQuickBooksExpenseCategoryFromPrompt = useCallback((row: QuickBooksViewRow) => {
@@ -250,7 +287,10 @@ export default function QuickBooksPage() {
           cell: (item) => (
             <div className="quickbooks-expense-category-control">
               <Select
-                value={resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap) || QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE}
+                value={
+                  resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap, expenseCategoryFingerprintMap) ||
+                  QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE
+                }
                 onChange={(event) => {
                   const nextCategory = sanitizeQuickBooksExpenseCategorySelectValue(event.target.value);
                   setQuickBooksExpenseCategory(item, nextCategory);
@@ -317,6 +357,7 @@ export default function QuickBooksPage() {
   }, [
     activeTab,
     addQuickBooksExpenseCategoryFromPrompt,
+    expenseCategoryFingerprintMap,
     expenseCategoryMap,
     expenseCategoryOptions,
     setQuickBooksExpenseCategory,
@@ -765,6 +806,23 @@ function normalizeQuickBooksExpenseCategoryLabel(rawValue: unknown): string {
   return value.slice(0, 120);
 }
 
+function normalizeQuickBooksExpenseFingerprintValue(rawValue: unknown): string {
+  return String(rawValue || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase("ru-RU")
+    .slice(0, 200);
+}
+
+function buildQuickBooksExpenseFingerprint(row: QuickBooksPaymentRow): string {
+  const normalizedPayee = normalizeQuickBooksExpenseFingerprintValue(row?.clientName);
+  const normalizedDescription = normalizeQuickBooksExpenseFingerprintValue(row?.description);
+  if (!normalizedPayee && !normalizedDescription) {
+    return "";
+  }
+  return `${normalizedPayee}|${normalizedDescription}`;
+}
+
 function sanitizeQuickBooksExpenseCategorySelectValue(rawValue: unknown): string {
   const value = String(rawValue || "").trim();
   if (!value || value === QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE) {
@@ -777,6 +835,7 @@ function buildQuickBooksExpenseCategoryOptions(
   categories: string[] | null | undefined,
   rows: QuickBooksPaymentRow[] = [],
   categoryMap: QuickBooksExpenseCategoryMap = {},
+  categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
 ): string[] {
   const normalizedCategories = normalizeQuickBooksExpenseCategoriesList(categories || []);
   const combined = [...normalizedCategories];
@@ -790,7 +849,7 @@ function buildQuickBooksExpenseCategoryOptions(
     combined.push(defaultCategory);
   }
   for (const row of Array.isArray(rows) ? rows : []) {
-    const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap);
+    const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap, categoryFingerprintMap);
     if (!resolvedCategory) {
       continue;
     }
@@ -824,17 +883,27 @@ function prependQuickBooksExpenseCategory(categories: string[], category: string
 function resolveQuickBooksExpenseCategoryForRow(
   row: QuickBooksPaymentRow,
   categoryMap: QuickBooksExpenseCategoryMap,
+  categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap = {},
 ): string {
   const transactionId = sanitizeQuickBooksTransactionId(row?.transactionId);
-  if (!transactionId) {
+  if (transactionId) {
+    const directCategory = normalizeQuickBooksExpenseCategoryLabel(categoryMap[transactionId] || "");
+    if (directCategory) {
+      return directCategory;
+    }
+  }
+
+  const fingerprint = buildQuickBooksExpenseFingerprint(row);
+  if (!fingerprint) {
     return "";
   }
-  return normalizeQuickBooksExpenseCategoryLabel(categoryMap[transactionId] || "");
+  return normalizeQuickBooksExpenseCategoryLabel(categoryFingerprintMap[fingerprint] || "");
 }
 
 function buildQuickBooksExpenseCategorySummaryRows(
   rows: QuickBooksPaymentRow[],
   categoryMap: QuickBooksExpenseCategoryMap,
+  categoryFingerprintMap: QuickBooksExpenseCategoryFingerprintMap,
   orderedCategories: string[],
 ): QuickBooksExpenseCategorySummaryRow[] {
   const totals = new Map<string, number>();
@@ -847,7 +916,7 @@ function buildQuickBooksExpenseCategorySummaryRows(
     if (!Number.isFinite(amount) || amount <= 0) {
       continue;
     }
-    const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap);
+    const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap, categoryFingerprintMap);
     const category = resolvedCategory || "Без категории";
     totals.set(category, (totals.get(category) || 0) + amount);
   }
