@@ -22,13 +22,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node (with npm cache)
+        if: ${{ hashFiles('mobile-app/package-lock.json') != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: |
-            mobile-app/package-lock.json
+          cache-dependency-path: mobile-app/package-lock.json
+
+      - name: Setup Node (without cache)
+        if: ${{ hashFiles('mobile-app/package-lock.json') == '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Install mobile dependencies
         if: ${{ hashFiles('mobile-app/package.json') != '' }}
