@@ -66,6 +66,8 @@ const QUICKBOOKS_MONTH_OPTIONS = [
 const QUICKBOOKS_EXPENSE_DEFAULT_CATEGORIES = ["Marketing", "Salaries"] as const;
 const QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL = "Uncategorized";
 const QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE = "__none__";
+const QUICKBOOKS_OUTGOING_CACHE_STORAGE_KEY = "quickbooks-outgoing-cache-v1";
+const QUICKBOOKS_OUTGOING_CACHE_MAX_RANGES = 24;
 const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -103,6 +105,14 @@ const QUICKBOOKS_MONEY_FLOW_TABS = [
 type QuickBooksTab = (typeof QUICKBOOKS_MONEY_FLOW_TABS)[number]["key"];
 type QuickBooksViewRow = RowWithKey<QuickBooksPaymentRow>;
 type QuickBooksExpenseCategoryPayeeSuggestionMap = Record<string, string>;
+type QuickBooksOutgoingCacheEntries = Record<string, QuickBooksOutgoingCacheEntry>;
+
+interface QuickBooksOutgoingCacheEntry {
+  from: string;
+  to: string;
+  savedAt: string;
+  items: QuickBooksPaymentRow[];
+}
 
 export default function QuickBooksPage() {
   const todayDate = useMemo(() => new Date(), []);
@@ -798,6 +808,7 @@ export default function QuickBooksPage() {
         to: targetRange.to,
       });
       const items = Array.isArray(payload.items) ? payload.items : [];
+      writeQuickBooksOutgoingCacheForRange(targetRange, items);
       setOutgoingTransactions(
         withStableRowKeys(items, previousItems, rowKeySequenceRef, {
           prefix: "qb-out",
@@ -809,6 +820,21 @@ export default function QuickBooksPage() {
       setSyncWarning("");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load expense transactions.";
+      const cachedItems = readQuickBooksOutgoingCacheForRange(targetRange);
+      if (cachedItems.length) {
+        setLoadError("");
+        setSyncWarning(`QuickBooks read failed. Showing locally saved expense data: ${message}`);
+        setStatusText(`Showing locally saved expense data. QuickBooks read failed: ${message}`);
+        setOutgoingTransactions(
+          withStableRowKeys(cachedItems, previousItems, rowKeySequenceRef, {
+            prefix: "qb-out",
+            signature: quickBooksRowSignature,
+          }),
+        );
+        setRangeText(`Range: ${targetRange.from} -> ${targetRange.to}`);
+        setLastLoadPrefix("Local saved expense data:");
+        return;
+      }
       if (!previousItems.length) {
         setLoadError(message);
         setStatusText(message);
@@ -1687,6 +1713,171 @@ function buildOutgoingLoadPrefixFromPayload(payload: { source?: string }): strin
     return "QuickBooks live data:";
   }
   return "Expense data:";
+}
+
+function buildQuickBooksOutgoingCacheRangeKey(range: QuickBooksRange): string {
+  return `${String(range?.from || "").trim()}::${String(range?.to || "").trim()}`;
+}
+
+function normalizeQuickBooksOutgoingCacheRow(rawValue: unknown): QuickBooksPaymentRow | null {
+  const row = rawValue && typeof rawValue === "object" ? (rawValue as Record<string, unknown>) : null;
+  if (!row) {
+    return null;
+  }
+
+  const paymentDate = String(row.paymentDate || "").trim();
+  if (!paymentDate) {
+    return null;
+  }
+
+  const amount = Number(row.paymentAmount);
+  if (!Number.isFinite(amount)) {
+    return null;
+  }
+
+  const transactionType = String(row.transactionType || "").trim();
+  if (!transactionType) {
+    return null;
+  }
+
+  const transactionId = String(row.transactionId || "").trim();
+  return {
+    transactionId,
+    clientName: String(row.clientName || "").trim() || "Unknown payee",
+    clientPhone: String(row.clientPhone || "").trim(),
+    clientEmail: String(row.clientEmail || "").trim(),
+    categoryName: String(row.categoryName || "").trim(),
+    categoryDetails: String(row.categoryDetails || "").trim(),
+    description: String(row.description || "").trim(),
+    paymentAmount: amount,
+    paymentDate,
+    transactionType,
+  };
+}
+
+function normalizeQuickBooksOutgoingCacheEntry(rawValue: unknown): QuickBooksOutgoingCacheEntry | null {
+  const entry = rawValue && typeof rawValue === "object" ? (rawValue as Record<string, unknown>) : null;
+  if (!entry) {
+    return null;
+  }
+
+  const from = String(entry.from || "").trim();
+  const to = String(entry.to || "").trim();
+  const savedAt = String(entry.savedAt || "").trim();
+  if (!from || !to) {
+    return null;
+  }
+
+  const rawItems = Array.isArray(entry.items) ? entry.items : [];
+  const items = rawItems.map((item) => normalizeQuickBooksOutgoingCacheRow(item)).filter((item): item is QuickBooksPaymentRow => Boolean(item));
+
+  return {
+    from,
+    to,
+    savedAt: savedAt || new Date().toISOString(),
+    items,
+  };
+}
+
+function readQuickBooksOutgoingCacheEntries(): QuickBooksOutgoingCacheEntries {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return {};
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(QUICKBOOKS_OUTGOING_CACHE_STORAGE_KEY);
+    if (!rawValue) {
+      return {};
+    }
+
+    const parsed = JSON.parse(rawValue) as unknown;
+    const parsedObject = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    if (!parsedObject) {
+      return {};
+    }
+
+    const normalized: QuickBooksOutgoingCacheEntries = {};
+    for (const [rawKey, rawEntry] of Object.entries(parsedObject)) {
+      const key = String(rawKey || "").trim();
+      if (!key) {
+        continue;
+      }
+      const normalizedEntry = normalizeQuickBooksOutgoingCacheEntry(rawEntry);
+      if (!normalizedEntry) {
+        continue;
+      }
+      normalized[key] = normalizedEntry;
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function writeQuickBooksOutgoingCacheEntries(entries: QuickBooksOutgoingCacheEntries): void {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(QUICKBOOKS_OUTGOING_CACHE_STORAGE_KEY, JSON.stringify(entries));
+  } catch {
+    // Ignore local storage write failures.
+  }
+}
+
+function writeQuickBooksOutgoingCacheForRange(range: QuickBooksRange, items: QuickBooksPaymentRow[]): void {
+  const key = buildQuickBooksOutgoingCacheRangeKey(range);
+  if (!key) {
+    return;
+  }
+
+  const nextEntry: QuickBooksOutgoingCacheEntry = {
+    from: String(range?.from || "").trim(),
+    to: String(range?.to || "").trim(),
+    savedAt: new Date().toISOString(),
+    items: Array.isArray(items) ? items.map((item) => ({ ...item })) : [],
+  };
+
+  const previousEntries = readQuickBooksOutgoingCacheEntries();
+  const nextEntries: QuickBooksOutgoingCacheEntries = {
+    ...previousEntries,
+    [key]: nextEntry,
+  };
+
+  const sortedKeys = Object.keys(nextEntries).sort((leftKey, rightKey) => {
+    const leftSavedAt = String(nextEntries[leftKey]?.savedAt || "");
+    const rightSavedAt = String(nextEntries[rightKey]?.savedAt || "");
+    if (leftSavedAt === rightSavedAt) {
+      return 0;
+    }
+    return leftSavedAt < rightSavedAt ? 1 : -1;
+  });
+
+  while (sortedKeys.length > QUICKBOOKS_OUTGOING_CACHE_MAX_RANGES) {
+    const keyToDelete = sortedKeys.pop();
+    if (!keyToDelete) {
+      break;
+    }
+    delete nextEntries[keyToDelete];
+  }
+
+  writeQuickBooksOutgoingCacheEntries(nextEntries);
+}
+
+function readQuickBooksOutgoingCacheForRange(range: QuickBooksRange): QuickBooksPaymentRow[] {
+  const key = buildQuickBooksOutgoingCacheRangeKey(range);
+  if (!key) {
+    return [];
+  }
+
+  const entries = readQuickBooksOutgoingCacheEntries();
+  const cachedEntry = entries[key];
+  if (!cachedEntry || !Array.isArray(cachedEntry.items) || !cachedEntry.items.length) {
+    return [];
+  }
+
+  return cachedEntry.items.map((item) => ({ ...item }));
 }
 
 function formatQuickBooksClientLabel(clientName: string, transactionType: string, amount: number): string {
