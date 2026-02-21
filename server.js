@@ -21353,6 +21353,20 @@ function setNoStoreNoCacheHtmlHeaders(res) {
   res.setHeader("Expires", "0");
 }
 
+function setNoStorePrivateApiHeaders(res) {
+  res.setHeader("Cache-Control", "no-store, private");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
+
+function applyNoStorePrivateHeadersForAuthenticatedApi(req, res, next) {
+  const requestPath = sanitizeTextValue(req.path, 2048);
+  if (requestPath && requestPath.startsWith("/api/")) {
+    setNoStorePrivateApiHeaders(res);
+  }
+  next();
+}
+
 function setWebAppStaticHeaders(res, filePath) {
   const normalizedFilePath = typeof filePath === "string" ? filePath : "";
   const relativePath = path.relative(webAppDistRoot, normalizedFilePath);
@@ -21490,6 +21504,7 @@ app.get("/logout", handleWebLogout);
 app.post("/logout", handleWebLogout);
 
 app.use(requireWebAuth);
+app.use(applyNoStorePrivateHeadersForAuthenticatedApi);
 app.use(requireWebApiCsrf);
 
 app.get("/app", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
@@ -23595,7 +23610,7 @@ app.get("/api/moderation/submissions/:id/files/:fileId", requireWebPermission(WE
       "Content-Disposition",
       buildContentDisposition(isInline ? "inline" : "attachment", file.fileName),
     );
-    res.setHeader("Cache-Control", "private, max-age=0, no-cache");
+    setNoStorePrivateApiHeaders(res);
     res.send(file.content);
   } catch (error) {
     console.error("GET /api/moderation/submissions/:id/files/:fileId failed:", error);
