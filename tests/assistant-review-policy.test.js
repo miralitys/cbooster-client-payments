@@ -49,3 +49,23 @@ test("assistant review storage policy supports full and redact modes", () => {
   assert.equal(fullMode, input);
   assert.equal(redactMode, "[redacted by assistant review policy]");
 });
+
+test("assistant review minimal mode redacts sensitive labels even without mention hints", () => {
+  const input = [
+    "Manager: Kate Burnis",
+    "Company: Acme Inc",
+    "Note: keep private",
+    "Amount: USD 700.00",
+  ].join("\n");
+
+  const sanitized = __assistantInternals.sanitizeAssistantReviewTextForStorage(input, {
+    piiMode: "minimal",
+    maxLength: 8000,
+  });
+
+  assert.match(sanitized, /\[redacted\]/i);
+  assert.match(sanitized, /\[redacted-amount\]/i);
+  assert.doesNotMatch(sanitized, /Kate Burnis/i);
+  assert.doesNotMatch(sanitized, /Acme Inc/i);
+  assert.doesNotMatch(sanitized, /keep private/i);
+});

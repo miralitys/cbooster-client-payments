@@ -43,6 +43,22 @@ test("assistant scope tenant key ignores tenant headers when auth profile has no
   assert.equal(tenantKey, "default");
 });
 
+test("assistant scope tenant key prioritizes trusted tenantKey over other profile fields and spoofed headers", () => {
+  const tenantKey = __assistantInternals.resolveAssistantSessionScopeTenantKeyFromRequest({
+    headers: {
+      "x-cbooster-tenant": "spoof-tenant",
+      "x-tenant-id": "spoof-tenant-2",
+    },
+    webAuthProfile: {
+      tenantKey: "Primary Tenant",
+      tenantId: "Secondary Tenant",
+      orgId: "Third Tenant",
+    },
+  });
+
+  assert.equal(tenantKey, "primary-tenant");
+});
+
 test("assistant client message seq normalization accepts positive integers only", () => {
   assert.equal(__assistantInternals.normalizeAssistantClientMessageSeq(1), 1);
   assert.equal(__assistantInternals.normalizeAssistantClientMessageSeq("42"), 42);

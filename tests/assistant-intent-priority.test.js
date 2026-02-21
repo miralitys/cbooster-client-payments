@@ -65,6 +65,24 @@ const UPDATED_AT = "2026-02-10T00:00:00Z";
 test("assistant internals export is available for contract tests", () => {
   assert.ok(__assistantInternals);
   assert.equal(typeof __assistantInternals.buildAssistantReplyPayload, "function");
+  assert.equal(typeof __assistantInternals.getAssistantIntentPriorityTable, "function");
+});
+
+test("assistant intent priority table is explicit and ordered", () => {
+  const table = __assistantInternals.getAssistantIntentPriorityTable();
+  assert.ok(Array.isArray(table));
+  assert.equal(table.length >= 20, true);
+  assert.deepEqual(
+    table.slice(0, 6).map((item) => item.key),
+    ["help", "context_reset", "scope_follow_up", "manager_compare", "client_range_list_scope", "new_clients"],
+  );
+  assert.deepEqual(
+    table.slice(-3).map((item) => item.key),
+    ["summary_metrics", "client_lookup", "fallback_summary"],
+  );
+  table.forEach((item, index) => {
+    assert.equal(item.rank, index + 1);
+  });
 });
 
 test("context reset intent has priority over additional commands", () => {
@@ -172,4 +190,33 @@ test("top debt intent keeps priority over generic summary intent", () => {
 
   assert.match(result.reply, /Топ/i);
   assert.doesNotMatch(result.reply, /Доступно клиентов:/i);
+});
+
+test("compare managers intent dominates manager ranking in same message", () => {
+  const result = __assistantInternals.buildAssistantReplyPayload(
+    "Сравни менеджеров Vlad Burnis и Nenad Nash и покажи рейтинг менеджеров по долгу",
+    FIXTURE_RECORDS,
+    UPDATED_AT,
+  );
+
+  assert.match(result.reply, /Сравнение менеджеров/i);
+  assert.doesNotMatch(result.reply, /Рейтинг менеджеров/i);
+});
+
+test("fresh range intent with follow-up wording does not reuse stale scoped list", () => {
+  const result = __assistantInternals.buildAssistantReplyPayload(
+    "Покажи клиентов с 2026-02-01 по 2026-02-09 и топ должников по ним",
+    FIXTURE_RECORDS,
+    UPDATED_AT,
+    {
+      clientComparables: ["john smith"],
+      scopeEstablished: true,
+    },
+  );
+
+  assert.ok(result.scope);
+  assert.ok(Array.isArray(result.scope.clientComparables));
+  assert.ok(result.scope.clientComparables.length >= 2);
+  assert.notDeepEqual(result.scope.clientComparables, ["john smith"]);
+  assert.doesNotMatch(result.reply, /Контекст найден/i);
 });

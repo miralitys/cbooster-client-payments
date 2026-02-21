@@ -6553,6 +6553,36 @@ function shouldAssistantPreferFreshScopeIntent(intentProfile) {
   );
 }
 
+const ASSISTANT_INTENT_PRIORITY_TABLE = Object.freeze([
+  Object.freeze({ rank: 1, key: "help", branch: "wantsHelp" }),
+  Object.freeze({ rank: 2, key: "context_reset", branch: "wantsContextReset" }),
+  Object.freeze({ rank: 3, key: "scope_follow_up", branch: "executeAssistantScopeFollowUpReply" }),
+  Object.freeze({ rank: 4, key: "manager_compare", branch: "wantsCompare + wantsManager + 2 manager matches" }),
+  Object.freeze({ rank: 5, key: "client_range_list_scope", branch: "shouldListClientsByRange" }),
+  Object.freeze({ rank: 6, key: "new_clients", branch: "wantsNewClients" }),
+  Object.freeze({ rank: 7, key: "first_payment", branch: "wantsFirstPayment" }),
+  Object.freeze({ rank: 8, key: "revenue", branch: "wantsRevenue" }),
+  Object.freeze({ rank: 9, key: "debt_dynamics", branch: "wantsDebtDynamics" }),
+  Object.freeze({ rank: 10, key: "stopped_paying", branch: "wantsStoppedPaying" }),
+  Object.freeze({ rank: 11, key: "anomaly", branch: "wantsAnomaly / anomaly hints" }),
+  Object.freeze({ rank: 12, key: "call_list", branch: "wantsCallList" }),
+  Object.freeze({ rank: 13, key: "latest_payment", branch: "wantsLatestPayment" }),
+  Object.freeze({ rank: 14, key: "missing_fields", branch: "wantsWithout/wantsWith with manager/company/notes" }),
+  Object.freeze({ rank: 15, key: "manager_scope", branch: "primaryManager scoped handlers" }),
+  Object.freeze({ rank: 16, key: "company_scope", branch: "primaryCompany scoped handler" }),
+  Object.freeze({ rank: 17, key: "manager_ranking", branch: "wantsManager + (top/count/summary/per)" }),
+  Object.freeze({ rank: 18, key: "top_metrics", branch: "wantsTop with debt/contract/paid" }),
+  Object.freeze({ rank: 19, key: "status_filters", branch: "overdue/written_off/fully_paid/not_fully_paid" }),
+  Object.freeze({ rank: 20, key: "threshold_filters", branch: "comparator + amountThreshold + metric" }),
+  Object.freeze({ rank: 21, key: "summary_metrics", branch: "count/avg/max/percent/summary totals" }),
+  Object.freeze({ rank: 22, key: "client_lookup", branch: "strong match or clarify for client lookup" }),
+  Object.freeze({ rank: 23, key: "fallback_summary", branch: "summary/help fallback" }),
+]);
+
+function getAssistantIntentPriorityTable() {
+  return ASSISTANT_INTENT_PRIORITY_TABLE;
+}
+
 function tokenizeAssistantText(rawValue) {
   const normalized = normalizeAssistantComparableText(rawValue, 4000);
   if (!normalized) {
@@ -9496,6 +9526,7 @@ function executeAssistantScopeFollowUpReply(intentProfile, sessionScope, runtime
 }
 
 function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = null, preparedData = null) {
+  // Keep branch order synchronized with ASSISTANT_INTENT_PRIORITY_TABLE.
   const intentProfile = buildAssistantIntentProfile(message);
   const {
     normalizedMessage,
@@ -26768,5 +26799,6 @@ module.exports = {
     normalizeAssistantContextResetFailureReasonCode,
     parseAssistantContextResetBrowserFromUserAgent,
     buildAssistantContextResetBrowserVersionKey,
+    getAssistantIntentPriorityTable,
   },
 };
