@@ -205,24 +205,6 @@ const FORM_SECTIONS = [
   },
 ];
 
-const WRITTEN_OFF_CLIENT_NAMES = new Set(
-  [
-    "Ghenadie Nipomici",
-    "Andrii Kuziv",
-    "Alina Seiitbek Kyzy",
-    "Syimyk Alymov",
-    "Urmatbek Aliman Adi",
-    "Maksatbek Nadyrov",
-    "Ismayil Hajiyev",
-    "Artur Maltsev",
-    "Maksim Burlaev",
-    "Serhii Vasylchuk",
-    "Denys Vatsyk",
-    "Rinat Kadirmetov",
-    "Pavlo Mykhailov",
-  ].map(normalizeClientName),
-);
-
 const SUBMISSION_PRIMARY_FIELDS = [
   "clientName",
   "closedBy",
@@ -563,7 +545,10 @@ export default function App() {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify({ records: nextRecords }),
+        body: JSON.stringify({
+          records: nextRecords,
+          expectedUpdatedAt: recordsUpdatedAt || null,
+        }),
       });
 
       setRecords(nextRecords);
@@ -578,6 +563,13 @@ export default function App() {
           error: "Session expired. Sign in again.",
         };
       }
+      if (error?.status === 409) {
+        await loadRecords();
+        return {
+          ok: false,
+          error: "Records were updated by another user. Data was refreshed, please retry your action.",
+        };
+      }
       return {
         ok: false,
         error: error.message || "Failed to save records.",
@@ -585,7 +577,7 @@ export default function App() {
     } finally {
       setIsSavingRecords(false);
     }
-  }, [applyUnauthorizedState, requestApiJson]);
+  }, [applyUnauthorizedState, loadRecords, recordsUpdatedAt, requestApiJson]);
 
   const loadPendingSubmissions = useCallback(async () => {
     setModerationError("");
@@ -1493,7 +1485,7 @@ function RecordForm({ mode, initialRecord, isSavingRecords, onSubmit, onCancel }
           if (!nextDraft.dateWhenWrittenOff) {
             nextDraft.dateWhenWrittenOff = getTodayDateUs();
           }
-        } else if (!isWrittenOffByList(nextDraft.clientName)) {
+        } else {
           nextDraft.dateWhenWrittenOff = "";
         }
       }
@@ -1828,7 +1820,7 @@ function prepareRecordForSave({ draft, mode, previousRecord }) {
 
   if (record.writtenOff === "Yes" && !record.dateWhenWrittenOff) {
     record.dateWhenWrittenOff = getTodayDateUs();
-  } else if (!isWrittenOffByList(record.clientName)) {
+  } else if (record.writtenOff !== "Yes") {
     record.dateWhenWrittenOff = "";
   }
 
@@ -2530,25 +2522,12 @@ function isCheckboxEnabled(rawValue) {
   return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
 }
 
-function normalizeClientName(value) {
-  return (value || "")
-    .toString()
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-}
-
-function isWrittenOffByList(clientName) {
-  const normalized = normalizeClientName(clientName);
-  return normalized ? WRITTEN_OFF_CLIENT_NAMES.has(normalized) : false;
-}
-
 function isRecordWrittenOff(record) {
   if (!record) {
     return false;
   }
 
-  return isCheckboxEnabled(record.writtenOff) || isWrittenOffByList(record.clientName);
+  return isCheckboxEnabled(record.writtenOff);
 }
 
 function formatMoneyText(rawValue) {
