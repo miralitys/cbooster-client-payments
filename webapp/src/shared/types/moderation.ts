@@ -16,6 +16,7 @@ export interface ModerationSubmission {
   reviewNote?: string;
   submittedBy?: TelegramSubmittedBy;
   client: Partial<ClientRecord>;
+  miniData?: Record<string, unknown>;
   attachmentsCount?: number;
 }
 
