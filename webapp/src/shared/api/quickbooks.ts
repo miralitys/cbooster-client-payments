@@ -1,17 +1,27 @@
 import { apiRequest } from "@/shared/api/fetcher";
 import type { QuickBooksPaymentsPayload, QuickBooksSyncJobPayload } from "@/shared/types/quickbooks";
 
-interface GetQuickBooksPaymentsOptions {
+interface GetQuickBooksTransactionsOptions {
   from: string;
   to: string;
 }
 
-export async function getQuickBooksPayments(options: GetQuickBooksPaymentsOptions): Promise<QuickBooksPaymentsPayload> {
+export async function getQuickBooksPayments(options: GetQuickBooksTransactionsOptions): Promise<QuickBooksPaymentsPayload> {
   const query = new URLSearchParams({
     from: options.from,
     to: options.to,
   });
   return apiRequest<QuickBooksPaymentsPayload>(`/api/quickbooks/payments/recent?${query.toString()}`);
+}
+
+export async function getQuickBooksOutgoingPayments(
+  options: GetQuickBooksTransactionsOptions,
+): Promise<QuickBooksPaymentsPayload> {
+  const query = new URLSearchParams({
+    from: options.from,
+    to: options.to,
+  });
+  return apiRequest<QuickBooksPaymentsPayload>(`/api/quickbooks/payments/outgoing?${query.toString()}`);
 }
 
 interface CreateQuickBooksSyncJobOptions {
