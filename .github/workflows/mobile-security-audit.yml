@@ -16,7 +16,6 @@ on:
 
 jobs:
   mobile-audit:
-    if: ${{ hashFiles('mobile-app/package.json') != '' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -32,7 +31,9 @@ jobs:
             mobile-app/package-lock.json
 
       - name: Install mobile dependencies
+        if: ${{ hashFiles('mobile-app/package.json') != '' }}
         run: npm --prefix mobile-app ci
 
       - name: Audit gate (high/critical block)
+        if: ${{ hashFiles('mobile-app/package.json') != '' }}
         run: node scripts/mobile-audit-gate.js
