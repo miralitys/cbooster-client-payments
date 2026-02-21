@@ -1,33 +1,23 @@
-export type GhlDocumentsStatus = "found" | "possible" | "not_found" | "error" | string;
+export type GhlClientContractStatus = "ready" | "no_contact" | "no_contract" | "error" | string;
 
-export interface GhlClientDocument {
-  title: string;
-  url: string;
-  snippet: string;
-  source: string;
-  contactName: string;
-  contactId: string;
-  isContractMatch: boolean;
-}
-
-export interface GhlClientDocumentsRow {
+export interface GhlClientContractRow {
   clientName: string;
   contactName: string;
+  contactId: string;
   matchedContacts: number;
-  documentsCount: number;
-  documents: GhlClientDocument[];
   contractTitle: string;
   contractUrl: string;
   source: string;
-  status: GhlDocumentsStatus;
+  status: GhlClientContractStatus;
   error?: string;
 }
 
-export interface GhlClientDocumentsPayload {
+export interface GhlClientContractsPayload {
   ok: boolean;
   count: number;
+  readyCount?: number;
   limit: number;
-  items: GhlClientDocumentsRow[];
+  items: GhlClientContractRow[];
   source?: string;
   updatedAt?: string | null;
   matcherVersion?: string;
