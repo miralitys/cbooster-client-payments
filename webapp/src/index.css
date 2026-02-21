@@ -1757,6 +1757,42 @@ a {
   gap: var(--space-2);
 }
 
+.quickbooks-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+}
+
+.quickbooks-bulk-actions__selection,
+.quickbooks-bulk-actions__assign {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.quickbooks-bulk-actions__meta {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.quickbooks-bulk-actions__select {
+  min-width: 200px;
+}
+
+.quickbooks-row-select {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
 .quickbooks-expense-summary {
   display: grid;
   gap: 8px;
@@ -3032,6 +3068,20 @@ a {
 
   .quickbooks-outgoing-layout {
     grid-template-columns: 1fr;
+  }
+
+  .quickbooks-bulk-actions {
+    align-items: stretch;
+  }
+
+  .quickbooks-bulk-actions__selection,
+  .quickbooks-bulk-actions__assign {
+    width: 100%;
+  }
+
+  .quickbooks-bulk-actions__select {
+    min-width: 0;
+    width: 100%;
   }
 
   .quickbooks-expense-summary__row {

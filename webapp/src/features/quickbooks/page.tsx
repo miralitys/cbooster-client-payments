@@ -118,6 +118,8 @@ export default function QuickBooksPage() {
   const [search, setSearch] = useState("");
   const [refundOnly, setRefundOnly] = useState(false);
   const [uncategorizedOnly, setUncategorizedOnly] = useState(false);
+  const [selectedOutgoingKeys, setSelectedOutgoingKeys] = useState<string[]>([]);
+  const [bulkExpenseCategory, setBulkExpenseCategory] = useState("");
   const [savedExpenseCategories, setSavedExpenseCategories] = useState<string[]>(() =>
     buildQuickBooksExpenseCategoryOptions(readQuickBooksExpenseCategoriesList()),
   );
@@ -158,6 +160,20 @@ export default function QuickBooksPage() {
       (item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap, expenseCategoryFingerprintMap),
     ).length;
   }, [activeTab, allTransactions, expenseCategoryFingerprintMap, expenseCategoryMap]);
+  const filteredOutgoingSelectionKeys = useMemo(() => {
+    if (activeTab !== "outgoing") {
+      return [];
+    }
+    return filteredTransactions.map((row) => resolveQuickBooksOutgoingSelectionKey(row)).filter(Boolean);
+  }, [activeTab, filteredTransactions]);
+  const selectedOutgoingKeySet = useMemo(() => new Set(selectedOutgoingKeys), [selectedOutgoingKeys]);
+  const selectedFilteredCount = useMemo(
+    () => filteredOutgoingSelectionKeys.filter((selectionKey) => selectedOutgoingKeySet.has(selectionKey)).length,
+    [filteredOutgoingSelectionKeys, selectedOutgoingKeySet],
+  );
+  const allFilteredSelected = Boolean(filteredOutgoingSelectionKeys.length) && selectedFilteredCount === filteredOutgoingSelectionKeys.length;
+  const canApplyBulkCategory =
+    selectedOutgoingKeys.length > 0 && Boolean(sanitizeQuickBooksExpenseCategorySelectValue(bulkExpenseCategory));
   const yearOptions = useMemo(() => {
     const years: number[] = [];
     for (let year = currentYear; year >= minQuickBooksYear; year -= 1) {
@@ -222,6 +238,24 @@ export default function QuickBooksPage() {
     writeQuickBooksExpenseCategoryFingerprintMap(expenseCategoryFingerprintMap);
   }, [expenseCategoryFingerprintMap]);
 
+  useEffect(() => {
+    const outgoingKeys = new Set(outgoingTransactions.map((row) => resolveQuickBooksOutgoingSelectionKey(row)).filter(Boolean));
+    setSelectedOutgoingKeys((previousKeys) => {
+      const nextKeys = previousKeys.filter((selectionKey) => outgoingKeys.has(selectionKey));
+      if (nextKeys.length === previousKeys.length) {
+        return previousKeys;
+      }
+      return nextKeys;
+    });
+  }, [outgoingTransactions]);
+
+  useEffect(() => {
+    if (activeTab === "outgoing") {
+      return;
+    }
+    setSelectedOutgoingKeys([]);
+  }, [activeTab]);
+
   const setQuickBooksExpenseCategory = useCallback((row: QuickBooksViewRow, rawValue: string) => {
     const transactionId = sanitizeQuickBooksTransactionId(row?.transactionId);
     if (!transactionId) {
@@ -276,9 +310,93 @@ export default function QuickBooksPage() {
     setQuickBooksExpenseCategory(row, nextCategory);
   }, [setQuickBooksExpenseCategory]);
 
+  const addBulkQuickBooksExpenseCategoryFromPrompt = useCallback(() => {
+    const nextCategoryRaw = globalThis.window?.prompt("Add expense category", "") || "";
+    const nextCategory = normalizeQuickBooksExpenseCategoryLabel(nextCategoryRaw);
+    if (!nextCategory) {
+      return;
+    }
+
+    setSavedExpenseCategories((previousCategories) =>
+      prependQuickBooksExpenseCategory(buildQuickBooksExpenseCategoryOptions(previousCategories), nextCategory),
+    );
+    setBulkExpenseCategory(nextCategory);
+  }, []);
+
+  const toggleOutgoingTransactionSelection = useCallback((row: QuickBooksViewRow) => {
+    const selectionKey = resolveQuickBooksOutgoingSelectionKey(row);
+    if (!selectionKey) {
+      return;
+    }
+
+    setSelectedOutgoingKeys((previousKeys) => {
+      if (previousKeys.includes(selectionKey)) {
+        return previousKeys.filter((existingKey) => existingKey !== selectionKey);
+      }
+      return [...previousKeys, selectionKey];
+    });
+  }, []);
+
+  const selectAllFilteredOutgoingTransactions = useCallback(() => {
+    if (!filteredOutgoingSelectionKeys.length) {
+      return;
+    }
+    setSelectedOutgoingKeys((previousKeys) => {
+      const nextSet = new Set(previousKeys);
+      for (const selectionKey of filteredOutgoingSelectionKeys) {
+        nextSet.add(selectionKey);
+      }
+      return [...nextSet];
+    });
+  }, [filteredOutgoingSelectionKeys]);
+
+  const clearFilteredOutgoingSelection = useCallback(() => {
+    if (!filteredOutgoingSelectionKeys.length) {
+      return;
+    }
+    const filteredSet = new Set(filteredOutgoingSelectionKeys);
+    setSelectedOutgoingKeys((previousKeys) => previousKeys.filter((selectionKey) => !filteredSet.has(selectionKey)));
+  }, [filteredOutgoingSelectionKeys]);
+
+  const applyBulkQuickBooksExpenseCategory = useCallback(() => {
+    const nextCategory = sanitizeQuickBooksExpenseCategorySelectValue(bulkExpenseCategory);
+    if (!nextCategory || !selectedOutgoingKeys.length) {
+      return;
+    }
+
+    const selectedSet = new Set(selectedOutgoingKeys);
+    const targetRows = outgoingTransactions.filter((row) => selectedSet.has(resolveQuickBooksOutgoingSelectionKey(row)));
+    if (!targetRows.length) {
+      return;
+    }
+
+    setSavedExpenseCategories((previousCategories) =>
+      prependQuickBooksExpenseCategory(buildQuickBooksExpenseCategoryOptions(previousCategories), nextCategory),
+    );
+    for (const row of targetRows) {
+      setQuickBooksExpenseCategory(row, nextCategory);
+    }
+  }, [bulkExpenseCategory, outgoingTransactions, selectedOutgoingKeys, setQuickBooksExpenseCategory]);
+
   const tableColumns = useMemo<TableColumn<QuickBooksViewRow>[]>(() => {
     if (activeTab === "outgoing") {
       return [
+        {
+          key: "selection",
+          label: "",
+          align: "center",
+          cell: (item) => {
+            const selectionKey = resolveQuickBooksOutgoingSelectionKey(item);
+            return (
+              <input
+                type="checkbox"
+                checked={Boolean(selectionKey && selectedOutgoingKeySet.has(selectionKey))}
+                onChange={() => toggleOutgoingTransactionSelection(item)}
+                className="quickbooks-row-select"
+              />
+            );
+          },
+        },
         {
           key: "paymentDate",
           label: "Date",
@@ -383,7 +501,9 @@ export default function QuickBooksPage() {
     expenseCategoryFingerprintMap,
     expenseCategoryMap,
     expenseCategoryOptions,
+    selectedOutgoingKeySet,
     setQuickBooksExpenseCategory,
+    toggleOutgoingTransactionSelection,
   ]);
 
   const pollQuickBooksSyncJob = useCallback(async (jobId: string, shouldTotalRefresh: boolean) => {
@@ -593,6 +713,52 @@ export default function QuickBooksPage() {
 
   const transactionsContent = (
     <>
+      {activeTab === "outgoing" ? (
+        <div className="quickbooks-bulk-actions">
+          <div className="quickbooks-bulk-actions__selection">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={selectAllFilteredOutgoingTransactions}
+              disabled={!filteredOutgoingSelectionKeys.length || allFilteredSelected}
+            >
+              Select all
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={clearFilteredOutgoingSelection}
+              disabled={!selectedFilteredCount}
+            >
+              Clear selected
+            </Button>
+            <span className="quickbooks-bulk-actions__meta">Selected: {selectedOutgoingKeys.length}</span>
+          </div>
+          <div className="quickbooks-bulk-actions__assign">
+            <Select
+              value={bulkExpenseCategory || QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE}
+              onChange={(event) => setBulkExpenseCategory(event.target.value)}
+              className="quickbooks-bulk-actions__select"
+            >
+              <option value={QUICKBOOKS_EXPENSE_CATEGORY_EMPTY_VALUE}>Choose category</option>
+              {expenseCategoryOptions.map((categoryOption) => (
+                <option key={`bulk-${categoryOption}`} value={categoryOption}>
+                  {categoryOption}
+                </option>
+              ))}
+            </Select>
+            <Button type="button" variant="secondary" size="sm" onClick={addBulkQuickBooksExpenseCategoryFromPrompt}>
+              Add
+            </Button>
+            <Button type="button" size="sm" onClick={applyBulkQuickBooksExpenseCategory} disabled={!canApplyBulkCategory}>
+              Apply to selected
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       <p className={`dashboard-message quickbooks-status ${loadError || syncWarning ? "error" : ""}`.trim()}>
         {syncWarning || statusText}
       </p>
@@ -843,6 +1009,28 @@ function quickBooksRowSignature(row: QuickBooksPaymentRow): string {
     String(row.paymentAmount ?? "").trim(),
     String(row.transactionType || "").trim(),
   ].join("|");
+}
+
+function resolveQuickBooksOutgoingSelectionKey(row: QuickBooksPaymentRow): string {
+  const transactionId = sanitizeQuickBooksTransactionId(row?.transactionId);
+  if (transactionId) {
+    return `tx:${transactionId}`;
+  }
+
+  const viewRowKey = (row as { _rowKey?: unknown })?._rowKey;
+  if (typeof viewRowKey === "string" && viewRowKey.trim()) {
+    return `row:${viewRowKey.trim()}`;
+  }
+
+  const fallbackSignature = [
+    String(row?.paymentDate || "").trim(),
+    String(row?.clientName || "").trim(),
+    String(row?.description || "").trim(),
+    String(row?.paymentAmount ?? "").trim(),
+  ]
+    .join("|")
+    .trim();
+  return fallbackSignature ? `sig:${fallbackSignature}` : "";
 }
 
 function sanitizeQuickBooksTransactionId(rawValue: unknown): string {
