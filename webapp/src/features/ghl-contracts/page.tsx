@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { downloadGhlClientContract, getGhlClientContracts } from "@/shared/api";
 import type { GhlClientContractRow } from "@/shared/types/ghlDocuments";
-import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageShell, Panel, Table } from "@/shared/ui";
+import { Badge, Button, EmptyState, ErrorState, Input, LoadingSkeleton, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const DEFAULT_LIMIT = 25;
@@ -13,19 +13,33 @@ export default function GhlContractsPage() {
   const [loadError, setLoadError] = useState("");
   const [statusText, setStatusText] = useState("Loading client list and searching signed PDF contracts in GoHighLevel...");
   const [downloadingMap, setDownloadingMap] = useState<Record<string, boolean>>({});
+  const [clientNameInput, setClientNameInput] = useState("");
+  const [activeClientQuery, setActiveClientQuery] = useState("");
 
-  const loadContracts = useCallback(async () => {
+  const loadContracts = useCallback(async (options?: { clientName?: string }) => {
+    const normalizedClientName = (options?.clientName || "").toString().trim();
     setIsLoading(true);
     setLoadError("");
-    setStatusText("Loading client list and searching signed PDF contracts in GoHighLevel...");
+    setStatusText(
+      normalizedClientName
+        ? `Searching "${normalizedClientName}" in GoHighLevel...`
+        : "Loading client list and searching signed PDF contracts in GoHighLevel...",
+    );
 
     try {
-      const payload = await getGhlClientContracts(DEFAULT_LIMIT);
+      const payload = await getGhlClientContracts(DEFAULT_LIMIT, {
+        clientName: normalizedClientName,
+      });
       const nextItems = Array.isArray(payload.items) ? payload.items : [];
       const readyCount = nextItems.filter((item) => normalizeStatus(item.status) === "ready").length;
 
       setItems(nextItems);
-      setStatusText(`Loaded ${nextItems.length} clients. Contracts ready for download: ${readyCount}.`);
+      setActiveClientQuery(normalizedClientName);
+      if (normalizedClientName) {
+        setStatusText(`Loaded ${nextItems.length} match for "${normalizedClientName}". Contracts ready: ${readyCount}.`);
+      } else {
+        setStatusText(`Loaded ${nextItems.length} clients. Contracts ready for download: ${readyCount}.`);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load contract download table.";
       setItems([]);
@@ -38,6 +52,21 @@ export default function GhlContractsPage() {
 
   useEffect(() => {
     void loadContracts();
+  }, [loadContracts]);
+
+  const handleFindClient = useCallback(async () => {
+    const normalized = clientNameInput.trim();
+    if (!normalized) {
+      return;
+    }
+    await loadContracts({
+      clientName: normalized,
+    });
+  }, [clientNameInput, loadContracts]);
+
+  const handleShowFirstClients = useCallback(async () => {
+    setClientNameInput("");
+    await loadContracts();
   }, [loadContracts]);
 
   const handleDownload = useCallback(async (item: GhlClientContractRow) => {
@@ -146,6 +175,29 @@ export default function GhlContractsPage() {
         }
       >
         {!loadError ? <p className="dashboard-message ghl-contracts-status">{statusText}</p> : null}
+        <div className="ghl-contracts-toolbar">
+          <Input
+            className="ghl-contracts-search-input"
+            placeholder="Find client (e.g. Vladyslav Novosiadlyi)"
+            value={clientNameInput}
+            onChange={(event) => setClientNameInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleFindClient();
+              }
+            }}
+            disabled={isLoading}
+          />
+          <Button type="button" size="sm" onClick={() => void handleFindClient()} disabled={isLoading || !clientNameInput.trim()}>
+            Find Client
+          </Button>
+          {activeClientQuery ? (
+            <Button type="button" size="sm" variant="secondary" onClick={() => void handleShowFirstClients()} disabled={isLoading}>
+              Show First 25
+            </Button>
+          ) : null}
+        </div>
 
         {isLoading ? <LoadingSkeleton rows={8} /> : null}
 

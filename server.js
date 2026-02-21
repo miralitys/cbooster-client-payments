@@ -26474,11 +26474,40 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
   }
 
   const limit = normalizeGhlClientContractDownloadLimit(req.query.limit);
+  const requestedClientNameRaw = sanitizeTextValue(req.query.clientName, 300);
 
   try {
     const state = await getStoredRecords();
     const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
-    const clientNames = getFirstUniqueClientNamesFromRecords(visibilityContext.visibleRecords, limit);
+    let clientNames = [];
+
+    if (requestedClientNameRaw) {
+      const requestedClientNameLookup = normalizeNameForLookup(requestedClientNameRaw);
+      const exactMatch = visibilityContext.visibleClientNames.find(
+        (clientName) => normalizeNameForLookup(clientName) === requestedClientNameLookup,
+      );
+      const containsMatch =
+        exactMatch ||
+        visibilityContext.visibleClientNames.find((clientName) => {
+          const candidateLookup = normalizeNameForLookup(clientName);
+          return (
+            candidateLookup.includes(requestedClientNameLookup) ||
+            requestedClientNameLookup.includes(candidateLookup)
+          );
+        });
+
+      if (!containsMatch) {
+        res.status(404).json({
+          error: `Client "${requestedClientNameRaw}" is not available in your visible records.`,
+        });
+        return;
+      }
+
+      clientNames = [containsMatch];
+    } else {
+      clientNames = getFirstUniqueClientNamesFromRecords(visibilityContext.visibleRecords, limit);
+    }
+
     const items = await buildGhlClientContractDownloadRows(clientNames);
     const readyCount = items.filter((item) => normalizeGhlClientContractDownloadStatus(item?.status) === "ready").length;
     res.json({
@@ -26486,6 +26515,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       count: items.length,
       readyCount,
       limit,
+      requestedClientName: requestedClientNameRaw || "",
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
