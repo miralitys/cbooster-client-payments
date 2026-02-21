@@ -1,0 +1,38 @@
+name: Mobile Security Audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "mobile-app/**"
+      - "scripts/mobile-audit-gate.js"
+      - ".github/workflows/mobile-security-audit.yml"
+  push:
+    branches: [main]
+    paths:
+      - "mobile-app/**"
+      - "scripts/mobile-audit-gate.js"
+      - ".github/workflows/mobile-security-audit.yml"
+
+jobs:
+  mobile-audit:
+    if: ${{ hashFiles('mobile-app/package.json') != '' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            mobile-app/package-lock.json
+
+      - name: Install mobile dependencies
+        run: npm --prefix mobile-app ci
+
+      - name: Audit gate (high/critical block)
+        run: node scripts/mobile-audit-gate.js
