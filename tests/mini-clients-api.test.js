@@ -1163,6 +1163,156 @@ test("POST /api/mini/clients enforces attachment security before DB write", asyn
   }
 });
 
+test("POST /api/mini/clients enforces total attachment budget for chunked multipart uploads", async () => {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-chunked-budget-"));
+  const pgCaptureFilePath = path.join(captureDir, "pg-events.jsonl");
+
+  try {
+    await withServer(
+      {
+        DATABASE_URL: "postgres://fake/fake",
+        TEST_USE_FAKE_PG: "1",
+        TEST_PG_CAPTURE_FILE: pgCaptureFilePath,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      },
+      async ({ baseUrl }) => {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const initData = buildTelegramInitData({
+          authDate: nowSeconds,
+          user: { id: 1008, username: "chunked_budget_user" },
+        });
+        const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+        const nearMaxPerFile = 10 * 1024 * 1024 - 1024;
+        const attachments = [
+          { fileName: "chunked-1.pdf", mimeType: "application/pdf", bytes: makePdfBytes(nearMaxPerFile) },
+          { fileName: "chunked-2.pdf", mimeType: "application/pdf", bytes: makePdfBytes(nearMaxPerFile) },
+          { fileName: "chunked-3.pdf", mimeType: "application/pdf", bytes: makePdfBytes(nearMaxPerFile) },
+          { fileName: "chunked-4.pdf", mimeType: "application/pdf", bytes: makePdfBytes(nearMaxPerFile) },
+          { fileName: "chunked-5.pdf", mimeType: "application/pdf", bytes: makePdfBytes(5000) },
+        ];
+
+        const eventsBefore = readPgCaptureEvents(pgCaptureFilePath).length;
+        const response = await postMiniClientsMultipartChunked(baseUrl, {
+          initData,
+          uploadToken,
+          client: buildValidMiniClient({ clientName: "Chunked Budget Client" }),
+          attachments,
+          chunkSize: 64 * 1024,
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 413);
+        assert.equal(typeof body.error, "string");
+        assert.ok(body.error.includes("40 MB"), `Unexpected error message: ${body.error}`);
+        const eventsAfter = readPgCaptureEvents(pgCaptureFilePath).length;
+        assert.equal(eventsAfter, eventsBefore, "Rejected chunked upload should not write to DB.");
+      },
+    );
+  } finally {
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
+});
+
+test("POST /api/mini/clients accepts multipart string client payload", async () => {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-multipart-string-client-"));
+  const pgCaptureFilePath = path.join(captureDir, "pg-events.jsonl");
+
+  try {
+    await withServer(
+      {
+        DATABASE_URL: "postgres://fake/fake",
+        TEST_USE_FAKE_PG: "1",
+        TEST_PG_CAPTURE_FILE: pgCaptureFilePath,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      },
+      async ({ baseUrl }) => {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const initData = buildTelegramInitData({
+          authDate: nowSeconds,
+          user: { id: 1012, username: "multipart_string_client_user" },
+        });
+        const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+        const response = await postMiniClientsMultipart(baseUrl, {
+          initData,
+          uploadToken,
+          client: JSON.stringify(
+            buildValidMiniClient({
+              clientName: "Multipart String Client",
+            }),
+          ),
+          attachments: [
+            {
+              fileName: "multipart-string-client.pdf",
+              mimeType: "application/pdf",
+              bytes: makePdfBytes(256),
+            },
+          ],
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 201);
+        assert.equal(body.ok, true);
+        assert.equal(body.status, "pending");
+
+        const events = readPgCaptureEvents(pgCaptureFilePath);
+        const lastFileInsert = [...events].reverse().find((event) => event.type === "file_insert");
+        assert.ok(lastFileInsert, "Expected file_insert event for multipart attachment.");
+        assert.equal(lastFileInsert.fileName, "multipart-string-client.pdf");
+        assert.equal(lastFileInsert.mimeType, "application/pdf");
+      },
+    );
+  } finally {
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
+});
+
+test("POST /api/mini/clients rejects multipart helper defaults when auth headers are missing", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+    },
+    async ({ baseUrl }) => {
+      const response = await postMiniClientsMultipart(baseUrl, {
+        client: buildValidMiniClient({
+          clientName: "Multipart Missing Auth Client",
+        }),
+        attachments: null,
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 401);
+      assert.equal(typeof body.error, "string");
+    },
+  );
+});
+
+test("POST /api/mini/clients rejects chunked helper fallback payload without auth", async () => {
+  await withServer(
+    {
+      DATABASE_URL: "postgres://fake/fake",
+      TEST_USE_FAKE_PG: "1",
+      TELEGRAM_BOT_TOKEN,
+      TELEGRAM_INIT_DATA_TTL_SEC: "600",
+    },
+    async ({ baseUrl }) => {
+      const response = await postMiniClientsMultipartChunked(baseUrl, {
+        client: "",
+        attachments: [{}],
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 401);
+      assert.equal(typeof body.error, "string");
+    },
+  );
+});
 test("POST /api/mini/clients maps multer limit errors to safe 400 responses", async (t) => {
   await withServer(
     {
