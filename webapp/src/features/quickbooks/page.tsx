@@ -1178,7 +1178,7 @@ export default function QuickBooksPage() {
           </p>
         ) : null}
         {insightError ? <p className="quickbooks-insight-error">{insightError}</p> : null}
-        {insightText ? <pre className="quickbooks-insight-result">{insightText}</pre> : null}
+        {insightText ? <QuickBooksInsightFormattedView rawText={insightText} /> : null}
       </Modal>
     </PageShell>
   );
@@ -1602,6 +1602,199 @@ function buildQuickBooksInsightCacheKey(item: QuickBooksPaymentRow): string {
     .join("|")
     .trim();
   return signature ? `sig:${signature}` : "";
+}
+
+type InsightSectionKey = "company" | "expense" | "categories" | "confidence" | "other";
+
+interface ParsedQuickBooksInsight {
+  company: string[];
+  expense: string[];
+  categories: string[];
+  confidence: string;
+  other: string[];
+}
+
+function QuickBooksInsightFormattedView({ rawText }: { rawText: string }) {
+  const parsedInsight = parseQuickBooksInsight(rawText);
+  const confidenceClassName = getQuickBooksConfidenceClassName(parsedInsight.confidence);
+
+  return (
+    <div className="quickbooks-insight-pretty">
+      {parsedInsight.company.length ? (
+        <section className="quickbooks-insight-card">
+          <h4>Company Activity</h4>
+          <p>{parsedInsight.company.join(" ")}</p>
+        </section>
+      ) : null}
+
+      {parsedInsight.expense.length ? (
+        <section className="quickbooks-insight-card">
+          <h4>Most Likely Expense Type</h4>
+          <p>{parsedInsight.expense.join(" ")}</p>
+        </section>
+      ) : null}
+
+      {parsedInsight.categories.length ? (
+        <section className="quickbooks-insight-card">
+          <h4>Suggested QuickBooks Category</h4>
+          <ol className="quickbooks-insight-list">
+            {parsedInsight.categories.map((category, index) => (
+              <li key={`${category}-${index}`}>{category}</li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
+
+      {parsedInsight.confidence ? (
+        <section className="quickbooks-insight-card quickbooks-insight-card--confidence">
+          <h4>Confidence Level</h4>
+          <span className={`quickbooks-insight-confidence ${confidenceClassName}`.trim()}>{parsedInsight.confidence}</span>
+        </section>
+      ) : null}
+
+      {parsedInsight.other.length ? (
+        <section className="quickbooks-insight-card">
+          <h4>Additional Notes</h4>
+          <p>{parsedInsight.other.join(" ")}</p>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function parseQuickBooksInsight(rawText: string): ParsedQuickBooksInsight {
+  const parsed: ParsedQuickBooksInsight = {
+    company: [],
+    expense: [],
+    categories: [],
+    confidence: "",
+    other: [],
+  };
+
+  const normalizedLines = String(rawText || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => cleanQuickBooksInsightLine(line))
+    .filter(Boolean);
+
+  let currentSection: InsightSectionKey = "other";
+
+  for (const line of normalizedLines) {
+    const sectionKey = resolveQuickBooksInsightSectionByHeader(line);
+    if (sectionKey) {
+      currentSection = sectionKey;
+      continue;
+    }
+
+    if (currentSection === "categories") {
+      const category = line.replace(/^\d+[.)]\s*/, "").trim();
+      if (category) {
+        parsed.categories.push(category);
+      }
+      continue;
+    }
+
+    if (currentSection === "confidence") {
+      if (!parsed.confidence) {
+        parsed.confidence = normalizeQuickBooksConfidenceLabel(line);
+      }
+      continue;
+    }
+
+    if (currentSection === "company") {
+      parsed.company.push(line);
+      continue;
+    }
+
+    if (currentSection === "expense") {
+      parsed.expense.push(line);
+      continue;
+    }
+
+    parsed.other.push(line);
+  }
+
+  if (!parsed.categories.length && parsed.other.length) {
+    const extractedCategories = parsed.other
+      .filter((line) => /^\d+[.)]\s*/.test(line))
+      .map((line) => line.replace(/^\d+[.)]\s*/, "").trim())
+      .filter(Boolean);
+    if (extractedCategories.length) {
+      parsed.categories = extractedCategories;
+      parsed.other = parsed.other.filter((line) => !/^\d+[.)]\s*/.test(line));
+    }
+  }
+
+  if (!parsed.confidence) {
+    const sourceLine = [...parsed.other, ...parsed.expense, ...parsed.company].find((line) => /(low|medium|high)/i.test(line));
+    if (sourceLine) {
+      parsed.confidence = normalizeQuickBooksConfidenceLabel(sourceLine);
+    }
+  }
+
+  if (!parsed.company.length && !parsed.expense.length && !parsed.categories.length && !parsed.confidence) {
+    parsed.other = normalizedLines;
+  }
+
+  return parsed;
+}
+
+function cleanQuickBooksInsightLine(line: string): string {
+  return String(line || "")
+    .replace(/\*\*/g, "")
+    .replace(/^[-•]\s*/, "")
+    .replace(/[“”]/g, '"')
+    .trim();
+}
+
+function resolveQuickBooksInsightSectionByHeader(line: string): InsightSectionKey | null {
+  const normalized = cleanQuickBooksInsightLine(line).toLowerCase().replace(/[:\s]+$/g, "");
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith("company activity")) {
+    return "company";
+  }
+  if (normalized.startsWith("most likely expense type")) {
+    return "expense";
+  }
+  if (normalized.startsWith("suggested quickbooks category")) {
+    return "categories";
+  }
+  if (normalized.startsWith("confidence level")) {
+    return "confidence";
+  }
+
+  return null;
+}
+
+function normalizeQuickBooksConfidenceLabel(value: string): string {
+  const normalized = cleanQuickBooksInsightLine(value).toLowerCase();
+  if (normalized.includes("high")) {
+    return "High";
+  }
+  if (normalized.includes("medium")) {
+    return "Medium";
+  }
+  if (normalized.includes("low")) {
+    return "Low";
+  }
+  return cleanQuickBooksInsightLine(value);
+}
+
+function getQuickBooksConfidenceClassName(confidence: string): string {
+  const normalized = String(confidence || "").toLowerCase();
+  if (normalized === "high") {
+    return "quickbooks-insight-confidence--high";
+  }
+  if (normalized === "medium") {
+    return "quickbooks-insight-confidence--medium";
+  }
+  if (normalized === "low") {
+    return "quickbooks-insight-confidence--low";
+  }
+  return "quickbooks-insight-confidence--neutral";
 }
 
 function parseQuickBooksIsoDateParts(value: string): { year: number; month: number; day: number } | null {
