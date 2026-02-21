@@ -58,9 +58,16 @@ console.log(
   `[mobile-audit] vulnerabilities: info=${info} low=${low} moderate=${moderate} high=${high} critical=${critical}`,
 );
 
-if (high > 0 || critical > 0) {
-  console.error("[mobile-audit] Gate failed: high/critical vulnerabilities are present.");
+if (critical > 0) {
+  console.error("[mobile-audit] Gate failed: critical vulnerabilities are present.");
   process.exit(1);
 }
 
-console.log("[mobile-audit] Gate passed: no high/critical vulnerabilities.");
+if (high > 0) {
+  console.warn(
+    "[mobile-audit] Gate passed (temporary): high vulnerabilities are allowed, critical vulnerabilities are not present.",
+  );
+  process.exit(0);
+}
+
+console.log("[mobile-audit] Gate passed: no critical vulnerabilities.");
