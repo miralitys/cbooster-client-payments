@@ -1140,6 +1140,8 @@ let miniUploadParseInFlight = 0;
 const miniUploadParseWaiters = [];
 let miniTelegramNotificationQueue = Promise.resolve();
 let miniTelegramNotificationQueueDepth = 0;
+let miniRetentionSweepIntervalId = null;
+let miniRetentionSweepInFlight = false;
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
