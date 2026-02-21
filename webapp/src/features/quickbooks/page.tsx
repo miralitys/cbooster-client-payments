@@ -714,24 +714,24 @@ export default function QuickBooksPage() {
               />
             </div>
             {activeTab === "incoming" ? (
-              <label htmlFor="quickbooks-refund-only" className="cb-checkbox-row quickbooks-refund-filter">
+              <label htmlFor="quickbooks-refund-only" className="quickbooks-toggle-filter">
                 <input
                   id="quickbooks-refund-only"
                   type="checkbox"
                   checked={refundOnly}
                   onChange={(event) => setRefundOnly(event.target.checked)}
                 />
-                Only refunds
+                <span>Only refunds</span>
               </label>
             ) : (
-              <label htmlFor="quickbooks-uncategorized-only" className="cb-checkbox-row quickbooks-uncategorized-filter">
+              <label htmlFor="quickbooks-uncategorized-only" className="quickbooks-toggle-filter">
                 <input
                   id="quickbooks-uncategorized-only"
                   type="checkbox"
                   checked={uncategorizedOnly}
                   onChange={(event) => setUncategorizedOnly(event.target.checked)}
                 />
-                Только без категории
+                <span>Только без категории</span>
               </label>
             )}
           </div>
