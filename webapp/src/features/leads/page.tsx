@@ -14,7 +14,7 @@ const EMPTY_SUMMARY: GhlLeadsSummary = {
   generatedAt: "",
 };
 const SPREADSHEET_FORMULA_PREFIX = /^\s*[=+\-@]/;
-type LeadsRangeMode = "today" | "week";
+type LeadsRangeMode = "today" | "week" | "month";
 
 export default function LeadsPage() {
   const [items, setItems] = useState<GhlLeadRow[]>([]);
@@ -24,12 +24,15 @@ export default function LeadsPage() {
   const [loadError, setLoadError] = useState("");
   const [canSync, setCanSync] = useState(false);
   const [lastSyncedCount, setLastSyncedCount] = useState(0);
-  const [rangeMode, setRangeMode] = useState<LeadsRangeMode>("week");
+  const [rangeMode, setRangeMode] = useState<LeadsRangeMode>("today");
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const statusText = useMemo(() => {
-    const rangeLabel = rangeMode === "week" ? "this week" : "today";
+    const rangeLabel = rangeMode === "week" ? "this week" : rangeMode === "month" ? "this month" : "today";
     if (isLoading) {
-      return `Refreshing leads for ${rangeLabel} from GoHighLevel...`;
+      return isSyncing
+        ? `Refreshing leads for ${rangeLabel} from GoHighLevel...`
+        : `Loading leads for ${rangeLabel} from local database...`;
     }
 
     if (loadError) {
@@ -41,15 +44,16 @@ export default function LeadsPage() {
     }
 
     return `Loaded ${items.length} leads for ${rangeLabel}. Last sync added/updated: ${lastSyncedCount}.`;
-  }, [isLoading, items.length, lastSyncedCount, loadError, rangeMode]);
+  }, [isLoading, isSyncing, items.length, lastSyncedCount, loadError, rangeMode]);
 
-  const loadLeads = useCallback(async (nextRangeMode: LeadsRangeMode = rangeMode) => {
+  const loadLeads = useCallback(async (nextRangeMode: LeadsRangeMode = rangeMode, shouldRefresh = false) => {
     setIsLoading(true);
     setLoadError("");
     setRangeMode(nextRangeMode);
+    setIsSyncing(shouldRefresh);
 
     try {
-      const payload = await getGhlLeads(canSync ? "incremental" : "none", {
+      const payload = await getGhlLeads(shouldRefresh && canSync ? "incremental" : "none", {
         rangeMode: nextRangeMode,
       });
       const nextItems = Array.isArray(payload.items) ? payload.items : [];
@@ -65,6 +69,7 @@ export default function LeadsPage() {
       setLastSyncedCount(0);
       setLoadError(message);
     } finally {
+      setIsSyncing(false);
       setIsLoading(false);
     }
   }, [canSync, rangeMode]);
@@ -181,7 +186,7 @@ export default function LeadsPage() {
               type="button"
               size="sm"
               variant={rangeMode === "today" ? "primary" : "secondary"}
-              onClick={() => void loadLeads("today")}
+              onClick={() => void loadLeads("today", false)}
               disabled={isLoading}
             >
               Today
@@ -190,10 +195,19 @@ export default function LeadsPage() {
               type="button"
               size="sm"
               variant={rangeMode === "week" ? "primary" : "secondary"}
-              onClick={() => void loadLeads("week")}
+              onClick={() => void loadLeads("week", false)}
               disabled={isLoading}
             >
               This Week
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={rangeMode === "month" ? "primary" : "secondary"}
+              onClick={() => void loadLeads("month", false)}
+              disabled={isLoading}
+            >
+              This Month
             </Button>
             <Button
               type="button"
@@ -207,7 +221,7 @@ export default function LeadsPage() {
             <Button
               type="button"
               size="sm"
-              onClick={() => void loadLeads(rangeMode)}
+              onClick={() => void loadLeads(rangeMode, true)}
               disabled={isLoading || !canSync}
               isLoading={isLoading}
             >
@@ -220,8 +234,8 @@ export default function LeadsPage() {
 
         <div className="leads-summary-react" aria-live="polite">
           <SummaryCard
-            title={rangeMode === "week" ? "This Week" : "Today"}
-            value={rangeMode === "week" ? summary.week || items.length : summary.today || items.length}
+            title={rangeMode === "week" ? "This Week" : rangeMode === "month" ? "This Month" : "Today"}
+            value={rangeMode === "week" ? summary.week || items.length : rangeMode === "month" ? summary.month || items.length : summary.today || items.length}
           />
         </div>
 
@@ -237,7 +251,15 @@ export default function LeadsPage() {
         ) : null}
 
         {!isLoading && !loadError && !items.length ? (
-          <EmptyState title={rangeMode === "week" ? "Press Refresh to load this week's leads." : "Press Refresh to load today's leads."} />
+          <EmptyState
+            title={
+              rangeMode === "week"
+                ? "Press Refresh to load this week's leads."
+                : rangeMode === "month"
+                  ? "Press Refresh to load this month's leads."
+                  : "Press Refresh to load today's leads."
+            }
+          />
         ) : null}
 
         {!isLoading && !loadError && items.length ? (
