@@ -860,8 +860,14 @@ const MINI_CLIENT_ATTACHMENTS_CONFIG = Object.freeze({
   allowedExtensions: MINI_ATTACHMENT_ALLOWLIST_EXTENSIONS,
   allowedFormatsHelpText: MINI_ATTACHMENT_ALLOWED_FORMATS_HELP_TEXT,
 });
-const MINI_ATTACHMENT_AV_SCAN_ENABLED = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_ENABLED) === true;
-const MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN) === true;
+const MINI_ATTACHMENT_AV_SCAN_ENABLED_RAW = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_ENABLED);
+const MINI_ATTACHMENT_AV_SCAN_ENABLED =
+  MINI_ATTACHMENT_AV_SCAN_ENABLED_RAW === null
+    ? IS_PRODUCTION
+    : MINI_ATTACHMENT_AV_SCAN_ENABLED_RAW === true;
+const MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN_RAW = resolveOptionalBoolean(process.env.MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN);
+const MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN =
+  MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN_RAW === true && !(IS_PRODUCTION && MINI_ATTACHMENT_AV_SCAN_ENABLED);
 const MINI_ATTACHMENT_AV_SCAN_BIN = sanitizeTextValue(process.env.MINI_ATTACHMENT_AV_SCAN_BIN, 260);
 const MINI_ATTACHMENT_AV_SCAN_ARGS = parseCommaSeparatedStringList(process.env.MINI_ATTACHMENT_AV_SCAN_ARGS, 24, 240);
 const MINI_ATTACHMENT_AV_SCAN_TIMEOUT_MS = Math.min(
@@ -1080,6 +1086,18 @@ const ASSISTANT_PREPARED_DATA_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.ASSISTANT_PREPARED_DATA_CACHE_TTL_MS, 15 * 60 * 1000), 60 * 1000),
   24 * 60 * 60 * 1000,
 );
+const ASSISTANT_PREPARED_DATA_CACHE_MAX_TOTAL_BYTES = Math.min(
+  Math.max(
+    parsePositiveInteger(process.env.ASSISTANT_PREPARED_DATA_CACHE_MAX_TOTAL_BYTES, 96 * 1024 * 1024),
+    ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES * 1024,
+  ),
+  512 * 1024 * 1024,
+);
+const ASSISTANT_PREPARED_DATA_CACHE_ENTRY_BASE_ESTIMATED_BYTES = 320;
+const ASSISTANT_PREPARED_DATA_CACHE_RECORD_ESTIMATED_BYTES = 2200;
+const ASSISTANT_PREPARED_DATA_CACHE_ANALYZED_ROW_ESTIMATED_BYTES = 720;
+const ASSISTANT_PREPARED_DATA_CACHE_ENTITY_ESTIMATED_BYTES = 180;
+const ASSISTANT_PREPARED_DATA_CACHE_PAYMENT_EVENT_ESTIMATED_BYTES = 140;
 const ASSISTANT_RECORDS_STALE_FALLBACK_ENABLED = resolveOptionalBoolean(process.env.ASSISTANT_RECORDS_STALE_FALLBACK_ENABLED) !== false;
 const ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS, 3 * 60 * 1000), 30 * 1000),
@@ -1431,6 +1449,7 @@ let miniTelegramNotificationQueue = Promise.resolve();
 let miniTelegramNotificationQueueDepth = 0;
 let assistantRecordsSnapshotCache = null;
 const assistantPreparedDataCache = new Map();
+let assistantPreparedDataCacheTotalBytes = 0;
 const miniWriteInitDataReplayUsedByKey = new Map();
 const miniWriteInitDataReplayInFlightByKey = new Map();
 const miniWriteIdempotencyByKey = new Map();
@@ -19766,27 +19785,114 @@ function buildAssistantPreparedDataCacheKey(stateUpdatedAt, rawTenantKey, rawUse
   return `${snapshotVersion}::${tenantKey}::${userKey}::${visibilityHash}`;
 }
 
+function normalizeAssistantPreparedDataCacheEntryBytes(rawValue) {
+  const parsed = Number.parseInt(String(rawValue ?? "0"), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return ASSISTANT_PREPARED_DATA_CACHE_ENTRY_BASE_ESTIMATED_BYTES;
+  }
+  return parsed;
+}
+
+function estimateAssistantPreparedDataCacheEntryBytes(cacheKey, payload) {
+  const safeCacheKey = sanitizeTextValue(cacheKey, 600) || "";
+  const keyBytes = Buffer.byteLength(safeCacheKey, "utf8");
+  const visibleRecordsCount = Array.isArray(payload?.visibleRecords) ? payload.visibleRecords.length : 0;
+  const analyzedRowsCount = Array.isArray(payload?.analyzedRows) ? payload.analyzedRows.length : 0;
+  const managerEntriesCount = Array.isArray(payload?.managerEntries) ? payload.managerEntries.length : 0;
+  const companyEntriesCount = Array.isArray(payload?.companyEntries) ? payload.companyEntries.length : 0;
+  const paymentEventsCount = Array.isArray(payload?.paymentEvents) ? payload.paymentEvents.length : 0;
+
+  const estimatedBytes =
+    ASSISTANT_PREPARED_DATA_CACHE_ENTRY_BASE_ESTIMATED_BYTES +
+    keyBytes +
+    visibleRecordsCount * ASSISTANT_PREPARED_DATA_CACHE_RECORD_ESTIMATED_BYTES +
+    analyzedRowsCount * ASSISTANT_PREPARED_DATA_CACHE_ANALYZED_ROW_ESTIMATED_BYTES +
+    (managerEntriesCount + companyEntriesCount) * ASSISTANT_PREPARED_DATA_CACHE_ENTITY_ESTIMATED_BYTES +
+    paymentEventsCount * ASSISTANT_PREPARED_DATA_CACHE_PAYMENT_EVENT_ESTIMATED_BYTES;
+
+  return Math.max(
+    ASSISTANT_PREPARED_DATA_CACHE_ENTRY_BASE_ESTIMATED_BYTES,
+    normalizeAssistantPreparedDataCacheEntryBytes(estimatedBytes),
+  );
+}
+
+function clearAssistantPreparedDataCache() {
+  assistantPreparedDataCache.clear();
+  assistantPreparedDataCacheTotalBytes = 0;
+}
+
+function deleteAssistantPreparedDataCacheEntry(cacheKey) {
+  const existingEntry = assistantPreparedDataCache.get(cacheKey);
+  if (!existingEntry) {
+    return false;
+  }
+
+  assistantPreparedDataCache.delete(cacheKey);
+  const entryBytes = normalizeAssistantPreparedDataCacheEntryBytes(existingEntry.entryBytes);
+  assistantPreparedDataCacheTotalBytes = Math.max(0, assistantPreparedDataCacheTotalBytes - entryBytes);
+  return true;
+}
+
+function upsertAssistantPreparedDataCacheEntry(cacheKey, payload, nowMs = Date.now()) {
+  if (!cacheKey || !payload) {
+    return;
+  }
+
+  deleteAssistantPreparedDataCacheEntry(cacheKey);
+  const entryBytes = estimateAssistantPreparedDataCacheEntryBytes(cacheKey, payload);
+  if (entryBytes > ASSISTANT_PREPARED_DATA_CACHE_MAX_TOTAL_BYTES) {
+    return;
+  }
+
+  const entry = {
+    lastUsedAtMs: nowMs,
+    payload,
+    entryBytes,
+  };
+  assistantPreparedDataCache.set(cacheKey, entry);
+  assistantPreparedDataCacheTotalBytes += entryBytes;
+}
+
+function touchAssistantPreparedDataCacheEntry(cacheKey, entry, nowMs = Date.now()) {
+  if (!cacheKey || !entry) {
+    return;
+  }
+
+  entry.lastUsedAtMs = nowMs;
+  if (assistantPreparedDataCache.get(cacheKey) === entry) {
+    assistantPreparedDataCache.delete(cacheKey);
+  }
+  assistantPreparedDataCache.set(cacheKey, entry);
+}
+
 function pruneAssistantPreparedDataCache(nowMs = Date.now()) {
   if (!assistantPreparedDataCache.size) {
+    assistantPreparedDataCacheTotalBytes = 0;
     return;
   }
 
   for (const [cacheKey, entry] of assistantPreparedDataCache.entries()) {
-    if (!entry || nowMs - entry.lastUsedAtMs > ASSISTANT_PREPARED_DATA_CACHE_TTL_MS) {
-      assistantPreparedDataCache.delete(cacheKey);
+    if (!entry) {
+      deleteAssistantPreparedDataCacheEntry(cacheKey);
+      continue;
+    }
+
+    const lastUsedAtMs = Number.parseInt(String(entry.lastUsedAtMs ?? "0"), 10);
+    if (!Number.isFinite(lastUsedAtMs) || nowMs - lastUsedAtMs > ASSISTANT_PREPARED_DATA_CACHE_TTL_MS) {
+      deleteAssistantPreparedDataCacheEntry(cacheKey);
     }
   }
 
-  if (assistantPreparedDataCache.size <= ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES) {
-    return;
-  }
-
-  const overflow = assistantPreparedDataCache.size - ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES;
-  const evictionCandidates = [...assistantPreparedDataCache.entries()].sort(
-    (left, right) => left[1].lastUsedAtMs - right[1].lastUsedAtMs,
-  );
-  for (let index = 0; index < overflow; index += 1) {
-    assistantPreparedDataCache.delete(evictionCandidates[index][0]);
+  while (
+    assistantPreparedDataCache.size > ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES ||
+    assistantPreparedDataCacheTotalBytes > ASSISTANT_PREPARED_DATA_CACHE_MAX_TOTAL_BYTES
+  ) {
+    const oldestEntry = assistantPreparedDataCache.entries().next();
+    if (oldestEntry.done) {
+      assistantPreparedDataCacheTotalBytes = 0;
+      break;
+    }
+    deleteAssistantPreparedDataCacheEntry(oldestEntry.value[0]);
   }
 }
 
@@ -19808,7 +19914,7 @@ async function getStoredRecordsForAssistantChat() {
     const state = await getStoredRecordsForApiRecordsRoute();
     const normalizedStateUpdatedAt = normalizeAssistantRecordsSnapshotVersion(state.updatedAt);
     if (assistantRecordsSnapshotCache?.snapshotVersion && assistantRecordsSnapshotCache.snapshotVersion !== headRevisionVersion) {
-      assistantPreparedDataCache.clear();
+      clearAssistantPreparedDataCache();
     }
 
     assistantRecordsSnapshotCache = {
@@ -19843,7 +19949,7 @@ function getAssistantPreparedDataForUserScope(recordsState, rawTenantKey, rawUse
   const cacheKey = buildAssistantPreparedDataCacheKey(recordsState?.updatedAt, rawTenantKey, rawUsername, userProfile);
   const cachedEntry = assistantPreparedDataCache.get(cacheKey);
   if (cachedEntry?.payload) {
-    cachedEntry.lastUsedAtMs = nowMs;
+    touchAssistantPreparedDataCacheEntry(cacheKey, cachedEntry, nowMs);
     return cachedEntry.payload;
   }
 
@@ -19858,10 +19964,7 @@ function getAssistantPreparedDataForUserScope(recordsState, rawTenantKey, rawUse
     paymentEvents: null,
   };
 
-  assistantPreparedDataCache.set(cacheKey, {
-    lastUsedAtMs: nowMs,
-    payload,
-  });
+  upsertAssistantPreparedDataCacheEntry(cacheKey, payload, nowMs);
   pruneAssistantPreparedDataCache(nowMs);
   return payload;
 }
@@ -26683,6 +26786,16 @@ function logServerStartupSummary(port) {
   }
   if (TELEGRAM_NOTIFY_THREAD_ID && !TELEGRAM_NOTIFY_CHAT_ID) {
     console.warn("TELEGRAM_NOTIFY_THREAD_ID is ignored because TELEGRAM_NOTIFY_CHAT_ID is not set.");
+  }
+  if (IS_PRODUCTION && MINI_ATTACHMENT_AV_SCAN_ENABLED_RAW !== true) {
+    console.warn(
+      "Mini attachment AV scan is mandatory in production. MINI_ATTACHMENT_AV_SCAN_ENABLED is forced to true.",
+    );
+  }
+  if (IS_PRODUCTION && MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN_RAW === true) {
+    console.warn(
+      "Mini attachment AV fail-open mode is not allowed in production. MINI_ATTACHMENT_AV_SCAN_FAIL_OPEN is ignored.",
+    );
   }
   if (MINI_ATTACHMENT_AV_SCAN_ENABLED) {
     if (!MINI_ATTACHMENT_AV_SCAN_BIN) {
