@@ -64,10 +64,17 @@ export async function syncCustomDashboardTasks(mode: "delta" | "full"): Promise<
   });
 }
 
-export async function getCustomDashboardTaskMovements(hours = 24): Promise<CustomDashboardTaskMovementsResponse> {
+export async function getCustomDashboardTaskMovements(
+  hours = 24,
+  options: { refresh?: boolean } = {},
+): Promise<CustomDashboardTaskMovementsResponse> {
   const requestedHours = Number.isFinite(hours) ? Math.trunc(hours) : 24;
   const normalizedHours = Math.min(Math.max(requestedHours, 1), 24 * 7);
-  return apiRequest<CustomDashboardTaskMovementsResponse>(`/api/custom-dashboard/tasks-movements?hours=${normalizedHours}`, {
+  const refreshQuery = options.refresh ? "&refresh=1" : "";
+  return apiRequest<CustomDashboardTaskMovementsResponse>(
+    `/api/custom-dashboard/tasks-movements?hours=${normalizedHours}${refreshQuery}`,
+    {
     timeoutMs: 180_000,
-  });
+    },
+  );
 }

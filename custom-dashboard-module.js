@@ -21,6 +21,7 @@ const CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS = {
 const CUSTOM_DASHBOARD_TASKS_SOURCE_KEY = "custom_dashboard/settings/tasks_source";
 const CUSTOM_DASHBOARD_GHL_TASKS_LATEST_KEY = "custom_dashboard/latest/tasks_ghl";
 const CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY = "custom_dashboard/sync/tasks_ghl_state";
+const CUSTOM_DASHBOARD_TASK_MOVEMENTS_CACHE_KEY = "custom_dashboard/cache/tasks_movements_24h";
 
 const CUSTOM_DASHBOARD_TASKS_SOURCE_UPLOAD = "upload";
 const CUSTOM_DASHBOARD_TASKS_SOURCE_GHL = "ghl";
@@ -93,6 +94,23 @@ const CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_INTERVAL_MS = Math.min(
 const CUSTOM_DASHBOARD_GHL_TASKS_CURSOR_SKEW_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASKS_CURSOR_SKEW_MS, 5 * 60 * 1000), 0),
   24 * 60 * 60 * 1000,
+);
+const CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_ENABLED = resolveOptionalBoolean(
+  process.env.CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_ENABLED,
+) !== false;
+const CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_TIMEZONE = (
+  process.env.CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_TIMEZONE ||
+  "America/Chicago"
+)
+  .toString()
+  .trim();
+const CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_HOUR = Math.min(
+  Math.max(toSafeInteger(process.env.CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_HOUR, 22), 0),
+  23,
+);
+const CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_MINUTE = Math.min(
+  Math.max(toSafeInteger(process.env.CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_MINUTE, 0), 0),
+  59,
 );
 const CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS = Math.min(
   Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS, 24), 1),
@@ -295,6 +313,15 @@ function registerCustomDashboardModule(config) {
     lastStartedAt: "",
     lastFinishedAt: "",
     lastTrigger: "",
+    lastError: "",
+  };
+  let taskMovementsAutoSyncTimerId = null;
+  let taskMovementsAutoSyncRuntimeState = {
+    inFlight: false,
+    lastStartedAt: "",
+    lastFinishedAt: "",
+    lastSuccessAt: "",
+    nextRunAt: "",
     lastError: "",
   };
 
@@ -1172,6 +1199,182 @@ function registerCustomDashboardModule(config) {
       rows: serializedRows,
       managerSummary,
     };
+  }
+
+  function buildTaskMovementsAutoSyncInfo() {
+    return {
+      enabled: CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_ENABLED,
+      timeZone: resolveSafeTimeZone(CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_TIMEZONE, "America/Chicago"),
+      hour: CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_HOUR,
+      minute: CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_MINUTE,
+      inFlight: Boolean(taskMovementsAutoSyncRuntimeState.inFlight),
+      nextRunAt: taskMovementsAutoSyncRuntimeState.nextRunAt || "",
+      lastStartedAt: taskMovementsAutoSyncRuntimeState.lastStartedAt || "",
+      lastFinishedAt: taskMovementsAutoSyncRuntimeState.lastFinishedAt || "",
+      lastSuccessAt: taskMovementsAutoSyncRuntimeState.lastSuccessAt || "",
+      lastError: taskMovementsAutoSyncRuntimeState.lastError || "",
+    };
+  }
+
+  async function readTaskMovementsCache() {
+    const raw = await readAppDataValue(CUSTOM_DASHBOARD_TASK_MOVEMENTS_CACHE_KEY, null);
+    if (!raw || typeof raw !== "object") {
+      return null;
+    }
+    if (!Array.isArray(raw.rows) || !Array.isArray(raw.managerSummary)) {
+      return null;
+    }
+    return raw;
+  }
+
+  async function refreshTaskMovementsCache(options = {}) {
+    const requestedHours = Math.max(1, toSafeInteger(options.hours, 24));
+    const periodHours = Math.min(requestedHours, CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS);
+    const trigger = sanitizeTextValue(options.trigger, 80) || "manual";
+    const payload = await buildGhlTaskMovementsPayload({ hours: periodHours });
+    const cachedAt = new Date().toISOString();
+    const record = {
+      ...payload,
+      cachedAt,
+      cacheTrigger: trigger,
+    };
+
+    if (periodHours === 24) {
+      await upsertAppDataValue(CUSTOM_DASHBOARD_TASK_MOVEMENTS_CACHE_KEY, record);
+    }
+    return record;
+  }
+
+  async function loadTaskMovementsPayload(options = {}) {
+    const requestedHours = Math.max(1, toSafeInteger(options.hours, 24));
+    const periodHours = Math.min(requestedHours, CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS);
+    const shouldRefresh = Boolean(options.refresh);
+    const trigger = sanitizeTextValue(options.trigger, 80) || "api";
+
+    if (!shouldRefresh && periodHours === 24) {
+      const cached = await readTaskMovementsCache();
+      if (cached) {
+        return {
+          ...cached,
+          fromCache: true,
+          autoSync: buildTaskMovementsAutoSyncInfo(),
+        };
+      }
+    }
+
+    const refreshed = await refreshTaskMovementsCache({
+      hours: periodHours,
+      trigger,
+    });
+    return {
+      ...refreshed,
+      fromCache: false,
+      autoSync: buildTaskMovementsAutoSyncInfo(),
+    };
+  }
+
+  async function runTaskMovementsAutoSync(options = {}) {
+    if (taskMovementsAutoSyncRuntimeState.inFlight) {
+      return false;
+    }
+
+    const trigger = sanitizeTextValue(options.trigger, 80) || "auto";
+    const startedAt = new Date().toISOString();
+    taskMovementsAutoSyncRuntimeState = {
+      ...taskMovementsAutoSyncRuntimeState,
+      inFlight: true,
+      lastStartedAt: startedAt,
+      lastError: "",
+    };
+
+    try {
+      await refreshTaskMovementsCache({
+        hours: 24,
+        trigger,
+      });
+      const finishedAt = new Date().toISOString();
+      taskMovementsAutoSyncRuntimeState = {
+        ...taskMovementsAutoSyncRuntimeState,
+        inFlight: false,
+        lastFinishedAt: finishedAt,
+        lastSuccessAt: finishedAt,
+        lastError: "",
+      };
+      return true;
+    } catch (error) {
+      const finishedAt = new Date().toISOString();
+      taskMovementsAutoSyncRuntimeState = {
+        ...taskMovementsAutoSyncRuntimeState,
+        inFlight: false,
+        lastFinishedAt: finishedAt,
+        lastError: sanitizeTextValue(error?.message, 600) || "Task movements auto sync failed.",
+      };
+      console.error("[custom-dashboard] task movements auto sync failed:", error);
+      return false;
+    }
+  }
+
+  function scheduleTaskMovementsAutoSyncNextRun() {
+    if (taskMovementsAutoSyncTimerId) {
+      clearTimeout(taskMovementsAutoSyncTimerId);
+      taskMovementsAutoSyncTimerId = null;
+    }
+
+    const nextRunTimestamp = getNextZonedDailyRunTimestamp({
+      timeZone: CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_TIMEZONE,
+      hour: CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_HOUR,
+      minute: CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_MINUTE,
+      nowTimestamp: Date.now(),
+    });
+    if (!Number.isFinite(nextRunTimestamp)) {
+      return false;
+    }
+
+    const delayMs = Math.max(1000, Math.round(nextRunTimestamp - Date.now()));
+    taskMovementsAutoSyncRuntimeState = {
+      ...taskMovementsAutoSyncRuntimeState,
+      nextRunAt: new Date(nextRunTimestamp).toISOString(),
+    };
+
+    taskMovementsAutoSyncTimerId = setTimeout(() => {
+      taskMovementsAutoSyncTimerId = null;
+      void runTaskMovementsAutoSync({
+        trigger: "scheduled-daily",
+      }).finally(() => {
+        scheduleTaskMovementsAutoSyncNextRun();
+      });
+    }, delayMs);
+
+    return true;
+  }
+
+  function startTaskMovementsAutoSyncScheduler() {
+    if (taskMovementsAutoSyncTimerId) {
+      return false;
+    }
+    if (!pool || !isGhlTasksSyncConfigured() || !CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_ENABLED) {
+      return false;
+    }
+
+    const started = scheduleTaskMovementsAutoSyncNextRun();
+    if (!started) {
+      return false;
+    }
+
+    void readTaskMovementsCache()
+      .then((cached) => {
+        if (cached) {
+          return;
+        }
+        return runTaskMovementsAutoSync({
+          trigger: "startup-initial",
+        });
+      })
+      .catch((error) => {
+        console.error("[custom-dashboard] task movements cache bootstrap failed:", error);
+      });
+
+    return true;
   }
 
   function normalizeGhlTaskForDashboard(rawTask, context) {
@@ -2742,7 +2945,12 @@ function detectCsvDelimiter(csvText) {
       try {
         const requestedHours = toSafeInteger(req.query?.hours, 24);
         const hours = Math.min(Math.max(requestedHours, 1), CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS);
-        const payload = await buildGhlTaskMovementsPayload({ hours });
+        const refresh = resolveOptionalBoolean(req.query?.refresh) === true;
+        const payload = await loadTaskMovementsPayload({
+          hours,
+          refresh,
+          trigger: refresh ? "api-refresh" : "api-read",
+        });
         res.json(payload);
       } catch (error) {
         console.error("GET /api/custom-dashboard/tasks-movements failed:", error);
@@ -2903,6 +3111,7 @@ function detectCsvDelimiter(csvText) {
           table: `${dbSchema}.${tableName}`,
           ghlTasksConfigured: isGhlTasksSyncConfigured(),
           ghlTasksAutoSyncEnabled: CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_ENABLED,
+          taskMovementsAutoSync: buildTaskMovementsAutoSyncInfo(),
         });
       } catch (error) {
         res.status(resolveDbErrorStatus(error)).json({
@@ -2926,6 +3135,21 @@ function detectCsvDelimiter(csvText) {
   } else if (startGhlTasksAutoSync()) {
     console.log(
       `[custom-dashboard] GHL tasks auto sync started: every ${Math.round(CUSTOM_DASHBOARD_GHL_TASKS_AUTO_SYNC_INTERVAL_MS / (60 * 1000))} min.`,
+    );
+  }
+
+  if (!CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_ENABLED) {
+    console.warn(
+      "[custom-dashboard] Task movements auto sync is disabled (CUSTOM_DASHBOARD_TASK_MOVEMENTS_AUTO_SYNC_ENABLED=false).",
+    );
+  } else if (!pool) {
+    console.warn("[custom-dashboard] Task movements auto sync is disabled because DATABASE_URL is missing.");
+  } else if (!isGhlTasksSyncConfigured()) {
+    console.warn("[custom-dashboard] Task movements auto sync is disabled because GHL credentials are missing.");
+  } else if (startTaskMovementsAutoSyncScheduler()) {
+    const info = buildTaskMovementsAutoSyncInfo();
+    console.log(
+      `[custom-dashboard] Task movements auto sync scheduled: ${String(info.hour).padStart(2, "0")}:${String(info.minute).padStart(2, "0")} ${info.timeZone}. Next run: ${info.nextRunAt || "-"}.`,
     );
   }
 }
@@ -3346,6 +3570,106 @@ function buildArchiveTimestamp(isoDate) {
   const minutes = String(date.getUTCMinutes()).padStart(2, "0");
   const seconds = String(date.getUTCSeconds()).padStart(2, "0");
   return `${year}${month}${day}T${hours}${minutes}${seconds}Z`;
+}
+
+function resolveSafeTimeZone(rawTimeZone, fallback = "UTC") {
+  const candidate = sanitizeTextValue(rawTimeZone, 120);
+  if (!candidate) {
+    return fallback;
+  }
+
+  try {
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: candidate,
+      year: "numeric",
+    }).format(new Date());
+    return candidate;
+  } catch {
+    return fallback;
+  }
+}
+
+function getDateTimePartsInTimeZone(timestamp, timeZone) {
+  const date = new Date(Number.isFinite(timestamp) ? timestamp : Date.now());
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: resolveSafeTimeZone(timeZone, "UTC"),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const valueByType = {};
+  for (const part of parts) {
+    if (part.type === "literal") {
+      continue;
+    }
+    valueByType[part.type] = part.value;
+  }
+
+  return {
+    year: toSafeInteger(valueByType.year, date.getUTCFullYear()),
+    month: toSafeInteger(valueByType.month, date.getUTCMonth() + 1),
+    day: toSafeInteger(valueByType.day, date.getUTCDate()),
+    hour: toSafeInteger(valueByType.hour, date.getUTCHours()),
+    minute: toSafeInteger(valueByType.minute, date.getUTCMinutes()),
+    second: toSafeInteger(valueByType.second, date.getUTCSeconds()),
+  };
+}
+
+function getTimeZoneOffsetMilliseconds(timestamp, timeZone) {
+  const sourceTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now();
+  const parts = getDateTimePartsInTimeZone(sourceTimestamp, timeZone);
+  const representedAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return representedAsUtc - sourceTimestamp;
+}
+
+function zonedDateTimeToUtcTimestamp(timeZone, year, month, day, hour, minute, second = 0) {
+  const safeYear = toSafeInteger(year, 1970);
+  const safeMonth = Math.min(Math.max(toSafeInteger(month, 1), 1), 12);
+  const safeDay = Math.min(Math.max(toSafeInteger(day, 1), 1), 31);
+  const safeHour = Math.min(Math.max(toSafeInteger(hour, 0), 0), 23);
+  const safeMinute = Math.min(Math.max(toSafeInteger(minute, 0), 0), 59);
+  const safeSecond = Math.min(Math.max(toSafeInteger(second, 0), 0), 59);
+
+  const approximateUtc = Date.UTC(safeYear, safeMonth - 1, safeDay, safeHour, safeMinute, safeSecond);
+  const offsetMs = getTimeZoneOffsetMilliseconds(approximateUtc, timeZone);
+  return approximateUtc - offsetMs;
+}
+
+function getNextZonedDailyRunTimestamp(options = {}) {
+  const safeTimeZone = resolveSafeTimeZone(options.timeZone, "America/Chicago");
+  const safeHour = Math.min(Math.max(toSafeInteger(options.hour, 22), 0), 23);
+  const safeMinute = Math.min(Math.max(toSafeInteger(options.minute, 0), 0), 59);
+  const nowTimestamp = Number.isFinite(options.nowTimestamp) ? options.nowTimestamp : Date.now();
+  const nowParts = getDateTimePartsInTimeZone(nowTimestamp, safeTimeZone);
+
+  let nextRun = zonedDateTimeToUtcTimestamp(
+    safeTimeZone,
+    nowParts.year,
+    nowParts.month,
+    nowParts.day,
+    safeHour,
+    safeMinute,
+    0,
+  );
+  if (nextRun > nowTimestamp + 1000) {
+    return nextRun;
+  }
+
+  const tomorrowUtcDate = new Date(Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day) + DAY_IN_MS);
+  return zonedDateTimeToUtcTimestamp(
+    safeTimeZone,
+    tomorrowUtcDate.getUTCFullYear(),
+    tomorrowUtcDate.getUTCMonth() + 1,
+    tomorrowUtcDate.getUTCDate(),
+    safeHour,
+    safeMinute,
+    0,
+  );
 }
 
 function getCurrentUtcDayStart() {
