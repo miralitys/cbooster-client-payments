@@ -43,6 +43,7 @@ let initData = "";
 let isMiniAccessAllowed = false;
 let isSubmitting = false;
 let isAccessCheckInProgress = true;
+let miniUploadToken = "";
 
 initializeDateField(payment1DateInput);
 initializeSsnField(ssnInput);
@@ -67,6 +68,14 @@ if (form) {
     if (!isMiniAccessAllowed) {
       setMessage("Access denied. Only members of the allowed Telegram group can submit clients.", "error");
       return;
+    }
+
+    if (!miniUploadToken) {
+      await verifyMiniAccess({ quiet: true });
+      if (!miniUploadToken) {
+        setMessage("Session expired. Reopen Mini App and try again.", "error");
+        return;
+      }
     }
 
     const requiredValidation = validateRequiredMiniFields();
@@ -113,12 +122,25 @@ if (form) {
         method: "POST",
         headers: {
           Accept: "application/json",
+          "X-Mini-Upload-Token": miniUploadToken,
         },
         body: formPayload,
       });
 
       const responseBody = await response.json().catch(() => ({}));
       if (!response.ok) {
+        const responseCode = normalizeValue(responseBody?.code);
+        if (
+          response.status === 401 &&
+          responseCode.startsWith("mini_upload_token_")
+        ) {
+          miniUploadToken = "";
+          await verifyMiniAccess({ quiet: true });
+          if (miniUploadToken) {
+            throw new Error("Session refreshed. Tap Add Client again.");
+          }
+          throw new Error("Session expired. Reopen Mini App and try again.");
+        }
         throw new Error(responseBody.error || `Request failed (${response.status})`);
       }
 
@@ -160,7 +182,8 @@ async function initializeTelegramContext() {
   await verifyMiniAccess();
 }
 
-async function verifyMiniAccess() {
+async function verifyMiniAccess(options = {}) {
+  const quiet = options?.quiet === true;
   if (!initData) {
     isAccessCheckInProgress = false;
     updateFormInteractivity();
@@ -185,14 +208,22 @@ async function verifyMiniAccess() {
       throw new Error(responseBody.error || `Access check failed (${response.status})`);
     }
 
+    miniUploadToken = normalizeValue(responseBody?.uploadToken);
+    if (!miniUploadToken) {
+      throw new Error("Mini upload token is missing. Reopen Mini App.");
+    }
+
     isMiniAccessAllowed = true;
     isAccessCheckInProgress = false;
     updateFormInteractivity();
   } catch (error) {
+    miniUploadToken = "";
     isMiniAccessAllowed = false;
     isAccessCheckInProgress = false;
     updateFormInteractivity();
-    setMessage(error.message || "Access denied for Mini App.", "error");
+    if (!quiet) {
+      setMessage(error.message || "Access denied for Mini App.", "error");
+    }
   }
 }
 
