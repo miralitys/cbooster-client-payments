@@ -25850,6 +25850,68 @@ function isGhlContractDownloadSourceAllowed(rawSource) {
   );
 }
 
+function summarizeGhlContractDownloadCandidateForDebug(candidate, context = {}) {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+
+  const source = sanitizeTextValue(candidate?.source, 160).toLowerCase();
+  const url = extractGhlUrlsFromText(candidate?.url)[0] || "";
+  const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
+  const signal = normalizeGhlContractComparableText(
+    `${candidate?.title || ""} ${candidate?.snippet || ""} ${source} ${candidateId || ""}`,
+  );
+  const hasAllowedUrl = Boolean(url && isAllowedGhlContractDownloadUrl(url));
+  const hasPdfHint = (hasAllowedUrl && isLikelyGhlPdfUrl(url)) || /\bpdf\b/.test(signal);
+  const hasContractKeyword = hasGhlContractOrAgreementKeyword(candidate);
+  const isRelatedToContact = isGhlContractCandidateRelatedToContact(candidate, context?.contactName, context?.contactId);
+  const allowedSource = isGhlContractDownloadSourceAllowed(source);
+  const isDownloadCandidate = isGhlContractDownloadCandidate(candidate, context);
+  const score = computeGhlContractDownloadCandidateScore(candidate, context);
+
+  return {
+    title: sanitizeTextValue(candidate?.title, 220) || "-",
+    source: source || "unknown",
+    url: sanitizeTextValue(url, 1200),
+    candidateId: candidateId || "",
+    contactName: sanitizeTextValue(candidate?.contactName, 220),
+    contactId: sanitizeTextValue(candidate?.contactId, 160),
+    allowedSource,
+    hasAllowedUrl,
+    hasCandidateId: Boolean(candidateId),
+    hasPdfHint,
+    hasContractKeyword,
+    isRelatedToContact,
+    isDownloadCandidate,
+    score,
+  };
+}
+
+function buildTopGhlContractDownloadCandidatesForDebug(candidates, context = {}, limit = 10) {
+  const normalizedLimit = Math.min(Math.max(parsePositiveInteger(limit, 10), 1), 30);
+  const normalizedCandidates = dedupeGhlContractCandidates(candidates)
+    .map((candidate) => ({
+      ...candidate,
+      url: extractGhlUrlsFromText(candidate?.url)[0] || "",
+      candidateId: extractLikelyGhlEntityId(candidate?.candidateId),
+    }))
+    .map((candidate) => summarizeGhlContractDownloadCandidateForDebug(candidate, context))
+    .filter(Boolean)
+    .sort((left, right) => {
+      const scoreDiff = Number(right?.score || 0) - Number(left?.score || 0);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      const urlDiff = Number(Boolean(right?.hasAllowedUrl)) - Number(Boolean(left?.hasAllowedUrl));
+      if (urlDiff !== 0) {
+        return urlDiff;
+      }
+      return (left?.title || "").localeCompare(right?.title || "", "en", { sensitivity: "base" });
+    });
+
+  return normalizedCandidates.slice(0, normalizedLimit);
+}
+
 function computeGhlContractDownloadCandidateScore(candidate, context = {}) {
   const source = sanitizeTextValue(candidate?.source, 160).toLowerCase();
   const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
@@ -25997,14 +26059,28 @@ function pickBestGhlContractDownloadCandidate(candidates, context = {}, options 
   };
 }
 
-async function resolveGhlContractDownloadCandidateViaId(candidate, context = {}) {
+async function resolveGhlContractDownloadCandidateViaId(candidate, context = {}, debugTrace = null) {
   const normalizedCandidate = normalizeGhlContractCandidate(candidate);
   if (!normalizedCandidate) {
+    if (debugTrace && typeof debugTrace === "object") {
+      debugTrace.error = "invalid_candidate";
+    }
     return null;
   }
 
   const directUrl = extractGhlUrlsFromText(normalizedCandidate.url)[0] || "";
   if (directUrl && isAllowedGhlContractDownloadUrl(directUrl)) {
+    if (debugTrace && typeof debugTrace === "object") {
+      debugTrace.resolved = true;
+      debugTrace.method = "candidate_direct_url";
+      debugTrace.result = summarizeGhlContractDownloadCandidateForDebug(
+        {
+          ...normalizedCandidate,
+          url: directUrl,
+        },
+        context,
+      );
+    }
     return {
       ...normalizedCandidate,
       url: directUrl,
@@ -26013,6 +26089,10 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {})
 
   const candidateId = extractLikelyGhlEntityId(normalizedCandidate.candidateId);
   if (!candidateId) {
+    if (debugTrace && typeof debugTrace === "object") {
+      debugTrace.error = "missing_candidate_id";
+      debugTrace.resolved = false;
+    }
     return null;
   }
 
@@ -26020,6 +26100,13 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {})
   const normalizedContactName = sanitizeTextValue(context?.contactName || normalizedCandidate.contactName, 300);
   const normalizedContactId = sanitizeTextValue(context?.contactId || normalizedCandidate.contactId, 160);
   const normalizedClientName = sanitizeTextValue(context?.clientName, 300);
+
+  if (debugTrace && typeof debugTrace === "object") {
+    debugTrace.candidateId = candidateId;
+    debugTrace.input = summarizeGhlContractDownloadCandidateForDebug(normalizedCandidate, context);
+    debugTrace.attempts = [];
+    debugTrace.resolved = false;
+  }
 
   const attempts = [];
   if (normalizedContactId) {
@@ -26161,15 +26248,36 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {})
     try {
       response = await attempt.request();
     } catch {
+      if (debugTrace?.attempts instanceof Array) {
+        debugTrace.attempts.push({
+          source: attempt.source,
+          ok: false,
+          reason: "request_failed",
+        });
+      }
       continue;
     }
 
     if (!response.ok) {
+      if (debugTrace?.attempts instanceof Array) {
+        debugTrace.attempts.push({
+          source: attempt.source,
+          ok: false,
+          status: Number.isFinite(response.status) ? response.status : 0,
+        });
+      }
       continue;
     }
 
     const extracted = extractGhlContractCandidatesFromPayload(response.body, attempt.source);
     if (!extracted.length) {
+      if (debugTrace?.attempts instanceof Array) {
+        debugTrace.attempts.push({
+          source: attempt.source,
+          ok: true,
+          extractedCount: 0,
+        });
+      }
       continue;
     }
 
@@ -26193,7 +26301,24 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {})
         requireUrl: true,
       },
     );
+    if (debugTrace?.attempts instanceof Array) {
+      debugTrace.attempts.push({
+        source: attempt.source,
+        ok: true,
+        extractedCount: extracted.length,
+        resolved: Boolean(resolvedCandidate?.url),
+      });
+    }
     if (resolvedCandidate && resolvedCandidate.url) {
+      if (debugTrace && typeof debugTrace === "object") {
+        debugTrace.resolved = true;
+        debugTrace.method = "resolved_by_candidate_id";
+        debugTrace.result = summarizeGhlContractDownloadCandidateForDebug(resolvedCandidate, {
+          contactName: normalizedContactName || normalizedClientName,
+          contactId: normalizedContactId,
+          clientName: normalizedClientName,
+        });
+      }
       return {
         ...normalizedCandidate,
         ...resolvedCandidate,
@@ -26202,6 +26327,9 @@ async function resolveGhlContractDownloadCandidateViaId(candidate, context = {})
     }
   }
 
+  if (debugTrace && typeof debugTrace === "object") {
+    debugTrace.resolved = false;
+  }
   return null;
 }
 
@@ -26490,8 +26618,27 @@ function prioritizePreferredContact(contacts, preferredContactId) {
 
 async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
   const normalizedClientName = sanitizeTextValue(clientName, 300);
+  const debugEnabled = Boolean(options?.debugEnabled);
+  const diagnostics = debugEnabled
+    ? {
+        clientName: normalizedClientName || sanitizeTextValue(clientName, 300),
+        preferredContactId: sanitizeTextValue(options?.preferredContactId, 160),
+        matchedContacts: 0,
+        inspectedContacts: 0,
+        contacts: [],
+        byNameFallback: null,
+        selectedCandidate: null,
+        finalDecision: "",
+        error: "",
+      }
+    : null;
+  const finalize = (row) => (diagnostics ? { ...row, diagnostics } : row);
+
   if (!normalizedClientName) {
-    return {
+    if (diagnostics) {
+      diagnostics.finalDecision = "invalid_client_name";
+    }
+    return finalize({
       clientName: "",
       contactName: "-",
       contactId: "",
@@ -26501,13 +26648,19 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
       source: "",
       status: normalizeGhlClientContractDownloadStatus("no_contact"),
       error: "",
-    };
+    });
   }
 
   try {
     const contacts = await searchGhlContactsByClientName(normalizedClientName);
+    if (diagnostics) {
+      diagnostics.matchedContacts = contacts.length;
+    }
     if (!contacts.length) {
-      return {
+      if (diagnostics) {
+        diagnostics.finalDecision = "no_contact";
+      }
+      return finalize({
         clientName: normalizedClientName,
         contactName: "-",
         contactId: "",
@@ -26517,7 +26670,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         source: "contacts.search",
         status: normalizeGhlClientContractDownloadStatus("no_contact"),
         error: "",
-      };
+      });
     }
 
     const orderedContacts = prioritizePreferredContact(contacts, options?.preferredContactId);
@@ -26536,9 +26689,30 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
       const detailedContact = await fetchGhlContactById(contactId).catch(() => null);
       const mergedContact = mergeGhlContactSnapshots(rawContact, detailedContact);
       const contactName = buildContactCandidateName(mergedContact) || buildContactCandidateName(rawContact) || normalizedClientName;
+      const contactDiagnostics = diagnostics
+        ? {
+            contactName,
+            contactId,
+            fromContactPayloadCount: 0,
+            fromMergedContactFieldsCount: 0,
+            fromApiCount: 0,
+            fromLegacyApiCount: 0,
+            totalCandidatesCount: 0,
+            topCandidates: [],
+            selectedMethod: "",
+            selectedCandidate: null,
+            resolveById: null,
+          }
+        : null;
+      if (diagnostics) {
+        diagnostics.inspectedContacts += 1;
+      }
 
       const candidates = [];
       const fromContactPayload = extractGhlContractCandidatesFromContact(mergedContact);
+      if (contactDiagnostics) {
+        contactDiagnostics.fromContactPayloadCount = fromContactPayload.length;
+      }
       for (const candidate of fromContactPayload) {
         candidates.push({
           ...candidate,
@@ -26554,6 +26728,9 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         }
 
         const extracted = extractGhlContractCandidatesFromPayload(sourceValue, `contact.${key}`);
+        if (contactDiagnostics) {
+          contactDiagnostics.fromMergedContactFieldsCount += extracted.length;
+        }
         for (const candidate of extracted) {
           candidates.push({
             ...candidate,
@@ -26567,6 +26744,9 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         clientName: normalizedClientName,
         contactName,
       });
+      if (contactDiagnostics) {
+        contactDiagnostics.fromApiCount = fromApi.length;
+      }
       for (const candidate of fromApi) {
         candidates.push({
           ...candidate,
@@ -26580,12 +26760,24 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         clientName: normalizedClientName,
         contactName,
       });
+      if (contactDiagnostics) {
+        contactDiagnostics.fromLegacyApiCount = fromLegacyApi.length;
+      }
       for (const candidate of fromLegacyApi) {
         candidates.push({
           ...candidate,
           contactName: sanitizeTextValue(candidate?.contactName, 300) || contactName,
           contactId: sanitizeTextValue(candidate?.contactId, 160) || contactId,
         });
+      }
+      if (contactDiagnostics) {
+        const contextForDebug = {
+          contactName,
+          contactId,
+          clientName: normalizedClientName,
+        };
+        contactDiagnostics.totalCandidatesCount = dedupeGhlContractCandidates(candidates).length;
+        contactDiagnostics.topCandidates = buildTopGhlContractDownloadCandidatesForDebug(candidates, contextForDebug, 8);
       }
 
       let contactBestCandidate = pickBestGhlContractDownloadCandidate(
@@ -26599,6 +26791,14 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
           requireUrl: true,
         },
       );
+      if (contactDiagnostics && contactBestCandidate?.url) {
+        contactDiagnostics.selectedMethod = "direct_url";
+        contactDiagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(contactBestCandidate, {
+          contactName,
+          contactId,
+          clientName: normalizedClientName,
+        });
+      }
       if (!contactBestCandidate) {
         const contactResolvableCandidate = pickBestGhlContractDownloadCandidate(candidates, {
           contactName,
@@ -26606,12 +26806,31 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
           clientName: normalizedClientName,
         });
         if (contactResolvableCandidate) {
-          contactBestCandidate = await resolveGhlContractDownloadCandidateViaId(contactResolvableCandidate, {
-            contactName,
-            contactId,
-            clientName: normalizedClientName,
-          });
+          const resolveTrace = contactDiagnostics ? {} : null;
+          contactBestCandidate = await resolveGhlContractDownloadCandidateViaId(
+            contactResolvableCandidate,
+            {
+              contactName,
+              contactId,
+              clientName: normalizedClientName,
+            },
+            resolveTrace,
+          );
+          if (contactDiagnostics) {
+            contactDiagnostics.resolveById = resolveTrace;
+            if (contactBestCandidate?.url) {
+              contactDiagnostics.selectedMethod = "resolved_by_id";
+              contactDiagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(contactBestCandidate, {
+                contactName,
+                contactId,
+                clientName: normalizedClientName,
+              });
+            }
+          }
         }
+      }
+      if (diagnostics && contactDiagnostics) {
+        diagnostics.contacts.push(contactDiagnostics);
       }
 
       if (!contactBestCandidate || !contactBestCandidate.url) {
@@ -26635,6 +26854,23 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
 
     if (!bestCandidate) {
       const byNameCandidates = await listGhlContractDownloadCandidatesForClientName(normalizedClientName);
+      const byNameDiagnostics = diagnostics
+        ? {
+            candidatesCount: dedupeGhlContractCandidates(byNameCandidates).length,
+            topCandidates: buildTopGhlContractDownloadCandidatesForDebug(
+              byNameCandidates,
+              {
+                contactName: normalizedClientName,
+                contactId: "",
+                clientName: normalizedClientName,
+              },
+              8,
+            ),
+            selectedMethod: "",
+            selectedCandidate: null,
+            resolveById: null,
+          }
+        : null;
       let byNameBestCandidate = pickBestGhlContractDownloadCandidate(
         byNameCandidates,
         {
@@ -26646,6 +26882,14 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
           requireUrl: true,
         },
       );
+      if (byNameDiagnostics && byNameBestCandidate?.url) {
+        byNameDiagnostics.selectedMethod = "direct_url";
+        byNameDiagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(byNameBestCandidate, {
+          contactName: normalizedClientName,
+          contactId: "",
+          clientName: normalizedClientName,
+        });
+      }
       if (!byNameBestCandidate) {
         const byNameResolvableCandidate = pickBestGhlContractDownloadCandidate(byNameCandidates, {
           contactName: normalizedClientName,
@@ -26653,12 +26897,31 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
           clientName: normalizedClientName,
         });
         if (byNameResolvableCandidate) {
-          byNameBestCandidate = await resolveGhlContractDownloadCandidateViaId(byNameResolvableCandidate, {
-            contactName: normalizedClientName,
-            contactId: "",
-            clientName: normalizedClientName,
-          });
+          const resolveTrace = byNameDiagnostics ? {} : null;
+          byNameBestCandidate = await resolveGhlContractDownloadCandidateViaId(
+            byNameResolvableCandidate,
+            {
+              contactName: normalizedClientName,
+              contactId: "",
+              clientName: normalizedClientName,
+            },
+            resolveTrace,
+          );
+          if (byNameDiagnostics) {
+            byNameDiagnostics.resolveById = resolveTrace;
+            if (byNameBestCandidate?.url) {
+              byNameDiagnostics.selectedMethod = "resolved_by_id";
+              byNameDiagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(byNameBestCandidate, {
+                contactName: normalizedClientName,
+                contactId: "",
+                clientName: normalizedClientName,
+              });
+            }
+          }
         }
+      }
+      if (diagnostics) {
+        diagnostics.byNameFallback = byNameDiagnostics;
       }
 
       if (byNameBestCandidate && byNameBestCandidate.url) {
@@ -26676,7 +26939,10 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
     }
 
     if (!bestCandidate || !bestCandidate.url) {
-      return {
+      if (diagnostics) {
+        diagnostics.finalDecision = "no_contract";
+      }
+      return finalize({
         clientName: normalizedClientName,
         contactName: bestContactName || normalizedClientName,
         contactId: bestContactId || "",
@@ -26686,7 +26952,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         source: "gohighlevel",
         status: normalizeGhlClientContractDownloadStatus("no_contract"),
         error: "",
-      };
+      });
     }
 
     const contractUrl = sanitizeTextValue(bestCandidate.url, 2000);
@@ -26697,7 +26963,15 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
       sanitizeTextValue(bestCandidate.snippet, 300) ||
       "Contract";
 
-    return {
+    if (diagnostics) {
+      diagnostics.selectedCandidate = summarizeGhlContractDownloadCandidateForDebug(bestCandidate, {
+        contactName: bestContactName,
+        contactId: bestContactId,
+        clientName: normalizedClientName,
+      });
+      diagnostics.finalDecision = "ready";
+    }
+    return finalize({
       clientName: normalizedClientName,
       contactName: sanitizeTextValue(bestContactName, 300) || normalizedClientName,
       contactId: sanitizeTextValue(bestContactId, 160),
@@ -26707,9 +26981,13 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
       source: sanitizeTextValue(bestCandidate.source, 120) || "gohighlevel",
       status: normalizeGhlClientContractDownloadStatus("ready"),
       error: "",
-    };
+    });
   } catch (error) {
-    return {
+    if (diagnostics) {
+      diagnostics.finalDecision = "error";
+      diagnostics.error = sanitizeTextValue(error?.message, 500) || "GHL lookup failed.";
+    }
+    return finalize({
       clientName: normalizedClientName,
       contactName: "-",
       contactId: "",
@@ -26719,11 +26997,11 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
       source: "gohighlevel",
       status: normalizeGhlClientContractDownloadStatus("error"),
       error: sanitizeTextValue(error?.message, 500) || "GHL lookup failed.",
-    };
+    });
   }
 }
 
-async function buildGhlClientContractDownloadRows(clientNames) {
+async function buildGhlClientContractDownloadRows(clientNames, options = {}) {
   const names = Array.isArray(clientNames) ? clientNames : [];
   if (!names.length) {
     return [];
@@ -26737,7 +27015,7 @@ async function buildGhlClientContractDownloadRows(clientNames) {
     while (cursor < names.length) {
       const currentIndex = cursor;
       cursor += 1;
-      rows[currentIndex] = await resolveGhlClientContractDownloadRow(names[currentIndex]);
+      rows[currentIndex] = await resolveGhlClientContractDownloadRow(names[currentIndex], options);
     }
   }
 
@@ -26931,6 +27209,13 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
 
   const limit = normalizeGhlClientContractDownloadLimit(req.query.limit);
   const requestedClientNameRaw = sanitizeTextValue(req.query.clientName, 300);
+  const debugMode = parseBooleanFlag(req.query.debug, false);
+  if (debugMode && !requestedClientNameRaw) {
+    res.status(400).json({
+      error: "Query parameter `clientName` is required when `debug=1`.",
+    });
+    return;
+  }
 
   try {
     const state = await getStoredRecords();
@@ -26964,7 +27249,9 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       clientNames = getFirstUniqueClientNamesFromRecords(visibilityContext.visibleRecords, limit);
     }
 
-    const items = await buildGhlClientContractDownloadRows(clientNames);
+    const items = await buildGhlClientContractDownloadRows(clientNames, {
+      debugEnabled: debugMode,
+    });
     const readyCount = items.filter((item) => normalizeGhlClientContractDownloadStatus(item?.status) === "ready").length;
     res.json({
       ok: true,
@@ -26975,7 +27262,8 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-1",
+      matcherVersion: "ghl-contract-download-v2026-02-21-2",
+      debugMode,
     });
   } catch (error) {
     console.error("GET /api/ghl/client-contracts failed:", error);
