@@ -49,6 +49,7 @@ interface ScoredClientRecord {
   record: ClientRecord;
   score: ClientScoreResult;
   clientManager: string;
+  clientManagerNames: string[];
 }
 
 type ClientManagersRefreshMode = "none" | "incremental" | "full";
@@ -66,6 +67,9 @@ const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
   { key: "60-99", label: "60-99" },
   { key: "100", label: "100" },
 ];
+const MANAGER_FILTER_ALL = "__all__";
+const NO_MANAGER_LABEL = "No manager";
+const TEXT_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
 
 const COLUMN_LABELS: Record<string, string> = {
   clientName: "Client Name",
@@ -159,6 +163,7 @@ export default function ClientPaymentsPage() {
   } = useClientPayments();
 
   const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("all");
+  const [managerFilter, setManagerFilter] = useState<string>(MANAGER_FILTER_ALL);
   const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
   const [isManagersLoading, setIsManagersLoading] = useState(false);
   const [managersError, setManagersError] = useState("");
@@ -194,15 +199,44 @@ export default function ClientPaymentsPage() {
     return scoredMap;
   }, [records]);
 
+  const managerFilterOptions = useMemo<string[]>(() => {
+    let hasNoManager = false;
+    const uniqueByComparable = new Map<string, string>();
+
+    for (const record of visibleRecords) {
+      const managerNames = resolveClientManagerNames(record.clientName, clientManagersState.byClientName);
+      for (const managerName of managerNames) {
+        if (managerName === NO_MANAGER_LABEL) {
+          hasNoManager = true;
+          continue;
+        }
+
+        const comparable = normalizeComparableClientName(managerName);
+        if (!comparable || uniqueByComparable.has(comparable)) {
+          continue;
+        }
+        uniqueByComparable.set(comparable, managerName);
+      }
+    }
+
+    const sorted = [...uniqueByComparable.values()].sort((left, right) => TEXT_SORTER.compare(left, right));
+    return hasNoManager ? [NO_MANAGER_LABEL, ...sorted] : sorted;
+  }, [clientManagersState.byClientName, visibleRecords]);
+
   const scoredVisibleRecords = useMemo<ScoredClientRecord[]>(() => {
     return visibleRecords
-      .map((record) => ({
-        record,
-        score: scoreByRecordId.get(record.id) || evaluateClientScore(record),
-        clientManager: resolveClientManagerLabel(record.clientName, clientManagersState.byClientName),
-      }))
-      .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter));
-  }, [clientManagersState.byClientName, scoreByRecordId, scoreFilter, visibleRecords]);
+      .map((record) => {
+        const clientManagerNames = resolveClientManagerNames(record.clientName, clientManagersState.byClientName);
+        return {
+          record,
+          score: scoreByRecordId.get(record.id) || evaluateClientScore(record),
+          clientManager: clientManagerNames.join(", "),
+          clientManagerNames,
+        };
+      })
+      .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter))
+      .filter((item) => matchesClientManagerFilter(item.clientManagerNames, managerFilter));
+  }, [clientManagersState.byClientName, managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
   const managerStatusText = useMemo(() => {
@@ -433,6 +467,7 @@ export default function ClientPaymentsPage() {
     setDateRange("fullyPaidDateRange", "from", "");
     setDateRange("fullyPaidDateRange", "to", "");
     setScoreFilter("all");
+    setManagerFilter(MANAGER_FILTER_ALL);
     setIsScoreFilterOpen(false);
   }
 
@@ -578,6 +613,21 @@ export default function ClientPaymentsPage() {
                     {closedByOptions.map((option) => (
                       <option key={option} value={option}>
                         {option}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="filter-field filter-field--full">
+                  <label htmlFor="client-manager-filter-select">Client Manager</label>
+                  <Select
+                    id="client-manager-filter-select"
+                    value={managerFilter}
+                    onChange={(event) => setManagerFilter(event.target.value)}
+                  >
+                    <option value={MANAGER_FILTER_ALL}>All</option>
+                    {managerFilterOptions.map((managerName) => (
+                      <option key={managerName} value={managerName}>
+                        {managerName}
                       </option>
                     ))}
                   </Select>
@@ -941,32 +991,62 @@ function buildClientManagersLookup(rows: ClientManagerRow[]): Map<string, string
       continue;
     }
 
-    const current = map.get(key);
-    if (!current || current === "No manager") {
-      map.set(key, nextLabel);
-      continue;
-    }
+  const current = map.get(key);
+  if (!current || current === NO_MANAGER_LABEL) {
+    map.set(key, nextLabel);
+    continue;
+  }
 
-    if (nextLabel === "No manager") {
-      continue;
-    }
+  if (nextLabel === NO_MANAGER_LABEL) {
+    continue;
+  }
 
-    const merged = [...new Set([...current.split(",").map((item) => item.trim()), ...nextLabel.split(",").map((item) => item.trim())])]
-      .filter(Boolean)
-      .join(", ");
-    map.set(key, merged || "No manager");
+  const merged = [...new Set([...splitClientManagerLabel(current), ...splitClientManagerLabel(nextLabel)])]
+    .filter(Boolean)
+    .join(", ");
+  map.set(key, merged || NO_MANAGER_LABEL);
   }
 
   return map;
 }
 
-function resolveClientManagerLabel(clientName: string, lookup: Map<string, string>): string {
+function resolveClientManagerNames(clientName: string, lookup: Map<string, string>): string[] {
   const key = normalizeComparableClientName(clientName);
   if (!key) {
-    return "No manager";
+    return [NO_MANAGER_LABEL];
   }
 
-  return lookup.get(key) || "No manager";
+  const managersLabel = lookup.get(key);
+  if (!managersLabel) {
+    return [NO_MANAGER_LABEL];
+  }
+
+  return splitClientManagerLabel(managersLabel);
+}
+
+function splitClientManagerLabel(rawLabel: string): string[] {
+  const names = rawLabel
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!names.length) {
+    return [NO_MANAGER_LABEL];
+  }
+
+  return [...new Set(names)];
+}
+
+function matchesClientManagerFilter(managerNames: string[], selectedManager: string): boolean {
+  if (!selectedManager || selectedManager === MANAGER_FILTER_ALL) {
+    return true;
+  }
+
+  const selectedComparable = normalizeComparableClientName(selectedManager);
+  if (!selectedComparable) {
+    return true;
+  }
+
+  return managerNames.some((name) => normalizeComparableClientName(name) === selectedComparable);
 }
 
 function resolveManagersLabel(row: ClientManagerRow): string {
@@ -979,7 +1059,7 @@ function resolveManagersLabel(row: ClientManagerRow): string {
 
   const managersLabel = (row?.managersLabel || "").toString().trim();
   if (!managersLabel || managersLabel === "-" || managersLabel.toLowerCase() === "unassigned") {
-    return "No manager";
+    return NO_MANAGER_LABEL;
   }
 
   return managersLabel;
