@@ -484,21 +484,53 @@ function registerCustomDashboardModule(config) {
     ]).filter((item) => item && typeof item === "object");
   }
 
-  function extractGhlTaskSearchAfterValue(rawValue) {
-    if (Array.isArray(rawValue) && rawValue.length === 1) {
-      return sanitizeTextValue(rawValue[0], 1200);
+  function normalizeGhlTasksSearchAfterCursor(rawValue) {
+    if (Array.isArray(rawValue)) {
+      const cursor = [];
+      for (const rawItem of rawValue) {
+        if (rawItem === null || rawItem === undefined || rawItem === "") {
+          continue;
+        }
+
+        if (typeof rawItem === "number" && Number.isFinite(rawItem)) {
+          cursor.push(rawItem);
+          continue;
+        }
+
+        const value = sanitizeTextValue(rawItem, 1200);
+        if (!value) {
+          continue;
+        }
+        cursor.push(value);
+      }
+      return cursor;
     }
-    if (rawValue && typeof rawValue === "object") {
-      return sanitizeTextValue(JSON.stringify(rawValue), 1200);
+
+    const singleValue = sanitizeTextValue(rawValue, 1200);
+    return singleValue ? [singleValue] : [];
+  }
+
+  function isSameGhlTasksSearchAfterCursor(leftCursor, rightCursor) {
+    const left = Array.isArray(leftCursor) ? leftCursor : [];
+    const right = Array.isArray(rightCursor) ? rightCursor : [];
+    if (left.length !== right.length) {
+      return false;
     }
-    return sanitizeTextValue(rawValue, 1200);
+
+    for (let index = 0; index < left.length; index += 1) {
+      if (String(left[index]) !== String(right[index])) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   function extractGhlTasksSearchAfterFromPayload(payload, tasks) {
-    const direct = extractGhlTaskSearchAfterValue(
+    const direct = normalizeGhlTasksSearchAfterCursor(
       pickValueFromObject(payload, ["meta.searchAfter", "searchAfter", "meta.nextSearchAfter", "nextSearchAfter"]),
     );
-    if (direct) {
+    if (direct.length) {
       return direct;
     }
 
@@ -509,13 +541,13 @@ function registerCustomDashboardModule(config) {
         continue;
       }
 
-      const value = extractGhlTaskSearchAfterValue(pickValueFromObject(item, ["searchAfter", "search_after"]));
-      if (value) {
+      const value = normalizeGhlTasksSearchAfterCursor(pickValueFromObject(item, ["searchAfter", "search_after"]));
+      if (value.length) {
         return value;
       }
     }
 
-    return "";
+    return [];
   }
 
   async function listGhlUsersIndex() {
@@ -942,7 +974,7 @@ function registerCustomDashboardModule(config) {
     let changedTasks = 0;
     let createdTasks = 0;
     let completedTasks = 0;
-    let searchAfter = "";
+    let searchAfter = [];
     let truncatedRows = false;
 
     const rows = [];
@@ -955,7 +987,7 @@ function registerCustomDashboardModule(config) {
         limit: CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_PAGE_LIMIT,
         query: "",
       };
-      if (searchAfter) {
+      if (searchAfter.length) {
         requestBody.searchAfter = searchAfter;
       }
 
@@ -1020,7 +1052,7 @@ function registerCustomDashboardModule(config) {
       }
 
       const nextSearchAfter = extractGhlTasksSearchAfterFromPayload(response.body, tasks);
-      if (!nextSearchAfter || nextSearchAfter === searchAfter) {
+      if (!nextSearchAfter.length || isSameGhlTasksSearchAfterCursor(nextSearchAfter, searchAfter)) {
         break;
       }
       searchAfter = nextSearchAfter;
