@@ -243,6 +243,18 @@ function readCapturedSendMessageText(captureFilePath) {
   }
 }
 
+async function waitForCapturedSendMessageText(captureFilePath, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const text = readCapturedSendMessageText(captureFilePath);
+    if (text) {
+      return text;
+    }
+    await delay(50);
+  }
+  return readCapturedSendMessageText(captureFilePath);
+}
+
 function readPgCaptureEvents(captureFilePath) {
   const raw = fs.existsSync(captureFilePath) ? fs.readFileSync(captureFilePath, "utf8") : "";
   const lines = raw
@@ -667,6 +679,61 @@ test("POST /api/mini/clients returns 201 for successful submission", async () =>
       assert.ok(!Number.isNaN(Date.parse(body.submittedAt)));
     },
   );
+});
+
+test("POST /api/mini/clients masks sensitive fields in Telegram notifications", async () => {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-telegram-mask-"));
+  const captureFilePath = path.join(captureDir, "telegram-capture.jsonl");
+
+  try {
+    await withServer(
+      {
+        DATABASE_URL: "postgres://fake/fake",
+        TEST_USE_FAKE_PG: "1",
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_NOTIFY_CHAT_ID: "-100900900900",
+        TELEGRAM_NOTIFY_FIELDS: "clientName,ssn,clientPhoneNumber,clientEmailAddress",
+        TEST_TELEGRAM_CAPTURE_FILE: captureFilePath,
+        TEST_TELEGRAM_FETCH_MODE: "status_member",
+        TELEGRAM_INIT_DATA_TTL_SEC: "120",
+      },
+      async ({ baseUrl }) => {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const initData = buildTelegramInitData({
+          authDate: nowSeconds,
+          user: { id: 506, username: "privacy_user" },
+        });
+        const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+        const response = await postMiniClients(baseUrl, {
+          initData,
+          client: {
+            clientName: "Privacy Client",
+            ssn: "123456789",
+            clientPhoneNumber: "1234567890",
+            clientEmailAddress: "normalized@example.com",
+          },
+        }, {
+          [MINI_UPLOAD_TOKEN_HEADER_NAME]: uploadToken,
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 201);
+        assert.equal(body.ok, true);
+
+        const messageText = await waitForCapturedSendMessageText(captureFilePath);
+        assert.ok(messageText.includes("- Client name: Privacy Client"));
+        assert.ok(messageText.includes("- SSN: ***-**-6789"));
+        assert.ok(messageText.includes("- Client phone number: ***-***-7890"));
+        assert.ok(messageText.includes("- Client email address: n***@e***.com"));
+        assert.equal(messageText.includes("123-45-6789"), false);
+        assert.equal(messageText.includes("+1(123)456-7890"), false);
+        assert.equal(messageText.includes("normalized@example.com"), false);
+      },
+    );
+  } finally {
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
 });
 
 test("POST /api/mini/clients still returns 201 when Telegram notification fails", async () => {
