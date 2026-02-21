@@ -10,6 +10,7 @@ import {
 import { getCustomDashboardTaskMovements } from "@/shared/api/customDashboard";
 import { showToast } from "@/shared/lib/toast";
 import type {
+  CustomDashboardCallsTodayRow,
   CustomDashboardCallsStatsRow,
   CustomDashboardMissedCallRow,
   CustomDashboardPayload,
@@ -48,6 +49,7 @@ const TASK_VIEW_OPTIONS = [
 ] as const;
 
 const CALLS_VIEW_OPTIONS = [
+  { key: "today", label: "Today" },
   { key: "stats", label: "Statistics" },
   { key: "missed", label: "Missed Calls" },
 ] as const;
@@ -80,7 +82,7 @@ export default function CustomDashboardPage() {
   const [dashboard, setDashboard] = useState<CustomDashboardPayload | null>(null);
 
   const [tasksView, setTasksView] = useState<TasksViewKey>("totals");
-  const [callsView, setCallsView] = useState<CallsViewKey>("stats");
+  const [callsView, setCallsView] = useState<CallsViewKey>("today");
   const [selectedSpecialist, setSelectedSpecialist] = useState("");
   const [selectedCallsManager, setSelectedCallsManager] = useState("");
 
@@ -293,6 +295,42 @@ export default function CustomDashboardPage() {
     );
   }, [dashboard?.callsByManager?.stats, selectedCallsManager]);
 
+  const callsTodayRows = useMemo(() => {
+    const rows = dashboard?.callsByManager?.todayByManager || [];
+    if (!selectedCallsManager) {
+      return rows;
+    }
+
+    return rows.filter(
+      (row) => normalizeComparable(row.managerName) === normalizeComparable(selectedCallsManager),
+    );
+  }, [dashboard?.callsByManager?.todayByManager, selectedCallsManager]);
+
+  const callsTodaySummary = useMemo(() => {
+    if (!selectedCallsManager) {
+      return (
+        dashboard?.callsByManager?.todaySummary || {
+          outgoing: 0,
+          incoming: 0,
+          missed: 0,
+        }
+      );
+    }
+
+    return callsTodayRows.reduce(
+      (accumulator, row) => ({
+        outgoing: accumulator.outgoing + row.outgoing,
+        incoming: accumulator.incoming + row.incoming,
+        missed: accumulator.missed + row.missed,
+      }),
+      {
+        outgoing: 0,
+        incoming: 0,
+        missed: 0,
+      },
+    );
+  }, [callsTodayRows, dashboard?.callsByManager?.todaySummary, selectedCallsManager]);
+
   const missedCallsRows = useMemo(() => {
     const rows = dashboard?.callsByManager?.missedCalls || [];
     if (!selectedCallsManager) {
@@ -494,6 +532,36 @@ export default function CustomDashboardPage() {
         label: "> 30 sec",
         align: "center",
         cell: (row) => String(row.over30Sec),
+      },
+    ],
+    [],
+  );
+
+  const callsTodayColumns = useMemo<TableColumn<CustomDashboardCallsTodayRow>[]>(
+    () => [
+      {
+        key: "managerName",
+        label: "Manager",
+        align: "left",
+        cell: (row) => row.managerName,
+      },
+      {
+        key: "outgoing",
+        label: "Outgoing Today",
+        align: "center",
+        cell: (row) => String(row.outgoing),
+      },
+      {
+        key: "incoming",
+        label: "Incoming Today",
+        align: "center",
+        cell: (row) => String(row.incoming),
+      },
+      {
+        key: "missed",
+        label: "Missed Today",
+        align: "center",
+        cell: (row) => String(row.missed),
       },
     ],
     [],
@@ -1198,11 +1266,33 @@ export default function CustomDashboardPage() {
                         label: option.label,
                       }))}
                       onChange={(value) => {
-                        if (value === "stats" || value === "missed") {
+                        if (value === "today" || value === "stats" || value === "missed") {
                           setCallsView(value);
                         }
                       }}
                     />
+
+                    {callsView === "today" ? (
+                      <>
+                        <div className="custom-dashboard-kpi-row custom-dashboard-kpi-row--three">
+                          <KpiCard label="Outgoing Today" value={String(callsTodaySummary.outgoing)} />
+                          <KpiCard label="Incoming Today" value={String(callsTodaySummary.incoming)} />
+                          <KpiCard label="Missed Today" value={String(callsTodaySummary.missed)} />
+                        </div>
+
+                        {callsTodayRows.length ? (
+                          <Table
+                            className="custom-dashboard-table-wrap"
+                            columns={callsTodayColumns}
+                            rows={callsTodayRows}
+                            rowKey={(row) => row.managerName}
+                            density="compact"
+                          />
+                        ) : (
+                          <EmptyState title="No calls logged today." />
+                        )}
+                      </>
+                    ) : null}
 
                     {callsView === "stats" ? (
                       callsStatsRows.length ? (

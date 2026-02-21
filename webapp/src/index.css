@@ -2568,6 +2568,10 @@ a {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.custom-dashboard-kpi-row--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .custom-dashboard-kpi-card {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -2780,6 +2784,7 @@ a {
   .custom-dashboard-sales-period-grid,
   .custom-dashboard-settings-grid,
   .custom-dashboard-kpi-row,
+  .custom-dashboard-kpi-row--three,
   .custom-dashboard-kpi-row--four {
     grid-template-columns: 1fr;
   }
