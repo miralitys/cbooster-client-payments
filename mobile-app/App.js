@@ -18,7 +18,9 @@ import {
 const API_BASE_URL = (
   process.env.EXPO_PUBLIC_API_BASE_URL || "https://cbooster-client-payments.onrender.com"
 ).replace(/\/+$/, "");
-const MOBILE_SESSION_HEADER_NAME = "X-CBooster-Session";
+const MOBILE_AUTHORIZATION_SCHEME = "Bearer";
+const MOBILE_DEVICE_ID_HEADER_NAME = "X-CBooster-Device-Id";
+const MOBILE_REQUEST_ID_HEADER_NAME = "X-CBooster-Request-Id";
 const AUTH_STATE_CHECKING = "checking";
 const AUTH_STATE_SIGNED_OUT = "signedOut";
 const AUTH_STATE_SIGNED_IN = "signedIn";
@@ -289,12 +291,16 @@ export default function App() {
   const [sensitiveAuthError, setSensitiveAuthError] = useState("");
   const [isSensitiveAuthSubmitting, setIsSensitiveAuthSubmitting] = useState(false);
   const sensitiveRevealTimeoutRef = useRef(null);
+  const mobileDeviceIdRef = useRef(createClientEntropyId("mob"));
 
   const isAuthenticated = authState === AUTH_STATE_SIGNED_IN;
 
   const requestApiJson = useCallback(
     (path, options = {}) => {
-      return requestJson(path, options, mobileSessionToken);
+      return requestJson(path, options, {
+        sessionToken: mobileSessionToken,
+        deviceId: mobileDeviceIdRef.current,
+      });
     },
     [mobileSessionToken],
   );
@@ -349,7 +355,10 @@ export default function App() {
     setAuthError("");
     setAuthState(AUTH_STATE_CHECKING);
     try {
-      const body = await requestJson("/api/auth/session", {}, mobileSessionToken);
+      const body = await requestJson("/api/mobile/auth/session", {}, {
+        sessionToken: mobileSessionToken,
+        deviceId: mobileDeviceIdRef.current,
+      });
       const username = (body?.user?.username || "").toString();
       setAuthUser(username);
       setAuthState(AUTH_STATE_SIGNED_IN);
@@ -376,16 +385,22 @@ export default function App() {
     setAuthError("");
 
     try {
-      const body = await requestJson("/api/auth/login", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const body = await requestJson(
+        "/api/mobile/auth/login",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            username,
+            password,
+          }),
         },
-        body: JSON.stringify({
-          username,
-          password,
-        }),
-      });
+        {
+          deviceId: mobileDeviceIdRef.current,
+        },
+      );
 
       const sessionToken = (body?.sessionToken || "").toString();
       const nextUsername = (body?.user?.username || username).toString();
@@ -406,7 +421,7 @@ export default function App() {
 
   const handleSignOut = useCallback(async () => {
     try {
-      await requestApiJson("/api/auth/logout", {
+      await requestApiJson("/api/mobile/auth/logout", {
         method: "POST",
       });
     } catch {
@@ -471,16 +486,22 @@ export default function App() {
     setSensitiveAuthError("");
 
     try {
-      const body = await requestJson("/api/auth/login", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const body = await requestJson(
+        "/api/mobile/auth/login",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            username,
+            password,
+          }),
         },
-        body: JSON.stringify({
-          username,
-          password,
-        }),
-      });
+        {
+          deviceId: mobileDeviceIdRef.current,
+        },
+      );
 
       const nextToken = (body?.sessionToken || "").toString();
       if (nextToken) {
@@ -509,6 +530,28 @@ export default function App() {
       setIsSensitiveAuthSubmitting(false);
     }
   }, [applyUnauthorizedState, authUser, sensitiveAuthPassword]);
+
+  const openTrustedAttachmentUrl = useCallback(async (pathOrUrl) => {
+    const url = toAbsoluteApiUrl(pathOrUrl);
+    if (!url) {
+      Alert.alert(
+        "Blocked unsafe link",
+        "Attachment link is not trusted. Contact administrator.",
+      );
+      return;
+    }
+
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        Alert.alert("Unable to open link", "This link cannot be opened on this device.");
+        return;
+      }
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert("Unable to open link", "Failed to open attachment link.");
+    }
+  }, []);
 
   const loadRecords = useCallback(async () => {
     setRecordsError("");
@@ -1070,8 +1113,7 @@ export default function App() {
                                 <Pressable
                                   style={styles.secondaryActionButton}
                                   onPress={() => {
-                                    const url = toAbsoluteApiUrl(item.previewUrl);
-                                    void Linking.openURL(url);
+                                    void openTrustedAttachmentUrl(item.previewUrl);
                                   }}
                                 >
                                   <Text style={styles.secondaryActionButtonText}>Preview</Text>
@@ -1082,8 +1124,7 @@ export default function App() {
                                 <Pressable
                                   style={styles.secondaryActionButton}
                                   onPress={() => {
-                                    const url = toAbsoluteApiUrl(item.downloadUrl);
-                                    void Linking.openURL(url);
+                                    void openTrustedAttachmentUrl(item.downloadUrl);
                                   }}
                                 >
                                   <Text style={styles.secondaryActionButtonText}>Download</Text>
@@ -2596,31 +2637,66 @@ function generateId() {
   return `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 }
 
-function toAbsoluteApiUrl(pathOrUrl) {
-  const value = (pathOrUrl || "").toString().trim();
-  if (!value) {
-    return API_BASE_URL;
-  }
-
-  if (/^https?:\/\//i.test(value)) {
-    return value;
-  }
-
-  if (value.startsWith("/")) {
-    return `${API_BASE_URL}${value}`;
-  }
-
-  return `${API_BASE_URL}/${value}`;
+function createClientEntropyId(prefix = "id") {
+  const normalizedPrefix = (prefix || "id").toString().replace(/[^a-z0-9_-]/gi, "").slice(0, 12) || "id";
+  const randomChunkA = Math.random().toString(36).slice(2, 12);
+  const randomChunkB = Math.random().toString(36).slice(2, 12);
+  return `${normalizedPrefix}-${Date.now().toString(36)}-${randomChunkA}${randomChunkB}`;
 }
 
-async function requestJson(path, options = {}, sessionToken = "") {
+function toAbsoluteApiUrl(pathOrUrl) {
+  let apiBaseUrl;
+  try {
+    apiBaseUrl = new URL(API_BASE_URL);
+  } catch {
+    return null;
+  }
+
+  const value = (pathOrUrl || "").toString().trim();
+  let candidateUrl;
+
+  try {
+    candidateUrl = new URL(value || "/", apiBaseUrl);
+  } catch {
+    return null;
+  }
+
+  const scheme = candidateUrl.protocol.toLowerCase();
+  if (scheme !== "https:" && scheme !== "http:") {
+    return null;
+  }
+
+  if (candidateUrl.origin !== apiBaseUrl.origin) {
+    return null;
+  }
+
+  return candidateUrl.toString();
+}
+
+async function requestJson(path, options = {}, authContext = {}) {
   const url = toAbsoluteApiUrl(path);
+  if (!url) {
+    throw new Error("Blocked unsafe request URL.");
+  }
+
+  const context =
+    authContext && typeof authContext === "object"
+      ? authContext
+      : {
+          sessionToken: authContext,
+        };
+  const sessionToken = (context.sessionToken || "").toString().trim();
+  const deviceId = (context.deviceId || "").toString().trim();
+
   const nextHeaders = {
     ...(options.headers || {}),
-    [MOBILE_SESSION_HEADER_NAME]: sessionToken || "",
+    [MOBILE_REQUEST_ID_HEADER_NAME]: createClientEntropyId("req"),
   };
-  if (!sessionToken) {
-    delete nextHeaders[MOBILE_SESSION_HEADER_NAME];
+  if (sessionToken) {
+    nextHeaders.Authorization = `${MOBILE_AUTHORIZATION_SCHEME} ${sessionToken}`;
+  }
+  if (deviceId) {
+    nextHeaders[MOBILE_DEVICE_ID_HEADER_NAME] = deviceId;
   }
 
   const response = await fetch(url, {
