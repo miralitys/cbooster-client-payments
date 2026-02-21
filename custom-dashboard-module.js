@@ -69,6 +69,14 @@ const CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT = Math.min(
   Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_CONTACT_PAGE_LIMIT, 100), 10),
   200,
 );
+const CUSTOM_DASHBOARD_GHL_USERS_PAGE_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_USERS_PAGE_LIMIT, 200), 10),
+  500,
+);
+const CUSTOM_DASHBOARD_GHL_USERS_MAX_PAGES = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_USERS_MAX_PAGES, 200), 1),
+  2000,
+);
 const CUSTOM_DASHBOARD_GHL_CONTACT_MAX_PAGES = Math.min(
   Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_CONTACT_MAX_PAGES, 500), 1),
   2000,
@@ -687,69 +695,88 @@ function registerCustomDashboardModule(config) {
   }
 
   async function listGhlUsersIndex() {
-    const attempts = [
-      () =>
-        requestGhlApi("/users/", {
-          method: "GET",
-          query: {
-            locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
-            limit: 200,
-            page: 1,
-          },
-          tolerateNotFound: true,
-        }),
-      () =>
-        requestGhlApi("/users", {
-          method: "GET",
-          query: {
-            locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
-            limit: 200,
-            page: 1,
-          },
-          tolerateNotFound: true,
-        }),
-    ];
+    const endpointPaths = ["/users/", "/users"];
 
-    for (const attempt of attempts) {
-      let response;
-      try {
-        response = await attempt();
-      } catch {
-        continue;
-      }
-
-      if (!response.ok) {
-        continue;
-      }
-
-      const users = extractGhlUsersFromPayload(response.body);
-      if (!users.length) {
-        continue;
-      }
-
+    for (const endpointPath of endpointPaths) {
       const index = new Map();
-      for (const user of users) {
-        const userId = sanitizeTextValue(
-          pickValueFromObject(user, ["id", "_id", "userId", "user_id"]),
-          160,
-        );
-        if (!userId) {
-          continue;
+      let page = 1;
+      let stalePages = 0;
+
+      while (page <= CUSTOM_DASHBOARD_GHL_USERS_MAX_PAGES) {
+        let response;
+        try {
+          response = await requestGhlApi(endpointPath, {
+            method: "GET",
+            query: {
+              locationId: CUSTOM_DASHBOARD_GHL_LOCATION_ID,
+              limit: CUSTOM_DASHBOARD_GHL_USERS_PAGE_LIMIT,
+              page,
+            },
+            tolerateNotFound: true,
+          });
+        } catch {
+          break;
         }
 
-        const userName = buildFullName(
-          sanitizeTextValue(pickValueFromObject(user, ["firstName", "firstname", "first_name"]), 120),
-          sanitizeTextValue(pickValueFromObject(user, ["lastName", "lastname", "last_name"]), 120),
-        );
-        const fallbackName = sanitizeTextValue(
-          pickValueFromObject(user, ["name", "fullName", "email", "username"]),
-          220,
-        );
-        const resolved = userName || fallbackName || userId;
-        index.set(userId, resolved);
+        if (!response.ok) {
+          break;
+        }
+
+        const users = extractGhlUsersFromPayload(response.body);
+        if (!users.length) {
+          break;
+        }
+
+        let addedOnPage = 0;
+        for (const user of users) {
+          const userId = sanitizeTextValue(
+            pickValueFromObject(user, ["id", "_id", "userId", "user_id"]),
+            160,
+          );
+          if (!userId) {
+            continue;
+          }
+
+          const userName = buildFullName(
+            sanitizeTextValue(pickValueFromObject(user, ["firstName", "firstname", "first_name"]), 120),
+            sanitizeTextValue(pickValueFromObject(user, ["lastName", "lastname", "last_name"]), 120),
+          );
+          const fallbackName = sanitizeTextValue(
+            pickValueFromObject(user, ["name", "fullName", "email", "username"]),
+            220,
+          );
+          const resolved = userName || fallbackName || userId;
+          if (!index.has(userId)) {
+            addedOnPage += 1;
+          }
+          index.set(userId, resolved);
+        }
+
+        if (addedOnPage === 0) {
+          stalePages += 1;
+        } else {
+          stalePages = 0;
+        }
+        if (stalePages >= CUSTOM_DASHBOARD_GHL_CONTACT_MAX_STALE_PAGES) {
+          break;
+        }
+
+        const hasMoreHint = resolveGhlContactsHasMore(response.body, page, CUSTOM_DASHBOARD_GHL_USERS_PAGE_LIMIT);
+        const likelyLastPageBySize = users.length < CUSTOM_DASHBOARD_GHL_USERS_PAGE_LIMIT;
+
+        if (hasMoreHint === false) {
+          break;
+        }
+        if (likelyLastPageBySize && hasMoreHint !== true) {
+          break;
+        }
+
+        page += 1;
       }
 
-      return index;
+      if (index.size) {
+        return index;
+      }
     }
 
     return new Map();
