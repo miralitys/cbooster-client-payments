@@ -19,7 +19,9 @@ export async function getGhlClientContracts(limit = 25, options: GetGhlClientCon
   if (normalizedClientName) {
     query.set("clientName", normalizedClientName);
   }
-  return apiRequest<GhlClientContractsPayload>(`/api/ghl/client-contracts?${query.toString()}`);
+  return apiRequest<GhlClientContractsPayload>(`/api/ghl/client-contracts?${query.toString()}`, {
+    timeoutMs: 60_000,
+  });
 }
 
 export async function downloadGhlClientContract(clientName: string, contactId = ""): Promise<DownloadGhlClientContractResult> {
