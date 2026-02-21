@@ -234,3 +234,45 @@ export interface CustomDashboardTasksSyncResponse {
   };
   tasksSource: CustomDashboardTasksSourceState;
 }
+
+export interface CustomDashboardTaskMovementRow {
+  taskId: string;
+  title: string;
+  managerName: string;
+  clientName: string;
+  contactId: string;
+  status: string;
+  isCompleted: boolean;
+  changeType: "created" | "completed" | "updated";
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string;
+}
+
+export interface CustomDashboardTaskMovementManagerRow {
+  managerName: string;
+  changed: number;
+  created: number;
+  completed: number;
+  updated: number;
+}
+
+export interface CustomDashboardTaskMovementsResponse {
+  ok: boolean;
+  generatedAt: string;
+  periodHours: number;
+  since: string;
+  scannedTasks: number;
+  changedTasks: number;
+  createdTasks: number;
+  completedTasks: number;
+  updatedTasks: number;
+  totalPages: number;
+  managers: number;
+  contacts: number;
+  rowsReturned: number;
+  rowLimit: number;
+  truncatedRows: boolean;
+  rows: CustomDashboardTaskMovementRow[];
+  managerSummary: CustomDashboardTaskMovementManagerRow[];
+}

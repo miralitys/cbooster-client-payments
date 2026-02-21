@@ -9,6 +9,7 @@ import {
   updateCustomDashboardTasksSource,
   uploadCustomDashboardFile,
 } from "@/shared/api";
+import { getCustomDashboardTaskMovements } from "@/shared/api/customDashboard";
 import { showToast } from "@/shared/lib/toast";
 import type {
   CustomDashboardCallsStatsRow,
@@ -16,6 +17,9 @@ import type {
   CustomDashboardPayload,
   CustomDashboardSalesManagerRow,
   CustomDashboardSalesMetrics,
+  CustomDashboardTaskMovementManagerRow,
+  CustomDashboardTaskMovementsResponse,
+  CustomDashboardTaskMovementRow,
   CustomDashboardTaskItem,
   CustomDashboardTasksSourceKind,
   CustomDashboardUploadMeta,
@@ -87,6 +91,10 @@ export default function CustomDashboardPage() {
   const [uploadingType, setUploadingType] = useState<UploadType | "">("");
   const [syncingTasksMode, setSyncingTasksMode] = useState<TasksSyncMode | "">("");
   const [isUpdatingTasksSource, setIsUpdatingTasksSource] = useState(false);
+  const [taskMovements, setTaskMovements] = useState<CustomDashboardTaskMovementsResponse | null>(null);
+  const [taskMovementsLoading, setTaskMovementsLoading] = useState(false);
+  const [taskMovementsError, setTaskMovementsError] = useState("");
+  const [selectedTaskMovementManager, setSelectedTaskMovementManager] = useState("");
   const tasksFileInputRef = useRef<HTMLInputElement | null>(null);
   const contactsFileInputRef = useRef<HTMLInputElement | null>(null);
   const callsFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -210,6 +218,24 @@ export default function CustomDashboardPage() {
   }, [dashboard?.callsByManager?.managerOptions]);
 
   useEffect(() => {
+    const managerOptions = taskMovements?.managerSummary?.map((row) => row.managerName) || [];
+    if (!managerOptions.length) {
+      setSelectedTaskMovementManager("");
+      return;
+    }
+
+    setSelectedTaskMovementManager((previous) => {
+      if (!previous) {
+        return "";
+      }
+      if (managerOptions.includes(previous)) {
+        return previous;
+      }
+      return "";
+    });
+  }, [taskMovements?.managerSummary]);
+
+  useEffect(() => {
     const users = usersPayload?.users || [];
     if (!users.length) {
       setUsersDraft({});
@@ -283,6 +309,22 @@ export default function CustomDashboardPage() {
       (row) => normalizeComparable(row.managerName) === normalizeComparable(selectedCallsManager),
     );
   }, [dashboard?.callsByManager?.missedCalls, selectedCallsManager]);
+
+  const taskMovementsManagerOptions = useMemo(
+    () => taskMovements?.managerSummary.map((row) => row.managerName) || [],
+    [taskMovements?.managerSummary],
+  );
+
+  const taskMovementsRows = useMemo(() => {
+    const rows = taskMovements?.rows || [];
+    if (!selectedTaskMovementManager) {
+      return rows;
+    }
+
+    return rows.filter(
+      (row) => normalizeComparable(row.managerName) === normalizeComparable(selectedTaskMovementManager),
+    );
+  }, [selectedTaskMovementManager, taskMovements?.rows]);
 
   const managerTasksColumns = useMemo<TableColumn<CustomDashboardPayload["managerTasks"]["rows"][number]>[]>(
     () => [
@@ -505,6 +547,90 @@ export default function CustomDashboardPage() {
     [],
   );
 
+  const taskMovementsManagerColumns = useMemo<TableColumn<CustomDashboardTaskMovementManagerRow>[]>(
+    () => [
+      {
+        key: "managerName",
+        label: "Manager",
+        align: "left",
+        cell: (row) => row.managerName,
+      },
+      {
+        key: "changed",
+        label: "Changed",
+        align: "center",
+        cell: (row) => String(row.changed),
+      },
+      {
+        key: "created",
+        label: "Created",
+        align: "center",
+        cell: (row) => String(row.created),
+      },
+      {
+        key: "completed",
+        label: "Completed",
+        align: "center",
+        cell: (row) => String(row.completed),
+      },
+      {
+        key: "updated",
+        label: "Updated",
+        align: "center",
+        cell: (row) => String(row.updated),
+      },
+    ],
+    [],
+  );
+
+  const taskMovementsColumns = useMemo<TableColumn<CustomDashboardTaskMovementRow>[]>(
+    () => [
+      {
+        key: "updatedAt",
+        label: "Updated At",
+        align: "center",
+        cell: (row) => formatDateTimeOrDash(row.updatedAt),
+      },
+      {
+        key: "managerName",
+        label: "Manager",
+        align: "left",
+        cell: (row) => row.managerName || "Unassigned",
+      },
+      {
+        key: "clientName",
+        label: "Client",
+        align: "left",
+        cell: (row) => row.clientName || row.contactId || "-",
+      },
+      {
+        key: "title",
+        label: "Task",
+        align: "left",
+        cell: (row) => row.title || "Task",
+      },
+      {
+        key: "changeType",
+        label: "Change",
+        align: "center",
+        cell: (row) => {
+          const tone: "success" | "warning" | "danger" | "neutral" =
+            row.changeType === "created" ? "success" : row.changeType === "completed" ? "warning" : "neutral";
+          const label =
+            row.changeType === "created" ? "Created" : row.changeType === "completed" ? "Completed" : "Updated";
+          return <Badge tone={tone}>{label}</Badge>;
+        },
+      },
+      {
+        key: "status",
+        label: "Status",
+        align: "center",
+        cell: (row) => (row.status || "").trim() || (row.isCompleted ? "completed" : "open"),
+      },
+    ],
+    [],
+  );
+
   const selectedUserEntry = useMemo<CustomDashboardUserSettingsEntry | null>(() => {
     const users = usersPayload?.users || [];
     if (!selectedUser) {
@@ -659,6 +785,36 @@ export default function CustomDashboardPage() {
     },
     [canManage, refreshEverything],
   );
+
+  const onLoadTaskMovements = useCallback(async () => {
+    if (!canManage) {
+      return;
+    }
+
+    setTaskMovementsLoading(true);
+    setTaskMovementsError("");
+    try {
+      const payload = await getCustomDashboardTaskMovements(24);
+      setTaskMovements(payload);
+      showToast({
+        type: "success",
+        message: `Loaded 24h task movements: ${payload.changedTasks} changes.`,
+        dedupeKey: `custom-dashboard-task-movements-${payload.generatedAt}`,
+        cooldownMs: 2500,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load task movements.";
+      setTaskMovementsError(message);
+      showToast({
+        type: "error",
+        message,
+        dedupeKey: `custom-dashboard-task-movements-error-${message}`,
+        cooldownMs: 3000,
+      });
+    } finally {
+      setTaskMovementsLoading(false);
+    }
+  }, [canManage]);
 
   const onSaveUsersSettings = useCallback(async () => {
     if (!canManage || !usersPayload) {
@@ -857,6 +1013,81 @@ export default function CustomDashboardPage() {
                     <p className="dashboard-message">
                       Processed contacts: {dashboard.tasksSource.stats.contactsProcessed} / {dashboard.tasksSource.stats.contactsTotal}. Tasks: {dashboard.tasksSource.stats.tasksTotal}.
                     </p>
+                  </div>
+                  <div className="custom-dashboard-tasks-source-card">
+                    <div className="custom-dashboard-tasks-source-head">
+                      <h3>Task Movements (Last 24 Hours)</h3>
+                      <div className="custom-dashboard-tasks-source-actions">
+                        <Select
+                          value={selectedTaskMovementManager}
+                          onChange={(event) => setSelectedTaskMovementManager(event.target.value)}
+                          disabled={!taskMovementsManagerOptions.length || taskMovementsLoading}
+                        >
+                          <option value="">All managers</option>
+                          {taskMovementsManagerOptions.map((managerName) => (
+                            <option key={managerName} value={managerName}>
+                              {managerName}
+                            </option>
+                          ))}
+                        </Select>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => void onLoadTaskMovements()}
+                          isLoading={taskMovementsLoading}
+                          disabled={!dashboard.tasksSource.ghlConfigured || taskMovementsLoading || tasksSourceBusy}
+                        >
+                          {taskMovements ? "Refresh 24h" : "Load 24h"}
+                        </Button>
+                      </div>
+                    </div>
+                    <p className="dashboard-message">
+                      Read-only fetch from GoHighLevel Tasks API. CRM records are not modified.
+                    </p>
+                    {taskMovementsError ? <p className="dashboard-message error">{taskMovementsError}</p> : null}
+                    {taskMovements ? (
+                      <>
+                        <p className="dashboard-message">
+                          Generated: {formatDateTimeOrDash(taskMovements.generatedAt)}. Since: {formatDateTimeOrDash(taskMovements.since)}.
+                        </p>
+                        <div className="custom-dashboard-kpi-row">
+                          <KpiCard label="Changed" value={String(taskMovements.changedTasks)} />
+                          <KpiCard label="Created" value={String(taskMovements.createdTasks)} />
+                          <KpiCard label="Completed" value={String(taskMovements.completedTasks)} />
+                          <KpiCard label="Updated" value={String(taskMovements.updatedTasks)} />
+                          <KpiCard label="Managers" value={String(taskMovements.managers)} />
+                          <KpiCard label="Contacts" value={String(taskMovements.contacts)} />
+                        </div>
+                        <p className="dashboard-message">
+                          Scanned tasks: {taskMovements.scannedTasks}. Pages: {taskMovements.totalPages}. Returned rows:{" "}
+                          {taskMovements.rowsReturned}
+                          {taskMovements.truncatedRows ? ` (capped at ${taskMovements.rowLimit})` : ""}.
+                        </p>
+                        {taskMovements.managerSummary.length ? (
+                          <Table
+                            className="custom-dashboard-table-wrap"
+                            columns={taskMovementsManagerColumns}
+                            rows={taskMovements.managerSummary}
+                            rowKey={(row) => row.managerName}
+                            density="compact"
+                          />
+                        ) : (
+                          <EmptyState title="No manager movement summary for selected period." />
+                        )}
+                        {taskMovementsRows.length ? (
+                          <Table
+                            className="custom-dashboard-table-wrap"
+                            columns={taskMovementsColumns}
+                            rows={taskMovementsRows}
+                            rowKey={(row, index) => `${row.taskId}-${index}`}
+                            density="compact"
+                          />
+                        ) : (
+                          <EmptyState title="No changed tasks for selected manager in last 24 hours." />
+                        )}
+                      </>
+                    ) : null}
                   </div>
                   {uploadStateLabel ? <p className="dashboard-message">{uploadStateLabel}</p> : null}
 

@@ -94,6 +94,22 @@ const CUSTOM_DASHBOARD_GHL_TASKS_CURSOR_SKEW_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASKS_CURSOR_SKEW_MS, 5 * 60 * 1000), 0),
   24 * 60 * 60 * 1000,
 );
+const CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS, 24), 1),
+  24 * 7,
+);
+const CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_PAGE_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_PAGE_LIMIT, 1000), 50),
+  2000,
+);
+const CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_PAGES = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_PAGES, 200), 1),
+  5000,
+);
+const CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_ROWS = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_ROWS, 3000), 200),
+  20000,
+);
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
@@ -164,6 +180,7 @@ const GHL_TASK_TITLE_FIELDS = ["title", "name", "task", "subject", "body", "desc
 const GHL_TASK_STATUS_FIELDS = ["status", "state", "result"];
 const GHL_TASK_DUE_FIELDS = ["dueDate", "dueAt", "due", "date", "due_date"];
 const GHL_TASK_CREATED_FIELDS = ["createdAt", "dateAdded", "createdOn", "created_date"];
+const GHL_TASK_UPDATED_FIELDS = ["updatedAt", "dateUpdated", "lastUpdated", "updatedOn", "updated_date"];
 const GHL_TASK_COMPLETED_FIELDS = ["completedAt", "dateCompleted", "completedOn", "doneAt", "closedAt"];
 const GHL_TASK_OWNER_FIELDS = [
   "assignedTo",
@@ -465,6 +482,40 @@ function registerCustomDashboardModule(config) {
       "data",
       "",
     ]).filter((item) => item && typeof item === "object");
+  }
+
+  function extractGhlTaskSearchAfterValue(rawValue) {
+    if (Array.isArray(rawValue) && rawValue.length === 1) {
+      return sanitizeTextValue(rawValue[0], 1200);
+    }
+    if (rawValue && typeof rawValue === "object") {
+      return sanitizeTextValue(JSON.stringify(rawValue), 1200);
+    }
+    return sanitizeTextValue(rawValue, 1200);
+  }
+
+  function extractGhlTasksSearchAfterFromPayload(payload, tasks) {
+    const direct = extractGhlTaskSearchAfterValue(
+      pickValueFromObject(payload, ["meta.searchAfter", "searchAfter", "meta.nextSearchAfter", "nextSearchAfter"]),
+    );
+    if (direct) {
+      return direct;
+    }
+
+    const list = Array.isArray(tasks) ? tasks : [];
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      const item = list[index];
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+
+      const value = extractGhlTaskSearchAfterValue(pickValueFromObject(item, ["searchAfter", "search_after"]));
+      if (value) {
+        return value;
+      }
+    }
+
+    return "";
   }
 
   async function listGhlUsersIndex() {
@@ -777,6 +828,263 @@ function registerCustomDashboardModule(config) {
       return "";
     }
     return usersIndex.get(ownerId) || ownerId;
+  }
+
+  function resolveGhlTaskClientName(task) {
+    const direct = sanitizeTextValue(
+      pickValueFromObject(task, [
+        "contactDetails.name",
+        "contact.name",
+        "contact.fullName",
+        "contactName",
+        "clientName",
+        "leadName",
+      ]),
+      260,
+    );
+    if (direct) {
+      return direct;
+    }
+
+    const firstName = sanitizeTextValue(
+      pickValueFromObject(task, ["contactDetails.firstName", "contact.firstName", "contact.firstname"]),
+      120,
+    );
+    const lastName = sanitizeTextValue(
+      pickValueFromObject(task, ["contactDetails.lastName", "contact.lastName", "contact.lastname"]),
+      120,
+    );
+    const fullName = buildFullName(firstName, lastName);
+    if (fullName) {
+      return fullName;
+    }
+
+    const email = sanitizeTextValue(pickValueFromObject(task, ["contactDetails.email", "contact.email"]), 240);
+    if (email) {
+      return email;
+    }
+    return sanitizeTextValue(pickValueFromObject(task, ["contactDetails.phone", "contact.phone"]), 80);
+  }
+
+  function resolveGhlTaskMovementType(movementCandidate) {
+    const candidate = sanitizeTextValue(movementCandidate, 20).toLowerCase();
+    if (candidate === "created" || candidate === "completed") {
+      return candidate;
+    }
+    return "updated";
+  }
+
+  function normalizeGhlTaskMovementRow(rawTask, usersIndex, sinceTimestamp) {
+    const taskIdRaw = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_ID_FIELDS), 160);
+    const taskTitle = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_TITLE_FIELDS), 500) || "Task";
+    const status = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_STATUS_FIELDS), 220);
+    const createdRaw = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_CREATED_FIELDS), 160);
+    const updatedRaw = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_UPDATED_FIELDS), 160);
+    const completedRaw = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_COMPLETED_FIELDS), 160);
+    const completedFlag = resolveOptionalBoolean(pickValueFromObject(rawTask, ["completed", "isCompleted", "done"]));
+    const statusComparable = normalizeComparableText(status, 220);
+    const completedAtTimestamp = parseDateTimeValue(completedRaw);
+    const createdAtTimestamp = parseDateTimeValue(createdRaw);
+    const updatedAtTimestamp = parseDateTimeValue(updatedRaw) || completedAtTimestamp || createdAtTimestamp;
+    if (!Number.isFinite(updatedAtTimestamp) || updatedAtTimestamp < sinceTimestamp) {
+      return null;
+    }
+
+    const isCompleted =
+      completedFlag === true ||
+      Boolean(completedAtTimestamp) ||
+      COMPLETED_TASK_STATUS_MATCHERS.some((token) => statusComparable.includes(token));
+
+    const contactId = sanitizeTextValue(pickValueFromObject(rawTask, GHL_TASK_CONTACT_ID_FIELDS), 160);
+    const managerName = resolveGhlTaskOwnerName(rawTask, usersIndex) || "Unassigned";
+    const clientName = resolveGhlTaskClientName(rawTask);
+    const movementTypeRaw = Number.isFinite(createdAtTimestamp) && createdAtTimestamp >= sinceTimestamp
+      ? "created"
+      : isCompleted && Number.isFinite(completedAtTimestamp) && completedAtTimestamp >= sinceTimestamp
+        ? "completed"
+        : isCompleted && !Number.isFinite(completedAtTimestamp)
+          ? "completed"
+          : "updated";
+    const movementType = resolveGhlTaskMovementType(movementTypeRaw);
+    const safeTaskId = taskIdRaw || `${contactId || "unknown"}:${taskTitle}:${updatedAtTimestamp}`;
+
+    return {
+      taskId: safeTaskId,
+      title: taskTitle,
+      managerName,
+      clientName: clientName || "",
+      contactId,
+      status: status || (isCompleted ? "completed" : "open"),
+      isCompleted,
+      changeType: movementType,
+      createdAt: Number.isFinite(createdAtTimestamp) ? new Date(createdAtTimestamp).toISOString() : "",
+      updatedAt: new Date(updatedAtTimestamp).toISOString(),
+      completedAt: Number.isFinite(completedAtTimestamp) ? new Date(completedAtTimestamp).toISOString() : "",
+      updatedAtTimestamp,
+    };
+  }
+
+  async function buildGhlTaskMovementsPayload(options = {}) {
+    if (!isGhlTasksSyncConfigured()) {
+      throw createHttpError("GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.", 400);
+    }
+
+    const requestedHours = Math.max(1, toSafeInteger(options.hours, 24));
+    const periodHours = Math.min(requestedHours, CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS);
+    const generatedAtTimestamp = Date.now();
+    const generatedAt = new Date(generatedAtTimestamp).toISOString();
+    const sinceTimestamp = generatedAtTimestamp - periodHours * 60 * 60 * 1000;
+    const since = new Date(sinceTimestamp).toISOString();
+    const usersIndex = await listGhlUsersIndex();
+
+    let page = 0;
+    let scannedTasks = 0;
+    let changedTasks = 0;
+    let createdTasks = 0;
+    let completedTasks = 0;
+    let searchAfter = "";
+    let truncatedRows = false;
+
+    const rows = [];
+    const managerSummaryMap = new Map();
+    const contactIds = new Set();
+    const seenTaskKeys = new Set();
+
+    while (page < CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_PAGES) {
+      const requestBody = {
+        limit: CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_PAGE_LIMIT,
+        query: "",
+      };
+      if (searchAfter) {
+        requestBody.searchAfter = searchAfter;
+      }
+
+      const response = await requestGhlApi(`/locations/${encodeURIComponent(CUSTOM_DASHBOARD_GHL_LOCATION_ID)}/tasks/search`, {
+        method: "POST",
+        body: requestBody,
+      });
+      const tasks = extractGhlTasksFromPayload(response.body);
+      if (!tasks.length) {
+        break;
+      }
+      page += 1;
+
+      for (const task of tasks) {
+        scannedTasks += 1;
+        const movementRow = normalizeGhlTaskMovementRow(task, usersIndex, sinceTimestamp);
+        if (!movementRow) {
+          continue;
+        }
+
+        const dedupeKeyRaw = movementRow.taskId || `${movementRow.contactId}:${movementRow.title}:${movementRow.updatedAt}`;
+        const dedupeKey = normalizeComparableText(dedupeKeyRaw, 500);
+        if (dedupeKey && seenTaskKeys.has(dedupeKey)) {
+          continue;
+        }
+        if (dedupeKey) {
+          seenTaskKeys.add(dedupeKey);
+        }
+
+        changedTasks += 1;
+        if (movementRow.changeType === "created") {
+          createdTasks += 1;
+        } else if (movementRow.changeType === "completed") {
+          completedTasks += 1;
+        }
+
+        const managerComparable = normalizeComparableText(movementRow.managerName, 220) || "unassigned";
+        const existingManager = managerSummaryMap.get(managerComparable) || {
+          managerName: movementRow.managerName || "Unassigned",
+          changed: 0,
+          created: 0,
+          completed: 0,
+        };
+        existingManager.changed += 1;
+        if (movementRow.changeType === "created") {
+          existingManager.created += 1;
+        }
+        if (movementRow.changeType === "completed") {
+          existingManager.completed += 1;
+        }
+        managerSummaryMap.set(managerComparable, existingManager);
+
+        if (movementRow.contactId) {
+          contactIds.add(movementRow.contactId);
+        }
+
+        if (rows.length < CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_ROWS) {
+          rows.push(movementRow);
+        } else {
+          truncatedRows = true;
+        }
+      }
+
+      const nextSearchAfter = extractGhlTasksSearchAfterFromPayload(response.body, tasks);
+      if (!nextSearchAfter || nextSearchAfter === searchAfter) {
+        break;
+      }
+      searchAfter = nextSearchAfter;
+    }
+
+    rows.sort((left, right) => {
+      const leftUpdated = Number.isFinite(left.updatedAtTimestamp) ? left.updatedAtTimestamp : 0;
+      const rightUpdated = Number.isFinite(right.updatedAtTimestamp) ? right.updatedAtTimestamp : 0;
+      if (leftUpdated !== rightUpdated) {
+        return rightUpdated - leftUpdated;
+      }
+      return sanitizeTextValue(left.title, 300).localeCompare(sanitizeTextValue(right.title, 300), "en-US", {
+        sensitivity: "base",
+      });
+    });
+
+    const managerSummary = [...managerSummaryMap.values()]
+      .map((row) => ({
+        managerName: row.managerName,
+        changed: row.changed,
+        created: row.created,
+        completed: row.completed,
+        updated: Math.max(0, row.changed - row.created - row.completed),
+      }))
+      .sort((left, right) => {
+        if (right.changed !== left.changed) {
+          return right.changed - left.changed;
+        }
+        return left.managerName.localeCompare(right.managerName, "en-US", { sensitivity: "base" });
+      });
+
+    const serializedRows = rows.map((item) => ({
+      taskId: item.taskId,
+      title: item.title,
+      managerName: item.managerName,
+      clientName: item.clientName,
+      contactId: item.contactId,
+      status: item.status,
+      isCompleted: item.isCompleted,
+      changeType: item.changeType,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      completedAt: item.completedAt,
+    }));
+
+    return {
+      ok: true,
+      generatedAt,
+      periodHours,
+      since,
+      scannedTasks,
+      changedTasks,
+      createdTasks,
+      completedTasks,
+      updatedTasks: Math.max(0, changedTasks - createdTasks - completedTasks),
+      totalPages: page,
+      managers: managerSummary.length,
+      contacts: contactIds.size,
+      rowsReturned: serializedRows.length,
+      rowLimit: CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_ROWS,
+      truncatedRows,
+      rows: serializedRows,
+      managerSummary,
+    };
   }
 
   function normalizeGhlTaskForDashboard(rawTask, context) {
@@ -2328,6 +2636,31 @@ function detectCsvDelimiter(csvText) {
         console.error("POST /api/custom-dashboard/tasks-sync failed:", error);
         res.status(resolveDbErrorStatus(error)).json({
           error: sanitizeTextValue(error?.message, 600) || "Failed to sync tasks from GoHighLevel.",
+        });
+      }
+    },
+  );
+
+  app.get(
+    "/api/custom-dashboard/tasks-movements",
+    requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
+    async (req, res) => {
+      if (!pool) {
+        res.status(503).json({
+          error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+        });
+        return;
+      }
+
+      try {
+        const requestedHours = toSafeInteger(req.query?.hours, 24);
+        const hours = Math.min(Math.max(requestedHours, 1), CUSTOM_DASHBOARD_GHL_TASK_MOVEMENTS_MAX_HOURS);
+        const payload = await buildGhlTaskMovementsPayload({ hours });
+        res.json(payload);
+      } catch (error) {
+        console.error("GET /api/custom-dashboard/tasks-movements failed:", error);
+        res.status(resolveDbErrorStatus(error)).json({
+          error: sanitizeTextValue(error?.message, 600) || "Failed to load task movements from GoHighLevel.",
         });
       }
     },

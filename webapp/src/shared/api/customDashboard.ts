@@ -1,6 +1,7 @@
 import { apiRequest } from "@/shared/api/fetcher";
 import type {
   CustomDashboardPayload,
+  CustomDashboardTaskMovementsResponse,
   CustomDashboardTasksSourceKind,
   CustomDashboardTasksSourceUpdateResponse,
   CustomDashboardTasksSyncResponse,
@@ -60,5 +61,13 @@ export async function syncCustomDashboardTasks(mode: "delta" | "full"): Promise<
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ mode }),
+  });
+}
+
+export async function getCustomDashboardTaskMovements(hours = 24): Promise<CustomDashboardTaskMovementsResponse> {
+  const requestedHours = Number.isFinite(hours) ? Math.trunc(hours) : 24;
+  const normalizedHours = Math.min(Math.max(requestedHours, 1), 24 * 7);
+  return apiRequest<CustomDashboardTaskMovementsResponse>(`/api/custom-dashboard/tasks-movements?hours=${normalizedHours}`, {
+    timeoutMs: 180_000,
   });
 }
