@@ -243,6 +243,67 @@ function readCapturedSendMessageText(captureFilePath) {
   }
 }
 
+function readPgCaptureEvents(captureFilePath) {
+  const raw = fs.existsSync(captureFilePath) ? fs.readFileSync(captureFilePath, "utf8") : "";
+  const lines = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const events = [];
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed && typeof parsed === "object") {
+        events.push(parsed);
+      }
+    } catch {
+      // Ignore malformed lines.
+    }
+  }
+  return events;
+}
+
+function makeBytes(size, fillValue = 65) {
+  const safeSize = Math.max(0, Number.parseInt(size, 10) || 0);
+  const array = new Uint8Array(safeSize);
+  if (safeSize > 0) {
+    array.fill(fillValue);
+  }
+  return array;
+}
+
+async function postMiniClientsMultipart(baseUrl, options) {
+  const form = new FormData();
+  form.append("initData", String(options?.initData || ""));
+  const client = options?.client;
+  if (typeof client === "string") {
+    form.append("client", client);
+  } else {
+    form.append("client", JSON.stringify(client || {}));
+  }
+
+  const attachments = Array.isArray(options?.attachments) ? options.attachments : [];
+  for (const attachment of attachments) {
+    const bytes = attachment?.bytes instanceof Uint8Array
+      ? attachment.bytes
+      : makeBytes(attachment?.size || 0);
+    const blob = new Blob([bytes], {
+      type: String(attachment?.mimeType || "application/octet-stream"),
+    });
+    form.append("attachments", blob, String(attachment?.fileName || "file.bin"));
+  }
+
+  return await fetch(`${baseUrl}/api/mini/clients`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      [MINI_UPLOAD_TOKEN_HEADER_NAME]: String(options?.uploadToken || ""),
+    },
+    body: form,
+  });
+}
+
 test("POST /api/mini/clients returns 503 without database", async () => {
   await withServer(
     {
@@ -635,4 +696,191 @@ test("POST /api/mini/clients still returns 201 when Telegram notification fails"
       assert.equal(body.attachmentsCount, 0);
     },
   );
+});
+
+test("POST /api/mini/clients enforces attachment security before DB write", async (t) => {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-clients-attachments-"));
+  const pgCaptureFilePath = path.join(captureDir, "pg-events.jsonl");
+
+  try {
+    await withServer(
+      {
+        DATABASE_URL: "postgres://fake/fake",
+        TEST_USE_FAKE_PG: "1",
+        TEST_PG_CAPTURE_FILE: pgCaptureFilePath,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_INIT_DATA_TTL_SEC: "600",
+      },
+      async ({ baseUrl }) => {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const initData = buildTelegramInitData({
+          authDate: nowSeconds,
+          user: { id: 606, username: "attachments_user" },
+        });
+        const uploadToken = await fetchUploadTokenFromAccess(baseUrl, initData);
+
+        async function expectAttachmentError(attachments, expectedStatus, expectedMessagePart) {
+          const eventsBefore = readPgCaptureEvents(pgCaptureFilePath).length;
+          const response = await postMiniClientsMultipart(baseUrl, {
+            initData,
+            uploadToken,
+            client: { clientName: "Attachment Client" },
+            attachments,
+          });
+          const body = await response.json();
+
+          assert.equal(response.status, expectedStatus);
+          assert.equal(typeof body.error, "string");
+          assert.ok(body.error.includes(expectedMessagePart), `Unexpected error message: ${body.error}`);
+
+          const eventsAfter = readPgCaptureEvents(pgCaptureFilePath).length;
+          assert.equal(eventsAfter, eventsBefore, "Blocked attachment request should not write to DB.");
+        }
+
+        await t.test("blocks more than 10 files", async () => {
+          const attachments = Array.from({ length: 11 }, (_, index) => ({
+            fileName: `file-${index + 1}.txt`,
+            mimeType: "text/plain",
+            bytes: makeBytes(8),
+          }));
+          await expectAttachmentError(attachments, 400, "You can upload up to 10 files.");
+        });
+
+        await t.test("blocks single file over 10 MB", async () => {
+          await expectAttachmentError(
+            [
+              {
+                fileName: "too-big.pdf",
+                mimeType: "application/pdf",
+                bytes: makeBytes(10 * 1024 * 1024 + 1),
+              },
+            ],
+            400,
+            "10 MB",
+          );
+        });
+
+        await t.test("blocks total attachments over 40 MB", async () => {
+          const nearMaxPerFile = 10 * 1024 * 1024 - 1024;
+          const attachments = [
+            {
+              fileName: "bulk-1.pdf",
+              mimeType: "application/pdf",
+              bytes: makeBytes(nearMaxPerFile),
+            },
+            {
+              fileName: "bulk-2.pdf",
+              mimeType: "application/pdf",
+              bytes: makeBytes(nearMaxPerFile),
+            },
+            {
+              fileName: "bulk-3.pdf",
+              mimeType: "application/pdf",
+              bytes: makeBytes(nearMaxPerFile),
+            },
+            {
+              fileName: "bulk-4.pdf",
+              mimeType: "application/pdf",
+              bytes: makeBytes(nearMaxPerFile),
+            },
+            {
+              fileName: "bulk-5.pdf",
+              mimeType: "application/pdf",
+              bytes: makeBytes(5000),
+            },
+          ];
+          await expectAttachmentError(attachments, 400, "40 MB");
+        });
+
+        await t.test("blocks dangerous extension", async () => {
+          await expectAttachmentError(
+            [
+              {
+                fileName: "../evil.js",
+                mimeType: "text/plain",
+                bytes: makeBytes(64),
+              },
+            ],
+            400,
+            "not allowed",
+          );
+        });
+
+        await t.test("blocks dangerous MIME type", async () => {
+          await expectAttachmentError(
+            [
+              {
+                fileName: "safe.txt",
+                mimeType: "text/html",
+                bytes: makeBytes(64),
+              },
+            ],
+            400,
+            "not allowed",
+          );
+        });
+
+        await t.test("blocks dangerous MIME pattern", async () => {
+          await expectAttachmentError(
+            [
+              {
+                fileName: "safe.txt",
+                mimeType: "application/x-sh",
+                bytes: makeBytes(64),
+              },
+            ],
+            400,
+            "not allowed",
+          );
+        });
+
+        await t.test("rejects empty buffer/path attachment", async () => {
+          await expectAttachmentError(
+            [
+              {
+                fileName: "empty.pdf",
+                mimeType: "application/pdf",
+                bytes: makeBytes(0),
+              },
+            ],
+            400,
+            "Failed to read",
+          );
+        });
+
+        await t.test("sanitizes file name before insert", async () => {
+          const response = await postMiniClientsMultipart(baseUrl, {
+            initData,
+            uploadToken,
+            client: { clientName: "Sanitize File Name Client" },
+            attachments: [
+              {
+                fileName: "../unsafe<>name?.pdf",
+                mimeType: "application/pdf",
+                bytes: makeBytes(128),
+              },
+            ],
+          });
+          const body = await response.json();
+
+          assert.equal(response.status, 201);
+          assert.equal(body.ok, true);
+
+          const events = readPgCaptureEvents(pgCaptureFilePath);
+          const lastFileInsert = [...events].reverse().find((event) => event.type === "file_insert");
+          assert.ok(lastFileInsert, "Expected file_insert event in fake DB capture.");
+          assert.equal(typeof lastFileInsert.fileName, "string");
+          assert.ok(lastFileInsert.fileName.length > 0);
+          assert.ok(lastFileInsert.fileName.length <= 180);
+          assert.ok(!lastFileInsert.fileName.includes("/"));
+          assert.ok(!lastFileInsert.fileName.includes("\\"));
+          assert.ok(!lastFileInsert.fileName.includes("<"));
+          assert.ok(!lastFileInsert.fileName.includes(">"));
+          assert.ok(lastFileInsert.fileName.endsWith(".pdf"));
+        });
+      },
+    );
+  } finally {
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
 });
