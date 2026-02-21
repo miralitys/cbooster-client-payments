@@ -26080,6 +26080,128 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
   return dedupeGhlContractCandidates(candidates);
 }
 
+function isGhlCandidateRelatedToClientName(candidate, clientName) {
+  const normalizedClientName = normalizeNameForLookup(clientName);
+  if (!normalizedClientName) {
+    return false;
+  }
+
+  const signal = normalizeNameForLookup(
+    `${candidate?.title || ""} ${candidate?.snippet || ""} ${candidate?.url || ""} ${candidate?.contactName || ""}`,
+  );
+  if (!signal) {
+    return false;
+  }
+
+  if (signal.includes(normalizedClientName) || normalizedClientName.includes(signal)) {
+    return true;
+  }
+
+  const tokens = normalizedClientName.split(" ").filter((token) => token.length >= 3);
+  if (!tokens.length) {
+    return false;
+  }
+
+  let matchedTokens = 0;
+  for (const token of tokens) {
+    if (signal.includes(token)) {
+      matchedTokens += 1;
+    }
+  }
+
+  if (matchedTokens >= Math.min(2, tokens.length)) {
+    return true;
+  }
+
+  const strongToken = tokens.find((token) => token.length >= 6 && signal.includes(token));
+  return Boolean(strongToken);
+}
+
+async function listGhlContractDownloadCandidatesForClientName(clientName) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return [];
+  }
+
+  const attempts = [
+    {
+      source: "proposals.document.client_name.status",
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
+            query: normalizedClientName,
+            skip: 0,
+            limit: 200,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.documents.client_name.status",
+      request: () =>
+        requestGhlApi("/proposals/documents", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            status: GHL_PROPOSAL_STATUS_FILTERS_QUERY,
+            query: normalizedClientName,
+            skip: 0,
+            limit: 200,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+    {
+      source: "proposals.document.client_name",
+      request: () =>
+        requestGhlApi("/proposals/document", {
+          method: "GET",
+          query: {
+            locationId: GHL_LOCATION_ID,
+            query: normalizedClientName,
+            skip: 0,
+            limit: 200,
+          },
+          tolerateNotFound: true,
+        }),
+    },
+  ];
+
+  const candidates = [];
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt.request();
+    } catch {
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const extracted = extractGhlContractCandidatesFromPayload(response.body, attempt.source);
+    if (!extracted.length) {
+      continue;
+    }
+
+    for (const candidate of extracted) {
+      if (!isGhlCandidateRelatedToClientName(candidate, normalizedClientName)) {
+        continue;
+      }
+      candidates.push({
+        ...candidate,
+        contactName: sanitizeTextValue(candidate?.contactName, 300) || normalizedClientName,
+      });
+    }
+  }
+
+  return dedupeGhlContractCandidates(candidates);
+}
+
 function prioritizePreferredContact(contacts, preferredContactId) {
   const normalizedContacts = Array.isArray(contacts) ? contacts : [];
   const normalizedPreferredId = sanitizeTextValue(preferredContactId, 160);
@@ -26216,6 +26338,21 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         bestCandidateScore = contactBestScore;
         bestContactName = contactName;
         bestContactId = contactId;
+      }
+    }
+
+    if (!bestCandidate) {
+      const byNameCandidates = await listGhlContractDownloadCandidatesForClientName(normalizedClientName);
+      const byNameBestCandidate = pickBestGhlContractDownloadCandidate(byNameCandidates, {
+        contactName: normalizedClientName,
+        contactId: "",
+        clientName: normalizedClientName,
+      });
+      if (byNameBestCandidate) {
+        bestCandidate = byNameBestCandidate;
+        bestCandidateScore = Number.isFinite(byNameBestCandidate.score) ? byNameBestCandidate.score : -1;
+        bestContactName = sanitizeTextValue(byNameBestCandidate?.contactName, 300) || bestContactName || normalizedClientName;
+        bestContactId = sanitizeTextValue(byNameBestCandidate?.contactId, 160) || bestContactId || "";
       }
     }
 
