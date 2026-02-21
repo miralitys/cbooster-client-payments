@@ -41,6 +41,7 @@ export interface GhlLeadsRefreshMeta {
   stoppedByTimeBudget?: boolean;
   warning?: string;
   error?: string;
+  removedMissedCallCount?: number;
 }
 
 export interface GhlLeadsPipelineMeta {

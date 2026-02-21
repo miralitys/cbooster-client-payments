@@ -24,6 +24,7 @@ export default function LeadsPage() {
   const [loadError, setLoadError] = useState("");
   const [canSync, setCanSync] = useState(false);
   const [lastSyncedCount, setLastSyncedCount] = useState(0);
+  const [lastRemovedMissedCallCount, setLastRemovedMissedCallCount] = useState(0);
   const [rangeMode, setRangeMode] = useState<LeadsRangeMode>("today");
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -43,8 +44,10 @@ export default function LeadsPage() {
       return `Press Refresh to load leads for ${rangeLabel}.`;
     }
 
-    return `Loaded ${items.length} leads for ${rangeLabel}. Last sync added/updated: ${lastSyncedCount}.`;
-  }, [isLoading, isSyncing, items.length, lastSyncedCount, loadError, rangeMode]);
+    const excludedMissedCallsText =
+      lastRemovedMissedCallCount > 0 ? ` Excluded missed calls: ${lastRemovedMissedCallCount}.` : "";
+    return `Loaded ${items.length} leads for ${rangeLabel}. Last sync added/updated: ${lastSyncedCount}.${excludedMissedCallsText}`;
+  }, [isLoading, isSyncing, items.length, lastSyncedCount, lastRemovedMissedCallCount, loadError, rangeMode]);
 
   const loadLeads = useCallback(async (nextRangeMode: LeadsRangeMode = rangeMode, shouldRefresh = false) => {
     setIsLoading(true);
@@ -53,7 +56,9 @@ export default function LeadsPage() {
     setIsSyncing(shouldRefresh);
 
     try {
-      const payload = await getGhlLeads(shouldRefresh && canSync ? "incremental" : "none", {
+      const refreshMode =
+        shouldRefresh && canSync ? (nextRangeMode === "today" ? "incremental" : "full") : "none";
+      const payload = await getGhlLeads(refreshMode, {
         rangeMode: nextRangeMode,
       });
       const nextItems = Array.isArray(payload.items) ? payload.items : [];
@@ -62,11 +67,13 @@ export default function LeadsPage() {
       setSummary(payload.summary || EMPTY_SUMMARY);
       setPipelineName((payload.pipeline?.name || "").toString().trim() || "SALES 3 LINE");
       setLastSyncedCount(Number(payload.refresh?.syncedLeadsCount) || 0);
+      setLastRemovedMissedCallCount(Number(payload.refresh?.removedMissedCallCount) || 0);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load leads table.";
       setItems([]);
       setSummary(EMPTY_SUMMARY);
       setLastSyncedCount(0);
+      setLastRemovedMissedCallCount(0);
       setLoadError(message);
     } finally {
       setIsSyncing(false);
