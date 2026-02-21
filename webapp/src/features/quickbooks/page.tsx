@@ -82,22 +82,16 @@ export default function QuickBooksPage() {
     if (activeTab === "outgoing") {
       return [
         {
+          key: "paymentDate",
+          label: "Date",
+          align: "center",
+          cell: (item) => formatDate(item.paymentDate),
+        },
+        {
           key: "clientName",
           label: "Payee",
           align: "left",
           cell: (item) => formatQuickBooksPayeeLabel(item.clientName),
-        },
-        {
-          key: "transactionType",
-          label: "Type",
-          align: "center",
-          cell: (item) => formatQuickBooksOutgoingTypeLabel(item.transactionType),
-        },
-        {
-          key: "description",
-          label: "Description",
-          align: "left",
-          cell: (item) => formatQuickBooksOutgoingDescriptionLabel(item.description),
         },
         {
           key: "paymentAmount",
@@ -106,10 +100,10 @@ export default function QuickBooksPage() {
           cell: (item) => CURRENCY_FORMATTER.format(Number(item.paymentAmount) || 0),
         },
         {
-          key: "paymentDate",
-          label: "Date",
-          align: "center",
-          cell: (item) => formatDate(item.paymentDate),
+          key: "description",
+          label: "Description",
+          align: "left",
+          cell: (item) => formatQuickBooksOutgoingDescriptionLabel(item.description),
         },
       ];
     }
@@ -685,20 +679,6 @@ function formatQuickBooksClientLabel(clientName: string, transactionType: string
 function formatQuickBooksPayeeLabel(payeeName: string): string {
   const normalizedName = String(payeeName || "").trim();
   return normalizedName || "Unknown payee";
-}
-
-function formatQuickBooksOutgoingTypeLabel(transactionType: string): string {
-  const normalizedType = String(transactionType || "").trim().toLowerCase();
-  if (normalizedType === "expense" || normalizedType === "purchase") {
-    return "Expense";
-  }
-  if (normalizedType === "billpayment") {
-    return "Bill Payment";
-  }
-  if (normalizedType === "check") {
-    return "Check";
-  }
-  return normalizedType ? normalizedType.charAt(0).toUpperCase() + normalizedType.slice(1) : "-";
 }
 
 function formatQuickBooksOutgoingDescriptionLabel(description: string | undefined): string {
