@@ -893,18 +893,6 @@ export default function CustomDashboardPage() {
                     <div className="custom-dashboard-tasks-source-head">
                       <h3>Task Movements (Last 24 Hours)</h3>
                       <div className="custom-dashboard-tasks-source-actions">
-                        <Select
-                          value={selectedTaskMovementManager}
-                          onChange={(event) => setSelectedTaskMovementManager(event.target.value)}
-                          disabled={!taskMovementsManagerOptions.length || taskMovementsLoading}
-                        >
-                          <option value="">All managers</option>
-                          {taskMovementsManagerOptions.map((managerName) => (
-                            <option key={managerName} value={managerName}>
-                              {managerName}
-                            </option>
-                          ))}
-                        </Select>
                         <Button
                           type="button"
                           size="sm"
@@ -963,6 +951,20 @@ export default function CustomDashboardPage() {
                         ) : (
                           <EmptyState title="No manager movement summary for selected period." />
                         )}
+                        <div className="custom-dashboard-task-movements-filter">
+                          <Select
+                            value={selectedTaskMovementManager}
+                            onChange={(event) => setSelectedTaskMovementManager(event.target.value)}
+                            disabled={!taskMovementsManagerOptions.length || taskMovementsLoading}
+                          >
+                            <option value="">All managers</option>
+                            {taskMovementsManagerOptions.map((managerName) => (
+                              <option key={managerName} value={managerName}>
+                                {managerName}
+                              </option>
+                            ))}
+                          </Select>
+                        </div>
                         {taskMovementsRows.length ? (
                           <Table
                             className="custom-dashboard-table-wrap"
