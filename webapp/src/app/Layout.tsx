@@ -16,7 +16,6 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/client-payments", label: "Client Payments" },
   { to: "/payment-probability", label: "Client Payment Probability" },
   { to: "/quickbooks", label: "QuickBooks" },
-  { to: "/client-managers", label: "Client Managers" },
   { to: "/leads", label: "Leads" },
   { to: "/ghl-contracts", label: "GHL Documents" },
   { to: "/access-control", label: "Access Control" },
@@ -33,10 +32,6 @@ function resolvePageTitle(pathname: string): string {
 
   if (pathname.startsWith("/quickbooks")) {
     return "QuickBooks";
-  }
-
-  if (pathname.startsWith("/client-managers")) {
-    return "Client - Manager Test";
   }
 
   if (pathname.startsWith("/leads")) {
