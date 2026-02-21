@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const bcrypt = require("bcryptjs");
 const fs = require("fs");
+const { Transform, Writable, pipeline } = require("stream");
 const express = require("express");
 const compression = require("compression");
 const helmet = require("helmet");
@@ -118,16 +119,9 @@ const WEB_AUTH_MOBILE_REPLAY_MAX_KEYS = Math.min(
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
 const WEB_AUTH_SESSION_SECRET_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_SESSION_SECRET);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW);
-const TRUST_PROXY_SETTING = resolveExpressTrustProxySetting(process.env.TRUST_PROXY, 1);
 const RATE_LIMIT_ENABLED = resolveOptionalBoolean(process.env.RATE_LIMIT_ENABLED) !== false;
-const RATE_LIMIT_STORE_MODE = resolveRateLimitStoreMode(process.env.RATE_LIMIT_STORE_MODE, DATABASE_URL);
 const RATE_LIMIT_STORE_MAX_KEYS = Math.min(Math.max(parsePositiveInteger(process.env.RATE_LIMIT_STORE_MAX_KEYS, 60000), 5000), 300000);
 const RATE_LIMIT_SWEEP_EVERY_REQUESTS = 120;
-const RATE_LIMIT_DB_SWEEP_EVERY_REQUESTS = 300;
-const RATE_LIMIT_DB_ERROR_COOLDOWN_MS = Math.min(
-  Math.max(parsePositiveInteger(process.env.RATE_LIMIT_DB_ERROR_COOLDOWN_MS, 30 * 1000), 5 * 1000),
-  10 * 60 * 1000,
-);
 const RATE_LIMIT_PROFILE_LOGIN_IP = Object.freeze({
   windowMs: 10 * 60 * 1000,
   maxHits: 40,
@@ -160,6 +154,18 @@ const RATE_LIMIT_PROFILE_API_CHAT = Object.freeze({
   windowMs: 60 * 1000,
   maxHitsIp: 60,
   maxHitsUser: 35,
+  blockMs: 2 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_API_ASSISTANT_TTS = Object.freeze({
+  windowMs: 10 * 60 * 1000,
+  maxHitsIp: 12,
+  maxHitsUser: 8,
+  blockMs: 30 * 60 * 1000,
+});
+const RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY = Object.freeze({
+  windowMs: 10 * 60 * 1000,
+  maxHitsIp: 120,
+  maxHitsUser: 80,
   blockMs: 2 * 60 * 1000,
 });
 const RATE_LIMIT_PROFILE_API_MINI_ACCESS = Object.freeze({
@@ -366,20 +372,6 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
 const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
-const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_RAW = normalizeWebAuthConfigValue(
-  process.env.QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY,
-);
-const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID =
-  sanitizeTextValue(process.env.QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID, 120) || "default";
-const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_ALGORITHM = "aes-256-gcm";
-const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_IV_LENGTH_BYTES = 12;
-const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_AUTH_TAG_LENGTH_BYTES = 16;
-const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY = deriveQuickBooksRefreshTokenEncryptionKey(
-  QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_RAW || WEB_AUTH_SESSION_SECRET,
-);
-const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_SOURCE = QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_RAW
-  ? "QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY"
-  : "WEB_AUTH_SESSION_SECRET";
 const QUICKBOOKS_REALM_ID = (process.env.QUICKBOOKS_REALM_ID || "").toString().trim();
 const QUICKBOOKS_REDIRECT_URI = (process.env.QUICKBOOKS_REDIRECT_URI || "").toString().trim();
 const QUICKBOOKS_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
@@ -504,6 +496,8 @@ const ELEVENLABS_TTS_TIMEOUT_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.ELEVENLABS_TTS_TIMEOUT_MS, 15000), 3000),
   60000,
 );
+const ASSISTANT_TTS_ENDPOINT_ENABLED = resolveOptionalBoolean(process.env.ASSISTANT_TTS_ENDPOINT_ENABLED) === true;
+const ASSISTANT_TTS_ENDPOINT_OWNER_ONLY = resolveOptionalBoolean(process.env.ASSISTANT_TTS_ENDPOINT_OWNER_ONLY) !== false;
 const TELEGRAM_MEMBER_ALLOWED_STATUSES = new Set(["member", "administrator", "creator", "restricted"]);
 const TELEGRAM_HTTP_RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const TELEGRAM_HTTP_RETRYABLE_ERROR_CODES = new Set([
@@ -575,16 +569,12 @@ const ASSISTANT_SESSION_SCOPE_TABLE_NAME = resolveTableName(
   process.env.DB_ASSISTANT_SESSION_SCOPE_TABLE_NAME,
   DEFAULT_ASSISTANT_SESSION_SCOPE_TABLE_NAME,
 );
-const DEFAULT_RATE_LIMIT_BUCKETS_TABLE_NAME = "web_rate_limit_buckets";
-const RATE_LIMIT_BUCKETS_TABLE_NAME = resolveTableName(
-  process.env.DB_RATE_LIMIT_BUCKETS_TABLE_NAME,
-  DEFAULT_RATE_LIMIT_BUCKETS_TABLE_NAME,
+const DEFAULT_MINI_RUNTIME_STATE_TABLE_NAME = "mini_runtime_state";
+const MINI_RUNTIME_STATE_TABLE_NAME = resolveTableName(
+  process.env.DB_MINI_RUNTIME_STATE_TABLE_NAME,
+  DEFAULT_MINI_RUNTIME_STATE_TABLE_NAME,
 );
-const DEFAULT_LOGIN_FAILURES_TABLE_NAME = "web_login_failure_state";
-const LOGIN_FAILURES_TABLE_NAME = resolveTableName(
-  process.env.DB_LOGIN_FAILURES_TABLE_NAME,
-  DEFAULT_LOGIN_FAILURES_TABLE_NAME,
-);
+const MINI_RUNTIME_STATE_STORE = resolveMiniRuntimeStateStore(process.env.MINI_RUNTIME_STATE_STORE);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
@@ -598,8 +588,8 @@ const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CA
 const GHL_LEADS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_LEADS_CACHE_TABLE_NAME);
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
 const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESSION_SCOPE_TABLE_NAME);
-const RATE_LIMIT_BUCKETS_TABLE = qualifyTableName(DB_SCHEMA, RATE_LIMIT_BUCKETS_TABLE_NAME);
-const LOGIN_FAILURES_TABLE = qualifyTableName(DB_SCHEMA, LOGIN_FAILURES_TABLE_NAME);
+const MINI_RUNTIME_STATE_TABLE = qualifyTableName(DB_SCHEMA, MINI_RUNTIME_STATE_TABLE_NAME);
+const MINI_RUNTIME_STATE_USE_POSTGRES = MINI_RUNTIME_STATE_STORE === "postgres" && Boolean(DATABASE_URL);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
@@ -677,14 +667,6 @@ const GHL_LEADS_READ_ENRICH_MAX_ROWS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_LEADS_READ_ENRICH_MAX_ROWS, 120), 0),
   1000,
 );
-const GHL_LEADS_REFRESH_READ_ENRICH_MAX_ROWS = Math.min(
-  Math.max(parsePositiveInteger(process.env.GHL_LEADS_REFRESH_READ_ENRICH_MAX_ROWS, 1000), 0),
-  5000,
-);
-const GHL_LEADS_REFRESH_READ_ENRICH_CONCURRENCY = Math.min(
-  Math.max(parsePositiveInteger(process.env.GHL_LEADS_REFRESH_READ_ENRICH_CONCURRENCY, 8), 1),
-  16,
-);
 const GHL_LEADS_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: GHL_LEADS_SYNC_TIME_ZONE,
   year: "numeric",
@@ -751,6 +733,13 @@ const MINI_WRITE_IDEMPOTENCY_MAX_KEYS = Math.min(
 const MINI_WRITE_IDEMPOTENCY_KEY_MIN_LENGTH = 8;
 const MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH = 180;
 const MINI_IDEMPOTENCY_KEY_HEADER_NAMES = ["idempotency-key", "x-idempotency-key"];
+const MINI_RUNTIME_STATE_SWEEP_EVERY_REQUESTS = Math.min(
+  Math.max(parsePositiveInteger(process.env.MINI_RUNTIME_STATE_SWEEP_EVERY_REQUESTS, 200), 10),
+  5000,
+);
+const MINI_RUNTIME_STATE_SCOPE_RATE_LIMIT = "mini_rate_limit";
+const MINI_RUNTIME_STATE_SCOPE_REPLAY = "mini_write_replay";
+const MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY = "mini_write_idempotency";
 const MINI_REVIEW_PURGE_ENABLED = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_ENABLED) !== false;
 const MINI_REVIEW_PURGE_ATTACHMENTS = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_ATTACHMENTS) !== false;
 const MINI_REVIEW_PURGE_SENSITIVE_DATA = resolveOptionalBoolean(process.env.MINI_REVIEW_PURGE_SENSITIVE_DATA) !== false;
@@ -1097,8 +1086,42 @@ const ASSISTANT_PREPARED_DATA_CACHE_TTL_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.ASSISTANT_PREPARED_DATA_CACHE_TTL_MS, 15 * 60 * 1000), 60 * 1000),
   24 * 60 * 60 * 1000,
 );
+const ASSISTANT_PREPARED_DATA_CACHE_MAX_TOTAL_BYTES = Math.min(
+  Math.max(
+    parsePositiveInteger(process.env.ASSISTANT_PREPARED_DATA_CACHE_MAX_TOTAL_BYTES, 96 * 1024 * 1024),
+    ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES * 1024,
+  ),
+  512 * 1024 * 1024,
+);
+const ASSISTANT_PREPARED_DATA_CACHE_ENTRY_BASE_ESTIMATED_BYTES = 320;
+const ASSISTANT_PREPARED_DATA_CACHE_RECORD_ESTIMATED_BYTES = 2200;
+const ASSISTANT_PREPARED_DATA_CACHE_ANALYZED_ROW_ESTIMATED_BYTES = 720;
+const ASSISTANT_PREPARED_DATA_CACHE_ENTITY_ESTIMATED_BYTES = 180;
+const ASSISTANT_PREPARED_DATA_CACHE_PAYMENT_EVENT_ESTIMATED_BYTES = 140;
+const ASSISTANT_RECORDS_STALE_FALLBACK_ENABLED = resolveOptionalBoolean(process.env.ASSISTANT_RECORDS_STALE_FALLBACK_ENABLED) !== false;
+const ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS, 3 * 60 * 1000), 30 * 1000),
+  30 * 60 * 1000,
+);
 const ASSISTANT_SESSION_SCOPE_MAX_CLIENTS = 1200;
 const ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY = "default";
+const ASSISTANT_SESSION_SCOPE_CLEAR_TOMBSTONE_COMPARABLE = "__assistant_scope_cleared__";
+const ASSISTANT_CONTEXT_RESET_FAILURE_STAGE_ALLOWLIST = new Set([
+  "keepalive_retry_exhausted",
+  "beacon_failed",
+]);
+const ASSISTANT_CONTEXT_RESET_FAILURE_REASON_CODE_ALLOWLIST = new Set([
+  "timeout",
+  "network_error",
+  "aborted",
+  "unauthorized",
+  "forbidden",
+  "csrf",
+  "server_error",
+  "http_error",
+  "unknown_error",
+]);
+const ASSISTANT_CONTEXT_RESET_BROWSER_METRIC_MAX_BUCKETS = 64;
 const ASSISTANT_LLM_MAX_CONTEXT_RECORDS = 18;
 const ASSISTANT_LLM_MAX_NOTES_LENGTH = 220;
 const ASSISTANT_PAYMENT_FIELDS = ["payment1", "payment2", "payment3", "payment4", "payment5", "payment6", "payment7"];
@@ -1325,7 +1348,7 @@ const performanceObservability = createPerformanceObservabilityState({
 startPerformanceObservabilityMonitor(performanceObservability);
 
 const app = express();
-app.set("trust proxy", TRUST_PROXY_SETTING);
+app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(
   helmet({
@@ -1383,9 +1406,6 @@ const pool = DATABASE_URL
       performanceObservability,
     )
   : null;
-if (RATE_LIMIT_ENABLED && RATE_LIMIT_STORE_MODE === "postgres" && !pool) {
-  console.warn("[rate-limit] RATE_LIMIT_STORE_MODE resolved to postgres, but DATABASE_URL is missing. Falling back to memory.");
-}
 const miniAttachmentsUploadMemoryMiddleware = createMiniAttachmentsUploadMiddleware({
   useDisk: false,
 });
@@ -1416,9 +1436,6 @@ let ghlLocationDocumentCandidatesCache = {
   items: [],
 };
 let rateLimitSweepCounter = 0;
-let rateLimitDbUnavailableUntilMs = 0;
-let rateLimitDbLastSweepStartedAtMs = 0;
-let rateLimitDbSweepInFlight = false;
 const rateLimitRequestBuckets = new Map();
 const loginFailureByAccountKey = new Map();
 const loginFailureByIpAccountKey = new Map();
@@ -1426,17 +1443,20 @@ const webAuthMobileSessionById = new Map();
 const webAuthMobileReplayByKey = new Map();
 let miniUploadParseInFlight = 0;
 const miniUploadParseWaiters = [];
+const MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL = Symbol("miniUploadTrackedTotalBytes");
+let miniRuntimeStateSweepCounter = 0;
 let miniTelegramNotificationQueue = Promise.resolve();
 let miniTelegramNotificationQueueDepth = 0;
 let assistantRecordsSnapshotCache = null;
 const assistantPreparedDataCache = new Map();
+let assistantPreparedDataCacheTotalBytes = 0;
+const miniWriteInitDataReplayUsedByKey = new Map();
+const miniWriteInitDataReplayInFlightByKey = new Map();
+const miniWriteIdempotencyByKey = new Map();
 let miniRetentionSweepIntervalId = null;
 let miniRetentionSweepInFlight = false;
 let assistantReviewRetentionSweepIntervalId = null;
 let assistantReviewRetentionSweepInFlight = false;
-const miniWriteInitDataReplayUsedByKey = new Map();
-const miniWriteInitDataReplayInFlightByKey = new Map();
-const miniWriteIdempotencyByKey = new Map();
 
 function resolveTableName(rawTableName, fallbackTableName) {
   const normalized = (rawTableName || fallbackTableName || "").trim();
@@ -1534,47 +1554,6 @@ function parsePositiveInteger(rawValue, fallbackValue) {
   return parsed;
 }
 
-function resolveExpressTrustProxySetting(rawValue, fallbackValue = 1) {
-  const value = (rawValue || "").toString().trim();
-  if (!value) {
-    return fallbackValue;
-  }
-
-  const normalized = value.toLowerCase();
-  if (normalized === "false" || normalized === "off" || normalized === "0" || normalized === "no") {
-    return false;
-  }
-
-  if (normalized === "true" || normalized === "on" || normalized === "yes") {
-    return true;
-  }
-
-  const hops = Number.parseInt(value, 10);
-  if (Number.isFinite(hops) && hops >= 0) {
-    return hops;
-  }
-
-  // Express accepts CSV subnet names / CIDRs / IPs (e.g. loopback, 10.0.0.0/8).
-  if (/^[a-z0-9_.,:/\-\s]+$/i.test(value)) {
-    return value;
-  }
-
-  return fallbackValue;
-}
-
-function resolveRateLimitStoreMode(rawValue, databaseUrl) {
-  const normalized = (rawValue || "auto").toString().trim().toLowerCase();
-  if (normalized === "memory" || normalized === "in-memory" || normalized === "in_memory") {
-    return "memory";
-  }
-
-  if (normalized === "postgres" || normalized === "pg" || normalized === "database" || normalized === "db") {
-    return databaseUrl ? "postgres" : "memory";
-  }
-
-  return databaseUrl ? "postgres" : "memory";
-}
-
 function parseOptionalPositiveInteger(rawValue) {
   const value = (rawValue || "").toString().trim();
   if (!value) {
@@ -1601,6 +1580,19 @@ function parseOptionalTelegramChatId(rawValue) {
   }
 
   return value;
+}
+
+function resolveMiniRuntimeStateStore(rawValue) {
+  const normalized = (rawValue || "").toString().trim().toLowerCase();
+  if (normalized === "memory" || normalized === "postgres") {
+    return normalized;
+  }
+
+  if (IS_PRODUCTION && DATABASE_URL) {
+    return "postgres";
+  }
+
+  return "memory";
 }
 
 function resolveAttachmentStorageRoot(rawValue) {
@@ -1870,6 +1862,31 @@ function createPerformanceObservabilityState(options = {}) {
       lastErrorAt: null,
       lastErrorMessage: "",
     },
+    assistantContextReset: {
+      failureCount: 0,
+      byStage: {
+        keepalive_retry_exhausted: 0,
+        beacon_failed: 0,
+        unknown: 0,
+      },
+      byReasonCode: {
+        timeout: 0,
+        network_error: 0,
+        aborted: 0,
+        unauthorized: 0,
+        forbidden: 0,
+        csrf: 0,
+        server_error: 0,
+        http_error: 0,
+        unknown_error: 0,
+      },
+      byBrowserVersion: new Map(),
+      browserVersionOverflowCount: 0,
+      lastFailureAt: null,
+      lastStage: null,
+      lastReasonCode: null,
+      lastBrowserVersion: null,
+    },
   };
 }
 
@@ -2050,6 +2067,139 @@ function recordAssistantSessionScopeMetricError(state, error) {
   }
   state.assistantSessionScope.lastErrorAt = new Date().toISOString();
   state.assistantSessionScope.lastErrorMessage = sanitizeTextValue(error?.message, 600);
+}
+
+function normalizeAssistantContextResetFailureStage(rawValue) {
+  const value = sanitizeTextValue(rawValue, 64).toLowerCase();
+  if (!value) {
+    return "unknown";
+  }
+  if (ASSISTANT_CONTEXT_RESET_FAILURE_STAGE_ALLOWLIST.has(value)) {
+    return value;
+  }
+  return "unknown";
+}
+
+function normalizeAssistantContextResetFailureReasonCode(rawValue) {
+  const value = sanitizeTextValue(rawValue, 64).toLowerCase();
+  if (!value) {
+    return "unknown_error";
+  }
+  if (ASSISTANT_CONTEXT_RESET_FAILURE_REASON_CODE_ALLOWLIST.has(value)) {
+    return value;
+  }
+  return "unknown_error";
+}
+
+function normalizeAssistantContextResetBrowserVersion(rawValue) {
+  const value = sanitizeTextValue(rawValue, 24);
+  if (!value) {
+    return "0";
+  }
+  const match = value.match(/\d{1,3}/);
+  return match ? match[0] : "0";
+}
+
+function parseAssistantContextResetBrowserFromUserAgent(rawUserAgent) {
+  const userAgent = sanitizeTextValue(rawUserAgent, 600);
+  if (!userAgent) {
+    return {
+      name: "unknown",
+      version: "0",
+    };
+  }
+
+  let match = userAgent.match(/(?:Edg|Edge)\/([0-9]+(?:\.[0-9]+){0,2})/i);
+  if (match) {
+    return {
+      name: "edge",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  match = userAgent.match(/OPR\/([0-9]+(?:\.[0-9]+){0,2})/i);
+  if (match) {
+    return {
+      name: "opera",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  match = userAgent.match(/(?:Chrome|CriOS)\/([0-9]+(?:\.[0-9]+){0,2})/i);
+  if (match) {
+    return {
+      name: "chrome",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  match = userAgent.match(/(?:Firefox|FxiOS)\/([0-9]+(?:\.[0-9]+){0,2})/i);
+  if (match) {
+    return {
+      name: "firefox",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  match = userAgent.match(/Version\/([0-9]+(?:\.[0-9]+){0,2}).*Safari\//i);
+  if (match) {
+    return {
+      name: "safari",
+      version: normalizeAssistantContextResetBrowserVersion(match[1]),
+    };
+  }
+
+  return {
+    name: "unknown",
+    version: "0",
+  };
+}
+
+function buildAssistantContextResetBrowserVersionKey(browser = {}) {
+  const name = sanitizeTextValue(browser.name, 40).toLowerCase() || "unknown";
+  const version = normalizeAssistantContextResetBrowserVersion(browser.version);
+  return `${name}/${version}`;
+}
+
+function incrementAssistantContextResetBrowserMetricBucket(state, browserVersionKey) {
+  if (!state?.assistantContextReset?.byBrowserVersion || !browserVersionKey) {
+    return;
+  }
+
+  const buckets = state.assistantContextReset.byBrowserVersion;
+  const current = Number.parseInt(buckets.get(browserVersionKey), 10);
+  if (Number.isFinite(current) && current > 0) {
+    buckets.set(browserVersionKey, current + 1);
+    return;
+  }
+
+  if (buckets.size >= ASSISTANT_CONTEXT_RESET_BROWSER_METRIC_MAX_BUCKETS) {
+    state.assistantContextReset.browserVersionOverflowCount += 1;
+    return;
+  }
+
+  buckets.set(browserVersionKey, 1);
+}
+
+function recordAssistantContextResetFailureMetric(state, payload = {}) {
+  if (!state?.assistantContextReset) {
+    return;
+  }
+
+  const stage = normalizeAssistantContextResetFailureStage(payload.stage);
+  const reasonCode = normalizeAssistantContextResetFailureReasonCode(payload.reasonCode);
+  const browserVersionKey = buildAssistantContextResetBrowserVersionKey(payload.browser);
+  const stageCounters = state.assistantContextReset.byStage || {};
+  const reasonCounters = state.assistantContextReset.byReasonCode || {};
+
+  state.assistantContextReset.failureCount += 1;
+  stageCounters[stage] = (Number.parseInt(stageCounters[stage], 10) || 0) + 1;
+  reasonCounters[reasonCode] = (Number.parseInt(reasonCounters[reasonCode], 10) || 0) + 1;
+  incrementAssistantContextResetBrowserMetricBucket(state, browserVersionKey);
+  state.assistantContextReset.lastFailureAt = new Date().toISOString();
+  state.assistantContextReset.lastStage = stage;
+  state.assistantContextReset.lastReasonCode = reasonCode;
+  state.assistantContextReset.lastBrowserVersion = browserVersionKey;
 }
 
 function startPerformanceObservabilityMonitor(state) {
@@ -2321,6 +2471,14 @@ function buildPerformanceDiagnosticsPayload(state) {
   const dualWriteState = state.recordsDualWrite || {};
   const dualReadCompareState = state.recordsDualReadCompare || {};
   const assistantSessionScopeState = state.assistantSessionScope || {};
+  const assistantContextResetState = state.assistantContextReset || {};
+  const assistantContextResetBrowserRows = Array.from(assistantContextResetState.byBrowserVersion?.entries() || [])
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 30)
+    .map(([browserVersion, count]) => ({
+      browserVersion,
+      count: normalizeDualWriteSummaryValue(count),
+    }));
 
   const httpRouteRows = Array.from(httpState.routes.values())
     .sort((left, right) => {
@@ -2459,6 +2617,33 @@ function buildPerformanceDiagnosticsPayload(state) {
       lastEvictionAt: sanitizeTextValue(assistantSessionScopeState.lastEvictionAt, 60),
       lastErrorAt: sanitizeTextValue(assistantSessionScopeState.lastErrorAt, 60),
       lastErrorMessage: sanitizeTextValue(assistantSessionScopeState.lastErrorMessage, 600),
+    },
+    assistantContextReset: {
+      failureCount: normalizeDualWriteSummaryValue(assistantContextResetState.failureCount),
+      byStage: {
+        keepalive_retry_exhausted: normalizeDualWriteSummaryValue(
+          assistantContextResetState.byStage?.keepalive_retry_exhausted,
+        ),
+        beacon_failed: normalizeDualWriteSummaryValue(assistantContextResetState.byStage?.beacon_failed),
+        unknown: normalizeDualWriteSummaryValue(assistantContextResetState.byStage?.unknown),
+      },
+      byReasonCode: {
+        timeout: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.timeout),
+        network_error: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.network_error),
+        aborted: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.aborted),
+        unauthorized: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.unauthorized),
+        forbidden: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.forbidden),
+        csrf: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.csrf),
+        server_error: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.server_error),
+        http_error: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.http_error),
+        unknown_error: normalizeDualWriteSummaryValue(assistantContextResetState.byReasonCode?.unknown_error),
+      },
+      byBrowserVersion: assistantContextResetBrowserRows,
+      browserVersionOverflowCount: normalizeDualWriteSummaryValue(assistantContextResetState.browserVersionOverflowCount),
+      lastFailureAt: sanitizeTextValue(assistantContextResetState.lastFailureAt, 60),
+      lastStage: sanitizeTextValue(assistantContextResetState.lastStage, 64),
+      lastReasonCode: sanitizeTextValue(assistantContextResetState.lastReasonCode, 64),
+      lastBrowserVersion: sanitizeTextValue(assistantContextResetState.lastBrowserVersion, 80),
     },
   };
 }
@@ -2845,7 +3030,7 @@ function sweepMiniWriteInitDataReplayState(nowMs = Date.now()) {
   }
 }
 
-function reserveMiniWriteInitDataReplayKey(replayKey, expiresAtMs) {
+function reserveMiniWriteInitDataReplayKeyInMemory(replayKey, expiresAtMs) {
   const normalizedReplayKey = sanitizeTextValue(replayKey, 900);
   if (!normalizedReplayKey) {
     return {
@@ -2882,11 +3067,12 @@ function reserveMiniWriteInitDataReplayKey(replayKey, expiresAtMs) {
     reservation: {
       key: normalizedReplayKey,
       expiresAtMs: safeExpiresAtMs,
+      store: "memory",
     },
   };
 }
 
-function releaseMiniWriteInitDataReplayKeyReservation(reservation, markAsUsed) {
+function releaseMiniWriteInitDataReplayKeyReservationInMemory(reservation, markAsUsed) {
   if (!reservation || !reservation.key) {
     return;
   }
@@ -2919,7 +3105,7 @@ function sweepMiniWriteIdempotencyState(nowMs = Date.now()) {
   }
 }
 
-function reserveMiniWriteIdempotency(userId, rawIdempotencyKey) {
+function reserveMiniWriteIdempotencyInMemory(userId, rawIdempotencyKey) {
   const normalizedUserId = sanitizeTextValue(userId, 50);
   const normalizedIdempotencyKey = sanitizeTextValue(rawIdempotencyKey, MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH);
   if (!normalizedUserId || !normalizedIdempotencyKey) {
@@ -2962,11 +3148,12 @@ function reserveMiniWriteIdempotency(userId, rawIdempotencyKey) {
     reservation: {
       cacheKey,
       expiresAtMs,
+      store: "memory",
     },
   };
 }
 
-function commitMiniWriteIdempotencySuccess(reservation, statusCode, responseBody) {
+function commitMiniWriteIdempotencySuccessInMemory(reservation, statusCode, responseBody) {
   if (!reservation?.cacheKey) {
     return;
   }
@@ -2984,7 +3171,7 @@ function commitMiniWriteIdempotencySuccess(reservation, statusCode, responseBody
   });
 }
 
-function releaseMiniWriteIdempotencyReservation(reservation) {
+function releaseMiniWriteIdempotencyReservationInMemory(reservation) {
   if (!reservation?.cacheKey) {
     return;
   }
@@ -2992,6 +3179,371 @@ function releaseMiniWriteIdempotencyReservation(reservation) {
   const existingEntry = miniWriteIdempotencyByKey.get(reservation.cacheKey);
   if (existingEntry && existingEntry.state === "in_flight") {
     miniWriteIdempotencyByKey.delete(reservation.cacheKey);
+  }
+}
+
+function normalizeMiniRuntimeEntryState(rawValue) {
+  return sanitizeTextValue(rawValue, 40).toLowerCase();
+}
+
+async function reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs) {
+  const normalizedReplayKey = sanitizeTextValue(replayKey, 900);
+  if (!normalizedReplayKey) {
+    return {
+      ok: true,
+      reservation: null,
+    };
+  }
+
+  await ensureDatabaseReady();
+  const nowMs = Date.now();
+  const safeExpiresAtMs = Math.max(
+    nowMs + 1000,
+    Number.isFinite(expiresAtMs) ? expiresAtMs : nowMs + TELEGRAM_INIT_DATA_WRITE_TTL_SEC * 1000,
+  );
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      MINI_RUNTIME_STATE_SCOPE_REPLAY,
+      normalizedReplayKey,
+    ]);
+
+    const existingResult = await client.query(
+      `
+        SELECT state
+        FROM ${MINI_RUNTIME_STATE_TABLE}
+        WHERE scope = $1
+          AND entry_key = $2
+          AND expires_at > NOW()
+        FOR UPDATE
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_REPLAY, normalizedReplayKey],
+    );
+
+    if (existingResult.rows.length) {
+      const existingState = normalizeMiniRuntimeEntryState(existingResult.rows[0]?.state);
+      await client.query("COMMIT");
+      if (existingState === "used") {
+        return {
+          ok: false,
+          status: 409,
+          error: "This Telegram session was already used. Reopen Mini App before submitting again.",
+          code: "mini_init_data_replay",
+        };
+      }
+      return {
+        ok: false,
+        status: 409,
+        error: "The same Telegram session is already being submitted. Please wait.",
+        code: "mini_init_data_replay_in_flight",
+      };
+    }
+
+    await client.query(
+      `
+        INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
+          (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
+        VALUES
+          ($1, $2, 'in_flight', 0, NULL, NULL, NULL, NULL, $3, NOW())
+        ON CONFLICT (scope, entry_key)
+        DO UPDATE SET
+          state = EXCLUDED.state,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = NOW()
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_REPLAY, normalizedReplayKey, new Date(safeExpiresAtMs).toISOString()],
+    );
+
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      reservation: {
+        key: normalizedReplayKey,
+        expiresAtMs: safeExpiresAtMs,
+        store: "shared",
+      },
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function releaseMiniWriteInitDataReplayKeyReservationShared(reservation, markAsUsed) {
+  if (!reservation?.key) {
+    return;
+  }
+
+  await ensureDatabaseReady();
+  const safeKey = sanitizeTextValue(reservation.key, 900);
+  if (!safeKey) {
+    return;
+  }
+
+  if (markAsUsed) {
+    const safeExpiresAtMs = Math.max(Date.now() + 1000, Number.parseInt(reservation.expiresAtMs, 10) || 0);
+    await pool.query(
+      `
+        UPDATE ${MINI_RUNTIME_STATE_TABLE}
+        SET state = 'used',
+            expires_at = $3,
+            updated_at = NOW()
+        WHERE scope = $1
+          AND entry_key = $2
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_REPLAY, safeKey, new Date(safeExpiresAtMs).toISOString()],
+    );
+    return;
+  }
+
+  await pool.query(
+    `
+      DELETE FROM ${MINI_RUNTIME_STATE_TABLE}
+      WHERE scope = $1
+        AND entry_key = $2
+        AND state = 'in_flight'
+    `,
+    [MINI_RUNTIME_STATE_SCOPE_REPLAY, safeKey],
+  );
+}
+
+async function reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey) {
+  const normalizedUserId = sanitizeTextValue(userId, 50);
+  const normalizedIdempotencyKey = sanitizeTextValue(rawIdempotencyKey, MINI_WRITE_IDEMPOTENCY_KEY_MAX_LENGTH);
+  if (!normalizedUserId || !normalizedIdempotencyKey) {
+    return {
+      ok: true,
+      reservation: null,
+    };
+  }
+
+  await ensureDatabaseReady();
+  const cacheKey = `${normalizedUserId}:${normalizedIdempotencyKey}`;
+  const nowMs = Date.now();
+  const expiresAtMs = nowMs + MINI_WRITE_IDEMPOTENCY_TTL_SEC * 1000;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY,
+      cacheKey,
+    ]);
+
+    const existingResult = await client.query(
+      `
+        SELECT state, status_code, response_body
+        FROM ${MINI_RUNTIME_STATE_TABLE}
+        WHERE scope = $1
+          AND entry_key = $2
+          AND expires_at > NOW()
+        FOR UPDATE
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY, cacheKey],
+    );
+
+    if (existingResult.rows.length) {
+      const existingRow = existingResult.rows[0] || {};
+      const existingState = normalizeMiniRuntimeEntryState(existingRow.state);
+      if (existingState === "done") {
+        await client.query("COMMIT");
+        const replayedStatus = Number.parseInt(existingRow.status_code, 10);
+        const replayedBody =
+          existingRow.response_body && typeof existingRow.response_body === "object" && !Array.isArray(existingRow.response_body)
+            ? JSON.parse(JSON.stringify(existingRow.response_body))
+            : { ok: true };
+        return {
+          ok: false,
+          replayed: true,
+          status: Number.isFinite(replayedStatus) ? replayedStatus : 201,
+          body: replayedBody,
+        };
+      }
+
+      await client.query("COMMIT");
+      return {
+        ok: false,
+        status: 409,
+        error: "Duplicate request is already in progress. Please wait and retry.",
+        code: "mini_idempotency_in_flight",
+      };
+    }
+
+    await client.query(
+      `
+        INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
+          (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
+        VALUES
+          ($1, $2, 'in_flight', 0, NULL, NULL, NULL, NULL, $3, NOW())
+        ON CONFLICT (scope, entry_key)
+        DO UPDATE SET
+          state = EXCLUDED.state,
+          status_code = NULL,
+          response_body = NULL,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = NOW()
+      `,
+      [MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY, cacheKey, new Date(expiresAtMs).toISOString()],
+    );
+
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      reservation: {
+        cacheKey,
+        expiresAtMs,
+        store: "shared",
+      },
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function commitMiniWriteIdempotencySuccessShared(reservation, statusCode, responseBody) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  await ensureDatabaseReady();
+  const safeStatus = Number.isFinite(statusCode) ? Math.max(200, Math.min(299, statusCode)) : 201;
+  const safeBody =
+    responseBody && typeof responseBody === "object" && !Array.isArray(responseBody)
+      ? JSON.parse(JSON.stringify(responseBody))
+      : { ok: true };
+  const safeExpiresAtMs = Math.max(Date.now() + 1000, Number.parseInt(reservation.expiresAtMs, 10) || 0);
+  await pool.query(
+    `
+      UPDATE ${MINI_RUNTIME_STATE_TABLE}
+      SET state = 'done',
+          status_code = $3,
+          response_body = $4::jsonb,
+          expires_at = $5,
+          updated_at = NOW()
+      WHERE scope = $1
+        AND entry_key = $2
+    `,
+    [
+      MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY,
+      sanitizeTextValue(reservation.cacheKey, 260),
+      safeStatus,
+      JSON.stringify(safeBody),
+      new Date(safeExpiresAtMs).toISOString(),
+    ],
+  );
+}
+
+async function releaseMiniWriteIdempotencyReservationShared(reservation) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  await ensureDatabaseReady();
+  await pool.query(
+    `
+      DELETE FROM ${MINI_RUNTIME_STATE_TABLE}
+      WHERE scope = $1
+        AND entry_key = $2
+        AND state = 'in_flight'
+    `,
+    [MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY, sanitizeTextValue(reservation.cacheKey, 260)],
+  );
+}
+
+async function reserveMiniWriteInitDataReplayKey(replayKey, expiresAtMs) {
+  if (!shouldUseMiniRuntimeStateSharedStore()) {
+    return reserveMiniWriteInitDataReplayKeyInMemory(replayKey, expiresAtMs);
+  }
+
+  await maybeSweepMiniRuntimeStateSharedStore();
+  try {
+    return await reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs);
+  } catch (error) {
+    console.warn("[mini replay] Shared replay guard failed, falling back to process-local guard:", sanitizeTextValue(error?.message, 260));
+    return reserveMiniWriteInitDataReplayKeyInMemory(replayKey, expiresAtMs);
+  }
+}
+
+async function releaseMiniWriteInitDataReplayKeyReservation(reservation, markAsUsed) {
+  if (!reservation || !reservation.key) {
+    return;
+  }
+
+  if (reservation.store === "memory" || !shouldUseMiniRuntimeStateSharedStore()) {
+    releaseMiniWriteInitDataReplayKeyReservationInMemory(reservation, markAsUsed);
+    return;
+  }
+
+  try {
+    await releaseMiniWriteInitDataReplayKeyReservationShared(reservation, markAsUsed);
+  } catch (error) {
+    console.warn("[mini replay] Shared replay release failed, applying process-local fallback:", sanitizeTextValue(error?.message, 260));
+    releaseMiniWriteInitDataReplayKeyReservationInMemory(reservation, markAsUsed);
+  }
+}
+
+async function reserveMiniWriteIdempotency(userId, rawIdempotencyKey) {
+  if (!shouldUseMiniRuntimeStateSharedStore()) {
+    return reserveMiniWriteIdempotencyInMemory(userId, rawIdempotencyKey);
+  }
+
+  await maybeSweepMiniRuntimeStateSharedStore();
+  try {
+    return await reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey);
+  } catch (error) {
+    console.warn("[mini idempotency] Shared reservation failed, falling back to process-local state:", sanitizeTextValue(error?.message, 260));
+    return reserveMiniWriteIdempotencyInMemory(userId, rawIdempotencyKey);
+  }
+}
+
+async function commitMiniWriteIdempotencySuccess(reservation, statusCode, responseBody) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  if (reservation.store === "memory" || !shouldUseMiniRuntimeStateSharedStore()) {
+    commitMiniWriteIdempotencySuccessInMemory(reservation, statusCode, responseBody);
+    return;
+  }
+
+  try {
+    await commitMiniWriteIdempotencySuccessShared(reservation, statusCode, responseBody);
+  } catch (error) {
+    console.warn("[mini idempotency] Shared commit failed, mirroring success in process-local state:", sanitizeTextValue(error?.message, 260));
+    commitMiniWriteIdempotencySuccessInMemory(reservation, statusCode, responseBody);
+  }
+}
+
+async function releaseMiniWriteIdempotencyReservation(reservation) {
+  if (!reservation?.cacheKey) {
+    return;
+  }
+
+  if (reservation.store === "memory" || !shouldUseMiniRuntimeStateSharedStore()) {
+    releaseMiniWriteIdempotencyReservationInMemory(reservation);
+    return;
+  }
+
+  try {
+    await releaseMiniWriteIdempotencyReservationShared(reservation);
+  } catch (error) {
+    console.warn("[mini idempotency] Shared release failed, applying process-local cleanup:", sanitizeTextValue(error?.message, 260));
+    releaseMiniWriteIdempotencyReservationInMemory(reservation);
   }
 }
 
@@ -3058,6 +3610,140 @@ async function withMiniUploadParseSlot(task) {
   }
 }
 
+function resetMiniUploadTrackedTotalBytes(req) {
+  if (!req || typeof req !== "object") {
+    return;
+  }
+  req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL] = 0;
+}
+
+function trackMiniUploadChunkBytes(req, chunk) {
+  if (!req || typeof req !== "object") {
+    return 0;
+  }
+
+  const chunkLength = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk || "");
+  const safeChunkLength = Number.isFinite(chunkLength) && chunkLength > 0 ? chunkLength : 0;
+  const currentTotal =
+    Number.isFinite(req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL]) && req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL] > 0
+      ? req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL]
+      : 0;
+  const nextTotal = currentTotal + safeChunkLength;
+  req[MINI_UPLOAD_TRACKED_TOTAL_BYTES_SYMBOL] = nextTotal;
+  return nextTotal;
+}
+
+function createMiniMultipartTotalSizeExceededError() {
+  return createHttpError(
+    `Total attachment size must not exceed ${Math.floor(MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES / (1024 * 1024))} MB.`,
+    413,
+    "mini_multipart_too_large",
+  );
+}
+
+function createMiniAttachmentBudgetTransform(req) {
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      const totalBytes = trackMiniUploadChunkBytes(req, chunk);
+      if (totalBytes > MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES) {
+        callback(createMiniMultipartTotalSizeExceededError());
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
+
+function createMiniAttachmentsUploadStorageEngine(options = {}) {
+  const useDisk = options.useDisk === true;
+
+  return {
+    _handleFile(req, file, callback) {
+      let completed = false;
+      const finish = (error, fileInfo) => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        callback(error, fileInfo);
+      };
+
+      let size = 0;
+      const budgetTransform = createMiniAttachmentBudgetTransform(req);
+      budgetTransform.on("data", (chunk) => {
+        const chunkLength = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk || "");
+        if (Number.isFinite(chunkLength) && chunkLength > 0) {
+          size += chunkLength;
+        }
+      });
+
+      if (useDisk) {
+        const fileName = `upload-${generateId()}`;
+        const filePath = path.join(ATTACHMENTS_UPLOAD_TMP_DIR, fileName);
+        const writeStream = fs.createWriteStream(filePath, {
+          flags: "wx",
+          mode: 0o600,
+        });
+
+        pipeline(file.stream, budgetTransform, writeStream, (error) => {
+          if (error) {
+            void removeFileIfExists(filePath);
+            finish(error);
+            return;
+          }
+
+          finish(null, {
+            destination: ATTACHMENTS_UPLOAD_TMP_DIR,
+            filename: fileName,
+            path: filePath,
+            size,
+          });
+        });
+        return;
+      }
+
+      const chunks = [];
+      const sink = new Writable({
+        write(chunk, _encoding, done) {
+          chunks.push(Buffer.from(chunk));
+          done();
+        },
+      });
+
+      pipeline(file.stream, budgetTransform, sink, (error) => {
+        if (error) {
+          finish(error);
+          return;
+        }
+
+        finish(null, {
+          buffer: Buffer.concat(chunks),
+          size,
+        });
+      });
+    },
+
+    _removeFile(_req, file, callback) {
+      const tempPath = sanitizeUploadedTempPath(file?.path);
+      if (tempPath) {
+        fs.unlink(tempPath, (error) => {
+          if (error && error.code !== "ENOENT") {
+            callback(error);
+            return;
+          }
+          callback(null);
+        });
+        return;
+      }
+
+      if (file && Object.prototype.hasOwnProperty.call(file, "buffer")) {
+        delete file.buffer;
+      }
+      callback(null);
+    },
+  };
+}
+
 function createMiniAttachmentsUploadMiddleware(options = {}) {
   const useDisk = options.useDisk === true;
   const multerOptions = {
@@ -3065,26 +3751,17 @@ function createMiniAttachmentsUploadMiddleware(options = {}) {
       files: MINI_MAX_ATTACHMENTS_COUNT,
       fileSize: MINI_MAX_ATTACHMENT_SIZE_BYTES,
     },
+    storage: createMiniAttachmentsUploadStorageEngine({
+      useDisk,
+    }),
   };
-
-  if (useDisk) {
-    multerOptions.storage = multer.diskStorage({
-      destination: (_req, _file, callback) => {
-        callback(null, ATTACHMENTS_UPLOAD_TMP_DIR);
-      },
-      filename: (_req, _file, callback) => {
-        callback(null, `upload-${generateId()}`);
-      },
-    });
-  } else {
-    multerOptions.storage = multer.memoryStorage();
-  }
 
   return multer(multerOptions).array("attachments", MINI_MAX_ATTACHMENTS_COUNT);
 }
 
 function parseMiniMultipartRequest(req, res) {
   return new Promise((resolve, reject) => {
+    resetMiniUploadTrackedTotalBytes(req);
     const uploadMiddleware =
       ATTACHMENTS_STREAMING_ENABLED && miniAttachmentsUploadDiskMiddleware
         ? miniAttachmentsUploadDiskMiddleware
@@ -4479,7 +5156,6 @@ function resolveMobileSessionContextFromRequest(req, options = {}) {
     requestId,
   };
 }
-
 function getRequestCookie(req, cookieName) {
   const normalizedName = sanitizeTextValue(cookieName, 200);
   if (!normalizedName) {
@@ -4756,35 +5432,10 @@ function generateWebAuthUsernameFromDisplayName(displayName) {
   return `pending.user.${Date.now().toString(36)}`.slice(0, 120);
 }
 
-function generateSecureRandomString(length, alphabet) {
-  const normalizedLength = Math.max(1, Number.parseInt(length, 10) || 1);
-  const normalizedAlphabet = typeof alphabet === "string" ? alphabet : "";
-  if (!normalizedAlphabet) {
-    return "";
-  }
-
-  const alphabetLength = normalizedAlphabet.length;
-  const maxByteInclusive = Math.floor(256 / alphabetLength) * alphabetLength - 1;
-  let output = "";
-
-  while (output.length < normalizedLength) {
-    const bytes = crypto.randomBytes(Math.max(32, normalizedLength * 2));
-    for (let index = 0; index < bytes.length && output.length < normalizedLength; index += 1) {
-      const byte = bytes[index];
-      if (byte > maxByteInclusive) {
-        continue;
-      }
-      output += normalizedAlphabet[byte % alphabetLength];
-    }
-  }
-
-  return output;
-}
-
 function generateWebAuthTemporaryPassword() {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-  const randomChunk = generateSecureRandomString(14, alphabet);
-  return `Temp!${randomChunk}`;
+  const randomChunk = Math.random().toString(36).slice(2, 12);
+  const tsChunk = Date.now().toString(36).slice(-6);
+  return `Temp!${randomChunk}${tsChunk}`;
 }
 
 function buildWebAuthBootstrapUserPassword(username) {
@@ -5225,6 +5876,20 @@ function normalizeAssistantSessionId(rawValue) {
   return normalized.toLowerCase();
 }
 
+function normalizeAssistantClientMessageSeq(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 40);
+  if (!normalized) {
+    return 0;
+  }
+
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+
+  return Math.min(parsed, Number.MAX_SAFE_INTEGER);
+}
+
 function normalizeAssistantDateRange(rawRange) {
   if (!rawRange || typeof rawRange !== "object") {
     return null;
@@ -5306,15 +5971,12 @@ function buildAssistantScopeFromRows(rows, range = null, scopeEstablished = true
   return buildAssistantScopeFromComparableList(clientComparables, range, scopeEstablished);
 }
 
-function buildAssistantScopeFromEvents(events, range = null, scopeEstablished = true) {
-  const clientComparables = [];
-  for (const event of Array.isArray(events) ? events : []) {
-    if (!event?.clientComparable) {
-      continue;
-    }
-    clientComparables.push(event.clientComparable);
-  }
-  return buildAssistantScopeFromComparableList(clientComparables, range, scopeEstablished);
+function buildAssistantScopeClearTombstonePayload() {
+  return buildAssistantScopeStoragePayload({
+    clientComparables: [ASSISTANT_SESSION_SCOPE_CLEAR_TOMBSTONE_COMPARABLE],
+    scopeEstablished: false,
+    range: null,
+  });
 }
 
 function normalizeAssistantScopeTenantKey(rawValue) {
@@ -5339,14 +6001,17 @@ function resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSess
 }
 
 function resolveAssistantSessionScopeTenantKeyFromRequest(req) {
-  const explicitHeaderTenant = sanitizeTextValue(req?.headers?.["x-cbooster-tenant"], 120);
-  const fallbackHeaderTenant = sanitizeTextValue(req?.headers?.["x-tenant-id"], 120);
   const profileTenant =
+    sanitizeTextValue(req?.webAuthProfile?.tenantKey, 120) ||
+    sanitizeTextValue(req?.webAuthProfile?.tenant, 120) ||
     sanitizeTextValue(req?.webAuthProfile?.tenantId, 120) ||
     sanitizeTextValue(req?.webAuthProfile?.organizationId, 120) ||
-    sanitizeTextValue(req?.webAuthProfile?.orgId, 120);
-  const hostnameTenant = sanitizeTextValue(req?.hostname, 120);
-  return normalizeAssistantScopeTenantKey(explicitHeaderTenant || fallbackHeaderTenant || profileTenant || hostnameTenant);
+    sanitizeTextValue(req?.webAuthProfile?.orgId, 120) ||
+    sanitizeTextValue(req?.webAuthProfile?.workspaceId, 120);
+
+  // Security boundary: tenant for scope isolation must come from trusted auth profile only.
+  // Client-supplied tenant headers are intentionally ignored to prevent namespace spoofing.
+  return normalizeAssistantScopeTenantKey(profileTenant);
 }
 
 function parseAssistantSessionScopeStoreCount(rawValue) {
@@ -5577,6 +6242,11 @@ async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId)
       return null;
     }
 
+    if (normalizedScope.scopeEstablished !== true) {
+      recordAssistantSessionScopeMetricMiss(performanceObservability);
+      return null;
+    }
+
     recordAssistantSessionScopeMetricHit(performanceObservability);
     return normalizedScope;
   } catch (error) {
@@ -5586,14 +6256,19 @@ async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId)
   }
 }
 
-async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, rawScope) {
+async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, rawScope, options = {}) {
   const scopeStoragePayload = buildAssistantScopeStoragePayload(rawScope);
   if (!scopeStoragePayload || !pool) {
-    return;
+    return {
+      applied: false,
+      stale: false,
+      clientMessageSeq: normalizeAssistantClientMessageSeq(options?.clientMessageSeq),
+    };
   }
 
   const { scope, scopeJson, scopeBytes, truncated } = scopeStoragePayload;
   const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
+  const clientMessageSeq = normalizeAssistantClientMessageSeq(options?.clientMessageSeq);
   const expiresAt = new Date(Date.now() + ASSISTANT_SESSION_SCOPE_TTL_MS).toISOString();
   let client = null;
 
@@ -5602,30 +6277,81 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
     client = await pool.connect();
     await client.query("BEGIN");
 
-    await client.query(
-      `
-        INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
-          cache_key,
-          tenant_key,
-          user_key,
-          session_key,
-          scope,
-          scope_bytes,
-          updated_at,
-          expires_at
-        )
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW(), $7::timestamptz)
-        ON CONFLICT (cache_key) DO UPDATE
-        SET tenant_key = EXCLUDED.tenant_key,
-            user_key = EXCLUDED.user_key,
-            session_key = EXCLUDED.session_key,
-            scope = EXCLUDED.scope,
-            scope_bytes = EXCLUDED.scope_bytes,
-            updated_at = NOW(),
-            expires_at = EXCLUDED.expires_at
-      `,
-      [identity.cacheKey, identity.tenantKey, identity.userKey, identity.sessionKey, scopeJson, scopeBytes, expiresAt],
-    );
+    const upsertResult =
+      clientMessageSeq > 0
+        ? await client.query(
+            `
+              INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
+                cache_key,
+                tenant_key,
+                user_key,
+                session_key,
+                scope,
+                last_seq,
+                scope_bytes,
+                updated_at,
+                expires_at
+              )
+              VALUES ($1, $2, $3, $4, $5::jsonb, $6::bigint, $7, NOW(), $8::timestamptz)
+              ON CONFLICT (cache_key) DO UPDATE
+              SET tenant_key = EXCLUDED.tenant_key,
+                  user_key = EXCLUDED.user_key,
+                  session_key = EXCLUDED.session_key,
+                  scope = EXCLUDED.scope,
+                  last_seq = EXCLUDED.last_seq,
+                  scope_bytes = EXCLUDED.scope_bytes,
+                  updated_at = NOW(),
+                  expires_at = EXCLUDED.expires_at
+              WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq < EXCLUDED.last_seq
+            `,
+            [
+              identity.cacheKey,
+              identity.tenantKey,
+              identity.userKey,
+              identity.sessionKey,
+              scopeJson,
+              clientMessageSeq,
+              scopeBytes,
+              expiresAt,
+            ],
+          )
+        : await client.query(
+            `
+              INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
+                cache_key,
+                tenant_key,
+                user_key,
+                session_key,
+                scope,
+                last_seq,
+                scope_bytes,
+                updated_at,
+                expires_at
+              )
+              VALUES ($1, $2, $3, $4, $5::jsonb, 0, $6, NOW(), $7::timestamptz)
+              ON CONFLICT (cache_key) DO UPDATE
+              SET tenant_key = EXCLUDED.tenant_key,
+                  user_key = EXCLUDED.user_key,
+                  session_key = EXCLUDED.session_key,
+                  scope = EXCLUDED.scope,
+                  last_seq = EXCLUDED.last_seq,
+                  scope_bytes = EXCLUDED.scope_bytes,
+                  updated_at = NOW(),
+                  expires_at = EXCLUDED.expires_at
+              WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq <= 0
+            `,
+            [identity.cacheKey, identity.tenantKey, identity.userKey, identity.sessionKey, scopeJson, scopeBytes, expiresAt],
+          );
+
+    const applied = parseAssistantSessionScopeStoreCount(upsertResult?.rowCount) > 0;
+    if (!applied) {
+      await client.query("COMMIT");
+      return {
+        applied: false,
+        stale: clientMessageSeq > 0,
+        clientMessageSeq,
+      };
+    }
 
     const perUserMaintenance = await pruneAssistantSessionScopeStoreForUser(identity, client);
     const maintenance = await pruneAssistantSessionScopeStore(client);
@@ -5642,6 +6368,11 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
         `[assistant][scope-store] scope payload truncated to ${scope.clientComparables.length} clients for user=${identity.userKey} session=${identity.sessionKey}`,
       );
     }
+    return {
+      applied: true,
+      stale: false,
+      clientMessageSeq,
+    };
   } catch (error) {
     if (client) {
       try {
@@ -5652,6 +6383,11 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
     }
     recordAssistantSessionScopeMetricError(performanceObservability, error);
     console.warn(`[assistant][scope-store] upsert failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
+    return {
+      applied: false,
+      stale: false,
+      clientMessageSeq,
+    };
   } finally {
     if (client) {
       client.release();
@@ -5659,32 +6395,101 @@ async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSession
   }
 }
 
-async function clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId) {
+async function clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, options = {}) {
+  const clientMessageSeq = normalizeAssistantClientMessageSeq(options?.clientMessageSeq);
   if (!pool) {
     recordAssistantSessionScopeMetricSize(performanceObservability, 0);
     recordAssistantSessionScopeMetricBytes(performanceObservability, 0);
-    return;
+    return {
+      applied: false,
+      stale: false,
+      clientMessageSeq,
+    };
   }
 
   const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
   try {
     await ensureDatabaseReady();
-    await pool.query(
-      `
-        DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
-        WHERE cache_key = $1
-      `,
-      [identity.cacheKey],
-    );
+    let applied = false;
+
+    if (clientMessageSeq > 0) {
+      const tombstonePayload = buildAssistantScopeClearTombstonePayload();
+      if (!tombstonePayload) {
+        return {
+          applied: false,
+          stale: false,
+          clientMessageSeq,
+        };
+      }
+
+      const expiresAt = new Date(Date.now() + ASSISTANT_SESSION_SCOPE_TTL_MS).toISOString();
+      const clearResult = await pool.query(
+        `
+          INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
+            cache_key,
+            tenant_key,
+            user_key,
+            session_key,
+            scope,
+            last_seq,
+            scope_bytes,
+            updated_at,
+            expires_at
+          )
+          VALUES ($1, $2, $3, $4, $5::jsonb, $6::bigint, $7, NOW(), $8::timestamptz)
+          ON CONFLICT (cache_key) DO UPDATE
+          SET tenant_key = EXCLUDED.tenant_key,
+              user_key = EXCLUDED.user_key,
+              session_key = EXCLUDED.session_key,
+              scope = EXCLUDED.scope,
+              last_seq = EXCLUDED.last_seq,
+              scope_bytes = EXCLUDED.scope_bytes,
+              updated_at = NOW(),
+              expires_at = EXCLUDED.expires_at
+          WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq < EXCLUDED.last_seq
+        `,
+        [
+          identity.cacheKey,
+          identity.tenantKey,
+          identity.userKey,
+          identity.sessionKey,
+          tombstonePayload.scopeJson,
+          clientMessageSeq,
+          tombstonePayload.scopeBytes,
+          expiresAt,
+        ],
+      );
+      applied = parseAssistantSessionScopeStoreCount(clearResult?.rowCount) > 0;
+    } else {
+      const clearResult = await pool.query(
+        `
+          DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
+          WHERE cache_key = $1
+        `,
+        [identity.cacheKey],
+      );
+      applied = parseAssistantSessionScopeStoreCount(clearResult?.rowCount) > 0;
+    }
+
     const maintenance = await pruneAssistantSessionScopeStore(pool);
     recordAssistantSessionScopeMetricSize(performanceObservability, maintenance.size);
     recordAssistantSessionScopeMetricBytes(performanceObservability, maintenance.totalBytes);
     if (maintenance.evictions > 0) {
       recordAssistantSessionScopeMetricEvictions(performanceObservability, maintenance.evictions);
     }
+    return {
+      applied,
+      stale: clientMessageSeq > 0 && !applied,
+      clientMessageSeq,
+    };
   } catch (error) {
     recordAssistantSessionScopeMetricError(performanceObservability, error);
     console.warn(`[assistant][scope-store] clear failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
+    return {
+      applied: false,
+      stale: false,
+      clientMessageSeq,
+    };
   }
 }
 
@@ -5703,6 +6508,108 @@ function hasAssistantScopeReferenceInMessage(normalizedMessage) {
     );
 
   return hasExplicitEnglishReference || hasExplicitRussianReference;
+}
+
+function resolveAssistantScopeSourceMetadata(options = {}) {
+  const explicitPersisted = options?.explicitPersisted === true;
+  const mentionEphemeral = options?.mentionEphemeral === true;
+
+  if (explicitPersisted) {
+    return {
+      scopeSource: "explicit",
+      scopePersisted: true,
+      scopeEphemeralSource: "none",
+    };
+  }
+
+  if (mentionEphemeral) {
+    return {
+      scopeSource: "none",
+      scopePersisted: false,
+      scopeEphemeralSource: "mention",
+    };
+  }
+
+  return {
+    scopeSource: "none",
+    scopePersisted: false,
+    scopeEphemeralSource: "none",
+  };
+}
+
+function hasAssistantExplicitClientListIntent(normalizedMessage) {
+  if (!normalizedMessage) {
+    return false;
+  }
+
+  const hasExplicitEnglishListIntent =
+    /\b(?:show|list|find|get|display)\b\s+(?:all\s+|the\s+|me\s+|new\s+|overdue\s+){0,3}(?:clients?|records?|contracts?|debtors?)\b/i.test(
+      normalizedMessage,
+    );
+  const hasExplicitRussianListIntent =
+    /(?:^|[\s,.;:!?()«»"'`])(?:покажи|выведи|список|найди|отобрази)\s+(?:всех\s+|мне\s+|новых\s+|просроченных\s+){0,3}(?:клиент(?:ов|а)?|запис(?:и|ей)|договор(?:ы|а)?|должник(?:ов|а)?)(?=$|[\s,.;:!?()«»"'`])/i.test(
+      normalizedMessage,
+    );
+
+  return hasExplicitEnglishListIntent || hasExplicitRussianListIntent;
+}
+
+function shouldAssistantPreferFreshScopeIntent(intentProfile) {
+  if (!intentProfile?.wantsScopeReference) {
+    return false;
+  }
+
+  if (intentProfile.hasExplicitClientListIntent === true) {
+    return true;
+  }
+
+  if (!intentProfile.parsedDateRange) {
+    return false;
+  }
+
+  return (
+    intentProfile.wantsTop ||
+    intentProfile.wantsNewClients ||
+    intentProfile.wantsFirstPayment ||
+    intentProfile.wantsStoppedPaying ||
+    intentProfile.wantsOverdue ||
+    intentProfile.wantsWrittenOff ||
+    intentProfile.wantsNotFullyPaid ||
+    intentProfile.wantsFullyPaid ||
+    intentProfile.wantsLatestPayment ||
+    intentProfile.wantsAnomaly ||
+    intentProfile.wantsCallList
+  );
+}
+
+const ASSISTANT_INTENT_PRIORITY_TABLE = Object.freeze([
+  Object.freeze({ rank: 1, key: "help", branch: "wantsHelp" }),
+  Object.freeze({ rank: 2, key: "context_reset", branch: "wantsContextReset" }),
+  Object.freeze({ rank: 3, key: "scope_follow_up", branch: "executeAssistantScopeFollowUpReply" }),
+  Object.freeze({ rank: 4, key: "manager_compare", branch: "wantsCompare + wantsManager + 2 manager matches" }),
+  Object.freeze({ rank: 5, key: "client_range_list_scope", branch: "shouldListClientsByRange" }),
+  Object.freeze({ rank: 6, key: "new_clients", branch: "wantsNewClients" }),
+  Object.freeze({ rank: 7, key: "first_payment", branch: "wantsFirstPayment" }),
+  Object.freeze({ rank: 8, key: "revenue", branch: "wantsRevenue" }),
+  Object.freeze({ rank: 9, key: "debt_dynamics", branch: "wantsDebtDynamics" }),
+  Object.freeze({ rank: 10, key: "stopped_paying", branch: "wantsStoppedPaying" }),
+  Object.freeze({ rank: 11, key: "anomaly", branch: "wantsAnomaly / anomaly hints" }),
+  Object.freeze({ rank: 12, key: "call_list", branch: "wantsCallList" }),
+  Object.freeze({ rank: 13, key: "latest_payment", branch: "wantsLatestPayment" }),
+  Object.freeze({ rank: 14, key: "missing_fields", branch: "wantsWithout/wantsWith with manager/company/notes" }),
+  Object.freeze({ rank: 15, key: "manager_scope", branch: "primaryManager scoped handlers" }),
+  Object.freeze({ rank: 16, key: "company_scope", branch: "primaryCompany scoped handler" }),
+  Object.freeze({ rank: 17, key: "manager_ranking", branch: "wantsManager + (top/count/summary/per)" }),
+  Object.freeze({ rank: 18, key: "top_metrics", branch: "wantsTop with debt/contract/paid" }),
+  Object.freeze({ rank: 19, key: "status_filters", branch: "overdue/written_off/fully_paid/not_fully_paid" }),
+  Object.freeze({ rank: 20, key: "threshold_filters", branch: "comparator + amountThreshold + metric" }),
+  Object.freeze({ rank: 21, key: "summary_metrics", branch: "count/avg/max/percent/summary totals" }),
+  Object.freeze({ rank: 22, key: "client_lookup", branch: "strong match or clarify for client lookup" }),
+  Object.freeze({ rank: 23, key: "fallback_summary", branch: "summary/help fallback" }),
+]);
+
+function getAssistantIntentPriorityTable() {
+  return ASSISTANT_INTENT_PRIORITY_TABLE;
 }
 
 function tokenizeAssistantText(rawValue) {
@@ -5811,15 +6718,6 @@ function getAssistantMonthStartTimestamp(timestamp) {
 
   const date = new Date(timestamp);
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
-}
-
-function getAssistantLastDayOfMonthTimestamp(timestamp) {
-  if (!Number.isFinite(timestamp)) {
-    return null;
-  }
-
-  const date = new Date(timestamp);
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0);
 }
 
 function getAssistantWeekStartTimestamp(timestamp) {
@@ -6479,25 +7377,6 @@ function buildAssistantTopDebtRows(records, limit = 5) {
   });
 
   return rows.slice(0, Math.max(1, Math.min(limit, 20)));
-}
-
-function buildAssistantTopDebtReply(records, isRussian) {
-  const rows = buildAssistantTopDebtRows(records, 5);
-  if (!rows.length) {
-    return isRussian ? "Клиентов с положительным остатком долга не найдено." : "No clients with active debt were found.";
-  }
-
-  const lines = [isRussian ? "Топ-5 должников:" : "Top 5 debtors:"];
-  rows.forEach((row, index) => {
-    const manager = getAssistantRecordManagerName(row.record);
-    const statusLabel = getAssistantStatusLabel(row.status, isRussian);
-    const managerChunk = manager ? (isRussian ? `, менеджер: ${manager}` : `, manager: ${manager}`) : "";
-    lines.push(
-      `${index + 1}. ${getAssistantRecordDisplayName(row.record)} - ${formatAssistantMoney(row.debt)} (${statusLabel}${managerChunk})`,
-    );
-  });
-
-  return lines.join("\n");
 }
 
 function buildAssistantStatusReply(records, statusType, isRussian) {
@@ -8445,10 +9324,292 @@ function buildAssistantStoppedPayingAfterDateReply(rows, cutoffTimestamp, isRuss
   return lines.join("\n");
 }
 
-function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = null, preparedData = null) {
+function buildAssistantIntentProfile(message) {
   const normalizedMessage = normalizeAssistantSearchText(message);
   const isRussian = /[а-яё]/i.test(normalizedMessage);
-  const suggestions = getAssistantDefaultSuggestions(isRussian);
+  const wantsTop = /(top|largest|biggest|топ|крупн|наибольш|больш|rating|rank|рейтинг)/i.test(normalizedMessage);
+  const parsedDateRange = parseAssistantDateRangeFromMessage(message);
+
+  const profile = {
+    normalizedMessage,
+    isRussian,
+    suggestions: getAssistantDefaultSuggestions(isRussian),
+    wantsHelp: /(help|what can you do|commands?|подсказ|что уме|помощ|команд|пример)/i.test(normalizedMessage),
+    wantsClientLookup: /(client|clients|клиент|клиенты|show|покаж|найд|search|find|карточк|lookup|фамил|имя)/i.test(
+      normalizedMessage,
+    ),
+    wantsOverdue: /(overdue|late|просроч)/i.test(normalizedMessage),
+    wantsWrittenOff: /(written[\s-]*off|write[\s-]*off|списан|списано|списанн)/i.test(normalizedMessage),
+    wantsFullyPaid: /(fully[\s-]*paid|paid[\s-]*off|полностью|полност|закрыт|оплачен)/i.test(normalizedMessage),
+    wantsNotFullyPaid: /(not\s+fully\s+paid|не\s+полностью\s+оплачен|неоплачен)/i.test(normalizedMessage),
+    wantsDebt: /(debt|balance|future payment|future payments|долг|баланс|остат)/i.test(normalizedMessage),
+    wantsDebtorsWord: /(debtor|debtors|должник|должников)/i.test(normalizedMessage),
+    wantsTop,
+    wantsSummary: /(summary|overview|overall|totals?|итог|свод|общ|всего)/i.test(normalizedMessage),
+    wantsCount: /(how many|count|сколько|колич|number of)/i.test(normalizedMessage),
+    wantsAverage: /(average|avg|средн)/i.test(normalizedMessage),
+    wantsPercent: /(percent|percentage|процент)/i.test(normalizedMessage),
+    wantsMax: /(largest|biggest|highest|max|максим|сам(ый|ая).*(больш|крупн))/i.test(normalizedMessage),
+    wantsContract: /(contract|contracts|договор|контракт)/i.test(normalizedMessage),
+    wantsPaid: /(paid|payments?|оплач|платеж|получено)/i.test(normalizedMessage),
+    wantsManager: /(manager|менеджер)/i.test(normalizedMessage),
+    wantsCompany: /(company|компан)/i.test(normalizedMessage),
+    wantsNotes: /(notes?|note|примечан|коммент|нотс)/i.test(normalizedMessage),
+    wantsLatestPayment: /(latest payment|last payment|последн.*плат|payment date|дата платеж)/i.test(normalizedMessage),
+    wantsWithout: /(without|без|none|пуст|не\s+указан|отсутств)/i.test(normalizedMessage),
+    wantsWith: /(\bwith\b|есть|имеет|заполнен)/i.test(normalizedMessage),
+    wantsCompare: /(compare|сравни|versus|vs|против)/i.test(normalizedMessage),
+    wantsAnomaly: /(anomal|ошиб|аномал|некоррект|проверь|inconsisten|mismatch)/i.test(normalizedMessage),
+    wantsCallList: /(call list|обзвон|позвон|follow[\s-]*up)/i.test(normalizedMessage),
+    wantsRevenue:
+      /(revenue|выручк|cash flow)/i.test(normalizedMessage) ||
+      (/(собрано|collected|поступлен|доход)/i.test(normalizedMessage) &&
+        /(by|по|period|период|week|недел|month|месяц|day|день|динам)/i.test(normalizedMessage)),
+    wantsDebtDynamics: /(debt dynamics|debt movement|динам.*долг|измен.*долг)/i.test(normalizedMessage),
+    wantsNewClients: /(new clients?|нов(ых|ые).*(клиент|клиентов)|пришл.*клиент|создан.*клиент)/i.test(normalizedMessage),
+    wantsFirstPayment: /(first payment|перв.*плат(е|ё)ж|перв.*оплат)/i.test(normalizedMessage),
+    wantsByManager: /(by manager|по менеджер|по каждому менеджеру|каждого менеджера)/i.test(normalizedMessage),
+    wantsStoppedPaying: /(stopped paying|перестал.*плат|не плат.*после|нет платеж.*после)/i.test(normalizedMessage),
+    wantsMostRecent: /(most recent|newest|сам(ый|ая).*(последн|недавн))/i.test(normalizedMessage),
+    wantsOldest: /(oldest|earliest|сам(ый|ая).*(давн|ранн))/i.test(normalizedMessage),
+    wantsRecentWindow: /(in the last|за последн|в последн|within)/i.test(normalizedMessage),
+    wantsNoOverdue: /(no overdue|without overdue|без просроч|нет просроч|overdue 0)/i.test(normalizedMessage),
+    wantsZeroBalance: /(zero balance|balance 0|нулев|баланс 0|долг 0)/i.test(normalizedMessage),
+    wantsNegativeHint: /(negative|отрицател)/i.test(normalizedMessage),
+    wantsPaidGtContractHint:
+      /(paid.*(more|over|greater|больше|выше).*(contract|договор|контракт)|оплач.*(больше|выше).*(договор|контракт))/i.test(
+        normalizedMessage,
+      ),
+    hasExplicitClientListIntent: hasAssistantExplicitClientListIntent(normalizedMessage),
+    wantsScopeReference: hasAssistantScopeReferenceInMessage(normalizedMessage),
+    wantsContextReset: /(reset context|clear context|forget context|сбрось контекст|очисти контекст|забудь контекст)/i.test(
+      normalizedMessage,
+    ),
+    comparator: detectAssistantComparator(normalizedMessage),
+    parsedDateRange,
+  };
+
+  profile.topLimit = extractAssistantTopLimit(message, profile.wantsTop ? 5 : 10);
+  profile.dayRange = profile.wantsOverdue ? extractAssistantDayRange(message) : null;
+  profile.dayThreshold = extractAssistantDayThreshold(message, 30);
+  profile.amountThreshold = extractAssistantAmountThreshold(message);
+  profile.periodGranularity = resolveAssistantGranularity(message, parsedDateRange);
+  profile.wantsPeriodBreakdown = /(by week|by month|by day|по недел|по месяц|по дням|динам|trend)/i.test(normalizedMessage);
+  profile.wantsPaymentSummary =
+    profile.wantsPaid || profile.wantsRevenue || /(сумм|денег|money|amount|total paid|total amount|общая сумма)/i.test(normalizedMessage);
+  profile.prefersFreshScopeIntent = shouldAssistantPreferFreshScopeIntent(profile);
+
+  return profile;
+}
+
+function buildAssistantReplyRuntimeData(message, visibleRecords, preparedData, intentProfile) {
+  const cachedPreparedData = preparedData && typeof preparedData === "object" ? preparedData : null;
+  const analyzedRows = Array.isArray(cachedPreparedData?.analyzedRows)
+    ? cachedPreparedData.analyzedRows
+    : buildAssistantAnalyzedRows(visibleRecords);
+  const managerEntries = Array.isArray(cachedPreparedData?.managerEntries)
+    ? cachedPreparedData.managerEntries
+    : buildAssistantDistinctEntityEntries(analyzedRows, "manager");
+  const companyEntries = Array.isArray(cachedPreparedData?.companyEntries)
+    ? cachedPreparedData.companyEntries
+    : buildAssistantDistinctEntityEntries(analyzedRows, "company");
+  const managerMatches = findAssistantEntityMatchesInMessage(message, managerEntries, 3);
+  const companyMatches = findAssistantEntityMatchesInMessage(message, companyEntries, 2);
+  const primaryManager = managerMatches[0] || null;
+  const secondaryManager = managerMatches[1] || null;
+  const primaryCompany = companyMatches[0] || null;
+
+  const needsPaymentEvents =
+    intentProfile.wantsRevenue ||
+    intentProfile.wantsDebtDynamics ||
+    intentProfile.wantsFirstPayment ||
+    intentProfile.wantsNewClients ||
+    intentProfile.wantsScopeReference ||
+    (intentProfile.wantsClientLookup && Boolean(intentProfile.parsedDateRange));
+  let paymentEvents = [];
+  if (needsPaymentEvents) {
+    if (Array.isArray(cachedPreparedData?.paymentEvents)) {
+      paymentEvents = cachedPreparedData.paymentEvents;
+    } else {
+      paymentEvents = buildAssistantPaymentEvents(visibleRecords);
+      if (cachedPreparedData && cachedPreparedData.paymentEvents === null) {
+        cachedPreparedData.paymentEvents = paymentEvents;
+      }
+    }
+  }
+
+  return {
+    analyzedRows,
+    paymentEvents,
+    primaryManager,
+    secondaryManager,
+    primaryCompany,
+  };
+}
+
+function executeAssistantScopeFollowUpReply(intentProfile, sessionScope, runtimeData, respond) {
+  if (!intentProfile.wantsScopeReference) {
+    return null;
+  }
+
+  const activeScope = normalizeAssistantScopePayload(sessionScope);
+  if (!activeScope || !activeScope.clientComparables.length || activeScope.scopeEstablished !== true) {
+    return respond(
+      intentProfile.isRussian
+        ? "Не вижу сохраненного контекста списка клиентов. Сначала сделайте базовый запрос (например: покажи клиентов за последнюю неделю)."
+        : "I cannot find a saved client-list context. First run a base query (for example: show clients for the last week).",
+    );
+  }
+
+  const scopedRows = buildAssistantScopedRowsByComparable(runtimeData.analyzedRows, activeScope.clientComparables);
+  if (!scopedRows.length) {
+    return respond(
+      intentProfile.isRussian
+        ? "Контекст найден, но клиенты из него сейчас не попали в ваш видимый срез данных."
+        : "Context was found, but those clients are not visible in your current data scope.",
+    );
+  }
+
+  const scopeRange = intentProfile.parsedDateRange || activeScope.range || null;
+  const scopedEventsInRange = filterAssistantPaymentEventsByComparable(runtimeData.paymentEvents, activeScope.clientComparables, scopeRange);
+  const scopedEventsAllTime = filterAssistantPaymentEventsByComparable(runtimeData.paymentEvents, activeScope.clientComparables);
+
+  if (intentProfile.wantsNewClients || intentProfile.wantsFirstPayment) {
+    if (!scopeRange) {
+      return respond(
+        intentProfile.isRussian
+          ? "Для первого платежа по текущему контексту уточните период."
+          : "Please provide a date range for first-payment analytics in the current context.",
+      );
+    }
+
+    return respond(
+      buildAssistantFirstPaymentsInRangeReply(
+        scopedRows,
+        scopedEventsAllTime,
+        scopeRange,
+        intentProfile.isRussian,
+        intentProfile.topLimit,
+        intentProfile.wantsByManager || intentProfile.wantsManager,
+      ),
+      true,
+      buildAssistantScopeFromRows(scopedRows, scopeRange),
+    );
+  }
+
+  if (intentProfile.wantsPaymentSummary) {
+    if (intentProfile.wantsPeriodBreakdown) {
+      const rangeForRevenue =
+        scopeRange ||
+        buildAssistantDateRange(
+          getAssistantCurrentUtcDayStart() - 29 * ASSISTANT_DAY_IN_MS,
+          getAssistantCurrentUtcDayStart(),
+          "default_30_days",
+        );
+      return respond(
+        buildAssistantRevenueByPeriodReply(
+          scopedEventsAllTime,
+          rangeForRevenue,
+          intentProfile.isRussian,
+          intentProfile.periodGranularity,
+          40,
+        ),
+        true,
+        buildAssistantScopeFromRows(scopedRows, rangeForRevenue),
+      );
+    }
+
+    return respond(
+      buildAssistantScopePaymentsSummaryReply(scopedRows, scopedEventsInRange, scopeRange, intentProfile.isRussian),
+      true,
+      buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
+    );
+  }
+
+  if (intentProfile.wantsCount && !intentProfile.wantsDebt && !intentProfile.wantsDebtorsWord) {
+    return respond(
+      intentProfile.isRussian
+        ? `Клиентов в текущем контексте: ${scopedRows.length}`
+        : `Clients in the current context: ${scopedRows.length}`,
+      true,
+      buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
+    );
+  }
+
+  if (intentProfile.wantsDebt || intentProfile.wantsDebtorsWord) {
+    const metricKey = intentProfile.wantsCount ? "debt_clients_count" : "total_to_collect";
+    return respond(
+      buildAssistantSingleMetricReply(scopedRows, metricKey, intentProfile.isRussian),
+      true,
+      buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
+    );
+  }
+
+  return respond(
+    intentProfile.isRussian
+      ? `Контекст найден: ${scopedRows.length} клиентов. Уточните метрику (сумма оплат, количество оплат, долг, первые платежи).`
+      : `Context found: ${scopedRows.length} clients. Specify metric (paid amount, payment count, debt, first payments).`,
+    true,
+    buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
+  );
+}
+
+function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = null, preparedData = null) {
+  // Keep branch order synchronized with ASSISTANT_INTENT_PRIORITY_TABLE.
+  const intentProfile = buildAssistantIntentProfile(message);
+  const {
+    normalizedMessage,
+    isRussian,
+    suggestions,
+    wantsHelp,
+    wantsClientLookup,
+    wantsOverdue,
+    wantsWrittenOff,
+    wantsFullyPaid,
+    wantsNotFullyPaid,
+    wantsDebt,
+    wantsDebtorsWord,
+    wantsTop,
+    wantsSummary,
+    wantsCount,
+    wantsAverage,
+    wantsPercent,
+    wantsMax,
+    wantsContract,
+    wantsPaid,
+    wantsManager,
+    wantsCompany,
+    wantsNotes,
+    wantsLatestPayment,
+    wantsWithout,
+    wantsWith,
+    wantsCompare,
+    wantsAnomaly,
+    wantsCallList,
+    wantsRevenue,
+    wantsDebtDynamics,
+    wantsNewClients,
+    wantsFirstPayment,
+    wantsByManager,
+    wantsStoppedPaying,
+    wantsMostRecent,
+    wantsOldest,
+    wantsRecentWindow,
+    wantsNoOverdue,
+    wantsZeroBalance,
+    wantsNegativeHint,
+    wantsPaidGtContractHint,
+    wantsContextReset,
+    hasExplicitClientListIntent,
+    prefersFreshScopeIntent,
+    comparator,
+    topLimit,
+    dayRange,
+    dayThreshold,
+    amountThreshold,
+    parsedDateRange,
+    periodGranularity,
+  } = intentProfile;
   const respond = (reply, handledByRules = true, scope = null) => {
     const normalizedScope = normalizeAssistantScopePayload(scope);
     return {
@@ -8472,57 +9633,6 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
     );
   }
 
-  const wantsHelp = /(help|what can you do|commands?|подсказ|что уме|помощ|команд|пример)/i.test(normalizedMessage);
-  const wantsClientLookup = /(client|clients|клиент|клиенты|show|покаж|найд|search|find|карточк|lookup|фамил|имя)/i.test(
-    normalizedMessage,
-  );
-  const wantsOverdue = /(overdue|late|просроч)/i.test(normalizedMessage);
-  const wantsWrittenOff = /(written[\s-]*off|write[\s-]*off|списан|списано|списанн)/i.test(normalizedMessage);
-  const wantsFullyPaid = /(fully[\s-]*paid|paid[\s-]*off|полностью|полност|закрыт|оплачен)/i.test(normalizedMessage);
-  const wantsNotFullyPaid = /(not\s+fully\s+paid|не\s+полностью\s+оплачен|неоплачен)/i.test(normalizedMessage);
-  const wantsDebt = /(debt|balance|future payment|future payments|долг|баланс|остат)/i.test(normalizedMessage);
-  const wantsDebtorsWord = /(debtor|debtors|должник|должников)/i.test(normalizedMessage);
-  const wantsTop = /(top|largest|biggest|топ|крупн|наибольш|больш|rating|rank|рейтинг)/i.test(normalizedMessage);
-  const wantsSummary = /(summary|overview|overall|totals?|итог|свод|общ|всего)/i.test(normalizedMessage);
-  const wantsCount = /(how many|count|сколько|колич|number of)/i.test(normalizedMessage);
-  const wantsAverage = /(average|avg|средн)/i.test(normalizedMessage);
-  const wantsPercent = /(percent|percentage|процент)/i.test(normalizedMessage);
-  const wantsMax = /(largest|biggest|highest|max|максим|сам(ый|ая).*(больш|крупн))/i.test(normalizedMessage);
-  const wantsContract = /(contract|contracts|договор|контракт)/i.test(normalizedMessage);
-  const wantsPaid = /(paid|payments?|оплач|платеж|получено)/i.test(normalizedMessage);
-  const wantsManager = /(manager|менеджер)/i.test(normalizedMessage);
-  const wantsCompany = /(company|компан)/i.test(normalizedMessage);
-  const wantsNotes = /(notes?|note|примечан|коммент|нотс)/i.test(normalizedMessage);
-  const wantsLatestPayment = /(latest payment|last payment|последн.*плат|payment date|дата платеж)/i.test(normalizedMessage);
-  const wantsWithout = /(without|без|none|пуст|не\s+указан|отсутств)/i.test(normalizedMessage);
-  const wantsWith = /(\bwith\b|есть|имеет|заполнен)/i.test(normalizedMessage);
-  const wantsCompare = /(compare|сравни|versus|vs|против)/i.test(normalizedMessage);
-  const wantsAnomaly = /(anomal|ошиб|аномал|некоррект|проверь|inconsisten|mismatch)/i.test(normalizedMessage);
-  const wantsCallList = /(call list|обзвон|позвон|follow[\s-]*up)/i.test(normalizedMessage);
-  const wantsRevenue =
-    /(revenue|выручк|cash flow)/i.test(normalizedMessage) ||
-    (/(собрано|collected|поступлен|доход)/i.test(normalizedMessage) &&
-      /(by|по|period|период|week|недел|month|месяц|day|день|динам)/i.test(normalizedMessage));
-  const wantsDebtDynamics = /(debt dynamics|debt movement|динам.*долг|измен.*долг)/i.test(normalizedMessage);
-  const wantsNewClients = /(new clients?|нов(ых|ые).*(клиент|клиентов)|пришл.*клиент|создан.*клиент)/i.test(normalizedMessage);
-  const wantsFirstPayment = /(first payment|перв.*плат(е|ё)ж|перв.*оплат)/i.test(normalizedMessage);
-  const wantsByManager = /(by manager|по менеджер|по каждому менеджеру|каждого менеджера)/i.test(normalizedMessage);
-  const wantsStoppedPaying = /(stopped paying|перестал.*плат|не плат.*после|нет платеж.*после)/i.test(normalizedMessage);
-  const wantsMostRecent = /(most recent|newest|сам(ый|ая).*(последн|недавн))/i.test(normalizedMessage);
-  const wantsOldest = /(oldest|earliest|сам(ый|ая).*(давн|ранн))/i.test(normalizedMessage);
-  const wantsRecentWindow = /(in the last|за последн|в последн|within)/i.test(normalizedMessage);
-  const wantsNoOverdue = /(no overdue|without overdue|без просроч|нет просроч|overdue 0)/i.test(normalizedMessage);
-  const wantsZeroBalance = /(zero balance|balance 0|нулев|баланс 0|долг 0)/i.test(normalizedMessage);
-  const wantsNegativeHint = /(negative|отрицател)/i.test(normalizedMessage);
-  const wantsPaidGtContractHint =
-    /(paid.*(more|over|greater|больше|выше).*(contract|договор|контракт)|оплач.*(больше|выше).*(договор|контракт))/i.test(
-      normalizedMessage,
-    );
-  const wantsScopeReference = hasAssistantScopeReferenceInMessage(normalizedMessage);
-  const wantsContextReset = /(reset context|clear context|forget context|сбрось контекст|очисти контекст|забудь контекст)/i.test(
-    normalizedMessage,
-  );
-
   if (wantsHelp) {
     return respond(buildAssistantHelpReply(isRussian, visibleRecords.length));
   }
@@ -8539,167 +9649,43 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
     );
   }
 
-  const cachedPreparedData = preparedData && typeof preparedData === "object" ? preparedData : null;
-  const analyzedRows = Array.isArray(cachedPreparedData?.analyzedRows)
-    ? cachedPreparedData.analyzedRows
-    : buildAssistantAnalyzedRows(visibleRecords);
-  const managerEntries = Array.isArray(cachedPreparedData?.managerEntries)
-    ? cachedPreparedData.managerEntries
-    : buildAssistantDistinctEntityEntries(analyzedRows, "manager");
-  const companyEntries = Array.isArray(cachedPreparedData?.companyEntries)
-    ? cachedPreparedData.companyEntries
-    : buildAssistantDistinctEntityEntries(analyzedRows, "company");
-  const managerMatches = findAssistantEntityMatchesInMessage(message, managerEntries, 3);
-  const companyMatches = findAssistantEntityMatchesInMessage(message, companyEntries, 2);
-  const primaryManager = managerMatches[0] || null;
-  const secondaryManager = managerMatches[1] || null;
-  const primaryCompany = companyMatches[0] || null;
-
-  const comparator = detectAssistantComparator(normalizedMessage);
-  const topLimit = extractAssistantTopLimit(message, wantsTop ? 5 : 10);
-  const dayRange = wantsOverdue ? extractAssistantDayRange(message) : null;
-  const dayThreshold = extractAssistantDayThreshold(message, 30);
-  const amountThreshold = extractAssistantAmountThreshold(message);
-  const parsedDateRange = parseAssistantDateRangeFromMessage(message);
-  const periodGranularity = resolveAssistantGranularity(message, parsedDateRange);
-  const activeScope = normalizeAssistantScopePayload(sessionScope);
-  const needsPaymentEvents =
-    wantsRevenue ||
-    wantsDebtDynamics ||
-    wantsFirstPayment ||
-    wantsNewClients ||
-    wantsScopeReference ||
-    (wantsClientLookup && Boolean(parsedDateRange));
-  let paymentEvents = [];
-  if (needsPaymentEvents) {
-    if (Array.isArray(cachedPreparedData?.paymentEvents)) {
-      paymentEvents = cachedPreparedData.paymentEvents;
-    } else {
-      paymentEvents = buildAssistantPaymentEvents(visibleRecords);
-      if (cachedPreparedData && cachedPreparedData.paymentEvents === null) {
-        cachedPreparedData.paymentEvents = paymentEvents;
-      }
-    }
+  const runtimeData = buildAssistantReplyRuntimeData(message, visibleRecords, preparedData, intentProfile);
+  const scopeReplyPayload = prefersFreshScopeIntent
+    ? null
+    : executeAssistantScopeFollowUpReply(intentProfile, sessionScope, runtimeData, respond);
+  if (scopeReplyPayload) {
+    return scopeReplyPayload;
   }
-
-  if (wantsScopeReference) {
-    if (!activeScope || !activeScope.clientComparables.length || activeScope.scopeEstablished !== true) {
-      return respond(
-        isRussian
-          ? "Не вижу сохраненного контекста списка клиентов. Сначала сделайте базовый запрос (например: покажи клиентов за последнюю неделю)."
-          : "I cannot find a saved client-list context. First run a base query (for example: show clients for the last week).",
-      );
-    }
-
-    const scopedRows = buildAssistantScopedRowsByComparable(analyzedRows, activeScope.clientComparables);
-    if (!scopedRows.length) {
-      return respond(
-        isRussian
-          ? "Контекст найден, но клиенты из него сейчас не попали в ваш видимый срез данных."
-          : "Context was found, but those clients are not visible in your current data scope.",
-      );
-    }
-
-    const scopeRange = parsedDateRange || activeScope.range || null;
-    const scopedEventsInRange = filterAssistantPaymentEventsByComparable(paymentEvents, activeScope.clientComparables, scopeRange);
-    const scopedEventsAllTime = filterAssistantPaymentEventsByComparable(paymentEvents, activeScope.clientComparables);
-    const wantsPeriodBreakdown = /(by week|by month|by day|по недел|по месяц|по дням|динам|trend)/i.test(normalizedMessage);
-    const wantsPaymentSummary = wantsPaid || wantsRevenue || /(сумм|денег|money|amount|total paid|total amount|общая сумма)/i.test(normalizedMessage);
-
-    if (wantsNewClients || wantsFirstPayment) {
-      if (!scopeRange) {
-        return respond(
-          isRussian
-            ? "Для первого платежа по текущему контексту уточните период."
-            : "Please provide a date range for first-payment analytics in the current context.",
-        );
-      }
-
-      return respond(
-        buildAssistantFirstPaymentsInRangeReply(
-          scopedRows,
-          scopedEventsAllTime,
-          scopeRange,
-          isRussian,
-          topLimit,
-          wantsByManager || wantsManager,
-        ),
-        true,
-        buildAssistantScopeFromRows(scopedRows, scopeRange),
-      );
-    }
-
-    if (wantsPaymentSummary) {
-      if (wantsPeriodBreakdown) {
-        const rangeForRevenue =
-          scopeRange ||
-          buildAssistantDateRange(
-            getAssistantCurrentUtcDayStart() - 29 * ASSISTANT_DAY_IN_MS,
-            getAssistantCurrentUtcDayStart(),
-            "default_30_days",
-          );
-        return respond(
-          buildAssistantRevenueByPeriodReply(scopedEventsAllTime, rangeForRevenue, isRussian, periodGranularity, 40),
-          true,
-          buildAssistantScopeFromRows(scopedRows, rangeForRevenue),
-        );
-      }
-
-      return respond(
-        buildAssistantScopePaymentsSummaryReply(scopedRows, scopedEventsInRange, scopeRange, isRussian),
-        true,
-        buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
-      );
-    }
-
-    if (wantsCount && !wantsDebt && !wantsDebtorsWord) {
-      return respond(
-        isRussian
-          ? `Клиентов в текущем контексте: ${scopedRows.length}`
-          : `Clients in the current context: ${scopedRows.length}`,
-        true,
-        buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
-      );
-    }
-
-    if (wantsDebt || wantsDebtorsWord) {
-      const metricKey = wantsCount ? "debt_clients_count" : "total_to_collect";
-      return respond(
-        buildAssistantSingleMetricReply(scopedRows, metricKey, isRussian),
-        true,
-        buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
-      );
-    }
-
-    return respond(
-      isRussian
-        ? `Контекст найден: ${scopedRows.length} клиентов. Уточните метрику (сумма оплат, количество оплат, долг, первые платежи).`
-        : `Context found: ${scopedRows.length} clients. Specify metric (paid amount, payment count, debt, first payments).`,
-      true,
-      buildAssistantScopeFromRows(scopedRows, scopeRange || activeScope.range),
-    );
-  }
+  const { analyzedRows, paymentEvents, primaryManager, secondaryManager, primaryCompany } = runtimeData;
 
   if (wantsCompare && wantsManager && primaryManager && secondaryManager) {
     return respond(buildAssistantManagerComparisonReply(analyzedRows, primaryManager, secondaryManager, isRussian));
   }
 
-  const shouldListClientsByRange =
+  const shouldForceFreshClientRangeScope =
+    prefersFreshScopeIntent &&
+    hasExplicitClientListIntent &&
     wantsClientLookup &&
     parsedDateRange &&
     !primaryManager &&
-    !primaryCompany &&
-    !wantsTop &&
-    !wantsSummary &&
-    !wantsDebt &&
-    !wantsOverdue &&
-    !wantsAnomaly &&
-    !wantsCallList &&
-    !wantsStoppedPaying &&
-    !wantsNewClients &&
-    !wantsFirstPayment &&
-    !wantsRevenue &&
-    !wantsDebtDynamics;
+    !primaryCompany;
+  const shouldListClientsByRange =
+    shouldForceFreshClientRangeScope ||
+    (wantsClientLookup &&
+      parsedDateRange &&
+      !primaryManager &&
+      !primaryCompany &&
+      !wantsTop &&
+      !wantsSummary &&
+      !wantsDebt &&
+      !wantsOverdue &&
+      !wantsAnomaly &&
+      !wantsCallList &&
+      !wantsStoppedPaying &&
+      !wantsNewClients &&
+      !wantsFirstPayment &&
+      !wantsRevenue &&
+      !wantsDebtDynamics);
 
   if (shouldListClientsByRange) {
     const entries = buildAssistantClientsWithPaymentsInRangeEntries(paymentEvents, parsedDateRange);
@@ -9640,9 +10626,10 @@ async function requestOpenAiQuickBooksInsight(details) {
     throw createHttpError("OpenAI is not configured. Set OPENAI_API_KEY to use Ask GPT.", 503, "openai_not_configured");
   }
 
+  const input = buildQuickBooksTransactionInsightPrompt(details);
   const requestBody = {
     model: OPENAI_MODEL,
-    input: buildQuickBooksTransactionInsightPrompt(details),
+    input,
     max_output_tokens: Math.min(OPENAI_ASSISTANT_MAX_OUTPUT_TOKENS, 900),
   };
 
@@ -9667,7 +10654,6 @@ async function requestOpenAiQuickBooksInsight(details) {
     if (abortController.signal.aborted) {
       throw createHttpError(`OpenAI request timed out after ${OPENAI_ASSISTANT_TIMEOUT_MS}ms.`, 504, "openai_timeout");
     }
-
     throw createHttpError(
       `OpenAI request failed: ${sanitizeTextValue(error?.message, 320) || "network error"}.`,
       503,
@@ -10116,13 +11102,11 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
   }
 
   let password = normalizeWebAuthConfigValue(payload.password);
-  let temporaryPassword = "";
   if (password && password.length < 8) {
     throw createHttpError("Password must be at least 8 characters.", 400);
   }
   if (!password) {
     password = generateWebAuthTemporaryPassword();
-    temporaryPassword = password;
   }
 
   const departmentId = normalizeWebAuthDepartmentId(payload.departmentId || payload.department);
@@ -10150,7 +11134,6 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     roleId,
     teamUsernames,
     mustChangePassword: true,
-    temporaryPassword,
   };
 }
 
@@ -10459,43 +11442,22 @@ function requireOwnerOrAdminAccess(message = "Owner or admin access is required.
   };
 }
 
-function normalizeRateLimitIpAddress(rawValue) {
-  let candidate = sanitizeTextValue(rawValue, 200);
-  if (!candidate) {
-    return "";
-  }
-
-  // Normalize mapped localhost/IPv4 forms.
-  if (candidate === "::1") {
-    return "127.0.0.1";
-  }
-  if (candidate.startsWith("::ffff:")) {
-    candidate = candidate.slice("::ffff:".length);
-  }
-
-  // Remove IPv6 zone id (`fe80::1%en0`) and IPv4 port suffix (`1.2.3.4:1234`).
-  const zoneIndex = candidate.indexOf("%");
-  if (zoneIndex >= 0) {
-    candidate = candidate.slice(0, zoneIndex);
-  }
-  if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(candidate)) {
-    candidate = candidate.replace(/:\d+$/, "");
-  }
-
-  if (candidate.startsWith("[") && candidate.endsWith("]")) {
-    candidate = candidate.slice(1, -1);
-  }
-
-  return sanitizeTextValue(candidate, 160);
-}
-
 function resolveRateLimitClientIp(req) {
-  const directIp = normalizeRateLimitIpAddress(req?.ip);
+  const directIp = sanitizeTextValue(req?.ip, 160);
   if (directIp) {
     return directIp;
   }
 
-  const socketIp = normalizeRateLimitIpAddress(req?.socket?.remoteAddress || req?.connection?.remoteAddress);
+  const forwardedRaw = sanitizeTextValue(req?.headers?.["x-forwarded-for"], 400);
+  if (forwardedRaw) {
+    const firstForwarded = forwardedRaw.split(",")[0]?.trim();
+    const normalizedForwarded = sanitizeTextValue(firstForwarded, 160);
+    if (normalizedForwarded) {
+      return normalizedForwarded;
+    }
+  }
+
+  const socketIp = sanitizeTextValue(req?.socket?.remoteAddress || req?.connection?.remoteAddress, 160);
   if (socketIp) {
     return socketIp;
   }
@@ -10507,54 +11469,9 @@ function normalizeRateLimitUsername(rawValue) {
   return normalizeWebAuthUsername(rawValue || "");
 }
 
-function normalizeRateLimitStoreKey(rawValue, maxLength = 260) {
-  return sanitizeTextValue(rawValue, maxLength);
-}
-
-function readRateLimitNumeric(value, fallback = 0) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return fallback;
-  }
-  return numeric;
-}
-
 function buildRateLimitRetryAfterSeconds(retryAfterMs) {
   const normalizedMs = Number.isFinite(retryAfterMs) ? Math.max(0, retryAfterMs) : 0;
   return Math.max(1, Math.ceil(normalizedMs / 1000));
-}
-
-function buildRateLimitExpiryIso(nowMs, ttlMs) {
-  const normalizedNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
-  const normalizedTtlMs = Math.max(1000, Number.isFinite(ttlMs) ? ttlMs : 60_000);
-  return new Date(normalizedNowMs + normalizedTtlMs).toISOString();
-}
-
-function shouldUseSharedRateLimitStore(nowMs = Date.now()) {
-  if (!RATE_LIMIT_ENABLED) {
-    return false;
-  }
-  if (RATE_LIMIT_STORE_MODE !== "postgres") {
-    return false;
-  }
-  if (!pool) {
-    return false;
-  }
-  return nowMs >= rateLimitDbUnavailableUntilMs;
-}
-
-function markSharedRateLimitStoreFailure(error, operation = "unknown") {
-  const nowMs = Date.now();
-  const previousUnavailableUntilMs = rateLimitDbUnavailableUntilMs;
-  rateLimitDbUnavailableUntilMs = Math.max(rateLimitDbUnavailableUntilMs, nowMs + RATE_LIMIT_DB_ERROR_COOLDOWN_MS);
-  if (nowMs >= previousUnavailableUntilMs) {
-    console.warn(
-      `[rate-limit] shared store unavailable (${operation}), falling back to memory for ${Math.round(
-        RATE_LIMIT_DB_ERROR_COOLDOWN_MS / 1000,
-      )}s:`,
-      sanitizeTextValue(error?.message, 320) || "unknown error",
-    );
-  }
 }
 
 function maybeSweepRateLimitStores(nowMs = Date.now()) {
@@ -10563,51 +11480,36 @@ function maybeSweepRateLimitStores(nowMs = Date.now()) {
   }
 
   rateLimitSweepCounter += 1;
-  if (rateLimitSweepCounter % RATE_LIMIT_SWEEP_EVERY_REQUESTS === 0) {
-    const requestBucketExpiryFloorMs = 3 * 60 * 60 * 1000;
-    for (const [key, entry] of rateLimitRequestBuckets) {
-      const staleWindowMs = Math.max(entry.windowMs || 0, entry.blockMs || 0, requestBucketExpiryFloorMs);
-      if ((entry.lastSeenMs || 0) + staleWindowMs < nowMs) {
-        rateLimitRequestBuckets.delete(key);
-      }
-    }
-
-    const failureEntryExpiryFloorMs = 3 * 60 * 60 * 1000;
-    for (const [key, entry] of loginFailureByAccountKey) {
-      const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
-      if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
-        loginFailureByAccountKey.delete(key);
-      }
-    }
-
-    for (const [key, entry] of loginFailureByIpAccountKey) {
-      const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
-      if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
-        loginFailureByIpAccountKey.delete(key);
-      }
-    }
-
-    trimRateLimitStore(rateLimitRequestBuckets);
-    trimRateLimitStore(loginFailureByAccountKey);
-    trimRateLimitStore(loginFailureByIpAccountKey);
+  if (rateLimitSweepCounter % RATE_LIMIT_SWEEP_EVERY_REQUESTS !== 0) {
+    return;
   }
 
-  if (
-    shouldUseSharedRateLimitStore(nowMs) &&
-    rateLimitSweepCounter % RATE_LIMIT_DB_SWEEP_EVERY_REQUESTS === 0 &&
-    !rateLimitDbSweepInFlight &&
-    nowMs - rateLimitDbLastSweepStartedAtMs >= 30 * 1000
-  ) {
-    rateLimitDbSweepInFlight = true;
-    rateLimitDbLastSweepStartedAtMs = nowMs;
-    void sweepSharedRateLimitStores(nowMs)
-      .catch((error) => {
-        markSharedRateLimitStoreFailure(error, "db_sweep");
-      })
-      .finally(() => {
-        rateLimitDbSweepInFlight = false;
-      });
+  const requestBucketExpiryFloorMs = 3 * 60 * 60 * 1000;
+  for (const [key, entry] of rateLimitRequestBuckets) {
+    const staleWindowMs = Math.max(entry.windowMs || 0, entry.blockMs || 0, requestBucketExpiryFloorMs);
+    if ((entry.lastSeenMs || 0) + staleWindowMs < nowMs) {
+      rateLimitRequestBuckets.delete(key);
+    }
   }
+
+  const failureEntryExpiryFloorMs = 3 * 60 * 60 * 1000;
+  for (const [key, entry] of loginFailureByAccountKey) {
+    const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
+    if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
+      loginFailureByAccountKey.delete(key);
+    }
+  }
+
+  for (const [key, entry] of loginFailureByIpAccountKey) {
+    const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
+    if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
+      loginFailureByIpAccountKey.delete(key);
+    }
+  }
+
+  trimRateLimitStore(rateLimitRequestBuckets);
+  trimRateLimitStore(loginFailureByAccountKey);
+  trimRateLimitStore(loginFailureByIpAccountKey);
 }
 
 function trimRateLimitStore(store) {
@@ -10626,20 +11528,7 @@ function trimRateLimitStore(store) {
   }
 }
 
-async function sweepSharedRateLimitStores(nowMs = Date.now()) {
-  if (!shouldUseSharedRateLimitStore(nowMs)) {
-    return;
-  }
-
-  await ensureDatabaseReady();
-  const nowIso = new Date(nowMs).toISOString();
-  await Promise.all([
-    pool.query(`DELETE FROM ${RATE_LIMIT_BUCKETS_TABLE} WHERE expires_at < $1`, [nowIso]),
-    pool.query(`DELETE FROM ${LOGIN_FAILURES_TABLE} WHERE expires_at < $1`, [nowIso]),
-  ]);
-}
-
-function consumeRateLimitBucketInMemory(scope, subject, profile, nowMs = Date.now()) {
+function consumeRateLimitBucket(scope, subject, profile, nowMs = Date.now()) {
   if (!profile || !subject) {
     return {
       allowed: true,
@@ -10700,176 +11589,6 @@ function consumeRateLimitBucketInMemory(scope, subject, profile, nowMs = Date.no
   };
 }
 
-async function consumeRateLimitBucketInPostgres(scope, subject, profile, nowMs = Date.now()) {
-  if (!profile || !subject) {
-    return {
-      allowed: true,
-      retryAfterMs: 0,
-    };
-  }
-
-  await ensureDatabaseReady();
-  const windowMs = Math.max(1_000, Number(profile.windowMs) || 60_000);
-  const maxHits = Math.max(1, Number(profile.maxHits) || 1);
-  const blockMs = Math.max(windowMs, Number(profile.blockMs) || windowMs);
-  const key = normalizeRateLimitStoreKey(`${scope}:${subject}`, 512);
-  if (!key) {
-    return {
-      allowed: true,
-      retryAfterMs: 0,
-    };
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const selectResult = await client.query(
-      `
-        SELECT
-          window_start_ms,
-          hits,
-          blocked_until_ms,
-          window_ms,
-          block_ms,
-          last_seen_ms
-        FROM ${RATE_LIMIT_BUCKETS_TABLE}
-        WHERE bucket_key = $1
-        FOR UPDATE
-      `,
-      [key],
-    );
-
-    let entry;
-    if (selectResult.rows.length) {
-      const row = selectResult.rows[0];
-      entry = {
-        windowStartMs: readRateLimitNumeric(row.window_start_ms, nowMs),
-        hits: readRateLimitNumeric(row.hits, 0),
-        blockedUntilMs: readRateLimitNumeric(row.blocked_until_ms, 0),
-        lastSeenMs: readRateLimitNumeric(row.last_seen_ms, nowMs),
-        windowMs: readRateLimitNumeric(row.window_ms, windowMs),
-        blockMs: readRateLimitNumeric(row.block_ms, blockMs),
-      };
-    } else {
-      entry = {
-        windowStartMs: nowMs,
-        hits: 0,
-        blockedUntilMs: 0,
-        lastSeenMs: nowMs,
-        windowMs,
-        blockMs,
-      };
-    }
-
-    let result;
-    if (entry.blockedUntilMs > nowMs) {
-      entry.lastSeenMs = nowMs;
-      result = {
-        allowed: false,
-        retryAfterMs: Math.max(0, entry.blockedUntilMs - nowMs),
-      };
-    } else {
-      if (nowMs - entry.windowStartMs >= windowMs) {
-        entry.windowStartMs = nowMs;
-        entry.hits = 0;
-        entry.blockedUntilMs = 0;
-      }
-
-      entry.hits += 1;
-      entry.lastSeenMs = nowMs;
-      entry.windowMs = windowMs;
-      entry.blockMs = blockMs;
-
-      if (entry.hits > maxHits) {
-        entry.blockedUntilMs = nowMs + blockMs;
-        result = {
-          allowed: false,
-          retryAfterMs: Math.max(0, entry.blockedUntilMs - nowMs),
-        };
-      } else {
-        result = {
-          allowed: true,
-          retryAfterMs: 0,
-        };
-      }
-    }
-
-    const expiresAtIso = buildRateLimitExpiryIso(nowMs, Math.max(windowMs, blockMs, 3 * 60 * 60 * 1000));
-    await client.query(
-      `
-        INSERT INTO ${RATE_LIMIT_BUCKETS_TABLE} (
-          bucket_key,
-          scope,
-          subject,
-          window_start_ms,
-          hits,
-          blocked_until_ms,
-          window_ms,
-          block_ms,
-          last_seen_ms,
-          expires_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        ON CONFLICT (bucket_key)
-        DO UPDATE SET
-          scope = EXCLUDED.scope,
-          subject = EXCLUDED.subject,
-          window_start_ms = EXCLUDED.window_start_ms,
-          hits = EXCLUDED.hits,
-          blocked_until_ms = EXCLUDED.blocked_until_ms,
-          window_ms = EXCLUDED.window_ms,
-          block_ms = EXCLUDED.block_ms,
-          last_seen_ms = EXCLUDED.last_seen_ms,
-          expires_at = EXCLUDED.expires_at
-      `,
-      [
-        key,
-        normalizeRateLimitStoreKey(scope, 160),
-        normalizeRateLimitStoreKey(subject, 260),
-        Math.trunc(entry.windowStartMs),
-        Math.max(0, Math.trunc(entry.hits)),
-        Math.max(0, Math.trunc(entry.blockedUntilMs)),
-        Math.max(1000, Math.trunc(windowMs)),
-        Math.max(1000, Math.trunc(blockMs)),
-        Math.max(0, Math.trunc(entry.lastSeenMs)),
-        expiresAtIso,
-      ],
-    );
-
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // ignore rollback errors
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-async function consumeRateLimitBucket(scope, subject, profile, nowMs = Date.now()) {
-  if (!profile || !subject) {
-    return {
-      allowed: true,
-      retryAfterMs: 0,
-    };
-  }
-
-  if (!shouldUseSharedRateLimitStore(nowMs)) {
-    return consumeRateLimitBucketInMemory(scope, subject, profile, nowMs);
-  }
-
-  try {
-    return await consumeRateLimitBucketInPostgres(scope, subject, profile, nowMs);
-  } catch (error) {
-    markSharedRateLimitStoreFailure(error, "consume_bucket");
-    return consumeRateLimitBucketInMemory(scope, subject, profile, nowMs);
-  }
-}
-
 function sendRateLimitResponse(req, res, options = {}) {
   const retryAfterMs = Math.max(0, Number(options.retryAfterMs) || 0);
   const retryAfterSec = buildRateLimitRetryAfterSeconds(retryAfterMs);
@@ -10897,7 +11616,7 @@ function sendRateLimitResponse(req, res, options = {}) {
   });
 }
 
-async function enforceRateLimit(req, res, options = {}) {
+function enforceRateLimit(req, res, options = {}) {
   if (!RATE_LIMIT_ENABLED) {
     return true;
   }
@@ -10908,7 +11627,7 @@ async function enforceRateLimit(req, res, options = {}) {
   const ip = resolveRateLimitClientIp(req);
 
   if (options.ipProfile) {
-    const ipResult = await consumeRateLimitBucket(`${scope}:ip`, ip, options.ipProfile, nowMs);
+    const ipResult = consumeRateLimitBucket(`${scope}:ip`, ip, options.ipProfile, nowMs);
     if (!ipResult.allowed) {
       sendRateLimitResponse(req, res, {
         retryAfterMs: ipResult.retryAfterMs,
@@ -10925,7 +11644,7 @@ async function enforceRateLimit(req, res, options = {}) {
     const sessionUsername = normalizeRateLimitUsername(req.webAuthUser);
     const userKey = sessionUsername || fallbackUsername;
     if (userKey) {
-      const userResult = await consumeRateLimitBucket(`${scope}:user`, userKey, options.userProfile, nowMs);
+      const userResult = consumeRateLimitBucket(`${scope}:user`, userKey, options.userProfile, nowMs);
       if (!userResult.allowed) {
         sendRateLimitResponse(req, res, {
           retryAfterMs: userResult.retryAfterMs,
@@ -10939,6 +11658,216 @@ async function enforceRateLimit(req, res, options = {}) {
   }
 
   return true;
+}
+
+function parseTimestampMs(value) {
+  if (!value) {
+    return 0;
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return 0;
+  }
+  return timestamp;
+}
+
+function shouldUseMiniRuntimeStateSharedStore() {
+  return MINI_RUNTIME_STATE_USE_POSTGRES && Boolean(pool);
+}
+
+async function maybeSweepMiniRuntimeStateSharedStore() {
+  if (!shouldUseMiniRuntimeStateSharedStore()) {
+    return;
+  }
+
+  miniRuntimeStateSweepCounter += 1;
+  if (miniRuntimeStateSweepCounter % MINI_RUNTIME_STATE_SWEEP_EVERY_REQUESTS !== 0) {
+    return;
+  }
+
+  try {
+    await ensureDatabaseReady();
+    await pool.query(`DELETE FROM ${MINI_RUNTIME_STATE_TABLE} WHERE expires_at <= NOW()`);
+  } catch (error) {
+    console.warn("[mini runtime state] Failed to sweep expired rows:", sanitizeTextValue(error?.message, 220));
+  }
+}
+
+function buildMiniRateLimitScopeKey(scope, subjectType) {
+  const safeScope = sanitizeTextValue(scope, 80) || "api";
+  const safeSubjectType = sanitizeTextValue(subjectType, 16) || "ip";
+  return `${MINI_RUNTIME_STATE_SCOPE_RATE_LIMIT}:${safeScope}:${safeSubjectType}`;
+}
+
+async function consumeMiniRateLimitBucketShared(scope, subjectType, subject, profile, nowMs = Date.now()) {
+  if (!profile || !subject) {
+    return {
+      allowed: true,
+      retryAfterMs: 0,
+    };
+  }
+
+  await ensureDatabaseReady();
+  const windowMs = Math.max(1_000, Number(profile.windowMs) || 60_000);
+  const maxHits = Math.max(1, Number(profile.maxHits) || 1);
+  const blockMs = Math.max(windowMs, Number(profile.blockMs) || windowMs);
+  const safeSubject = sanitizeTextValue(subject, 220);
+  if (!safeSubject) {
+    return {
+      allowed: true,
+      retryAfterMs: 0,
+    };
+  }
+
+  const scopeKey = buildMiniRateLimitScopeKey(scope, subjectType);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      scopeKey,
+      safeSubject,
+    ]);
+
+    const existingResult = await client.query(
+      `
+        SELECT hits, window_started_at, blocked_until
+        FROM ${MINI_RUNTIME_STATE_TABLE}
+        WHERE scope = $1
+          AND entry_key = $2
+          AND expires_at > NOW()
+        FOR UPDATE
+      `,
+      [scopeKey, safeSubject],
+    );
+
+    let hits = 0;
+    let windowStartMs = nowMs;
+    let blockedUntilMs = 0;
+    if (existingResult.rows.length) {
+      const row = existingResult.rows[0] || {};
+      hits = Math.max(0, Number.parseInt(row.hits, 10) || 0);
+      const parsedWindowStartedAt = parseTimestampMs(row.window_started_at);
+      if (parsedWindowStartedAt > 0) {
+        windowStartMs = parsedWindowStartedAt;
+      }
+      blockedUntilMs = parseTimestampMs(row.blocked_until);
+    }
+
+    let allowed = true;
+    let retryAfterMs = 0;
+    if (blockedUntilMs > nowMs) {
+      allowed = false;
+      retryAfterMs = blockedUntilMs - nowMs;
+    } else {
+      if (nowMs - windowStartMs >= windowMs) {
+        windowStartMs = nowMs;
+        hits = 0;
+        blockedUntilMs = 0;
+      }
+
+      hits += 1;
+      if (hits > maxHits) {
+        blockedUntilMs = nowMs + blockMs;
+        allowed = false;
+        retryAfterMs = blockedUntilMs - nowMs;
+      }
+    }
+
+    const expiresAtMs = Math.max(nowMs + windowMs * 2, blockedUntilMs, nowMs + 60_000);
+    await client.query(
+      `
+        INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
+          (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
+        VALUES
+          ($1, $2, 'rate_limit', $3, $4, $5, NULL, NULL, $6, NOW())
+        ON CONFLICT (scope, entry_key)
+        DO UPDATE SET
+          state = EXCLUDED.state,
+          hits = EXCLUDED.hits,
+          window_started_at = EXCLUDED.window_started_at,
+          blocked_until = EXCLUDED.blocked_until,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = NOW()
+      `,
+      [
+        scopeKey,
+        safeSubject,
+        hits,
+        new Date(windowStartMs).toISOString(),
+        blockedUntilMs > 0 ? new Date(blockedUntilMs).toISOString() : null,
+        new Date(expiresAtMs).toISOString(),
+      ],
+    );
+
+    await client.query("COMMIT");
+    return {
+      allowed,
+      retryAfterMs,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function enforceMiniRateLimit(req, res, options = {}) {
+  if (!RATE_LIMIT_ENABLED) {
+    return true;
+  }
+
+  if (!shouldUseMiniRuntimeStateSharedStore()) {
+    return enforceRateLimit(req, res, options);
+  }
+
+  await maybeSweepMiniRuntimeStateSharedStore();
+  const nowMs = Date.now();
+  const scope = sanitizeTextValue(options.scope, 80) || "api";
+  const ip = resolveRateLimitClientIp(req);
+
+  try {
+    if (options.ipProfile) {
+      const ipResult = await consumeMiniRateLimitBucketShared(scope, "ip", ip, options.ipProfile, nowMs);
+      if (!ipResult.allowed) {
+        sendRateLimitResponse(req, res, {
+          retryAfterMs: ipResult.retryAfterMs,
+          message: options.message,
+          code: options.code,
+          nextPath: options.nextPath,
+        });
+        return false;
+      }
+    }
+
+    if (options.userProfile) {
+      const fallbackUsername = normalizeRateLimitUsername(options.username || req.body?.username || req.query?.username || "");
+      const sessionUsername = normalizeRateLimitUsername(req.webAuthUser);
+      const userKey = sessionUsername || fallbackUsername;
+      if (userKey) {
+        const userResult = await consumeMiniRateLimitBucketShared(scope, "user", userKey, options.userProfile, nowMs);
+        if (!userResult.allowed) {
+          sendRateLimitResponse(req, res, {
+            retryAfterMs: userResult.retryAfterMs,
+            message: options.message,
+            code: options.code,
+            nextPath: options.nextPath,
+          });
+          return false;
+        }
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.warn("[mini rate limit] Shared store check failed, falling back to process-local limiter:", sanitizeTextValue(error?.message, 260));
+    return enforceRateLimit(req, res, options);
+  }
 }
 
 function readLoginFailureLock(entry, nowMs, policy) {
@@ -10995,213 +11924,7 @@ function clearLoginFailureEntry(store, key) {
   store.delete(key);
 }
 
-async function readLoginFailureLockFromStore(store, policyScope, key, policy, nowMs) {
-  if (!key) {
-    return 0;
-  }
-
-  if (!shouldUseSharedRateLimitStore(nowMs)) {
-    return readLoginFailureLock(store.get(key), nowMs, policy);
-  }
-
-  try {
-    await ensureDatabaseReady();
-    const result = await pool.query(
-      `
-        SELECT
-          last_attempt_ms,
-          locked_until_ms
-        FROM ${LOGIN_FAILURES_TABLE}
-        WHERE failure_key = $1
-          AND policy_scope = $2
-        LIMIT 1
-      `,
-      [key, policyScope],
-    );
-    if (!result.rows.length) {
-      return 0;
-    }
-
-    const row = result.rows[0];
-    const lockedUntilMs = readRateLimitNumeric(row.locked_until_ms, 0);
-    const lastAttemptMs = readRateLimitNumeric(row.last_attempt_ms, 0);
-
-    if (lockedUntilMs > nowMs) {
-      return lockedUntilMs - nowMs;
-    }
-    if (nowMs - lastAttemptMs > policy.windowMs) {
-      void pool
-        .query(
-          `
-            DELETE FROM ${LOGIN_FAILURES_TABLE}
-            WHERE failure_key = $1
-              AND policy_scope = $2
-          `,
-          [key, policyScope],
-        )
-        .catch((error) => {
-          markSharedRateLimitStoreFailure(error, "login_lock_cleanup");
-        });
-      return 0;
-    }
-    return 0;
-  } catch (error) {
-    markSharedRateLimitStoreFailure(error, "read_login_lock");
-    return readLoginFailureLock(store.get(key), nowMs, policy);
-  }
-}
-
-async function recordLoginFailureEntryInStore(store, policyScope, key, policy, nowMs) {
-  if (!key) {
-    return;
-  }
-
-  if (!shouldUseSharedRateLimitStore(nowMs)) {
-    recordLoginFailureEntry(store, key, policy, nowMs);
-    return;
-  }
-
-  try {
-    await ensureDatabaseReady();
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const selectResult = await client.query(
-        `
-          SELECT
-            first_attempt_ms,
-            last_attempt_ms,
-            failures,
-            locked_until_ms,
-            window_ms,
-            lock_ms
-          FROM ${LOGIN_FAILURES_TABLE}
-          WHERE failure_key = $1
-            AND policy_scope = $2
-          FOR UPDATE
-        `,
-        [key, policyScope],
-      );
-
-      let entry;
-      if (selectResult.rows.length) {
-        const row = selectResult.rows[0];
-        entry = {
-          firstAttemptMs: readRateLimitNumeric(row.first_attempt_ms, nowMs),
-          lastAttemptMs: readRateLimitNumeric(row.last_attempt_ms, nowMs),
-          failures: readRateLimitNumeric(row.failures, 0),
-          lockedUntilMs: readRateLimitNumeric(row.locked_until_ms, 0),
-          windowMs: readRateLimitNumeric(row.window_ms, policy.windowMs),
-          lockMs: readRateLimitNumeric(row.lock_ms, policy.lockMs),
-        };
-      } else {
-        entry = null;
-      }
-
-      const shouldResetWindow = !entry || nowMs - entry.firstAttemptMs > policy.windowMs;
-      const lockExpired = entry && entry.lockedUntilMs > 0 && entry.lockedUntilMs <= nowMs;
-      if (shouldResetWindow || lockExpired) {
-        entry = {
-          firstAttemptMs: nowMs,
-          lastAttemptMs: nowMs,
-          failures: 0,
-          lockedUntilMs: 0,
-          windowMs: policy.windowMs,
-          lockMs: policy.lockMs,
-        };
-      }
-
-      entry.failures += 1;
-      entry.lastAttemptMs = nowMs;
-      entry.windowMs = policy.windowMs;
-      entry.lockMs = policy.lockMs;
-      if (entry.failures >= policy.maxFailures) {
-        entry.lockedUntilMs = nowMs + policy.lockMs;
-      }
-
-      const expiresAtIso = buildRateLimitExpiryIso(nowMs, Math.max(policy.windowMs, policy.lockMs, 3 * 60 * 60 * 1000));
-      await client.query(
-        `
-          INSERT INTO ${LOGIN_FAILURES_TABLE} (
-            failure_key,
-            policy_scope,
-            first_attempt_ms,
-            last_attempt_ms,
-            failures,
-            locked_until_ms,
-            window_ms,
-            lock_ms,
-            expires_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-          ON CONFLICT (failure_key)
-          DO UPDATE SET
-            policy_scope = EXCLUDED.policy_scope,
-            first_attempt_ms = EXCLUDED.first_attempt_ms,
-            last_attempt_ms = EXCLUDED.last_attempt_ms,
-            failures = EXCLUDED.failures,
-            locked_until_ms = EXCLUDED.locked_until_ms,
-            window_ms = EXCLUDED.window_ms,
-            lock_ms = EXCLUDED.lock_ms,
-            expires_at = EXCLUDED.expires_at
-        `,
-        [
-          key,
-          policyScope,
-          Math.max(0, Math.trunc(entry.firstAttemptMs)),
-          Math.max(0, Math.trunc(entry.lastAttemptMs)),
-          Math.max(0, Math.trunc(entry.failures)),
-          Math.max(0, Math.trunc(entry.lockedUntilMs)),
-          Math.max(1000, Math.trunc(policy.windowMs)),
-          Math.max(1000, Math.trunc(policy.lockMs)),
-          expiresAtIso,
-        ],
-      );
-
-      await client.query("COMMIT");
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // ignore rollback errors
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    markSharedRateLimitStoreFailure(error, "record_login_failure");
-    recordLoginFailureEntry(store, key, policy, nowMs);
-  }
-}
-
-async function clearLoginFailureEntryInStore(store, policyScope, key) {
-  if (!key) {
-    return;
-  }
-
-  if (!shouldUseSharedRateLimitStore(Date.now())) {
-    clearLoginFailureEntry(store, key);
-    return;
-  }
-
-  try {
-    await ensureDatabaseReady();
-    await pool.query(
-      `
-        DELETE FROM ${LOGIN_FAILURES_TABLE}
-        WHERE failure_key = $1
-          AND policy_scope = $2
-      `,
-      [key, policyScope],
-    );
-  } catch (error) {
-    markSharedRateLimitStoreFailure(error, "clear_login_failure");
-    clearLoginFailureEntry(store, key);
-  }
-}
-
-async function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
+function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   if (!RATE_LIMIT_ENABLED) {
     return true;
   }
@@ -11209,7 +11932,7 @@ async function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   const normalizedUsername = normalizeRateLimitUsername(username);
   const ip = resolveRateLimitClientIp(req);
 
-  const isRateAllowed = await enforceRateLimit(req, res, {
+  const isRateAllowed = enforceRateLimit(req, res, {
     scope: "login",
     ipProfile: RATE_LIMIT_PROFILE_LOGIN_IP,
     userProfile: RATE_LIMIT_PROFILE_LOGIN_ACCOUNT,
@@ -11228,21 +11951,13 @@ async function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
 
   maybeSweepRateLimitStores();
   const nowMs = Date.now();
-  const accountKey = normalizeRateLimitStoreKey(`account:${normalizedUsername}`, 320);
-  const ipAccountKey = normalizeRateLimitStoreKey(`account-ip:${normalizedUsername}:${ip}`, 400);
-  const accountLockMs = await readLoginFailureLockFromStore(
-    loginFailureByAccountKey,
-    "account",
-    accountKey,
-    LOGIN_FAILURE_ACCOUNT_POLICY,
+  const accountKey = `account:${normalizedUsername}`;
+  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const accountLockMs = readLoginFailureLock(loginFailureByAccountKey.get(accountKey), nowMs, LOGIN_FAILURE_ACCOUNT_POLICY);
+  const ipAccountLockMs = readLoginFailureLock(
+    loginFailureByIpAccountKey.get(ipAccountKey),
     nowMs,
-  );
-  const ipAccountLockMs = await readLoginFailureLockFromStore(
-    loginFailureByIpAccountKey,
-    "account_ip",
-    ipAccountKey,
     LOGIN_FAILURE_IP_ACCOUNT_POLICY,
-    nowMs,
   );
   const retryAfterMs = Math.max(accountLockMs, ipAccountLockMs);
 
@@ -11259,7 +11974,7 @@ async function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   return true;
 }
 
-async function registerFailedLoginAttempt(req, username) {
+function registerFailedLoginAttempt(req, username) {
   if (!RATE_LIMIT_ENABLED) {
     return;
   }
@@ -11272,20 +11987,14 @@ async function registerFailedLoginAttempt(req, username) {
   maybeSweepRateLimitStores();
   const nowMs = Date.now();
   const ip = resolveRateLimitClientIp(req);
-  const accountKey = normalizeRateLimitStoreKey(`account:${normalizedUsername}`, 320);
-  const ipAccountKey = normalizeRateLimitStoreKey(`account-ip:${normalizedUsername}:${ip}`, 400);
+  const accountKey = `account:${normalizedUsername}`;
+  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
 
-  await recordLoginFailureEntryInStore(loginFailureByAccountKey, "account", accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
-  await recordLoginFailureEntryInStore(
-    loginFailureByIpAccountKey,
-    "account_ip",
-    ipAccountKey,
-    LOGIN_FAILURE_IP_ACCOUNT_POLICY,
-    nowMs,
-  );
+  recordLoginFailureEntry(loginFailureByAccountKey, accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
+  recordLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey, LOGIN_FAILURE_IP_ACCOUNT_POLICY, nowMs);
 }
 
-async function clearFailedLoginAttempts(req, username) {
+function clearFailedLoginAttempts(req, username) {
   if (!RATE_LIMIT_ENABLED) {
     return;
   }
@@ -11296,10 +12005,10 @@ async function clearFailedLoginAttempts(req, username) {
   }
 
   const ip = resolveRateLimitClientIp(req);
-  const accountKey = normalizeRateLimitStoreKey(`account:${normalizedUsername}`, 320);
-  const ipAccountKey = normalizeRateLimitStoreKey(`account-ip:${normalizedUsername}:${ip}`, 400);
-  await clearLoginFailureEntryInStore(loginFailureByAccountKey, "account", accountKey);
-  await clearLoginFailureEntryInStore(loginFailureByIpAccountKey, "account_ip", ipAccountKey);
+  const accountKey = `account:${normalizedUsername}`;
+  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  clearLoginFailureEntry(loginFailureByAccountKey, accountKey);
+  clearLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey);
 }
 
 function isPublicWebAuthPath(pathname) {
@@ -14242,32 +14951,24 @@ async function fetchGhlContactById(contactId) {
   }
 
   const encodedContactId = encodeURIComponent(normalizedContactId);
-  const queryVariants = [
-    {
-      locationId: GHL_LOCATION_ID,
-    },
-    {
-      location_id: GHL_LOCATION_ID,
-    },
-    {},
-  ];
-  const attempts = [];
-  for (const query of queryVariants) {
-    attempts.push(() =>
+  const attempts = [
+    () =>
       requestGhlApi(`/contacts/${encodedContactId}`, {
         method: "GET",
-        query,
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
         tolerateNotFound: true,
       }),
-    );
-    attempts.push(() =>
+    () =>
       requestGhlApi(`/contacts/${encodedContactId}/`, {
         method: "GET",
-        query,
+        query: {
+          locationId: GHL_LOCATION_ID,
+        },
         tolerateNotFound: true,
       }),
-    );
-  }
+  ];
 
   for (const attempt of attempts) {
     let response;
@@ -15344,29 +16045,6 @@ function parseGhlOpportunityTimestamp(...candidates) {
   return 0;
 }
 
-function normalizeGhlLeadContactDisplayName(rawValue, maxLength = 320) {
-  const value = sanitizeTextValue(rawValue, maxLength);
-  if (!value) {
-    return "";
-  }
-
-  const callWithAlexPrefixPattern = /^\s*call with alex\s*\|\s*/i;
-  if (!callWithAlexPrefixPattern.test(value)) {
-    return value;
-  }
-
-  const withoutPrefix = value.replace(callWithAlexPrefixPattern, "").trim();
-  if (!withoutPrefix) {
-    return value;
-  }
-
-  const firstSegment = withoutPrefix
-    .split("|")
-    .map((segment) => sanitizeTextValue(segment, maxLength))
-    .find(Boolean);
-  return sanitizeTextValue(firstSegment || withoutPrefix, maxLength) || value;
-}
-
 function resolveGhlLeadContactName(opportunity) {
   const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
   const firstName = sanitizeTextValue(
@@ -15379,7 +16057,7 @@ function resolveGhlLeadContactName(opportunity) {
   );
   const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
 
-  return normalizeGhlLeadContactDisplayName(
+  return (
     sanitizeTextValue(
       opportunity?.contactName ||
         opportunity?.customerName ||
@@ -15389,8 +16067,8 @@ function resolveGhlLeadContactName(opportunity) {
         nestedContact?.fullName ||
         nestedContact?.full_name,
       320,
-    ) || fullName,
-    320,
+    ) ||
+    fullName
   );
 }
 
@@ -15583,93 +16261,6 @@ function shouldResolveGhlLeadAssignedName(rawValue) {
   return looksLikeGhlIdentifier(value);
 }
 
-function extractTextFromGhlFieldCandidate(candidate, maxLength, preferredKeys = []) {
-  if (candidate === null || candidate === undefined) {
-    return "";
-  }
-
-  if (typeof candidate === "string" || typeof candidate === "number") {
-    return sanitizeTextValue(candidate, maxLength);
-  }
-
-  if (Array.isArray(candidate)) {
-    for (const item of candidate) {
-      const value = extractTextFromGhlFieldCandidate(item, maxLength, preferredKeys);
-      if (value) {
-        return value;
-      }
-    }
-    return "";
-  }
-
-  if (typeof candidate !== "object") {
-    return "";
-  }
-
-  const lookupKeys = [
-    ...preferredKeys,
-    "value",
-    "number",
-    "phone",
-    "phoneNumber",
-    "phone_number",
-    "mobile",
-    "email",
-    "emailAddress",
-    "email_address",
-    "address",
-    "name",
-  ];
-
-  for (const key of lookupKeys) {
-    const value = extractTextFromGhlFieldCandidate(candidate?.[key], maxLength, preferredKeys);
-    if (value) {
-      return value;
-    }
-  }
-
-  return "";
-}
-
-function isLikelyPhoneNumber(rawValue) {
-  const value = sanitizeTextValue(rawValue, 120);
-  if (!value) {
-    return false;
-  }
-
-  const digits = value.replace(/\D/g, "");
-  return digits.length >= 7;
-}
-
-function extractPhoneNumberFromText(rawValue) {
-  const value = sanitizeTextValue(rawValue, 500);
-  if (!value) {
-    return "";
-  }
-
-  const match = value.match(/(\+?\d[\d()\s-]{6,}\d)/);
-  if (!match || !match[1]) {
-    return "";
-  }
-
-  const candidate = sanitizeTextValue(match[1], 80);
-  return isLikelyPhoneNumber(candidate) ? candidate : "";
-}
-
-function extractEmailFromText(rawValue) {
-  const value = sanitizeTextValue(rawValue, 500);
-  if (!value) {
-    return "";
-  }
-
-  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  if (!match || !match[0]) {
-    return "";
-  }
-
-  return sanitizeTextValue(match[0], 320).toLowerCase();
-}
-
 function resolveGhlLeadPhone(opportunity) {
   const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
   const candidates = [
@@ -15679,48 +16270,16 @@ function resolveGhlLeadPhone(opportunity) {
     opportunity?.contactPhone,
     opportunity?.contact_phone,
     opportunity?.mobile,
-    opportunity?.phones,
-    opportunity?.phoneNumbers,
-    opportunity?.phone_numbers,
-    opportunity?.additionalPhones,
-    opportunity?.additional_phones,
     nestedContact?.phone,
     nestedContact?.phoneNumber,
     nestedContact?.phone_number,
     nestedContact?.mobile,
     nestedContact?.contactPhone,
     nestedContact?.contact_phone,
-    nestedContact?.phones,
-    nestedContact?.phoneNumbers,
-    nestedContact?.phone_numbers,
-    nestedContact?.additionalPhones,
-    nestedContact?.additional_phones,
   ];
 
   for (const candidate of candidates) {
-    const value = extractTextFromGhlFieldCandidate(candidate, 80, [
-      "phone",
-      "phoneNumber",
-      "phone_number",
-      "number",
-      "mobile",
-      "value",
-    ]);
-    if (isLikelyPhoneNumber(value)) {
-      return value;
-    }
-  }
-
-  const textCandidates = [
-    opportunity?.opportunityName,
-    opportunity?.title,
-    opportunity?.name,
-    opportunity?.contactName,
-    nestedContact?.name,
-    nestedContact?.fullName,
-  ];
-  for (const candidate of textCandidates) {
-    const value = extractPhoneNumberFromText(candidate);
+    const value = sanitizeTextValue(candidate, 80);
     if (value) {
       return value;
     }
@@ -15737,42 +16296,15 @@ function resolveGhlLeadEmail(opportunity) {
     opportunity?.email_address,
     opportunity?.contactEmail,
     opportunity?.contact_email,
-    opportunity?.emails,
-    opportunity?.emailAddresses,
-    opportunity?.email_addresses,
     nestedContact?.email,
     nestedContact?.emailAddress,
     nestedContact?.email_address,
     nestedContact?.contactEmail,
     nestedContact?.contact_email,
-    nestedContact?.emails,
-    nestedContact?.emailAddresses,
-    nestedContact?.email_addresses,
   ];
 
   for (const candidate of candidates) {
-    const value = extractTextFromGhlFieldCandidate(candidate, 320, [
-      "email",
-      "emailAddress",
-      "email_address",
-      "address",
-      "value",
-    ]);
-    if (value.includes("@")) {
-      return value.toLowerCase();
-    }
-  }
-
-  const textCandidates = [
-    opportunity?.opportunityName,
-    opportunity?.title,
-    opportunity?.name,
-    opportunity?.contactName,
-    nestedContact?.name,
-    nestedContact?.fullName,
-  ];
-  for (const candidate of textCandidates) {
-    const value = extractEmailFromText(candidate);
+    const value = sanitizeTextValue(candidate, 320);
     if (value) {
       return value;
     }
@@ -15885,15 +16417,14 @@ function normalizeGhlOpportunityLeadRow(rawOpportunity, source = "gohighlevel", 
     180,
   );
   const contactName = resolveGhlLeadContactName(rawOpportunity);
-  const rawOpportunityName = sanitizeTextValue(
+  const opportunityName = sanitizeTextValue(
     rawOpportunity?.opportunityName ||
       rawOpportunity?.title ||
       rawOpportunity?.opportunity_title ||
       rawOpportunity?.dealName ||
       rawOpportunity?.name,
     320,
-  );
-  const opportunityName = normalizeGhlLeadContactDisplayName(rawOpportunityName, 320) || contactName || leadId;
+  ) || contactName || leadId;
   const leadSource = sanitizeGhlLeadSourceForDisplay(resolveGhlLeadSource(rawOpportunity) || source);
   const leadType = resolveGhlLeadTypeFromSource(leadSource);
   const assignedTo = resolveGhlLeadAssignedTo(rawOpportunity);
@@ -16432,8 +16963,8 @@ function mergeGhlLeadRows(baseRow, patchRow) {
     ...base,
     leadId: sanitizeTextValue(base.leadId || patch.leadId, 180),
     contactId: sanitizeTextValue(base.contactId || patch.contactId, 180),
-    contactName: normalizeGhlLeadContactDisplayName(base.contactName || patch.contactName, 320),
-    opportunityName: normalizeGhlLeadContactDisplayName(base.opportunityName || patch.opportunityName, 320),
+    contactName: sanitizeTextValue(base.contactName || patch.contactName, 320),
+    opportunityName: sanitizeTextValue(base.opportunityName || patch.opportunityName, 320),
     leadType: sanitizeTextValue(base.leadType || patch.leadType, 120),
     pipelineId: sanitizeTextValue(base.pipelineId || patch.pipelineId, 180),
     pipelineName: sanitizeTextValue(base.pipelineName || patch.pipelineName, 320),
@@ -16470,15 +17001,13 @@ function mergeGhlLeadRows(baseRow, patchRow) {
   return merged;
 }
 
-async function enrichGhlLeadRows(rows, pipelineContext = null, options = {}) {
+async function enrichGhlLeadRows(rows, pipelineContext = null) {
   const sourceRows = Array.isArray(rows) ? rows : [];
   if (!sourceRows.length || !isGhlConfigured()) {
     return sourceRows;
   }
 
-  const requestedMaxRows = parsePositiveIntegerOrZero(options?.maxRows);
-  const maxRowsLimit = requestedMaxRows > 0 ? requestedMaxRows : GHL_LEADS_ENRICH_MAX_ROWS;
-  const maxRows = Math.min(sourceRows.length, maxRowsLimit);
+  const maxRows = Math.min(sourceRows.length, GHL_LEADS_ENRICH_MAX_ROWS);
   if (maxRows <= 0) {
     return sourceRows;
   }
@@ -16520,8 +17049,7 @@ async function enrichGhlLeadRows(rows, pipelineContext = null, options = {}) {
   const managerNameCache = new Map();
 
   let cursor = 0;
-  const requestedConcurrency = parsePositiveIntegerOrZero(options?.concurrency);
-  const workerCount = Math.max(1, Math.min(requestedConcurrency || GHL_LEADS_ENRICH_CONCURRENCY, maxRows, 16));
+  const workerCount = Math.min(GHL_LEADS_ENRICH_CONCURRENCY, maxRows);
   async function worker() {
     while (cursor < maxRows) {
       const currentIndex = cursor;
@@ -16567,7 +17095,7 @@ async function enrichGhlLeadRows(rows, pipelineContext = null, options = {}) {
           if (detailedContact && typeof detailedContact === "object") {
             const contactPatch = {
               contactId,
-              contactName: normalizeGhlLeadContactDisplayName(buildContactCandidateName(detailedContact), 320),
+              contactName: sanitizeTextValue(buildContactCandidateName(detailedContact), 320),
               assignedTo: resolveGhlLeadAssignedTo({ contact: detailedContact }),
               phone: resolveGhlLeadPhone({ contact: detailedContact }),
               email: resolveGhlLeadEmail({ contact: detailedContact }),
@@ -16787,8 +17315,8 @@ function normalizeGhlLeadRowForCache(row) {
   return {
     leadId,
     contactId: sanitizeTextValue(row?.contactId, 180),
-    contactName: normalizeGhlLeadContactDisplayName(row?.contactName, 320),
-    opportunityName: normalizeGhlLeadContactDisplayName(row?.opportunityName, 320),
+    contactName: sanitizeTextValue(row?.contactName, 320),
+    opportunityName: sanitizeTextValue(row?.opportunityName, 320),
     leadType: sanitizeTextValue(row?.leadType, 120),
     pipelineId: sanitizeTextValue(row?.pipelineId, 180),
     pipelineName: sanitizeTextValue(row?.pipelineName, 320),
@@ -16821,8 +17349,8 @@ function mapGhlLeadCacheRow(row) {
   return {
     leadId,
     contactId: sanitizeTextValue(row?.contact_id, 180),
-    contactName: normalizeGhlLeadContactDisplayName(row?.contact_name, 320),
-    opportunityName: normalizeGhlLeadContactDisplayName(row?.opportunity_name, 320),
+    contactName: sanitizeTextValue(row?.contact_name, 320),
+    opportunityName: sanitizeTextValue(row?.opportunity_name, 320),
     leadType: sanitizeTextValue(row?.lead_type, 120),
     pipelineId: sanitizeTextValue(row?.pipeline_id, 180),
     pipelineName: sanitizeTextValue(row?.pipeline_name, 320),
@@ -17546,116 +18074,8 @@ function toIsoTimestampFromNow(secondsFromNow) {
   return new Date(Date.now() + secondsFromNow * 1000).toISOString();
 }
 
-function deriveQuickBooksRefreshTokenEncryptionKey(rawKeySeed) {
-  const normalizedSeed = normalizeWebAuthConfigValue(rawKeySeed);
-  if (!normalizedSeed) {
-    return null;
-  }
-
-  return crypto.createHash("sha256").update(normalizedSeed, "utf8").digest();
-}
-
-function encryptQuickBooksRefreshTokenForStorage(refreshToken) {
-  const normalizedRefreshToken = sanitizeTextValue(refreshToken, 6000);
-  if (!normalizedRefreshToken || !QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY) {
-    return null;
-  }
-
-  const iv = crypto.randomBytes(QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_IV_LENGTH_BYTES);
-  const cipher = crypto.createCipheriv(
-    QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_ALGORITHM,
-    QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY,
-    iv,
-    {
-      authTagLength: QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_AUTH_TAG_LENGTH_BYTES,
-    },
-  );
-  const encryptedBuffer = Buffer.concat([
-    cipher.update(normalizedRefreshToken, "utf8"),
-    cipher.final(),
-  ]);
-  const authTag = cipher.getAuthTag();
-
-  return {
-    refreshTokenEncrypted: encryptedBuffer.toString("base64"),
-    refreshTokenIv: iv.toString("base64"),
-    refreshTokenAuthTag: authTag.toString("base64"),
-    refreshTokenKeyId: QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID,
-  };
-}
-
-function decryptQuickBooksRefreshTokenFromStorageRow(row) {
-  if (!row || !QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY) {
-    return "";
-  }
-
-  const refreshTokenEncrypted = sanitizeTextValue(row?.refresh_token_encrypted, 12000);
-  const refreshTokenIv = sanitizeTextValue(row?.refresh_token_iv, 200);
-  const refreshTokenAuthTag = sanitizeTextValue(row?.refresh_token_auth_tag, 200);
-  if (!refreshTokenEncrypted || !refreshTokenIv || !refreshTokenAuthTag) {
-    return "";
-  }
-
-  try {
-    const encryptedBuffer = Buffer.from(refreshTokenEncrypted, "base64");
-    const ivBuffer = Buffer.from(refreshTokenIv, "base64");
-    const authTagBuffer = Buffer.from(refreshTokenAuthTag, "base64");
-    const decipher = crypto.createDecipheriv(
-      QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_ALGORITHM,
-      QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY,
-      ivBuffer,
-      {
-        authTagLength: QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_AUTH_TAG_LENGTH_BYTES,
-      },
-    );
-    decipher.setAuthTag(authTagBuffer);
-    const decryptedBuffer = Buffer.concat([decipher.update(encryptedBuffer), decipher.final()]);
-    return sanitizeTextValue(decryptedBuffer.toString("utf8"), 6000);
-  } catch (error) {
-    console.warn(
-      "QuickBooks refresh token decrypt failed:",
-      sanitizeTextValue(error?.message, 220) || "Unknown error.",
-    );
-    return "";
-  }
-}
-
-function hasQuickBooksEncryptedRefreshToken(row) {
-  return Boolean(
-    sanitizeTextValue(row?.refresh_token_encrypted, 12000) &&
-      sanitizeTextValue(row?.refresh_token_iv, 200) &&
-      sanitizeTextValue(row?.refresh_token_auth_tag, 200),
-  );
-}
-
-function resolveQuickBooksRefreshTokenFromAuthStateRow(row) {
-  if (!row || typeof row !== "object") {
-    return "";
-  }
-
-  const encryptedToken = decryptQuickBooksRefreshTokenFromStorageRow(row);
-  if (encryptedToken) {
-    return encryptedToken;
-  }
-
-  return sanitizeTextValue(row?.refresh_token, 6000);
-}
-
-function shouldMigrateQuickBooksRefreshTokenRowToEncrypted(row) {
-  if (!row || typeof row !== "object" || !QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY) {
-    return false;
-  }
-
-  const plainToken = sanitizeTextValue(row?.refresh_token, 6000);
-  if (!plainToken) {
-    return false;
-  }
-
-  return !hasQuickBooksEncryptedRefreshToken(row);
-}
-
-async function persistQuickBooksRefreshTokenWithQueryable(queryable, tokenValue, refreshTokenExpiresAtIso = "") {
-  if (!queryable || typeof queryable.query !== "function") {
+async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIso = "") {
+  if (!pool) {
     return;
   }
 
@@ -17665,51 +18085,25 @@ async function persistQuickBooksRefreshTokenWithQueryable(queryable, tokenValue,
   }
 
   const normalizedRefreshTokenExpiresAt = sanitizeTextValue(refreshTokenExpiresAtIso, 80) || null;
-  const encryptedTokenPayload = encryptQuickBooksRefreshTokenForStorage(normalizedToken);
-  const legacyRefreshToken = encryptedTokenPayload ? "" : normalizedToken;
 
-  await queryable.query(
+  await ensureDatabaseReady();
+  await pool.query(
     `
       INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (
         id,
         refresh_token,
-        refresh_token_encrypted,
-        refresh_token_iv,
-        refresh_token_auth_tag,
-        refresh_token_key_id,
         refresh_token_expires_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, NOW())
+      VALUES ($1, $2, $3::timestamptz, NOW())
       ON CONFLICT (id)
       DO UPDATE SET
         refresh_token = EXCLUDED.refresh_token,
-        refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-        refresh_token_iv = EXCLUDED.refresh_token_iv,
-        refresh_token_auth_tag = EXCLUDED.refresh_token_auth_tag,
-        refresh_token_key_id = EXCLUDED.refresh_token_key_id,
         refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
         updated_at = NOW()
     `,
-    [
-      QUICKBOOKS_AUTH_STATE_ROW_ID,
-      legacyRefreshToken,
-      encryptedTokenPayload?.refreshTokenEncrypted || "",
-      encryptedTokenPayload?.refreshTokenIv || "",
-      encryptedTokenPayload?.refreshTokenAuthTag || "",
-      encryptedTokenPayload?.refreshTokenKeyId || "",
-      normalizedRefreshTokenExpiresAt,
-    ],
+    [QUICKBOOKS_AUTH_STATE_ROW_ID, normalizedToken, normalizedRefreshTokenExpiresAt],
   );
-}
-
-async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIso = "") {
-  if (!pool) {
-    return;
-  }
-
-  await ensureDatabaseReady();
-  await persistQuickBooksRefreshTokenWithQueryable(pool, tokenValue, refreshTokenExpiresAtIso);
 }
 
 function isQuickBooksInvalidRefreshTokenDetails(detailsText) {
@@ -17936,7 +18330,19 @@ async function fetchQuickBooksRefundsInRange(accessToken, fromDate, toDate) {
 
 async function fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate) {
   return fetchQuickBooksEntityInRange(accessToken, "Purchase", fromDate, toDate, "purchases", {
-    selectFields: ["Id", "TotalAmt", "TxnDate", "EntityRef", "AccountRef", "Line", "PrivateNote"],
+    selectFields: ["Id", "TotalAmt", "TxnDate", "EntityRef"],
+  });
+}
+
+async function fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate) {
+  return fetchQuickBooksEntityInRange(accessToken, "BillPayment", fromDate, toDate, "bill payments", {
+    selectFields: ["Id", "TotalAmt", "TxnDate", "VendorRef"],
+  });
+}
+
+async function fetchQuickBooksChecksInRange(accessToken, fromDate, toDate) {
+  return fetchQuickBooksEntityInRange(accessToken, "Check", fromDate, toDate, "checks", {
+    selectFields: ["Id", "TotalAmt", "TxnDate", "PayeeRef"],
   });
 }
 
@@ -18205,7 +18611,7 @@ function mapQuickBooksRefund(record) {
 
 function normalizeQuickBooksOutgoingTransaction(item) {
   const transactionType = sanitizeTextValue(item?.transactionType, 40).toLowerCase();
-  if (transactionType !== "purchase" && transactionType !== "expense") {
+  if (transactionType !== "purchase" && transactionType !== "billpayment" && transactionType !== "check") {
     return null;
   }
 
@@ -18218,9 +18624,6 @@ function normalizeQuickBooksOutgoingTransaction(item) {
   const customerId = normalizeQuickBooksCustomerId(item?.customerId);
   const clientPhone = normalizeQuickBooksCustomerPhone(item?.clientPhone);
   const clientEmail = normalizeQuickBooksCustomerEmail(item?.clientEmail);
-  const categoryName = sanitizeTextValue(item?.categoryName, 300);
-  const categoryDetails = sanitizeTextValue(item?.categoryDetails, 300);
-  const description = sanitizeTextValue(item?.description, 300);
   const parsedAmount = Number.parseFloat(item?.paymentAmount);
   const paymentAmount = Number.isFinite(parsedAmount) ? -Math.abs(parsedAmount) : 0;
   const paymentDate = sanitizeTextValue(item?.paymentDate, 20);
@@ -18229,33 +18632,15 @@ function normalizeQuickBooksOutgoingTransaction(item) {
   }
 
   return {
-    transactionType: "expense",
+    transactionType,
     transactionId,
     customerId,
     clientName,
     clientPhone,
     clientEmail,
-    categoryName,
-    categoryDetails,
-    description,
     paymentAmount,
     paymentDate,
   };
-}
-
-function resolveQuickBooksReferenceLabel(reference, fallbackLabel = "") {
-  const normalizedRef = reference && typeof reference === "object" ? reference : {};
-  const referenceName = sanitizeTextValue(normalizedRef.name, 300);
-  if (referenceName) {
-    return referenceName;
-  }
-
-  const referenceId = sanitizeTextValue(normalizedRef.value, 120);
-  if (!referenceId) {
-    return "";
-  }
-  const fallbackPrefix = sanitizeTextValue(fallbackLabel, 80);
-  return fallbackPrefix ? `${fallbackPrefix} ${referenceId}` : referenceId;
 }
 
 function resolveQuickBooksPayeeReference(reference, fallbackLabel) {
@@ -18275,98 +18660,43 @@ function resolveQuickBooksPayeeReference(reference, fallbackLabel) {
   };
 }
 
-function pushQuickBooksOutgoingUniqueValue(target, seen, value) {
-  const normalizedValue = sanitizeTextValue(value, 300);
-  if (!normalizedValue) {
-    return;
-  }
-  const dedupeKey = normalizedValue.toLowerCase();
-  if (seen.has(dedupeKey)) {
-    return;
-  }
-  seen.add(dedupeKey);
-  target.push(normalizedValue);
-}
-
-function formatQuickBooksOutgoingValueList(values, maxVisible = 3) {
-  const normalizedValues = Array.isArray(values) ? values.filter((value) => sanitizeTextValue(value, 300)) : [];
-  if (!normalizedValues.length) {
-    return "";
-  }
-  if (normalizedValues.length <= maxVisible) {
-    return normalizedValues.join(", ");
-  }
-  return `${normalizedValues.slice(0, maxVisible).join(", ")} +${normalizedValues.length - maxVisible}`;
-}
-
-function extractQuickBooksOutgoingCategoryInfo(record) {
-  const normalizedRecord = record && typeof record === "object" ? record : {};
-  const categoryCandidates = [];
-  const categorySeen = new Set();
-  const detailCandidates = [];
-  const detailSeen = new Set();
-
-  const lines = Array.isArray(normalizedRecord?.Line) ? normalizedRecord.Line : [];
-  for (const line of lines) {
-    const normalizedLine = line && typeof line === "object" ? line : {};
-    const accountCategory = resolveQuickBooksReferenceLabel(normalizedLine?.AccountBasedExpenseLineDetail?.AccountRef, "Account");
-    const expenseAccountCategory = resolveQuickBooksReferenceLabel(
-      normalizedLine?.ItemBasedExpenseLineDetail?.ExpenseAccountRef,
-      "Expense Account",
-    );
-    const itemCategory = resolveQuickBooksReferenceLabel(normalizedLine?.ItemBasedExpenseLineDetail?.ItemRef, "Item");
-
-    if (accountCategory) {
-      pushQuickBooksOutgoingUniqueValue(categoryCandidates, categorySeen, accountCategory);
-      pushQuickBooksOutgoingUniqueValue(detailCandidates, detailSeen, `Account: ${accountCategory}`);
-    }
-    if (expenseAccountCategory) {
-      pushQuickBooksOutgoingUniqueValue(categoryCandidates, categorySeen, expenseAccountCategory);
-      pushQuickBooksOutgoingUniqueValue(detailCandidates, detailSeen, `Expense account: ${expenseAccountCategory}`);
-    }
-    if (itemCategory) {
-      if (!categoryCandidates.length) {
-        pushQuickBooksOutgoingUniqueValue(categoryCandidates, categorySeen, itemCategory);
-      }
-      pushQuickBooksOutgoingUniqueValue(detailCandidates, detailSeen, `Item: ${itemCategory}`);
-    }
-  }
-
-  return {
-    categoryName: categoryCandidates[0] || "",
-    categoryDetails: formatQuickBooksOutgoingValueList(detailCandidates, 3),
-  };
-}
-
-function extractQuickBooksOutgoingDescription(record) {
-  const normalizedRecord = record && typeof record === "object" ? record : {};
-  const descriptionCandidates = [];
-  const descriptionSeen = new Set();
-
-  pushQuickBooksOutgoingUniqueValue(descriptionCandidates, descriptionSeen, normalizedRecord?.PrivateNote);
-
-  const lines = Array.isArray(normalizedRecord?.Line) ? normalizedRecord.Line : [];
-  for (const line of lines) {
-    const normalizedLine = line && typeof line === "object" ? line : {};
-    pushQuickBooksOutgoingUniqueValue(descriptionCandidates, descriptionSeen, normalizedLine?.Description);
-  }
-
-  return formatQuickBooksOutgoingValueList(descriptionCandidates, 3);
-}
-
 function mapQuickBooksPurchaseAsOutgoing(record) {
   const payeeReference = resolveQuickBooksPayeeReference(record?.EntityRef, "Payee");
-  const categoryInfo = extractQuickBooksOutgoingCategoryInfo(record);
   return normalizeQuickBooksOutgoingTransaction({
-    transactionType: "expense",
+    transactionType: "purchase",
     transactionId: record?.Id,
     customerId: payeeReference.payeeId,
     clientName: payeeReference.payeeName,
     clientPhone: "",
     clientEmail: "",
-    categoryName: categoryInfo.categoryName,
-    categoryDetails: categoryInfo.categoryDetails,
-    description: extractQuickBooksOutgoingDescription(record),
+    paymentAmount: record?.TotalAmt,
+    paymentDate: record?.TxnDate,
+  });
+}
+
+function mapQuickBooksBillPaymentAsOutgoing(record) {
+  const payeeReference = resolveQuickBooksPayeeReference(record?.VendorRef, "Vendor");
+  return normalizeQuickBooksOutgoingTransaction({
+    transactionType: "billpayment",
+    transactionId: record?.Id,
+    customerId: payeeReference.payeeId,
+    clientName: payeeReference.payeeName,
+    clientPhone: "",
+    clientEmail: "",
+    paymentAmount: record?.TotalAmt,
+    paymentDate: record?.TxnDate,
+  });
+}
+
+function mapQuickBooksCheckAsOutgoing(record) {
+  const payeeReference = resolveQuickBooksPayeeReference(record?.PayeeRef, "Payee");
+  return normalizeQuickBooksOutgoingTransaction({
+    transactionType: "check",
+    transactionId: record?.Id,
+    customerId: payeeReference.payeeId,
+    clientName: payeeReference.payeeName,
+    clientPhone: "",
+    clientEmail: "",
     paymentAmount: record?.TotalAmt,
     paymentDate: record?.TxnDate,
   });
@@ -18374,10 +18704,17 @@ function mapQuickBooksPurchaseAsOutgoing(record) {
 
 async function listQuickBooksOutgoingTransactionsInRange(fromDate, toDate) {
   const accessToken = await fetchQuickBooksAccessToken();
-  const purchaseRecords = await fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate);
+  const [purchaseRecords, billPaymentRecords, checkRecords] = await Promise.all([
+    fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate),
+    fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate),
+    fetchQuickBooksChecksInRange(accessToken, fromDate, toDate),
+  ]);
 
-  const outgoingItems = purchaseRecords
-    .map(mapQuickBooksPurchaseAsOutgoing)
+  const outgoingItems = [
+    ...purchaseRecords.map(mapQuickBooksPurchaseAsOutgoing),
+    ...billPaymentRecords.map(mapQuickBooksBillPaymentAsOutgoing),
+    ...checkRecords.map(mapQuickBooksCheckAsOutgoing),
+  ]
     .filter((item) => item && typeof item === "object")
     .filter((item) => Math.abs(item.paymentAmount) >= QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT);
 
@@ -19007,79 +19344,46 @@ async function ensureDatabaseReady() {
         CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_AUTH_STATE_TABLE} (
           id BIGINT PRIMARY KEY,
           refresh_token TEXT NOT NULL DEFAULT '',
-          refresh_token_encrypted TEXT NOT NULL DEFAULT '',
-          refresh_token_iv TEXT NOT NULL DEFAULT '',
-          refresh_token_auth_tag TEXT NOT NULL DEFAULT '',
-          refresh_token_key_id TEXT NOT NULL DEFAULT '',
           refresh_token_expires_at TIMESTAMPTZ,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
 
-      await pool.query(`
-        ALTER TABLE ${QUICKBOOKS_AUTH_STATE_TABLE}
-        ADD COLUMN IF NOT EXISTS refresh_token_encrypted TEXT NOT NULL DEFAULT ''
-      `);
-
-      await pool.query(`
-        ALTER TABLE ${QUICKBOOKS_AUTH_STATE_TABLE}
-        ADD COLUMN IF NOT EXISTS refresh_token_iv TEXT NOT NULL DEFAULT ''
-      `);
-
-      await pool.query(`
-        ALTER TABLE ${QUICKBOOKS_AUTH_STATE_TABLE}
-        ADD COLUMN IF NOT EXISTS refresh_token_auth_tag TEXT NOT NULL DEFAULT ''
-      `);
-
-      await pool.query(`
-        ALTER TABLE ${QUICKBOOKS_AUTH_STATE_TABLE}
-        ADD COLUMN IF NOT EXISTS refresh_token_key_id TEXT NOT NULL DEFAULT ''
-      `);
-
       await pool.query(
         `
-          INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (id)
-          VALUES ($1)
+          INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (
+            id,
+            refresh_token
+          )
+          VALUES ($1, $2)
           ON CONFLICT (id) DO NOTHING
         `,
-        [QUICKBOOKS_AUTH_STATE_ROW_ID],
+        [QUICKBOOKS_AUTH_STATE_ROW_ID, sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)],
       );
+
+      if (sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)) {
+        await pool.query(
+          `
+            UPDATE ${QUICKBOOKS_AUTH_STATE_TABLE}
+            SET refresh_token = $2,
+                updated_at = NOW()
+            WHERE id = $1
+              AND COALESCE(refresh_token, '') = ''
+          `,
+          [QUICKBOOKS_AUTH_STATE_ROW_ID, sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)],
+        );
+      }
 
       const quickBooksAuthStateResult = await pool.query(
         `
-          SELECT
-            refresh_token,
-            refresh_token_encrypted,
-            refresh_token_iv,
-            refresh_token_auth_tag,
-            refresh_token_key_id,
-            refresh_token_expires_at
+          SELECT refresh_token
           FROM ${QUICKBOOKS_AUTH_STATE_TABLE}
           WHERE id = $1
           LIMIT 1
         `,
         [QUICKBOOKS_AUTH_STATE_ROW_ID],
       );
-
-      const quickBooksAuthStateRow = quickBooksAuthStateResult.rows[0] || null;
-      const envQuickBooksRefreshToken = sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000);
-      let storedQuickBooksRefreshToken = resolveQuickBooksRefreshTokenFromAuthStateRow(quickBooksAuthStateRow);
-
-      if (!storedQuickBooksRefreshToken && envQuickBooksRefreshToken) {
-        await persistQuickBooksRefreshTokenWithQueryable(pool, envQuickBooksRefreshToken);
-        storedQuickBooksRefreshToken = envQuickBooksRefreshToken;
-      } else if (shouldMigrateQuickBooksRefreshTokenRowToEncrypted(quickBooksAuthStateRow)) {
-        const refreshTokenExpiresAtIso = normalizeIsoTimestampOrNull(
-          quickBooksAuthStateRow?.refresh_token_expires_at,
-        );
-        await persistQuickBooksRefreshTokenWithQueryable(
-          pool,
-          sanitizeTextValue(quickBooksAuthStateRow?.refresh_token, 6000),
-          refreshTokenExpiresAtIso,
-        );
-        storedQuickBooksRefreshToken = sanitizeTextValue(quickBooksAuthStateRow?.refresh_token, 6000);
-      }
-
+      const storedQuickBooksRefreshToken = sanitizeTextValue(quickBooksAuthStateResult.rows[0]?.refresh_token, 6000);
       if (storedQuickBooksRefreshToken) {
         quickBooksRuntimeRefreshToken = storedQuickBooksRefreshToken;
       }
@@ -19243,6 +19547,7 @@ async function ensureDatabaseReady() {
           user_key TEXT NOT NULL DEFAULT 'unknown',
           session_key TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_SESSION_ID}',
           scope JSONB NOT NULL,
+          last_seq BIGINT NOT NULL DEFAULT 0,
           scope_bytes INTEGER NOT NULL DEFAULT 0,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           expires_at TIMESTAMPTZ NOT NULL
@@ -19252,6 +19557,11 @@ async function ensureDatabaseReady() {
       await pool.query(`
         ALTER TABLE ${ASSISTANT_SESSION_SCOPE_TABLE}
         ADD COLUMN IF NOT EXISTS scope_bytes INTEGER NOT NULL DEFAULT 0
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${ASSISTANT_SESSION_SCOPE_TABLE}
+        ADD COLUMN IF NOT EXISTS last_seq BIGINT NOT NULL DEFAULT 0
       `);
 
       await pool.query(`
@@ -19281,42 +19591,30 @@ async function ensureDatabaseReady() {
       `);
 
       await pool.query(`
-        CREATE TABLE IF NOT EXISTS ${RATE_LIMIT_BUCKETS_TABLE} (
-          bucket_key TEXT PRIMARY KEY,
-          scope TEXT NOT NULL DEFAULT '',
-          subject TEXT NOT NULL DEFAULT '',
-          window_start_ms BIGINT NOT NULL,
+        CREATE TABLE IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE} (
+          scope TEXT NOT NULL,
+          entry_key TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT '',
           hits INTEGER NOT NULL DEFAULT 0,
-          blocked_until_ms BIGINT NOT NULL DEFAULT 0,
-          window_ms INTEGER NOT NULL DEFAULT 0,
-          block_ms INTEGER NOT NULL DEFAULT 0,
-          last_seen_ms BIGINT NOT NULL DEFAULT 0,
-          expires_at TIMESTAMPTZ NOT NULL
+          window_started_at TIMESTAMPTZ,
+          blocked_until TIMESTAMPTZ,
+          status_code INTEGER,
+          response_body JSONB,
+          expires_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (scope, entry_key)
         )
       `);
 
       await pool.query(`
-        CREATE INDEX IF NOT EXISTS ${RATE_LIMIT_BUCKETS_TABLE_NAME}_expires_at_idx
-        ON ${RATE_LIMIT_BUCKETS_TABLE} (expires_at ASC)
+        CREATE INDEX IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE_NAME}_expires_at_idx
+        ON ${MINI_RUNTIME_STATE_TABLE} (expires_at ASC)
       `);
 
       await pool.query(`
-        CREATE TABLE IF NOT EXISTS ${LOGIN_FAILURES_TABLE} (
-          failure_key TEXT PRIMARY KEY,
-          policy_scope TEXT NOT NULL DEFAULT '',
-          first_attempt_ms BIGINT NOT NULL,
-          last_attempt_ms BIGINT NOT NULL,
-          failures INTEGER NOT NULL DEFAULT 0,
-          locked_until_ms BIGINT NOT NULL DEFAULT 0,
-          window_ms INTEGER NOT NULL DEFAULT 0,
-          lock_ms INTEGER NOT NULL DEFAULT 0,
-          expires_at TIMESTAMPTZ NOT NULL
-        )
-      `);
-
-      await pool.query(`
-        CREATE INDEX IF NOT EXISTS ${LOGIN_FAILURES_TABLE_NAME}_expires_at_idx
-        ON ${LOGIN_FAILURES_TABLE} (expires_at ASC)
+        CREATE INDEX IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE_NAME}_scope_expires_idx
+        ON ${MINI_RUNTIME_STATE_TABLE} (scope, expires_at ASC)
       `);
     })().catch((error) => {
       dbReadyPromise = null;
@@ -19407,6 +19705,56 @@ function normalizeAssistantRecordsSnapshotVersion(rawUpdatedAt) {
   return new Date(normalizedTimestamp).toISOString();
 }
 
+function buildAssistantRecordsStateFromSnapshotCache(snapshotCache, options = {}) {
+  const normalizedUpdatedAt = normalizeAssistantRecordsSnapshotVersion(snapshotCache?.updatedAt);
+  const normalizedStaleSnapshotAgeMs = Number.parseInt(String(options?.staleSnapshotAgeMs ?? ""), 10);
+  return {
+    records: Array.isArray(snapshotCache?.records) ? snapshotCache.records : [],
+    updatedAt: normalizedUpdatedAt === "none" ? null : normalizedUpdatedAt,
+    source: sanitizeTextValue(snapshotCache?.source, 40) || (READ_V2_ENABLED ? "v2" : "legacy"),
+    fallbackFromV2: snapshotCache?.fallbackFromV2 === true,
+    degradedMode: options?.degradedMode === true,
+    degradedReason: sanitizeTextValue(options?.degradedReason, 80) || "",
+    staleSnapshotAgeMs:
+      Number.isFinite(normalizedStaleSnapshotAgeMs) && normalizedStaleSnapshotAgeMs >= 0 ? normalizedStaleSnapshotAgeMs : null,
+  };
+}
+
+function buildAssistantStaleSnapshotFallbackState(snapshotCache, options = {}) {
+  const fallbackEnabled =
+    typeof options?.enabled === "boolean" ? options.enabled : ASSISTANT_RECORDS_STALE_FALLBACK_ENABLED;
+  if (!fallbackEnabled || !snapshotCache || typeof snapshotCache !== "object") {
+    return null;
+  }
+
+  const nowMs =
+    Number.isFinite(Number(options?.nowMs)) && Number(options.nowMs) > 0
+      ? Math.floor(Number(options.nowMs))
+      : Date.now();
+  const maxAgeMs =
+    Number.isFinite(Number(options?.maxAgeMs)) && Number(options.maxAgeMs) > 0
+      ? Math.floor(Number(options.maxAgeMs))
+      : ASSISTANT_RECORDS_STALE_FALLBACK_MAX_AGE_MS;
+  const refreshedAtMs =
+    Number.isFinite(Number(snapshotCache.refreshedAtMs)) && Number(snapshotCache.refreshedAtMs) > 0
+      ? Math.floor(Number(snapshotCache.refreshedAtMs))
+      : 0;
+  if (refreshedAtMs <= 0) {
+    return null;
+  }
+
+  const staleSnapshotAgeMs = Math.max(0, nowMs - refreshedAtMs);
+  if (staleSnapshotAgeMs > maxAgeMs) {
+    return null;
+  }
+
+  return buildAssistantRecordsStateFromSnapshotCache(snapshotCache, {
+    degradedMode: true,
+    degradedReason: sanitizeTextValue(options?.degradedReason, 80) || "stale_snapshot",
+    staleSnapshotAgeMs,
+  });
+}
+
 function buildAssistantVisibilitySignature(userProfile) {
   if (!userProfile || typeof userProfile !== "object") {
     return "anonymous";
@@ -19437,27 +19785,114 @@ function buildAssistantPreparedDataCacheKey(stateUpdatedAt, rawTenantKey, rawUse
   return `${snapshotVersion}::${tenantKey}::${userKey}::${visibilityHash}`;
 }
 
+function normalizeAssistantPreparedDataCacheEntryBytes(rawValue) {
+  const parsed = Number.parseInt(String(rawValue ?? "0"), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return ASSISTANT_PREPARED_DATA_CACHE_ENTRY_BASE_ESTIMATED_BYTES;
+  }
+  return parsed;
+}
+
+function estimateAssistantPreparedDataCacheEntryBytes(cacheKey, payload) {
+  const safeCacheKey = sanitizeTextValue(cacheKey, 600) || "";
+  const keyBytes = Buffer.byteLength(safeCacheKey, "utf8");
+  const visibleRecordsCount = Array.isArray(payload?.visibleRecords) ? payload.visibleRecords.length : 0;
+  const analyzedRowsCount = Array.isArray(payload?.analyzedRows) ? payload.analyzedRows.length : 0;
+  const managerEntriesCount = Array.isArray(payload?.managerEntries) ? payload.managerEntries.length : 0;
+  const companyEntriesCount = Array.isArray(payload?.companyEntries) ? payload.companyEntries.length : 0;
+  const paymentEventsCount = Array.isArray(payload?.paymentEvents) ? payload.paymentEvents.length : 0;
+
+  const estimatedBytes =
+    ASSISTANT_PREPARED_DATA_CACHE_ENTRY_BASE_ESTIMATED_BYTES +
+    keyBytes +
+    visibleRecordsCount * ASSISTANT_PREPARED_DATA_CACHE_RECORD_ESTIMATED_BYTES +
+    analyzedRowsCount * ASSISTANT_PREPARED_DATA_CACHE_ANALYZED_ROW_ESTIMATED_BYTES +
+    (managerEntriesCount + companyEntriesCount) * ASSISTANT_PREPARED_DATA_CACHE_ENTITY_ESTIMATED_BYTES +
+    paymentEventsCount * ASSISTANT_PREPARED_DATA_CACHE_PAYMENT_EVENT_ESTIMATED_BYTES;
+
+  return Math.max(
+    ASSISTANT_PREPARED_DATA_CACHE_ENTRY_BASE_ESTIMATED_BYTES,
+    normalizeAssistantPreparedDataCacheEntryBytes(estimatedBytes),
+  );
+}
+
+function clearAssistantPreparedDataCache() {
+  assistantPreparedDataCache.clear();
+  assistantPreparedDataCacheTotalBytes = 0;
+}
+
+function deleteAssistantPreparedDataCacheEntry(cacheKey) {
+  const existingEntry = assistantPreparedDataCache.get(cacheKey);
+  if (!existingEntry) {
+    return false;
+  }
+
+  assistantPreparedDataCache.delete(cacheKey);
+  const entryBytes = normalizeAssistantPreparedDataCacheEntryBytes(existingEntry.entryBytes);
+  assistantPreparedDataCacheTotalBytes = Math.max(0, assistantPreparedDataCacheTotalBytes - entryBytes);
+  return true;
+}
+
+function upsertAssistantPreparedDataCacheEntry(cacheKey, payload, nowMs = Date.now()) {
+  if (!cacheKey || !payload) {
+    return;
+  }
+
+  deleteAssistantPreparedDataCacheEntry(cacheKey);
+  const entryBytes = estimateAssistantPreparedDataCacheEntryBytes(cacheKey, payload);
+  if (entryBytes > ASSISTANT_PREPARED_DATA_CACHE_MAX_TOTAL_BYTES) {
+    return;
+  }
+
+  const entry = {
+    lastUsedAtMs: nowMs,
+    payload,
+    entryBytes,
+  };
+  assistantPreparedDataCache.set(cacheKey, entry);
+  assistantPreparedDataCacheTotalBytes += entryBytes;
+}
+
+function touchAssistantPreparedDataCacheEntry(cacheKey, entry, nowMs = Date.now()) {
+  if (!cacheKey || !entry) {
+    return;
+  }
+
+  entry.lastUsedAtMs = nowMs;
+  if (assistantPreparedDataCache.get(cacheKey) === entry) {
+    assistantPreparedDataCache.delete(cacheKey);
+  }
+  assistantPreparedDataCache.set(cacheKey, entry);
+}
+
 function pruneAssistantPreparedDataCache(nowMs = Date.now()) {
   if (!assistantPreparedDataCache.size) {
+    assistantPreparedDataCacheTotalBytes = 0;
     return;
   }
 
   for (const [cacheKey, entry] of assistantPreparedDataCache.entries()) {
-    if (!entry || nowMs - entry.lastUsedAtMs > ASSISTANT_PREPARED_DATA_CACHE_TTL_MS) {
-      assistantPreparedDataCache.delete(cacheKey);
+    if (!entry) {
+      deleteAssistantPreparedDataCacheEntry(cacheKey);
+      continue;
+    }
+
+    const lastUsedAtMs = Number.parseInt(String(entry.lastUsedAtMs ?? "0"), 10);
+    if (!Number.isFinite(lastUsedAtMs) || nowMs - lastUsedAtMs > ASSISTANT_PREPARED_DATA_CACHE_TTL_MS) {
+      deleteAssistantPreparedDataCacheEntry(cacheKey);
     }
   }
 
-  if (assistantPreparedDataCache.size <= ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES) {
-    return;
-  }
-
-  const overflow = assistantPreparedDataCache.size - ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES;
-  const evictionCandidates = [...assistantPreparedDataCache.entries()].sort(
-    (left, right) => left[1].lastUsedAtMs - right[1].lastUsedAtMs,
-  );
-  for (let index = 0; index < overflow; index += 1) {
-    assistantPreparedDataCache.delete(evictionCandidates[index][0]);
+  while (
+    assistantPreparedDataCache.size > ASSISTANT_PREPARED_DATA_CACHE_MAX_ENTRIES ||
+    assistantPreparedDataCacheTotalBytes > ASSISTANT_PREPARED_DATA_CACHE_MAX_TOTAL_BYTES
+  ) {
+    const oldestEntry = assistantPreparedDataCache.entries().next();
+    if (oldestEntry.done) {
+      assistantPreparedDataCacheTotalBytes = 0;
+      break;
+    }
+    deleteAssistantPreparedDataCacheEntry(oldestEntry.value[0]);
   }
 }
 
@@ -19468,38 +19903,43 @@ async function getStoredRecordsHeadRevision() {
 }
 
 async function getStoredRecordsForAssistantChat() {
-  const headRevision = await getStoredRecordsHeadRevision();
-  const headRevisionVersion = normalizeAssistantRecordsSnapshotVersion(headRevision);
+  try {
+    const headRevision = await getStoredRecordsHeadRevision();
+    const headRevisionVersion = normalizeAssistantRecordsSnapshotVersion(headRevision);
 
-  if (assistantRecordsSnapshotCache?.snapshotVersion === headRevisionVersion) {
-    return {
-      records: assistantRecordsSnapshotCache.records,
-      updatedAt: assistantRecordsSnapshotCache.updatedAt,
-      source: assistantRecordsSnapshotCache.source,
-      fallbackFromV2: assistantRecordsSnapshotCache.fallbackFromV2,
+    if (assistantRecordsSnapshotCache?.snapshotVersion === headRevisionVersion) {
+      return buildAssistantRecordsStateFromSnapshotCache(assistantRecordsSnapshotCache);
+    }
+
+    const state = await getStoredRecordsForApiRecordsRoute();
+    const normalizedStateUpdatedAt = normalizeAssistantRecordsSnapshotVersion(state.updatedAt);
+    if (assistantRecordsSnapshotCache?.snapshotVersion && assistantRecordsSnapshotCache.snapshotVersion !== headRevisionVersion) {
+      clearAssistantPreparedDataCache();
+    }
+
+    assistantRecordsSnapshotCache = {
+      snapshotVersion: headRevisionVersion,
+      updatedAt: normalizedStateUpdatedAt === "none" ? null : normalizedStateUpdatedAt,
+      records: Array.isArray(state.records) ? state.records : [],
+      source: sanitizeTextValue(state.source, 40) || (READ_V2_ENABLED ? "v2" : "legacy"),
+      fallbackFromV2: state.fallbackFromV2 === true,
+      refreshedAtMs: Date.now(),
     };
+
+    return buildAssistantRecordsStateFromSnapshotCache(assistantRecordsSnapshotCache);
+  } catch (error) {
+    const fallbackState = buildAssistantStaleSnapshotFallbackState(assistantRecordsSnapshotCache, {
+      degradedReason: "db_read_failed",
+    });
+    if (fallbackState) {
+      const errorCode = sanitizeTextValue(error?.code, 40) || "unknown";
+      console.warn(
+        `[assistant] stale snapshot fallback activated (reason=${fallbackState.degradedReason}, age_ms=${fallbackState.staleSnapshotAgeMs ?? -1}, error_code=${errorCode})`,
+      );
+      return fallbackState;
+    }
+    throw error;
   }
-
-  const state = await getStoredRecordsForApiRecordsRoute();
-  const normalizedStateUpdatedAt = normalizeAssistantRecordsSnapshotVersion(state.updatedAt);
-  if (assistantRecordsSnapshotCache?.snapshotVersion && assistantRecordsSnapshotCache.snapshotVersion !== headRevisionVersion) {
-    assistantPreparedDataCache.clear();
-  }
-
-  assistantRecordsSnapshotCache = {
-    snapshotVersion: headRevisionVersion,
-    updatedAt: normalizedStateUpdatedAt === "none" ? null : normalizedStateUpdatedAt,
-    records: Array.isArray(state.records) ? state.records : [],
-    source: sanitizeTextValue(state.source, 40) || (READ_V2_ENABLED ? "v2" : "legacy"),
-    fallbackFromV2: state.fallbackFromV2 === true,
-  };
-
-  return {
-    records: assistantRecordsSnapshotCache.records,
-    updatedAt: assistantRecordsSnapshotCache.updatedAt,
-    source: assistantRecordsSnapshotCache.source,
-    fallbackFromV2: assistantRecordsSnapshotCache.fallbackFromV2,
-  };
 }
 
 function getAssistantPreparedDataForUserScope(recordsState, rawTenantKey, rawUsername, userProfile) {
@@ -19509,7 +19949,7 @@ function getAssistantPreparedDataForUserScope(recordsState, rawTenantKey, rawUse
   const cacheKey = buildAssistantPreparedDataCacheKey(recordsState?.updatedAt, rawTenantKey, rawUsername, userProfile);
   const cachedEntry = assistantPreparedDataCache.get(cacheKey);
   if (cachedEntry?.payload) {
-    cachedEntry.lastUsedAtMs = nowMs;
+    touchAssistantPreparedDataCacheEntry(cacheKey, cachedEntry, nowMs);
     return cachedEntry.payload;
   }
 
@@ -19524,10 +19964,7 @@ function getAssistantPreparedDataForUserScope(recordsState, rawTenantKey, rawUse
     paymentEvents: null,
   };
 
-  assistantPreparedDataCache.set(cacheKey, {
-    lastUsedAtMs: nowMs,
-    payload,
-  });
+  upsertAssistantPreparedDataCacheEntry(cacheKey, payload, nowMs);
   pruneAssistantPreparedDataCache(nowMs);
   return payload;
 }
@@ -20058,6 +20495,7 @@ async function upsertSingleRecordToV2(client, record, options = {}) {
     writeTimestamp,
   };
 }
+
 async function listCurrentRecordsFromV2ForWrite(client) {
   const result = await client.query(
     `
@@ -23072,8 +23510,8 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
         };
       }
 
-      const stateResult = await client.query(
-        `SELECT records FROM ${STATE_TABLE} WHERE id = $1 FOR UPDATE`,
+      await client.query(
+        `SELECT updated_at FROM ${STATE_TABLE} WHERE id = $1 FOR UPDATE`,
         [STATE_ROW_ID],
       );
 
@@ -23601,6 +24039,21 @@ function setNoStorePrivateApiHeaders(res) {
   res.setHeader("Expires", "0");
 }
 
+function setAttachmentResponseSecurityHeaders(res, options = {}) {
+  if (!res || typeof res.setHeader !== "function") {
+    return;
+  }
+
+  const isInline = options && options.isInline === true;
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  if (isInline) {
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'none'; sandbox; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    );
+  }
+}
+
 function applyNoStorePrivateHeadersForAuthenticatedApi(req, res, next) {
   const requestPath = sanitizeTextValue(req.path, 2048);
   if (requestPath && requestPath.startsWith("/api/")) {
@@ -23651,24 +24104,24 @@ app.get("/login", (req, res) => {
     );
 });
 
-app.post("/login", async (req, res) => {
+app.post("/login", (req, res) => {
   const username = req.body?.username;
   const password = req.body?.password;
   const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
-  if (!(await ensureLoginAttemptAllowed(req, res, username, nextPath))) {
+  if (!ensureLoginAttemptAllowed(req, res, username, nextPath)) {
     return;
   }
 
   const authUser = authenticateWebAuthCredentials(username, password);
 
   if (!authUser) {
-    await registerFailedLoginAttempt(req, username);
+    registerFailedLoginAttempt(req, username);
     clearWebAuthSessionCookie(req, res);
     res.redirect(302, `/login?error=1&next=${encodeURIComponent(nextPath)}`);
     return;
   }
 
-  await clearFailedLoginAttempts(req, authUser.username);
+  clearFailedLoginAttempts(req, authUser.username);
   setWebAuthSessionCookie(req, res, authUser.username);
   if (isWebAuthPasswordChangeRequired(authUser)) {
     res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
@@ -23677,17 +24130,17 @@ app.post("/login", async (req, res) => {
   res.redirect(302, nextPath);
 });
 
-async function handleApiAuthLogin(req, res) {
+function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
   const password = req.body?.password;
-  if (!(await ensureLoginAttemptAllowed(req, res, username, "/"))) {
+  if (!ensureLoginAttemptAllowed(req, res, username, "/")) {
     return;
   }
 
   const authUser = authenticateWebAuthCredentials(username, password);
 
   if (!authUser) {
-    await registerFailedLoginAttempt(req, username);
+    registerFailedLoginAttempt(req, username);
     clearWebAuthSessionCookie(req, res);
     res.status(401).json({
       error: "Invalid login or password.",
@@ -23695,7 +24148,7 @@ async function handleApiAuthLogin(req, res) {
     return;
   }
 
-  await clearFailedLoginAttempts(req, authUser.username);
+  clearFailedLoginAttempts(req, authUser.username);
   const isMobileApiLogin = sanitizeTextValue(req.path, 120).startsWith("/api/mobile/");
   let sessionToken = "";
   if (isMobileApiLogin) {
@@ -24073,8 +24526,7 @@ app.post("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCE
     return;
   }
 
-  const usernameToCreate = normalizeWebAuthUsername(normalizedPayload?.username);
-  const existingUser = getWebAuthUserByUsername(usernameToCreate);
+  const existingUser = getWebAuthUserByUsername(normalizedPayload.username);
   if (existingUser) {
     res.status(409).json({
       error: "User with this username already exists.",
@@ -24083,17 +24535,11 @@ app.post("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCE
   }
 
   try {
-    const temporaryPassword = sanitizeTextValue(normalizedPayload?.temporaryPassword, 200);
-    const { temporaryPassword: _temporaryPassword, ...userPayload } = normalizedPayload;
-    const createdUser = upsertWebAuthUserInDirectory(userPayload);
-    const responsePayload = {
+    const createdUser = upsertWebAuthUserInDirectory(normalizedPayload);
+    res.status(201).json({
       ok: true,
       item: buildWebAuthPublicUser(createdUser),
-    };
-    if (temporaryPassword) {
-      responsePayload.temporaryPassword = temporaryPassword;
-    }
-    res.status(201).json(responsePayload);
+    });
   } catch (error) {
     res.status(error.httpStatus || 400).json({
       error: sanitizeTextValue(error?.message, 260) || "Failed to create user.",
@@ -24166,7 +24612,7 @@ async function respondQuickBooksRecentPayments(req, res, options = {}) {
   const quickBooksRateProfile = RATE_LIMIT_PROFILE_API_EXPENSIVE;
 
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
       ipProfile: {
         windowMs: quickBooksRateProfile.windowMs,
@@ -24180,7 +24626,7 @@ async function respondQuickBooksRecentPayments(req, res, options = {}) {
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -24225,7 +24671,7 @@ async function respondQuickBooksOutgoingPayments(req, res, options = {}) {
   const quickBooksRateProfile = RATE_LIMIT_PROFILE_API_EXPENSIVE;
 
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
       ipProfile: {
         windowMs: quickBooksRateProfile.windowMs,
@@ -24239,7 +24685,7 @@ async function respondQuickBooksOutgoingPayments(req, res, options = {}) {
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -24347,7 +24793,7 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
   }
 
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.quickbooks.sync",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
@@ -24361,7 +24807,7 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -24411,9 +24857,9 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
   });
 });
 
-app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (req, res) => {
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
@@ -24427,7 +24873,7 @@ app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -24449,7 +24895,7 @@ app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission
 
 app.post("/api/quickbooks/transaction-insight", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
@@ -24463,7 +24909,7 @@ app.post("/api/quickbooks/transaction-insight", requireWebPermission(WEB_AUTH_PE
       },
       message: "QuickBooks request limit reached. Please wait before retrying.",
       code: "quickbooks_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -24603,9 +25049,46 @@ app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSIO
   }
 });
 
+app.post("/api/assistant/context/reset/telemetry", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.assistant.context_reset_telemetry",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_ASSISTANT_RESET_TELEMETRY.blockMs,
+      },
+      message: "Assistant telemetry request limit reached. Please wait before retrying.",
+      code: "assistant_context_reset_telemetry_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const stage = normalizeAssistantContextResetFailureStage(req.body?.stage);
+  const reasonCode = normalizeAssistantContextResetFailureReasonCode(req.body?.reasonCode);
+  const userAgentHeader = Array.isArray(req.headers["user-agent"]) ? req.headers["user-agent"][0] : req.headers["user-agent"];
+  const browser = parseAssistantContextResetBrowserFromUserAgent(userAgentHeader);
+
+  recordAssistantContextResetFailureMetric(performanceObservability, {
+    stage,
+    reasonCode,
+    browser,
+  });
+
+  res.json({
+    ok: true,
+  });
+});
+
 app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.assistant.chat",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
@@ -24619,7 +25102,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
       },
       message: "Assistant request limit reached. Please wait before retrying.",
       code: "assistant_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -24641,6 +25124,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 
   const mode = normalizeAssistantChatMode(req.body?.mode);
   const sessionId = normalizeAssistantSessionId(req.body?.sessionId) || ASSISTANT_DEFAULT_SESSION_ID;
+  const clientMessageSeq = normalizeAssistantClientMessageSeq(req.body?.clientMessageSeq);
   const tenantKey = resolveAssistantSessionScopeTenantKeyFromRequest(req);
   const shouldResetContext = /(reset context|clear context|forget context|сбрось контекст|очисти контекст|забудь контекст)/i.test(
     normalizeAssistantSearchText(message),
@@ -24648,6 +25132,7 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 
   try {
     const state = await getStoredRecordsForAssistantChat();
+    const isAssistantDegradedMode = state.degradedMode === true;
     const preparedData = getAssistantPreparedDataForUserScope(state, tenantKey, req.webAuthUser, req.webAuthProfile);
     const filteredRecords = preparedData.visibleRecords;
     const sessionScope = shouldResetContext ? null : await getAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
@@ -24681,15 +25166,34 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
             filteredRecords,
             parsedDateRange || sessionScope?.range || null,
           );
-    let scopeSource = "none";
+    let scopeMetadata = resolveAssistantScopeSourceMetadata();
 
     if (shouldResetContext) {
-      await clearAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
+      const clearResult = await clearAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, {
+        clientMessageSeq,
+      });
+      if (clearResult.stale) {
+        console.info(
+          `[assistant][scope-store] stale clear ignored user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} session=${sessionId} seq=${clientMessageSeq}`,
+        );
+      }
     } else if (fallbackScope && fallbackScope.scopeEstablished === true) {
-      await upsertAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, fallbackScope);
-      scopeSource = "explicit";
+      const upsertResult = await upsertAssistantSessionScope(tenantKey, req.webAuthUser, sessionId, fallbackScope, {
+        clientMessageSeq,
+      });
+      if (upsertResult.applied) {
+        scopeMetadata = resolveAssistantScopeSourceMetadata({
+          explicitPersisted: true,
+        });
+      } else if (upsertResult.stale) {
+        console.info(
+          `[assistant][scope-store] stale upsert ignored user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} session=${sessionId} seq=${clientMessageSeq}`,
+        );
+      }
     } else if (mentionScope && mentionScope.scopeEstablished === true) {
-      scopeSource = "mention";
+      scopeMetadata = resolveAssistantScopeSourceMetadata({
+        mentionEphemeral: true,
+      });
     }
 
     try {
@@ -24710,19 +25214,30 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     }
 
     console.info(
-      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} scope_source=${scopeSource}`,
+      `[assistant] user=${sanitizeTextValue(req.webAuthUser, 140) || "unknown"} mode=${mode} provider=${provider} records=${filteredRecords.length} session=${sessionId} seq=${clientMessageSeq || 0} scope_source=${scopeMetadata.scopeSource} scope_persisted=${scopeMetadata.scopePersisted ? "1" : "0"} scope_ephemeral=${scopeMetadata.scopeEphemeralSource} degraded=${isAssistantDegradedMode ? "1" : "0"}`,
     );
+    if (isAssistantDegradedMode) {
+      res.setHeader("X-Assistant-Degraded-Mode", "1");
+    }
 
     res.json({
       ok: true,
       reply: normalizedReply,
       clientMentions,
-      scope_source: scopeSource,
+      scope_source: scopeMetadata.scopeSource,
+      scope_persisted: scopeMetadata.scopePersisted,
+      scope_ephemeral_source: scopeMetadata.scopeEphemeralSource,
       suggestions: Array.isArray(fallbackPayload.suggestions) ? fallbackPayload.suggestions.slice(0, 8) : [],
       source: {
         recordsUsed: filteredRecords.length,
         updatedAt: state.updatedAt || null,
         provider,
+        degradedMode: isAssistantDegradedMode,
+        degradedReason: isAssistantDegradedMode ? sanitizeTextValue(state.degradedReason, 80) || "stale_snapshot" : undefined,
+        staleSnapshotAgeMs:
+          isAssistantDegradedMode && Number.isFinite(Number(state.staleSnapshotAgeMs))
+            ? Number(state.staleSnapshotAgeMs)
+            : undefined,
       },
     });
   } catch (error) {
@@ -24732,22 +25247,36 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
 });
 
 app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (!ASSISTANT_TTS_ENDPOINT_ENABLED) {
+    res.status(404).json({
+      error: "API route not found",
+    });
+    return;
+  }
+
+  if (ASSISTANT_TTS_ENDPOINT_OWNER_ONLY && !req.webAuthProfile?.isOwner) {
+    res.status(403).json({
+      error: "Access denied. Owner role is required.",
+    });
+    return;
+  }
+
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.assistant.tts",
       ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_CHAT.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_CHAT.blockMs,
+        windowMs: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.blockMs,
       },
       userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_CHAT.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_CHAT.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_CHAT.blockMs,
+        windowMs: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_ASSISTANT_TTS.blockMs,
       },
       message: "Assistant audio request limit reached. Please wait before retrying.",
       code: "assistant_tts_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -24792,7 +25321,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
   const todayOnly = rangeMode === "today";
   const leadsRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: refreshMode !== "none" ? "api.ghl.leads.refresh" : "api.ghl.leads.read",
       ipProfile: {
         windowMs: leadsRateProfile.windowMs,
@@ -24806,7 +25335,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
       },
       message: "Leads lookup limit reached. Please wait before retrying.",
       code: "ghl_leads_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -24911,25 +25440,13 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
       rangeMode,
     });
     if (refreshMode !== "none" && isGhlConfigured() && items.length && GHL_LEADS_READ_ENRICH_MAX_ROWS > 0) {
-      const readEnrichMaxRows = Math.min(
-        items.length,
-        Math.max(
-          GHL_LEADS_READ_ENRICH_MAX_ROWS,
-          refreshMode === "full" ? GHL_LEADS_REFRESH_READ_ENRICH_MAX_ROWS : GHL_LEADS_READ_ENRICH_MAX_ROWS,
-        ),
-      );
-      const readEnrichConcurrency =
-        refreshMode === "full" ? Math.max(GHL_LEADS_ENRICH_CONCURRENCY, GHL_LEADS_REFRESH_READ_ENRICH_CONCURRENCY) : GHL_LEADS_ENRICH_CONCURRENCY;
       const rowsNeedingEnrichment = items
         .filter((row) => isSparseGhlLeadRow(row))
-        .slice(0, readEnrichMaxRows);
+        .slice(0, GHL_LEADS_READ_ENRICH_MAX_ROWS);
 
       if (rowsNeedingEnrichment.length) {
         try {
-          const enrichedRows = await enrichGhlLeadRows(rowsNeedingEnrichment, pipelineContext, {
-            maxRows: readEnrichMaxRows,
-            concurrency: readEnrichConcurrency,
-          });
+          const enrichedRows = await enrichGhlLeadRows(rowsNeedingEnrichment, pipelineContext);
           if (enrichedRows.length) {
             await upsertGhlLeadsCacheRows(enrichedRows);
             const enrichedById = new Map(enrichedRows.map((row) => [sanitizeTextValue(row?.leadId, 180), row]));
@@ -24941,8 +25458,6 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
               return mergeGhlLeadRows(row, enrichedById.get(leadId));
             });
           }
-          refreshMeta.readEnrichRequestedCount = rowsNeedingEnrichment.length;
-          refreshMeta.readEnrichAppliedCount = enrichedRows.length;
         } catch (readEnrichError) {
           console.warn(
             `[ghl leads] read enrichment skipped: ${sanitizeTextValue(readEnrichError?.message, 300) || "unknown error"}`,
@@ -24976,7 +25491,7 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
 async function respondGhlClientManagers(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/client-managers") {
   const managerRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: refreshMode !== "none" ? "api.ghl.client_managers.refresh" : "api.ghl.client_managers.read",
       ipProfile: {
         windowMs: managerRateProfile.windowMs,
@@ -24990,7 +25505,7 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
       },
       message: "Client-manager lookup limit reached. Please wait before retrying.",
       code: "ghl_client_managers_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -25123,7 +25638,7 @@ app.post("/api/ghl/client-managers/refresh", requireWebPermission(WEB_AUTH_PERMI
 
 app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.ghl.client_contracts",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
@@ -25137,7 +25652,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       },
       message: "Contract lookup limit reached. Please wait before retrying.",
       code: "ghl_client_contracts_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -25196,7 +25711,7 @@ app.post(
   requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
   async (req, res) => {
     if (
-      !(await enforceRateLimit(req, res, {
+      !enforceRateLimit(req, res, {
         scope: "api.ghl.basic_notes.refresh_all",
         ipProfile: {
           windowMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.windowMs,
@@ -25210,7 +25725,7 @@ app.post(
         },
         message: "Bulk BASIC/MEMO refresh limit reached. Please wait before retrying.",
         code: "ghl_basic_notes_refresh_rate_limited",
-      }))
+      })
     ) {
       return;
     }
@@ -25344,7 +25859,7 @@ async function resolveGhlBasicNoteContext(req, input) {
 
 app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.ghl.basic_note",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
@@ -25358,7 +25873,7 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
       },
       message: "BASIC/MEMO request limit reached. Please wait before retrying.",
       code: "ghl_basic_note_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -25399,7 +25914,7 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
 
 app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.ghl.basic_note.refresh",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
@@ -25413,7 +25928,7 @@ app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PER
       },
       message: "BASIC/MEMO refresh limit reached. Please wait before retrying.",
       code: "ghl_basic_note_refresh_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -25484,7 +25999,7 @@ app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PER
 
 app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS), async (req, res) => {
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.records.write",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
@@ -25498,7 +26013,7 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
       },
       message: "Save request limit reached. Please wait before retrying.",
       code: "records_write_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -25567,7 +26082,7 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
   }
 
   if (
-    !(await enforceRateLimit(req, res, {
+    !enforceRateLimit(req, res, {
       scope: "api.records.write",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
@@ -25581,7 +26096,7 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
       },
       message: "Save request limit reached. Please wait before retrying.",
       code: "records_write_rate_limited",
-    }))
+    })
   ) {
     return;
   }
@@ -25643,7 +26158,7 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
 
 app.post("/api/mini/access", async (req, res) => {
   if (
-    !(await enforceRateLimit(req, res, {
+    !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.access",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
@@ -25666,7 +26181,7 @@ app.post("/api/mini/access", async (req, res) => {
   }
 
   if (
-    !(await enforceRateLimit(req, res, {
+    !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.access",
       userProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
@@ -25711,7 +26226,7 @@ app.post("/api/mini/clients", async (req, res) => {
   const idempotencyKey = idempotencyKeyResult.key;
   let parsedUploadToken = null;
   if (
-    !(await enforceRateLimit(req, res, {
+    !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.write",
       ipProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -25745,7 +26260,7 @@ app.post("/api/mini/clients", async (req, res) => {
     }
 
     if (
-      !(await enforceRateLimit(req, res, {
+      !(await enforceMiniRateLimit(req, res, {
         scope: "api.mini.write",
         userProfile: {
           windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -25812,7 +26327,7 @@ app.post("/api/mini/clients", async (req, res) => {
   const authenticatedUserId = sanitizeTextValue(authResult.user?.id, 50);
   if (
     !parsedUploadToken &&
-    !(await enforceRateLimit(req, res, {
+    !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.write",
       userProfile: {
         windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
@@ -25856,7 +26371,7 @@ app.post("/api/mini/clients", async (req, res) => {
   let writeReplayReservationShouldPersist = false;
   let writeIdempotencyReservation = null;
   try {
-    const idempotencyReservationResult = reserveMiniWriteIdempotency(authenticatedUserId, idempotencyKey);
+    const idempotencyReservationResult = await reserveMiniWriteIdempotency(authenticatedUserId, idempotencyKey);
     if (!idempotencyReservationResult.ok) {
       if (idempotencyReservationResult.replayed) {
         res.setHeader("Idempotency-Replayed", "true");
@@ -25876,7 +26391,7 @@ app.post("/api/mini/clients", async (req, res) => {
     }
     writeIdempotencyReservation = idempotencyReservationResult.reservation;
 
-    const replayReservationResult = reserveMiniWriteInitDataReplayKey(
+    const replayReservationResult = await reserveMiniWriteInitDataReplayKey(
       buildMiniWriteInitDataReplayKey(authResult),
       resolveMiniWriteInitDataReplayExpiresAtMs(authResult),
     );
@@ -25903,7 +26418,7 @@ app.post("/api/mini/clients", async (req, res) => {
       submittedAt: submission.submittedAt,
       attachmentsCount: submission.attachmentsCount || 0,
     };
-    commitMiniWriteIdempotencySuccess(writeIdempotencyReservation, 201, successResponsePayload);
+    await commitMiniWriteIdempotencySuccess(writeIdempotencyReservation, 201, successResponsePayload);
     writeReplayReservationShouldPersist = true;
     res.status(201).json(successResponsePayload);
 
@@ -25918,8 +26433,8 @@ app.post("/api/mini/clients", async (req, res) => {
     console.error("POST /api/mini/clients failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to submit client"));
   } finally {
-    releaseMiniWriteIdempotencyReservation(writeIdempotencyReservation);
-    releaseMiniWriteInitDataReplayKeyReservation(
+    await releaseMiniWriteIdempotencyReservation(writeIdempotencyReservation);
+    await releaseMiniWriteInitDataReplayKeyReservation(
       writeReplayReservation,
       writeReplayReservationShouldPersist,
     );
@@ -26036,6 +26551,9 @@ app.get("/api/moderation/submissions/:id/files/:fileId", requireWebPermission(WE
       buildContentDisposition(isInline ? "inline" : "attachment", file.fileName),
     );
     setNoStorePrivateApiHeaders(res);
+    setAttachmentResponseSecurityHeaders(res, {
+      isInline,
+    });
     res.send(file.content);
   } catch (error) {
     console.error("GET /api/moderation/submissions/:id/files/:fileId failed:", error);
@@ -26331,13 +26849,6 @@ function logServerStartupSummary(port) {
     );
   }
   const quickBooksConfigured = isQuickBooksConfigured();
-  if (QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY) {
-    console.log(
-      `QuickBooks refresh token encryption is enabled (${QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_SOURCE}, key id: ${QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID}).`,
-    );
-  } else {
-    console.warn("QuickBooks refresh token encryption is disabled. QUICKBOOKS_REFRESH_TOKEN may be stored in plaintext.");
-  }
   if (!quickBooksConfigured) {
     console.warn("QuickBooks test API is disabled. Set QUICKBOOKS_CLIENT_ID/SECRET/REFRESH_TOKEN/REALM_ID.");
   }
@@ -26372,10 +26883,14 @@ function logServerStartupSummary(port) {
   } else {
     console.warn("Assistant LLM is disabled. Set OPENAI_API_KEY to enable OpenAI responses.");
   }
-  if (isElevenLabsConfigured()) {
-    console.log(`Assistant voice is enabled via ElevenLabs voice: ${ELEVENLABS_VOICE_ID}.`);
+  if (!ASSISTANT_TTS_ENDPOINT_ENABLED) {
+    console.log("Assistant backend TTS endpoint is disabled (ASSISTANT_TTS_ENDPOINT_ENABLED=false).");
+  } else if (!isElevenLabsConfigured()) {
+    console.warn("Assistant backend TTS endpoint is enabled but ElevenLabs is not configured.");
+  } else if (ASSISTANT_TTS_ENDPOINT_OWNER_ONLY) {
+    console.log(`Assistant backend TTS endpoint is enabled (owner-only) via ElevenLabs voice: ${ELEVENLABS_VOICE_ID}.`);
   } else {
-    console.warn("Assistant voice is running in browser fallback mode. Set ELEVENLABS_API_KEY to enable ElevenLabs TTS.");
+    console.log(`Assistant backend TTS endpoint is enabled via ElevenLabs voice: ${ELEVENLABS_VOICE_ID}.`);
   }
 }
 
@@ -26396,4 +26911,20 @@ if (isDirectServerExecution && (!isTestRuntime || forceAutostartInTestRuntime)) 
 module.exports = {
   app,
   startServer,
+  __assistantInternals: {
+    buildAssistantIntentProfile,
+    buildAssistantReplyPayload,
+    buildAssistantStaleSnapshotFallbackState,
+    resolveAssistantScopeSourceMetadata,
+    sanitizeAssistantReviewTextForStorage,
+    resolveAssistantReviewPiiMode,
+    buildAssistantReviewRetentionCutoffIso,
+    resolveAssistantSessionScopeTenantKeyFromRequest,
+    normalizeAssistantClientMessageSeq,
+    normalizeAssistantContextResetFailureStage,
+    normalizeAssistantContextResetFailureReasonCode,
+    parseAssistantContextResetBrowserFromUserAgent,
+    buildAssistantContextResetBrowserVersionKey,
+    getAssistantIntentPriorityTable,
+  },
 };
