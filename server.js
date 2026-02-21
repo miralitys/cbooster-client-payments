@@ -12890,6 +12890,29 @@ function parseGhlOpportunityTimestamp(...candidates) {
   return 0;
 }
 
+function normalizeGhlLeadContactDisplayName(rawValue, maxLength = 320) {
+  const value = sanitizeTextValue(rawValue, maxLength);
+  if (!value) {
+    return "";
+  }
+
+  const callWithAlexPrefixPattern = /^\s*call with alex\s*\|\s*/i;
+  if (!callWithAlexPrefixPattern.test(value)) {
+    return value;
+  }
+
+  const withoutPrefix = value.replace(callWithAlexPrefixPattern, "").trim();
+  if (!withoutPrefix) {
+    return value;
+  }
+
+  const firstSegment = withoutPrefix
+    .split("|")
+    .map((segment) => sanitizeTextValue(segment, maxLength))
+    .find(Boolean);
+  return sanitizeTextValue(firstSegment || withoutPrefix, maxLength) || value;
+}
+
 function resolveGhlLeadContactName(opportunity) {
   const nestedContact = opportunity?.contact && typeof opportunity.contact === "object" ? opportunity.contact : null;
   const firstName = sanitizeTextValue(
@@ -12902,7 +12925,7 @@ function resolveGhlLeadContactName(opportunity) {
   );
   const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
 
-  return (
+  return normalizeGhlLeadContactDisplayName(
     sanitizeTextValue(
       opportunity?.contactName ||
         opportunity?.customerName ||
@@ -12912,8 +12935,8 @@ function resolveGhlLeadContactName(opportunity) {
         nestedContact?.fullName ||
         nestedContact?.full_name,
       320,
-    ) ||
-    fullName
+    ) || fullName,
+    320,
   );
 }
 
@@ -13954,7 +13977,7 @@ function mergeGhlLeadRows(baseRow, patchRow) {
     ...base,
     leadId: sanitizeTextValue(base.leadId || patch.leadId, 180),
     contactId: sanitizeTextValue(base.contactId || patch.contactId, 180),
-    contactName: sanitizeTextValue(base.contactName || patch.contactName, 320),
+    contactName: normalizeGhlLeadContactDisplayName(base.contactName || patch.contactName, 320),
     opportunityName: sanitizeTextValue(base.opportunityName || patch.opportunityName, 320),
     leadType: sanitizeTextValue(base.leadType || patch.leadType, 120),
     pipelineId: sanitizeTextValue(base.pipelineId || patch.pipelineId, 180),
@@ -14086,7 +14109,7 @@ async function enrichGhlLeadRows(rows, pipelineContext = null) {
           if (detailedContact && typeof detailedContact === "object") {
             const contactPatch = {
               contactId,
-              contactName: sanitizeTextValue(buildContactCandidateName(detailedContact), 320),
+              contactName: normalizeGhlLeadContactDisplayName(buildContactCandidateName(detailedContact), 320),
               assignedTo: resolveGhlLeadAssignedTo({ contact: detailedContact }),
               phone: resolveGhlLeadPhone({ contact: detailedContact }),
               email: resolveGhlLeadEmail({ contact: detailedContact }),
@@ -14306,7 +14329,7 @@ function normalizeGhlLeadRowForCache(row) {
   return {
     leadId,
     contactId: sanitizeTextValue(row?.contactId, 180),
-    contactName: sanitizeTextValue(row?.contactName, 320),
+    contactName: normalizeGhlLeadContactDisplayName(row?.contactName, 320),
     opportunityName: sanitizeTextValue(row?.opportunityName, 320),
     leadType: sanitizeTextValue(row?.leadType, 120),
     pipelineId: sanitizeTextValue(row?.pipelineId, 180),
@@ -14340,7 +14363,7 @@ function mapGhlLeadCacheRow(row) {
   return {
     leadId,
     contactId: sanitizeTextValue(row?.contact_id, 180),
-    contactName: sanitizeTextValue(row?.contact_name, 320),
+    contactName: normalizeGhlLeadContactDisplayName(row?.contact_name, 320),
     opportunityName: sanitizeTextValue(row?.opportunity_name, 320),
     leadType: sanitizeTextValue(row?.lead_type, 120),
     pipelineId: sanitizeTextValue(row?.pipeline_id, 180),
