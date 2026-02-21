@@ -286,24 +286,6 @@ export default function QuickBooksPage() {
           cell: (item) => formatDate(item.paymentDate),
         },
         {
-          key: "clientName",
-          label: "Payee",
-          align: "left",
-          cell: (item) => formatQuickBooksPayeeLabel(item.clientName),
-        },
-        {
-          key: "paymentAmount",
-          label: "Outgoing Amount",
-          align: "right",
-          cell: (item) => CURRENCY_FORMATTER.format(Number(item.paymentAmount) || 0),
-        },
-        {
-          key: "description",
-          label: "Description",
-          align: "left",
-          cell: (item) => formatQuickBooksOutgoingDescriptionLabel(item.description),
-        },
-        {
           key: "expenseCategory",
           label: "Expense Category",
           align: "left",
@@ -338,6 +320,24 @@ export default function QuickBooksPage() {
               </Button>
             </div>
           ),
+        },
+        {
+          key: "clientName",
+          label: "Payee",
+          align: "left",
+          cell: (item) => formatQuickBooksPayeeLabel(item.clientName),
+        },
+        {
+          key: "paymentAmount",
+          label: "Outgoing Amount",
+          align: "right",
+          cell: (item) => CURRENCY_FORMATTER.format(Number(item.paymentAmount) || 0),
+        },
+        {
+          key: "description",
+          label: "Description",
+          align: "left",
+          cell: (item) => formatQuickBooksOutgoingDescriptionLabel(item.description),
         },
       ];
     }
