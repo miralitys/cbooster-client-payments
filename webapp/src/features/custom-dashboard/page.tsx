@@ -5,7 +5,6 @@ import {
   getCustomDashboard,
   getCustomDashboardUsers,
   saveCustomDashboardUsers,
-  uploadCustomDashboardFile,
 } from "@/shared/api";
 import { getCustomDashboardTaskMovements } from "@/shared/api/customDashboard";
 import { showToast } from "@/shared/lib/toast";
@@ -20,7 +19,6 @@ import type {
   CustomDashboardTaskMovementsResponse,
   CustomDashboardTaskMovementRow,
   CustomDashboardTaskItem,
-  CustomDashboardUploadMeta,
   CustomDashboardUserSettingsEntry,
   CustomDashboardUsersPayload,
   CustomDashboardWidgetKey,
@@ -71,7 +69,6 @@ const WIDGET_LABELS: Record<CustomDashboardWidgetKey, string> = {
 type SettingsTab = "dashboard" | "settings";
 type TasksViewKey = (typeof TASK_VIEW_OPTIONS)[number]["key"];
 type CallsViewKey = (typeof CALLS_VIEW_OPTIONS)[number]["key"];
-type UploadType = "contacts" | "calls";
 
 export default function CustomDashboardPage() {
   const location = useLocation();
@@ -86,14 +83,11 @@ export default function CustomDashboardPage() {
   const [selectedSpecialist, setSelectedSpecialist] = useState("");
   const [selectedCallsManager, setSelectedCallsManager] = useState("");
 
-  const [uploadingType, setUploadingType] = useState<UploadType | "">("");
   const [taskMovements, setTaskMovements] = useState<CustomDashboardTaskMovementsResponse | null>(null);
   const [taskMovementsLoading, setTaskMovementsLoading] = useState(false);
   const [taskMovementsError, setTaskMovementsError] = useState("");
   const [selectedTaskMovementManager, setSelectedTaskMovementManager] = useState("");
   const taskMovementsLoadedRef = useRef(false);
-  const contactsFileInputRef = useRef<HTMLInputElement | null>(null);
-  const callsFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [usersLoading, setUsersLoading] = useState(false);
   const [usersError, setUsersError] = useState("");
@@ -708,50 +702,12 @@ export default function CustomDashboardPage() {
     return usersDraft[selectedUser] || null;
   }, [selectedUser, usersDraft]);
 
-  const uploadStateLabel = useMemo(() => {
-    if (!uploadingType) {
-      return "";
-    }
-    if (uploadingType === "contacts") {
-      return "Uploading contacts file...";
-    }
-    return "Uploading calls file...";
-  }, [uploadingType]);
-
   const refreshEverything = useCallback(async () => {
     await loadDashboard();
     if (canManage && activeTab === "settings") {
       await loadUsersSettings();
     }
   }, [activeTab, canManage, loadDashboard, loadUsersSettings]);
-
-  const onUploadSelected = useCallback(
-    async (type: UploadType, file: File) => {
-      setUploadingType(type);
-      try {
-        const result = await uploadCustomDashboardFile(type, file);
-        showToast({
-          type: "success",
-          message: `${toUploadTitle(type)} uploaded (${result.count} rows).`,
-          dedupeKey: `custom-dashboard-upload-${type}-${result.uploadedAt}`,
-          cooldownMs: 2500,
-        });
-
-        await refreshEverything();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Upload failed.";
-        showToast({
-          type: "error",
-          message,
-          dedupeKey: `custom-dashboard-upload-error-${type}-${message}`,
-          cooldownMs: 3000,
-        });
-      } finally {
-        setUploadingType("");
-      }
-    },
-    [refreshEverything],
-  );
 
   const onLoadTaskMovements = useCallback(async (options: { refresh?: boolean; silent?: boolean } = {}) => {
     if (!canManage) {
@@ -952,7 +908,7 @@ export default function CustomDashboardPage() {
             <>
               {canManage ? (
                 <Panel title="Uploads" className="custom-dashboard-uploads-panel">
-                  <p className="dashboard-message">Upload data files for tasks, contacts and calls.</p>
+                  <p className="dashboard-message">Task movement monitoring and sync from GoHighLevel.</p>
                   <div className="custom-dashboard-tasks-source-card">
                     <div className="custom-dashboard-tasks-source-head">
                       <h3>Task Movements (Last 24 Hours)</h3>
@@ -1043,51 +999,6 @@ export default function CustomDashboardPage() {
                       </>
                     ) : null}
                   </div>
-                  {uploadStateLabel ? <p className="dashboard-message">{uploadStateLabel}</p> : null}
-
-                  <div className="custom-dashboard-upload-grid">
-                    <UploadCard
-                      title="Contacts"
-                      meta={dashboard.uploads.contacts}
-                      disabled={Boolean(uploadingType)}
-                      loading={uploadingType === "contacts"}
-                      onUploadClick={() => contactsFileInputRef.current?.click()}
-                    />
-                    <UploadCard
-                      title="Calls"
-                      meta={dashboard.uploads.calls}
-                      disabled={Boolean(uploadingType)}
-                      loading={uploadingType === "calls"}
-                      onUploadClick={() => callsFileInputRef.current?.click()}
-                    />
-                  </div>
-
-                  <input
-                    ref={contactsFileInputRef}
-                    type="file"
-                    accept=".csv,.tsv,.txt"
-                    className="custom-dashboard-upload-input"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        void onUploadSelected("contacts", file);
-                      }
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                  <input
-                    ref={callsFileInputRef}
-                    type="file"
-                    accept=".csv,.tsv,.txt"
-                    className="custom-dashboard-upload-input"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        void onUploadSelected("calls", file);
-                      }
-                      event.currentTarget.value = "";
-                    }}
-                  />
                 </Panel>
               ) : null}
 
@@ -1455,38 +1366,6 @@ export default function CustomDashboardPage() {
   );
 }
 
-interface UploadCardProps {
-  title: string;
-  meta: CustomDashboardUploadMeta;
-  disabled: boolean;
-  loading: boolean;
-  onUploadClick: () => void;
-  actionLabel?: string;
-}
-
-function UploadCard({ title, meta, disabled, loading, onUploadClick, actionLabel }: UploadCardProps) {
-  return (
-    <div className="custom-dashboard-upload-card">
-      <h3>{title}</h3>
-      <p className="dashboard-message">
-        {meta.count ? `${meta.count} rows` : "No uploads yet"}
-      </p>
-      <p className="dashboard-message">File: {meta.fileName || "-"}</p>
-      <p className="dashboard-message">Uploaded: {formatDateTimeOrDash(meta.uploadedAt)}</p>
-      <Button
-        type="button"
-        size="sm"
-        variant="secondary"
-        onClick={onUploadClick}
-        disabled={disabled}
-        isLoading={loading}
-      >
-        {actionLabel || "Upload File"}
-      </Button>
-    </div>
-  );
-}
-
 interface KpiCardProps {
   label: string;
   value: string;
@@ -1541,10 +1420,6 @@ function cloneWidgetSettings(settings: CustomDashboardWidgetSettings): CustomDas
       visibleNames: [...(settings.callsByManager?.visibleNames || [])],
     },
   };
-}
-
-function toUploadTitle(type: UploadType): string {
-  return type === "contacts" ? "Contacts" : "Calls";
 }
 
 function formatDateTimeOrDash(rawValue: string): string {
