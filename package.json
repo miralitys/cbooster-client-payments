@@ -25,6 +25,7 @@
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
     "express": "^4.21.2",
+    "helmet": "^8.1.0",
     "multer": "^2.0.2",
     "pg": "^8.13.3"
   }

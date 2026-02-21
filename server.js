@@ -5,6 +5,7 @@ const bcrypt = require("bcryptjs");
 const fs = require("fs");
 const express = require("express");
 const compression = require("compression");
+const helmet = require("helmet");
 const multer = require("multer");
 const { Pool } = require("pg");
 const {
@@ -1076,6 +1077,37 @@ startPerformanceObservabilityMonitor(performanceObservability);
 
 const app = express();
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "https://telegram.org", "https://*.telegram.org"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "blob:", "https:"],
+        connectSrc: ["'self'", "https:", "wss:"],
+        fontSrc: ["'self'", "data:"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+    hsts: IS_PRODUCTION
+      ? {
+          maxAge: 31536000,
+          includeSubDomains: true,
+          preload: true,
+        }
+      : false,
+    referrerPolicy: {
+      policy: "strict-origin-when-cross-origin",
+    },
+  }),
+);
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use(
