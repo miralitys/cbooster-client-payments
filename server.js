@@ -15255,18 +15255,30 @@ async function fetchQuickBooksAccessToken() {
   return authResult.accessToken;
 }
 
-async function fetchQuickBooksEntityInRange(accessToken, entityName, fromDate, toDate, requestLabel) {
+function normalizeQuickBooksQueryFieldName(rawValue) {
+  const value = sanitizeTextValue(rawValue, 80);
+  if (!value) {
+    return "";
+  }
+  return /^[A-Za-z][A-Za-z0-9_.]*$/.test(value) ? value : "";
+}
+
+async function fetchQuickBooksEntityInRange(accessToken, entityName, fromDate, toDate, requestLabel, options = {}) {
   const normalizedEntityName = sanitizeTextValue(entityName, 80);
   if (!normalizedEntityName) {
     throw createHttpError("QuickBooks query entity is missing.", 500);
   }
+
+  const requestedSelectFields = Array.isArray(options?.selectFields) ? options.selectFields : [];
+  const selectFields = [...new Set(requestedSelectFields.map(normalizeQuickBooksQueryFieldName).filter(Boolean))];
+  const selectClause = selectFields.length ? selectFields.join(", ") : "Id, TotalAmt, TxnDate, CustomerRef";
 
   const items = [];
   let startPosition = 1;
 
   while (items.length < QUICKBOOKS_MAX_QUERY_ROWS) {
     const query = [
-      "SELECT Id, TotalAmt, TxnDate, CustomerRef",
+      `SELECT ${selectClause}`,
       `FROM ${normalizedEntityName}`,
       `WHERE TxnDate >= '${fromDate}' AND TxnDate <= '${toDate}'`,
       "ORDER BY TxnDate DESC",
@@ -15330,6 +15342,24 @@ async function fetchQuickBooksPaymentsInRange(accessToken, fromDate, toDate) {
 
 async function fetchQuickBooksRefundsInRange(accessToken, fromDate, toDate) {
   return fetchQuickBooksEntityInRange(accessToken, "RefundReceipt", fromDate, toDate, "refunds");
+}
+
+async function fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate) {
+  return fetchQuickBooksEntityInRange(accessToken, "Purchase", fromDate, toDate, "purchases", {
+    selectFields: ["Id", "TotalAmt", "TxnDate", "EntityRef"],
+  });
+}
+
+async function fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate) {
+  return fetchQuickBooksEntityInRange(accessToken, "BillPayment", fromDate, toDate, "bill payments", {
+    selectFields: ["Id", "TotalAmt", "TxnDate", "VendorRef"],
+  });
+}
+
+async function fetchQuickBooksChecksInRange(accessToken, fromDate, toDate) {
+  return fetchQuickBooksEntityInRange(accessToken, "Check", fromDate, toDate, "checks", {
+    selectFields: ["Id", "TotalAmt", "TxnDate", "PayeeRef"],
+  });
 }
 
 async function fetchQuickBooksPaymentDetails(accessToken, paymentId) {
@@ -15593,6 +15623,118 @@ function mapQuickBooksRefund(record) {
     paymentDate: paymentDate || "",
     transactionType: "refund",
   };
+}
+
+function normalizeQuickBooksOutgoingTransaction(item) {
+  const transactionType = sanitizeTextValue(item?.transactionType, 40).toLowerCase();
+  if (transactionType !== "purchase" && transactionType !== "billpayment" && transactionType !== "check") {
+    return null;
+  }
+
+  const transactionId = sanitizeTextValue(item?.transactionId, 160);
+  if (!transactionId) {
+    return null;
+  }
+
+  const clientName = sanitizeTextValue(item?.clientName, 300) || "Unknown payee";
+  const customerId = normalizeQuickBooksCustomerId(item?.customerId);
+  const clientPhone = normalizeQuickBooksCustomerPhone(item?.clientPhone);
+  const clientEmail = normalizeQuickBooksCustomerEmail(item?.clientEmail);
+  const parsedAmount = Number.parseFloat(item?.paymentAmount);
+  const paymentAmount = Number.isFinite(parsedAmount) ? -Math.abs(parsedAmount) : 0;
+  const paymentDate = sanitizeTextValue(item?.paymentDate, 20);
+  if (!isValidIsoDateString(paymentDate)) {
+    return null;
+  }
+
+  return {
+    transactionType,
+    transactionId,
+    customerId,
+    clientName,
+    clientPhone,
+    clientEmail,
+    paymentAmount,
+    paymentDate,
+  };
+}
+
+function resolveQuickBooksPayeeReference(reference, fallbackLabel) {
+  const normalizedRef = reference && typeof reference === "object" ? reference : {};
+  const payeeId = normalizeQuickBooksCustomerId(normalizedRef.value);
+  const payeeName = sanitizeTextValue(normalizedRef.name, 300);
+  if (payeeName) {
+    return {
+      payeeName,
+      payeeId,
+    };
+  }
+
+  return {
+    payeeName: payeeId ? `${fallbackLabel} ${payeeId}` : "Unknown payee",
+    payeeId,
+  };
+}
+
+function mapQuickBooksPurchaseAsOutgoing(record) {
+  const payeeReference = resolveQuickBooksPayeeReference(record?.EntityRef, "Payee");
+  return normalizeQuickBooksOutgoingTransaction({
+    transactionType: "purchase",
+    transactionId: record?.Id,
+    customerId: payeeReference.payeeId,
+    clientName: payeeReference.payeeName,
+    clientPhone: "",
+    clientEmail: "",
+    paymentAmount: record?.TotalAmt,
+    paymentDate: record?.TxnDate,
+  });
+}
+
+function mapQuickBooksBillPaymentAsOutgoing(record) {
+  const payeeReference = resolveQuickBooksPayeeReference(record?.VendorRef, "Vendor");
+  return normalizeQuickBooksOutgoingTransaction({
+    transactionType: "billpayment",
+    transactionId: record?.Id,
+    customerId: payeeReference.payeeId,
+    clientName: payeeReference.payeeName,
+    clientPhone: "",
+    clientEmail: "",
+    paymentAmount: record?.TotalAmt,
+    paymentDate: record?.TxnDate,
+  });
+}
+
+function mapQuickBooksCheckAsOutgoing(record) {
+  const payeeReference = resolveQuickBooksPayeeReference(record?.PayeeRef, "Payee");
+  return normalizeQuickBooksOutgoingTransaction({
+    transactionType: "check",
+    transactionId: record?.Id,
+    customerId: payeeReference.payeeId,
+    clientName: payeeReference.payeeName,
+    clientPhone: "",
+    clientEmail: "",
+    paymentAmount: record?.TotalAmt,
+    paymentDate: record?.TxnDate,
+  });
+}
+
+async function listQuickBooksOutgoingTransactionsInRange(fromDate, toDate) {
+  const accessToken = await fetchQuickBooksAccessToken();
+  const [purchaseRecords, billPaymentRecords, checkRecords] = await Promise.all([
+    fetchQuickBooksPurchasesInRange(accessToken, fromDate, toDate),
+    fetchQuickBooksBillPaymentsInRange(accessToken, fromDate, toDate),
+    fetchQuickBooksChecksInRange(accessToken, fromDate, toDate),
+  ]);
+
+  const outgoingItems = [
+    ...purchaseRecords.map(mapQuickBooksPurchaseAsOutgoing),
+    ...billPaymentRecords.map(mapQuickBooksBillPaymentAsOutgoing),
+    ...checkRecords.map(mapQuickBooksCheckAsOutgoing),
+  ]
+    .filter((item) => item && typeof item === "object")
+    .filter((item) => Math.abs(item.paymentAmount) >= QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT);
+
+  return sortQuickBooksTransactionsByDateDesc(outgoingItems);
 }
 
 function sortQuickBooksTransactionsByDateDesc(items) {
@@ -20435,6 +20577,65 @@ async function respondQuickBooksRecentPayments(req, res, options = {}) {
   }
 }
 
+async function respondQuickBooksOutgoingPayments(req, res, options = {}) {
+  const range = options.range;
+  const routeLabel = sanitizeTextValue(options.routeLabel, 120) || "api/quickbooks/payments/outgoing";
+  const quickBooksRateProfile = RATE_LIMIT_PROFILE_API_EXPENSIVE;
+
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.quickbooks.read",
+      ipProfile: {
+        windowMs: quickBooksRateProfile.windowMs,
+        maxHits: quickBooksRateProfile.maxHitsIp,
+        blockMs: quickBooksRateProfile.blockMs,
+      },
+      userProfile: {
+        windowMs: quickBooksRateProfile.windowMs,
+        maxHits: quickBooksRateProfile.maxHitsUser,
+        blockMs: quickBooksRateProfile.blockMs,
+      },
+      message: "QuickBooks request limit reached. Please wait before retrying.",
+      code: "quickbooks_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  if (!isQuickBooksConfigured()) {
+    res.status(503).json({
+      error:
+        "QuickBooks is not configured. Set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN, and QUICKBOOKS_REALM_ID.",
+    });
+    return;
+  }
+
+  try {
+    const syncMeta = buildQuickBooksSyncMeta({
+      requested: false,
+      syncMode: "incremental",
+    });
+    const items = await listQuickBooksOutgoingTransactionsInRange(range.from, range.to);
+
+    res.json({
+      ok: true,
+      range: {
+        from: range.from,
+        to: range.to,
+      },
+      count: items.length,
+      items,
+      source: "quickbooks_live",
+      sync: syncMeta,
+    });
+  } catch (error) {
+    console.error(`${routeLabel} failed:`, error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load QuickBooks outgoing transactions.",
+    });
+  }
+}
+
 app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
   const syncRequestedOnGet =
     parseQuickBooksSyncFlag(req.query.sync) ||
@@ -20460,6 +20661,34 @@ app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISS
   await respondQuickBooksRecentPayments(req, res, {
     range,
     routeLabel: "GET /api/quickbooks/payments/recent",
+  });
+});
+
+app.get("/api/quickbooks/payments/outgoing", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+  const syncRequestedOnGet =
+    parseQuickBooksSyncFlag(req.query.sync) ||
+    parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
+  if (syncRequestedOnGet) {
+    res.status(405).json({
+      error: "State-changing sync is not allowed via GET. Use POST /api/quickbooks/payments/recent/sync.",
+      code: "method_not_allowed_for_sync",
+    });
+    return;
+  }
+
+  let range;
+  try {
+    range = resolveQuickBooksDateRangeFromRequest(req, "query");
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 300) || "Invalid date range.",
+    });
+    return;
+  }
+
+  await respondQuickBooksOutgoingPayments(req, res, {
+    range,
+    routeLabel: "GET /api/quickbooks/payments/outgoing",
   });
 });
 
