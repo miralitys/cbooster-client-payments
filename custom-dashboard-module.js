@@ -23,6 +23,7 @@ const CUSTOM_DASHBOARD_GHL_TASKS_LATEST_KEY = "custom_dashboard/latest/tasks_ghl
 const CUSTOM_DASHBOARD_GHL_TASKS_SYNC_STATE_KEY = "custom_dashboard/sync/tasks_ghl_state";
 const CUSTOM_DASHBOARD_TASK_MOVEMENTS_CACHE_KEY = "custom_dashboard/cache/tasks_movements_24h";
 const CUSTOM_DASHBOARD_GHL_CALLS_SYNC_STATE_KEY = "custom_dashboard/sync/calls_ghl_state";
+const CUSTOM_DASHBOARD_GHL_USER_NAMES_CACHE_KEY = "custom_dashboard/cache/ghl_user_names";
 
 const CUSTOM_DASHBOARD_TASKS_SOURCE_UPLOAD = "upload";
 const CUSTOM_DASHBOARD_TASKS_SOURCE_GHL = "ghl";
@@ -959,6 +960,31 @@ function registerCustomDashboardModule(config) {
     };
   }
 
+  function normalizeGhlUserNamesCache(rawValue) {
+    const source = rawValue && typeof rawValue === "object" ? rawValue : {};
+    const rawNames = source.names && typeof source.names === "object" ? source.names : {};
+    const names = {};
+    let count = 0;
+
+    for (const [rawManagerId, rawManagerName] of Object.entries(rawNames)) {
+      const managerId = sanitizeTextValue(rawManagerId, 160);
+      const managerName = sanitizeTextValue(rawManagerName, 220);
+      if (!managerId || !managerName || looksLikeOpaqueUserId(managerName)) {
+        continue;
+      }
+      names[managerId] = managerName;
+      count += 1;
+      if (count >= 10000) {
+        break;
+      }
+    }
+
+    return {
+      updatedAt: normalizeIsoDateOrEmpty(source.updatedAt),
+      names,
+    };
+  }
+
   function buildGhlCallsAutoSyncInfo(syncState) {
     const state = normalizeGhlCallsSyncState(syncState);
     return {
@@ -1870,6 +1896,114 @@ function registerCustomDashboardModule(config) {
         });
       }
     }
+  }
+
+  async function enrichCallsDataManagerNames(callsData) {
+    const source = normalizeComparableText(callsData?.source || callsData?.fileName, 80);
+    if (!source.includes("ghl")) {
+      return callsData;
+    }
+
+    const items = Array.isArray(callsData?.items) ? callsData.items : [];
+    if (!items.length) {
+      return callsData;
+    }
+
+    const managerIds = new Set();
+    for (const item of items) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const sourceManagerId = sanitizeTextValue(item.sourceManagerId, 160);
+      const managerName = sanitizeTextValue(item.managerName, 220);
+      const candidateId = sourceManagerId || (looksLikeOpaqueUserId(managerName) ? managerName : "");
+      if (candidateId) {
+        managerIds.add(candidateId);
+      }
+    }
+    if (!managerIds.size) {
+      return callsData;
+    }
+
+    const cacheRaw = await readAppDataValue(CUSTOM_DASHBOARD_GHL_USER_NAMES_CACHE_KEY, null);
+    const cached = normalizeGhlUserNamesCache(cacheRaw);
+    const managerNameCache = new Map(Object.entries(cached.names));
+
+    const unresolvedIds = [];
+    for (const managerId of managerIds) {
+      const cachedName = sanitizeTextValue(managerNameCache.get(managerId), 220);
+      if (!cachedName || looksLikeOpaqueUserId(cachedName)) {
+        unresolvedIds.push(managerId);
+      }
+    }
+
+    if (unresolvedIds.length && isGhlTasksSyncConfigured()) {
+      const usersIndex = await listGhlUsersIndex();
+      for (const [userId, managerName] of usersIndex.entries()) {
+        const normalizedUserId = sanitizeTextValue(userId, 160);
+        const normalizedManagerName = sanitizeTextValue(managerName, 220);
+        if (!normalizedUserId || !normalizedManagerName || looksLikeOpaqueUserId(normalizedManagerName)) {
+          continue;
+        }
+        if (!managerNameCache.has(normalizedUserId)) {
+          managerNameCache.set(normalizedUserId, normalizedManagerName);
+        }
+      }
+
+      await mapWithConcurrency(unresolvedIds, 5, async (managerId) => {
+        const resolved = await resolveGhlManagerNameById(managerId, usersIndex, managerNameCache);
+        const normalizedResolved = sanitizeTextValue(resolved, 220);
+        if (normalizedResolved && !looksLikeOpaqueUserId(normalizedResolved)) {
+          managerNameCache.set(managerId, normalizedResolved);
+        }
+      });
+    }
+
+    let itemsChanged = false;
+    const nextItems = items.map((item) => {
+      if (!item || typeof item !== "object") {
+        return item;
+      }
+
+      const sourceManagerId = sanitizeTextValue(item.sourceManagerId, 160);
+      const managerName = sanitizeTextValue(item.managerName, 220);
+      const candidateId = sourceManagerId || (looksLikeOpaqueUserId(managerName) ? managerName : "");
+      if (!candidateId) {
+        return item;
+      }
+
+      const resolved = sanitizeTextValue(managerNameCache.get(candidateId), 220);
+      const nextManagerName = resolved && !looksLikeOpaqueUserId(resolved) ? resolved : managerName;
+      const needsUpdate = nextManagerName !== managerName || sourceManagerId !== candidateId;
+      if (!needsUpdate) {
+        return item;
+      }
+
+      itemsChanged = true;
+      return {
+        ...item,
+        managerName: nextManagerName || managerName || "Unassigned",
+        sourceManagerId: candidateId,
+      };
+    });
+
+    const nextCache = {
+      updatedAt: new Date().toISOString(),
+      names: Object.fromEntries([...managerNameCache.entries()]),
+    };
+    await upsertAppDataValue(CUSTOM_DASHBOARD_GHL_USER_NAMES_CACHE_KEY, nextCache);
+
+    if (!itemsChanged) {
+      return callsData;
+    }
+
+    const nextCallsData = {
+      ...callsData,
+      items: nextItems,
+      count: nextItems.length,
+    };
+    await upsertAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.calls, nextCallsData);
+    return nextCallsData;
   }
 
   async function runGhlCallsSync(options = {}) {
@@ -3044,8 +3178,9 @@ function registerCustomDashboardModule(config) {
     const tasksSyncState = normalizeGhlTasksSyncState(tasksSyncStateRaw);
     const tasksData = tasksSourceSelected === CUSTOM_DASHBOARD_TASKS_SOURCE_GHL ? tasksGhlData : tasksUploadData;
     const contactsData = normalizeUploadData(contactsDataRaw, "contacts");
-    const callsData = normalizeUploadData(callsDataRaw, "calls");
+    let callsData = normalizeUploadData(callsDataRaw, "calls");
     const callsSyncState = normalizeGhlCallsSyncState(callsSyncStateRaw);
+    callsData = await enrichCallsDataManagerNames(callsData);
 
     const options = buildWidgetOptions(tasksData, contactsData, callsData);
     const activeUserProfile = req.webAuthProfile && typeof req.webAuthProfile === "object" ? req.webAuthProfile : null;
@@ -3100,7 +3235,8 @@ function registerCustomDashboardModule(config) {
     const tasksSyncState = normalizeGhlTasksSyncState(tasksSyncStateRaw);
     const tasksData = tasksSourceSelected === CUSTOM_DASHBOARD_TASKS_SOURCE_GHL ? tasksGhlData : tasksUploadData;
     const contactsData = normalizeUploadData(contactsDataRaw, "contacts");
-    const callsData = normalizeUploadData(callsDataRaw, "calls");
+    let callsData = normalizeUploadData(callsDataRaw, "calls");
+    callsData = await enrichCallsDataManagerNames(callsData);
 
     const options = buildWidgetOptions(tasksData, contactsData, callsData);
     const users = (typeof listWebAuthUsers === "function" ? listWebAuthUsers() : [])
