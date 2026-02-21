@@ -8,13 +8,27 @@
 ```bash
 cd "/Users/ramisyaparov/Desktop/Project/CBooster Client Payments/mobile-app"
 npm install
-cp .env.example .env
+cp .env.development.example .env
 ```
 
+По умолчанию используйте `development`/`staging` endpoint, не production.
 В `.env` укажите адрес сервера:
 
 ```bash
-EXPO_PUBLIC_API_BASE_URL=https://your-app-name.onrender.com
+EXPO_PUBLIC_API_BASE_URL=https://staging.example.com
+```
+
+Профили окружений:
+
+```bash
+# local dev / simulator
+cp .env.development.example .env
+
+# staging (QA/UAT)
+cp .env.staging.example .env
+
+# production (release only)
+cp .env.production.example .env
 ```
 
 ## 2. Запуск в dev (Xcode + Metro)
@@ -39,6 +53,10 @@ open "/Users/ramisyaparov/Desktop/Project/CBooster Client Payments/mobile-app/io
 1. `Product -> Scheme -> Edit Scheme...`
 2. Для `Run` выберите `Build Configuration: Release`
 3. `Cmd+R`
+
+Рекомендуемая связка профилей:
+- `CBoosterPayments-Dev` + `development/staging` `.env`
+- `CBoosterPayments-Release` + `production` `.env`
 
 ## 4. Сборка .ipa (EAS)
 
