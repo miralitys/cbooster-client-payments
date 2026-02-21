@@ -25,6 +25,7 @@ const {
   computeRowsChecksum,
   normalizeLegacyRecordsSnapshot,
 } = require("./client-records-v2-utils");
+const { normalizeAuthUsernameForScopeKey } = require("./assistant-session-scope-identity-utils");
 const { registerCustomDashboardModule } = require("./custom-dashboard-module");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
@@ -3716,7 +3717,7 @@ function normalizeAssistantScopeTenantKey(rawValue) {
 
 function resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId) {
   const tenantKey = normalizeAssistantScopeTenantKey(rawTenantKey);
-  const userKey = normalizeAssistantComparableText(rawUsername, 160) || "unknown";
+  const userKey = normalizeAuthUsernameForScopeKey(rawUsername) || "unknown";
   const sessionKey = normalizeAssistantSessionId(rawSessionId) || ASSISTANT_DEFAULT_SESSION_ID;
   return {
     tenantKey,
