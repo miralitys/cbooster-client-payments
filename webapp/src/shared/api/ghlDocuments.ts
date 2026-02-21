@@ -6,11 +6,19 @@ interface DownloadGhlClientContractResult {
   fileName: string;
 }
 
-export async function getGhlClientContracts(limit = 25): Promise<GhlClientContractsPayload> {
+interface GetGhlClientContractsOptions {
+  clientName?: string;
+}
+
+export async function getGhlClientContracts(limit = 25, options: GetGhlClientContractsOptions = {}): Promise<GhlClientContractsPayload> {
   const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(200, Math.trunc(limit))) : 25;
   const query = new URLSearchParams({
     limit: String(normalizedLimit),
   });
+  const normalizedClientName = (options.clientName || "").toString().trim();
+  if (normalizedClientName) {
+    query.set("clientName", normalizedClientName);
+  }
   return apiRequest<GhlClientContractsPayload>(`/api/ghl/client-contracts?${query.toString()}`);
 }
 
