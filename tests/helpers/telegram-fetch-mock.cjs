@@ -84,10 +84,15 @@ globalThis.fetch = async function patchedFetch(input, init) {
   if (mode === "status_member") {
     return jsonResponse(200, { ok: true, result: { status: "member" } });
   }
+  if (mode === "notify_fail") {
+    if (urlString.includes("/sendMessage")) {
+      return textResponse(500, "Telegram notify sendMessage failed");
+    }
+    return jsonResponse(200, { ok: true, result: { status: "member" } });
+  }
   if (mode === "telegram_matrix") {
     return buildMatrixResponse(urlString);
   }
 
   return originalFetch(input, init);
 };
-
