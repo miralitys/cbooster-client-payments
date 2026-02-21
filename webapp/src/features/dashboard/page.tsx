@@ -49,20 +49,25 @@ const OVERVIEW_PERIOD_OPTIONS: Array<{ key: OverviewPeriodKey; label: string }> 
   { key: "last30Days", label: "Last 30 Days" },
 ];
 const MODERATION_PAGE_LIMIT = 200;
-const SHOWN_CLIENT_FIELDS = new Set([
-  "clientName",
-  "closedBy",
-  "companyName",
-  "serviceType",
-  "contractTotals",
-  "payment1",
-  "payment1Date",
-  "notes",
-  "afterResult",
-  "writtenOff",
-  "id",
-  "createdAt",
-]);
+const MODERATION_CLIENT_DETAIL_FIELDS: Array<{ key: string; label: string }> = [
+  { key: "clientName", label: "Client Name" },
+  { key: "closedBy", label: "Closed By" },
+  { key: "leadSource", label: "Lead Source" },
+  { key: "companyName", label: "Company Name" },
+  { key: "serviceType", label: "Service Type" },
+  { key: "contractTotals", label: "Contract Totals" },
+  { key: "payment1", label: "Payment 1" },
+  { key: "payment1Date", label: "Payment 1 Date" },
+  { key: "futurePayment", label: "Future Payment" },
+  { key: "identityIq", label: "Identity IQ" },
+  { key: "ssn", label: "SSN" },
+  { key: "clientPhoneNumber", label: "Client Phone Number" },
+  { key: "clientEmailAddress", label: "Client Email Address" },
+  { key: "notes", label: "Notes" },
+  { key: "afterResult", label: "After Result" },
+  { key: "writtenOff", label: "Written Off" },
+];
+const SHOWN_CLIENT_FIELDS = new Set([...MODERATION_CLIENT_DETAIL_FIELDS.map((field) => field.key), "id", "createdAt"]);
 
 type DashboardQuickBooksViewRow = RowWithKey<QuickBooksPaymentRow>;
 
@@ -695,21 +700,14 @@ export default function DashboardPage() {
         {activeSubmission ? (
           <>
             <div className="record-details-grid submission-modal__details">
-              <Detail label="Client Name" value={getClientField(activeSubmission, "clientName")} />
-              <Detail label="Closed By" value={getClientField(activeSubmission, "closedBy")} />
-              <Detail label="Company Name" value={getClientField(activeSubmission, "companyName")} />
-              <Detail label="Service Type" value={getClientField(activeSubmission, "serviceType")} />
-              <Detail label="Contract Totals" value={getClientField(activeSubmission, "contractTotals")} />
-              <Detail label="Payment 1" value={getClientField(activeSubmission, "payment1")} />
-              <Detail label="Payment 1 Date" value={getClientField(activeSubmission, "payment1Date")} />
-              <Detail label="Notes" value={getClientField(activeSubmission, "notes")} />
-              <Detail label="After Result" value={getClientField(activeSubmission, "afterResult")} />
-              <Detail label="Written Off" value={getClientField(activeSubmission, "writtenOff")} />
+              {MODERATION_CLIENT_DETAIL_FIELDS.map((field) => (
+                <Detail key={field.key} label={field.label} value={getClientField(activeSubmission, field.key)} />
+              ))}
               <Detail label="Submitted By" value={formatSubmittedBy(activeSubmission.submittedBy)} />
               {Object.entries(activeSubmission.client || {})
-                .filter(([key, value]) => !SHOWN_CLIENT_FIELDS.has(key) && String(value || "").trim().length > 0)
+                .filter(([key, value]) => !SHOWN_CLIENT_FIELDS.has(key) && formatClientFieldValue(value).length > 0)
                 .map(([key, value]) => (
-                  <Detail key={key} label={key} value={String(value)} />
+                  <Detail key={key} label={key} value={formatClientFieldValue(value)} />
                 ))}
             </div>
 
@@ -768,11 +766,28 @@ function Detail({ label, value }: { label: string; value: string }) {
 }
 
 function getClientField(submission: ModerationSubmission, key: string): string {
-  const client = submission?.client;
-  if (!client || typeof client !== "object") {
+  const clientValue = getObjectFieldValue(submission?.client, key);
+  if (clientValue) {
+    return clientValue;
+  }
+  return getObjectFieldValue(submission?.miniData, key);
+}
+
+function getObjectFieldValue(source: unknown, key: string): string {
+  if (!source || typeof source !== "object") {
     return "";
   }
-  return String((client as Record<string, unknown>)[key] || "").trim();
+  return formatClientFieldValue((source as Record<string, unknown>)[key]);
+}
+
+function formatClientFieldValue(rawValue: unknown): string {
+  if (rawValue === null || rawValue === undefined) {
+    return "";
+  }
+  if (typeof rawValue === "boolean") {
+    return rawValue ? "Yes" : "No";
+  }
+  return String(rawValue).trim();
 }
 
 function formatSubmittedBy(submittedBy: ModerationSubmission["submittedBy"]): string {
