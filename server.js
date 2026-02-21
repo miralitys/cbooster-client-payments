@@ -599,7 +599,7 @@ const GHL_CLIENT_CONTRACT_DOWNLOAD_STATUSES = new Set(["ready", "no_contact", "n
 const GHL_PROPOSAL_STATUS_FILTERS = ["completed", "accepted", "signed", "sent", "viewed"];
 const GHL_PROPOSAL_STATUS_FILTERS_QUERY = GHL_PROPOSAL_STATUS_FILTERS.join(",");
 const GHL_CLIENT_CONTRACT_LOOKUP_MAX_CONTACTS = Math.min(
-  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_LOOKUP_MAX_CONTACTS, 5), 1),
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_LOOKUP_MAX_CONTACTS, 12), 1),
   20,
 );
 const GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS = Math.min(
@@ -25877,14 +25877,24 @@ function isGhlContractDownloadCandidate(candidate, context = {}) {
   const isRelatedToContact = isGhlContractCandidateRelatedToContact(candidate, context?.contactName, context?.contactId);
   const isProposalSource = source.startsWith("proposals.");
 
-  if (!hasPdfHint && !isProposalSource) {
-    return false;
-  }
-  if (!hasContractKeyword && !isProposalSource) {
-    return false;
-  }
   if (isProposalSource && !isRelatedToContact && !hasContractKeyword) {
     return false;
+  }
+
+  // For direct document/file/attachment sources, keep candidates even without explicit PDF/contract hints:
+  // many GHL tenants return generic file names and signed URLs without .pdf suffix.
+  if (!isProposalSource) {
+    const isDirectDocumentSource =
+      source.startsWith("contacts.documents") ||
+      source.startsWith("contact.documents") ||
+      source.startsWith("contacts.files") ||
+      source.startsWith("contact.files") ||
+      source.startsWith("contacts.attachments") ||
+      source.startsWith("contact.attachments");
+
+    if (!isDirectDocumentSource && !hasPdfHint && !hasContractKeyword) {
+      return false;
+    }
   }
 
   return true;
@@ -26141,6 +26151,15 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
       const contactName = buildContactCandidateName(mergedContact) || buildContactCandidateName(rawContact) || normalizedClientName;
 
       const candidates = [];
+      const fromContactPayload = extractGhlContractCandidatesFromContact(mergedContact);
+      for (const candidate of fromContactPayload) {
+        candidates.push({
+          ...candidate,
+          contactName: sanitizeTextValue(candidate?.contactName, 300) || contactName,
+          contactId: sanitizeTextValue(candidate?.contactId, 160) || contactId,
+        });
+      }
+
       for (const key of ["documents", "attachments", "files"]) {
         const sourceValue = mergedContact?.[key];
         if (!sourceValue) {
@@ -26162,6 +26181,19 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         contactName,
       });
       for (const candidate of fromApi) {
+        candidates.push({
+          ...candidate,
+          contactName: sanitizeTextValue(candidate?.contactName, 300) || contactName,
+          contactId: sanitizeTextValue(candidate?.contactId, 160) || contactId,
+        });
+      }
+
+      // Legacy extractor is broader and includes more endpoint/query variants (plus location-level fallbacks).
+      const fromLegacyApi = await listGhlContractCandidatesForContact(contactId, {
+        clientName: normalizedClientName,
+        contactName,
+      });
+      for (const candidate of fromLegacyApi) {
         candidates.push({
           ...candidate,
           contactName: sanitizeTextValue(candidate?.contactName, 300) || contactName,
