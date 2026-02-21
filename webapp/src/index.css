@@ -2803,7 +2803,13 @@ a {
 
 .custom-dashboard-react-page .cb-table th.custom-dashboard-manager-column,
 .custom-dashboard-react-page .cb-table td.custom-dashboard-manager-column {
-  width: max-content;
+  width: 1%;
+  min-width: max-content;
+  max-width: max-content;
+  white-space: nowrap;
+}
+
+.custom-dashboard-react-page .cb-table {
   min-width: max-content;
 }
 
