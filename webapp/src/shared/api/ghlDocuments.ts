@@ -39,9 +39,27 @@ export async function downloadGhlClientContract(clientName: string, contactId = 
     query.set("contactId", normalizedContactId);
   }
 
-  const response = await fetch(`/api/ghl/client-contracts/download?${query.toString()}`, {
-    credentials: "include",
-  });
+  const timeoutMs = 45_000;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(`/api/ghl/client-contracts/download?${query.toString()}`, {
+      credentials: "include",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Download request timed out after ${Math.round(timeoutMs / 1000)} seconds for "${normalizedClientName}".`);
+    }
+    const message = error instanceof Error ? error.message : "Unknown network error";
+    throw new Error(`Failed to download contract for "${normalizedClientName}": ${message}`);
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const rawBody = await response.text().catch(() => "");
