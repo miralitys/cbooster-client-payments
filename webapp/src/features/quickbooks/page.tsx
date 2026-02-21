@@ -577,15 +577,16 @@ export default function QuickBooksPage() {
                   >
                     Add
                   </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="quickbooks-expense-category-confirm"
-                    onClick={() => confirmSuggestedQuickBooksExpenseCategory(item)}
-                    disabled={!hasSuggestion}
-                  >
-                    Подтвердить
-                  </Button>
+                  {hasSuggestion ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="quickbooks-expense-category-confirm"
+                      onClick={() => confirmSuggestedQuickBooksExpenseCategory(item)}
+                    >
+                      Confirm
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             );
