@@ -2765,6 +2765,12 @@ a {
   font-size: var(--font-size-xs);
 }
 
+.custom-dashboard-react-page .cb-table th.custom-dashboard-manager-column,
+.custom-dashboard-react-page .cb-table td.custom-dashboard-manager-column {
+  width: max-content;
+  min-width: max-content;
+}
+
 .custom-dashboard-specialist-toolbar {
   min-width: min(280px, 100%);
 }

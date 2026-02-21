@@ -68,6 +68,7 @@ const WIDGET_LABELS: Record<CustomDashboardWidgetKey, string> = {
   salesReport: "Sales Report",
   callsByManager: "Calls by Manager",
 };
+const MANAGER_COLUMN_CLASS = "custom-dashboard-manager-column";
 
 type SettingsTab = "dashboard" | "settings";
 type TasksViewKey = (typeof TASK_VIEW_OPTIONS)[number]["key"];
@@ -366,6 +367,8 @@ export default function CustomDashboardPage() {
         key: "managerName",
         label: "Manager",
         align: "left",
+        className: MANAGER_COLUMN_CLASS,
+        headerClassName: MANAGER_COLUMN_CLASS,
         cell: (row) => row.managerName,
       },
       {
@@ -419,6 +422,8 @@ export default function CustomDashboardPage() {
         key: "managerName",
         label: "Manager",
         align: "left",
+        className: MANAGER_COLUMN_CLASS,
+        headerClassName: MANAGER_COLUMN_CLASS,
         cell: (task) => task.managerName || "-",
       },
       {
@@ -467,6 +472,8 @@ export default function CustomDashboardPage() {
         key: "managerName",
         label: "Manager",
         align: "left",
+        className: MANAGER_COLUMN_CLASS,
+        headerClassName: MANAGER_COLUMN_CLASS,
         cell: (row) => row.managerName,
       },
       {
@@ -515,6 +522,8 @@ export default function CustomDashboardPage() {
         key: "managerName",
         label: "Manager",
         align: "left",
+        className: MANAGER_COLUMN_CLASS,
+        headerClassName: MANAGER_COLUMN_CLASS,
         cell: (row) => row.managerName,
       },
       {
@@ -545,6 +554,8 @@ export default function CustomDashboardPage() {
         key: "managerName",
         label: "Manager",
         align: "left",
+        className: MANAGER_COLUMN_CLASS,
+        headerClassName: MANAGER_COLUMN_CLASS,
         cell: (row) => row.managerName,
       },
       {
@@ -575,6 +586,8 @@ export default function CustomDashboardPage() {
         key: "managerName",
         label: "Manager",
         align: "left",
+        className: MANAGER_COLUMN_CLASS,
+        headerClassName: MANAGER_COLUMN_CLASS,
         cell: (row) => row.managerName,
       },
       {
@@ -617,6 +630,8 @@ export default function CustomDashboardPage() {
         key: "managerName",
         label: "Manager",
         align: "left",
+        className: MANAGER_COLUMN_CLASS,
+        headerClassName: MANAGER_COLUMN_CLASS,
         cell: (row) => row.managerName,
       },
       {
@@ -659,6 +674,8 @@ export default function CustomDashboardPage() {
         key: "managerName",
         label: "Manager",
         align: "left",
+        className: MANAGER_COLUMN_CLASS,
+        headerClassName: MANAGER_COLUMN_CLASS,
         cell: (row) => row.managerName || "Unassigned",
       },
       {
