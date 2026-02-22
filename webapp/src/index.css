@@ -2689,8 +2689,30 @@ a {
   max-width: 520px;
 }
 
-.identityiq-score-table-wrap {
-  min-height: 120px;
+.identityiq-score-table-wrap.cb-table-wrap {
+  min-height: 0;
+  height: auto;
+  max-height: none;
+  resize: none;
+}
+
+.identityiq-score-table-wrap .cb-table {
+  min-width: 0;
+}
+
+.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table {
+  width: 100%;
+}
+
+.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table th,
+.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table td {
+  white-space: normal;
+}
+
+.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table th:last-child,
+.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table td:last-child {
+  width: 140px;
+  min-width: 120px;
 }
 
 .identityiq-score-snippets {
