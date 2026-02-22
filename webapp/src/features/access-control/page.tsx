@@ -75,7 +75,7 @@ export default function AccessControlPage() {
   const [assistantReviewsTotal, setAssistantReviewsTotal] = useState(0);
   const [assistantReviewsLoading, setAssistantReviewsLoading] = useState(false);
   const [assistantReviewsError, setAssistantReviewsError] = useState("");
-  const [assistantReviewsStatusText, setAssistantReviewsStatusText] = useState("Owner review queue is empty.");
+  const [assistantReviewsStatusText, setAssistantReviewsStatusText] = useState("Owner review queue has no pending topics.");
   const [assistantReviewDrafts, setAssistantReviewDrafts] = useState<Record<string, AssistantReviewDraft>>({});
   const [assistantReviewSavingIds, setAssistantReviewSavingIds] = useState<Record<string, boolean>>({});
   const [expandedAssistantReviewId, setExpandedAssistantReviewId] = useState<number | null>(null);
@@ -122,7 +122,7 @@ export default function AccessControlPage() {
   const loadAssistantReviewQueue = useCallback(async () => {
     setAssistantReviewsLoading(true);
     setAssistantReviewsError("");
-    setAssistantReviewsStatusText("Loading assistant review queue...");
+    setAssistantReviewsStatusText("Loading pending assistant topics...");
 
     try {
       const payload = await listAssistantReviews(ASSISTANT_REVIEW_LIMIT, 0);
@@ -146,9 +146,9 @@ export default function AccessControlPage() {
         return null;
       });
       if (!items.length) {
-        setAssistantReviewsStatusText("No assistant questions yet.");
+        setAssistantReviewsStatusText("No pending assistant topics.");
       } else {
-        setAssistantReviewsStatusText(`Loaded ${items.length} of ${payload.total} assistant questions.`);
+        setAssistantReviewsStatusText(`Loaded ${items.length} pending topics.`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load assistant review queue.";
@@ -522,6 +522,10 @@ export default function AccessControlPage() {
   }
 
   async function submitAssistantReviewCorrection(item: AssistantReviewItem) {
+    await submitAssistantReviewDecision(item, false);
+  }
+
+  async function submitAssistantReviewDecision(item: AssistantReviewItem, markCorrect: boolean) {
     if (!isOwnerUser) {
       return;
     }
@@ -530,28 +534,39 @@ export default function AccessControlPage() {
     const draft = getAssistantReviewDraft(item);
     const correctedReply = draft.correctedReply.trim();
     const correctionNote = draft.correctionNote.trim();
+    if (!markCorrect && !correctedReply && !correctionNote) {
+      const message = "Write Owner Corrected Answer (or a note), or use Correct.";
+      setAssistantReviewsError(message);
+      setAssistantReviewsStatusText(message);
+      return;
+    }
 
     setAssistantReviewSavingIds((previous) => ({ ...previous, [String(reviewId)]: true }));
     setAssistantReviewsError("");
-    setAssistantReviewsStatusText(`Saving correction for review #${reviewId}...`);
+    setAssistantReviewsStatusText(
+      markCorrect ? `Marking review #${reviewId} as correct...` : `Saving correction for review #${reviewId}...`,
+    );
 
     try {
       const response = await updateAssistantReview(reviewId, {
         correctedReply,
         correctionNote,
+        markCorrect,
       });
       const updatedItem = response.item;
-      setAssistantReviews((previous) =>
-        previous.map((review) => (review.id === updatedItem.id ? updatedItem : review)),
+      setAssistantReviews((previous) => previous.filter((review) => review.id !== updatedItem.id));
+      setAssistantReviewsTotal((previous) => Math.max(0, previous - 1));
+      setAssistantReviewDrafts((previous) => {
+        const next = { ...previous };
+        delete next[String(updatedItem.id)];
+        return next;
+      });
+      setExpandedAssistantReviewId((previous) => (previous === updatedItem.id ? null : previous));
+      setAssistantReviewsStatusText(
+        markCorrect
+          ? `Review #${reviewId} marked as correct and moved to completed.`
+          : `Correction saved for review #${reviewId}. Topic moved to completed.`,
       );
-      setAssistantReviewDrafts((previous) => ({
-        ...previous,
-        [String(updatedItem.id)]: {
-          correctedReply: updatedItem.correctedReply || "",
-          correctionNote: updatedItem.correctionNote || "",
-        },
-      }));
-      setAssistantReviewsStatusText(`Correction saved for review #${reviewId}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to save correction.";
       setAssistantReviewsError(message);
@@ -840,7 +855,7 @@ export default function AccessControlPage() {
           ) : null}
 
           {!assistantReviewsLoading && !assistantReviewsError && !assistantReviews.length ? (
-            <EmptyState title="No assistant questions yet." />
+            <EmptyState title="No pending assistant topics." />
           ) : null}
 
           {!assistantReviewsLoading && !assistantReviewsError && assistantReviews.length ? (
@@ -921,6 +936,16 @@ export default function AccessControlPage() {
                           >
                             Save Correction
                           </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => void submitAssistantReviewDecision(item, true)}
+                            isLoading={itemSaving}
+                            disabled={itemSaving}
+                          >
+                            Correct
+                          </Button>
                           <span className="access-control-assistant-review-updated-react">
                             {item.correctedAt
                               ? `Last correction: ${formatDateTime(item.correctedAt)} by ${item.correctedBy || "-"}`
@@ -937,7 +962,7 @@ export default function AccessControlPage() {
 
           {!assistantReviewsLoading && !assistantReviewsError && assistantReviews.length ? (
             <p className="access-control-assistant-review-total-react">
-              Showing {assistantReviews.length} of {assistantReviewsTotal} latest assistant questions.
+              Pending topics: {assistantReviews.length} of {assistantReviewsTotal}.
             </p>
           ) : null}
         </Panel>
