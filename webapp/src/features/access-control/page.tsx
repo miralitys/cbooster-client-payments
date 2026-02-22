@@ -947,22 +947,29 @@ export default function AccessControlPage() {
         open={Boolean(editingOriginalUsername && canManageAccess && editingUser)}
         title="Edit User"
         onClose={closeEditModal}
+        dialogClassName="access-control-edit-modal-react"
+        headerClassName="access-control-edit-modal-header-react"
+        contentClassName="access-control-edit-modal-content-react"
+        footerClassName="access-control-edit-modal-footer-react"
         footer={
           <div className="access-control-form-actions-react access-control-form-actions-react--split">
-            {canDeleteEditingUser ? (
-              <Button
-                type="button"
-                variant="danger"
-                onClick={() => void submitDeleteUser()}
-                isLoading={isDeleting}
-                disabled={isEditBusy}
-              >
-                Delete User
-              </Button>
-            ) : (
-              <span />
-            )}
+            <p className="access-control-edit-footer-note-react">
+              {canDeleteEditingUser
+                ? "Deleting a user removes account access immediately."
+                : "Only owner or admin can delete users."}
+            </p>
             <div className="access-control-form-actions-group-react">
+              {canDeleteEditingUser ? (
+                <Button
+                  type="button"
+                  variant="danger"
+                  onClick={() => void submitDeleteUser()}
+                  isLoading={isDeleting}
+                  disabled={isEditBusy}
+                >
+                  Delete User
+                </Button>
+              ) : null}
               <Button type="button" variant="secondary" onClick={closeEditModal} disabled={isEditBusy}>
                 Cancel
               </Button>
@@ -973,152 +980,180 @@ export default function AccessControlPage() {
           </div>
         }
       >
-        <form id="access-control-edit-user-form" className="access-control-form-react" onSubmit={(event) => void submitUpdateUser(event)}>
-          <p className={`dashboard-message ${editStatusError ? "error" : ""}`.trim()}>{editStatusText}</p>
+        <form
+          id="access-control-edit-user-form"
+          className="access-control-form-react access-control-form-react--edit-modal"
+          onSubmit={(event) => void submitUpdateUser(event)}
+        >
+          <div className="access-control-edit-intro-react">
+            <p className={`dashboard-message access-control-edit-status-react ${editStatusError ? "error" : ""}`.trim()}>{editStatusText}</p>
+            <p className="access-control-edit-subtitle-react">
+              Update account data, security settings, and department role.
+            </p>
+          </div>
 
-          <Field label="Username / Email (optional)" htmlFor="access-edit-username">
-            <Input
-              id="access-edit-username"
-              value={editForm.username}
-              onChange={(event) => setEditForm((previous) => ({ ...previous, username: event.target.value }))}
-              placeholder="Optional: user email or login"
-              disabled={isEditBusy}
-            />
-          </Field>
-
-          <Field label="New Password (optional)" htmlFor="access-edit-password">
-            <Input
-              id="access-edit-password"
-              type="password"
-              value={editForm.password}
-              onChange={(event) => setEditForm((previous) => ({ ...previous, password: event.target.value }))}
-              placeholder="Leave empty to keep current password"
-              disabled={isEditBusy}
-            />
-          </Field>
-
-          <Field label="2FA (Authenticator)" htmlFor="access-edit-totp-enabled">
-            <Select
-              id="access-edit-totp-enabled"
-              value={editForm.totpEnabled ? "enabled" : "disabled"}
-              onChange={(event) => {
-                const enabled = event.target.value === "enabled";
-                  setEditForm((previous) => ({
-                    ...previous,
-                    totpEnabled: enabled,
-                    totpSecret: enabled ? previous.totpSecret : "",
-                  }));
-                }}
-                disabled={isEditBusy}
-              >
-                <option value="disabled">Off</option>
-                <option value="enabled">Enabled</option>
-              </Select>
-            </Field>
-
-          {editForm.totpEnabled ? (
-            <>
-              <Field
-                label="TOTP Secret (Base32)"
-                htmlFor="access-edit-totp-secret"
-                hint={
-                  editingUser?.totpEnabled
-                    ? "Current secret is hidden. Generate and save a new secret to rotate this user 2FA key."
-                    : "Scan the QR below or paste your own secret."
-                }
-              >
+          <section className="access-control-edit-section-react">
+            <h4 className="access-control-edit-section-title-react">Account</h4>
+            <div className="access-control-edit-section-grid-react">
+              <Field label="Username / Email (optional)" htmlFor="access-edit-username">
                 <Input
-                  id="access-edit-totp-secret"
-                  value={editForm.totpSecret}
-                  onChange={(event) => setEditForm((previous) => ({ ...previous, totpSecret: event.target.value }))}
-                  placeholder="Example: JBSWY3DPEHPK3PXP"
+                  id="access-edit-username"
+                  value={editForm.username}
+                  onChange={(event) => setEditForm((previous) => ({ ...previous, username: event.target.value }))}
+                  placeholder="Optional: user email or login"
                   disabled={isEditBusy}
                 />
               </Field>
-              <div className="access-control-totp-actions-react">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  onClick={() =>
+
+              <Field label="Display Name" htmlFor="access-edit-display-name">
+                <Input
+                  id="access-edit-display-name"
+                  value={editForm.displayName}
+                  onChange={(event) => setEditForm((previous) => ({ ...previous, displayName: event.target.value }))}
+                  required
+                  disabled={isEditBusy}
+                />
+              </Field>
+            </div>
+          </section>
+
+          <section className="access-control-edit-section-react">
+            <h4 className="access-control-edit-section-title-react">Security</h4>
+            <div className="access-control-edit-section-grid-react">
+              <Field label="New Password (optional)" htmlFor="access-edit-password">
+                <Input
+                  id="access-edit-password"
+                  type="password"
+                  value={editForm.password}
+                  onChange={(event) => setEditForm((previous) => ({ ...previous, password: event.target.value }))}
+                  placeholder="Leave empty to keep current password"
+                  disabled={isEditBusy}
+                />
+              </Field>
+
+              <Field label="2FA (Authenticator)" htmlFor="access-edit-totp-enabled">
+                <Select
+                  id="access-edit-totp-enabled"
+                  value={editForm.totpEnabled ? "enabled" : "disabled"}
+                  onChange={(event) => {
+                    const enabled = event.target.value === "enabled";
                     setEditForm((previous) => ({
                       ...previous,
-                      totpSecret: generateTotpSecretValue(),
-                    }))
-                  }
+                      totpEnabled: enabled,
+                      totpSecret: enabled ? previous.totpSecret : "",
+                    }));
+                  }}
                   disabled={isEditBusy}
                 >
-                  Generate Secret
-                </Button>
-              </div>
-              <TotpQrPreview
-                title="Authenticator QR Preview"
-                username={editForm.username.trim() || editingOriginalUsername || editForm.displayName.trim() || "user"}
-                secret={editForm.totpSecret}
-                issuer={totpIssuer}
-                periodSec={totpPeriodSec}
-                digits={totpDigits}
-              />
-            </>
-          ) : null}
+                  <option value="disabled">Off</option>
+                  <option value="enabled">Enabled</option>
+                </Select>
+              </Field>
 
-          <Field label="Display Name" htmlFor="access-edit-display-name">
-            <Input
-              id="access-edit-display-name"
-              value={editForm.displayName}
-              onChange={(event) => setEditForm((previous) => ({ ...previous, displayName: event.target.value }))}
-              required
-              disabled={isEditBusy}
-            />
-          </Field>
+              {editForm.totpEnabled ? (
+                <>
+                  <div className="access-control-edit-span-2-react">
+                    <Field
+                      label="TOTP Secret (Base32)"
+                      htmlFor="access-edit-totp-secret"
+                      hint={
+                        editingUser?.totpEnabled
+                          ? "Current secret is hidden. Generate and save a new secret to rotate this user 2FA key."
+                          : "Scan the QR below or paste your own secret."
+                      }
+                    >
+                      <Input
+                        id="access-edit-totp-secret"
+                        value={editForm.totpSecret}
+                        onChange={(event) => setEditForm((previous) => ({ ...previous, totpSecret: event.target.value }))}
+                        placeholder="Example: JBSWY3DPEHPK3PXP"
+                        disabled={isEditBusy}
+                      />
+                    </Field>
+                  </div>
+                  <div className="access-control-totp-actions-react">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      onClick={() =>
+                        setEditForm((previous) => ({
+                          ...previous,
+                          totpSecret: generateTotpSecretValue(),
+                        }))
+                      }
+                      disabled={isEditBusy}
+                    >
+                      Generate Secret
+                    </Button>
+                  </div>
+                  <TotpQrPreview
+                    title="Authenticator QR Preview"
+                    username={editForm.username.trim() || editingOriginalUsername || editForm.displayName.trim() || "user"}
+                    secret={editForm.totpSecret}
+                    issuer={totpIssuer}
+                    periodSec={totpPeriodSec}
+                    digits={totpDigits}
+                  />
+                </>
+              ) : null}
+            </div>
+          </section>
 
-          <Field label="Department" htmlFor="access-edit-department">
-            <Select
-              id="access-edit-department"
-              value={editForm.departmentId}
-              onChange={(event) => onEditDepartmentChange(event.target.value)}
-              disabled={isEditBusy}
-            >
-              {departments.map((department) => (
-                <option key={department.id} value={department.id}>
-                  {department.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
+          <section className="access-control-edit-section-react">
+            <h4 className="access-control-edit-section-title-react">Department Access</h4>
+            <div className="access-control-edit-section-grid-react">
+              <Field label="Department" htmlFor="access-edit-department">
+                <Select
+                  id="access-edit-department"
+                  value={editForm.departmentId}
+                  onChange={(event) => onEditDepartmentChange(event.target.value)}
+                  disabled={isEditBusy}
+                >
+                  {departments.map((department) => (
+                    <option key={department.id} value={department.id}>
+                      {department.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
 
-          <Field label="Role" htmlFor="access-edit-role">
-            <Select
-              id="access-edit-role"
-              value={editForm.roleId}
-              onChange={(event) => {
-                const nextRole = event.target.value;
-                  setEditForm((previous) => ({
-                    ...previous,
-                    roleId: nextRole,
-                    teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : "",
-                  }));
-                }}
-                disabled={isEditBusy}
-              >
-              {editRoleOptions.map((role) => (
-                <option key={role.id} value={role.id}>
-                  {role.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
+              <Field label="Role" htmlFor="access-edit-role">
+                <Select
+                  id="access-edit-role"
+                  value={editForm.roleId}
+                  onChange={(event) => {
+                    const nextRole = event.target.value;
+                    setEditForm((previous) => ({
+                      ...previous,
+                      roleId: nextRole,
+                      teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : "",
+                    }));
+                  }}
+                  disabled={isEditBusy}
+                >
+                  {editRoleOptions.map((role) => (
+                    <option key={role.id} value={role.id}>
+                      {role.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
 
-          {editForm.roleId === "middle_manager" ? (
-            <Field label="Team Usernames (comma separated, for Middle Manager)" htmlFor="access-edit-team">
-              <Input
-                id="access-edit-team"
-                value={editForm.teamUsernames}
-                onChange={(event) => setEditForm((previous) => ({ ...previous, teamUsernames: event.target.value }))}
-                disabled={isEditBusy}
-              />
-            </Field>
-          ) : null}
+              {editForm.roleId === "middle_manager" ? (
+                <div className="access-control-edit-span-2-react">
+                  <Field label="Team Usernames (comma separated, for Middle Manager)" htmlFor="access-edit-team">
+                    <Input
+                      id="access-edit-team"
+                      value={editForm.teamUsernames}
+                      onChange={(event) => setEditForm((previous) => ({ ...previous, teamUsernames: event.target.value }))}
+                      disabled={isEditBusy}
+                    />
+                  </Field>
+                </div>
+              ) : null}
+            </div>
+          </section>
         </form>
       </Modal>
     </PageShell>
