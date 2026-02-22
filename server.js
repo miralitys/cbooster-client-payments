@@ -13834,9 +13834,21 @@ function extractGhlConversationsFromPayload(payload) {
 }
 
 function extractGhlConversationMessagesFromPayload(payload) {
+  const wrappedMessages =
+    payload?.messages && typeof payload.messages === "object" && !Array.isArray(payload.messages)
+      ? payload.messages
+      : null;
+  const wrappedDataMessages =
+    payload?.data?.messages && typeof payload.data.messages === "object" && !Array.isArray(payload.data.messages)
+      ? payload.data.messages
+      : null;
   const candidates = [
     payload?.messages,
+    wrappedMessages?.messages,
+    wrappedMessages?.items,
     payload?.data?.messages,
+    wrappedDataMessages?.messages,
+    wrappedDataMessages?.items,
     payload?.data?.items,
     payload?.items,
     payload?.data,
@@ -13857,6 +13869,41 @@ function extractGhlConversationMessagesFromPayload(payload) {
   }
 
   return [];
+}
+
+function parseGhlConversationMessagesEnvelope(payload) {
+  const wrappedMessages =
+    payload?.messages && typeof payload.messages === "object" && !Array.isArray(payload.messages)
+      ? payload.messages
+      : null;
+  const wrappedDataMessages =
+    payload?.data?.messages && typeof payload.data.messages === "object" && !Array.isArray(payload.data.messages)
+      ? payload.data.messages
+      : null;
+
+  const items = extractGhlConversationMessagesFromPayload(payload);
+  const nextPage =
+    wrappedMessages?.nextPage === true ||
+    wrappedMessages?.hasNextPage === true ||
+    wrappedDataMessages?.nextPage === true ||
+    wrappedDataMessages?.hasNextPage === true ||
+    payload?.nextPage === true ||
+    payload?.hasNextPage === true;
+  const lastMessageId = sanitizeTextValue(
+    wrappedMessages?.lastMessageId ||
+      wrappedMessages?.last_message_id ||
+      wrappedDataMessages?.lastMessageId ||
+      wrappedDataMessages?.last_message_id ||
+      payload?.lastMessageId ||
+      payload?.last_message_id,
+    220,
+  );
+
+  return {
+    items,
+    nextPage,
+    lastMessageId,
+  };
 }
 
 function extractGhlConversationId(conversation) {
@@ -14166,8 +14213,8 @@ async function listGhlConversationsForContact(contactId, contactName = "") {
   const attempts = [
     () =>
       requestGhlApi("/conversations/search", {
-        method: "POST",
-        body: {
+        method: "GET",
+        query: {
           locationId: GHL_LOCATION_ID,
           contactId: normalizedContactId,
           page: 1,
@@ -14177,17 +14224,6 @@ async function listGhlConversationsForContact(contactId, contactName = "") {
       }),
     () =>
       requestGhlApi("/conversations/search", {
-        method: "POST",
-        body: {
-          locationId: GHL_LOCATION_ID,
-          contactId: normalizedContactId,
-          page: 1,
-          limit: GHL_CLIENT_COMMUNICATION_MAX_CONVERSATIONS_PER_CONTACT,
-        },
-        tolerateNotFound: true,
-      }),
-    () =>
-      requestGhlApi("/conversations", {
         method: "GET",
         query: {
           locationId: GHL_LOCATION_ID,
@@ -14273,31 +14309,23 @@ async function listGhlMessagesForConversation(conversation) {
 
   const encodedConversationId = encodeURIComponent(conversationId);
   const attempts = [
-    () =>
+    (lastMessageId = "") =>
       requestGhlApi(`/conversations/${encodedConversationId}/messages`, {
         method: "GET",
         query: {
           locationId: GHL_LOCATION_ID,
           limit: GHL_CLIENT_COMMUNICATION_MAX_MESSAGES_PER_CONVERSATION,
+          ...(lastMessageId ? { lastMessageId } : {}),
         },
         tolerateNotFound: true,
       }),
-    () =>
+    (lastMessageId = "") =>
       requestGhlApi(`/conversations/${encodedConversationId}/messages/`, {
         method: "GET",
         query: {
           locationId: GHL_LOCATION_ID,
           limit: GHL_CLIENT_COMMUNICATION_MAX_MESSAGES_PER_CONVERSATION,
-        },
-        tolerateNotFound: true,
-      }),
-    () =>
-      requestGhlApi("/conversations/messages", {
-        method: "GET",
-        query: {
-          locationId: GHL_LOCATION_ID,
-          conversationId,
-          limit: GHL_CLIENT_COMMUNICATION_MAX_MESSAGES_PER_CONVERSATION,
+          ...(lastMessageId ? { lastMessageId } : {}),
         },
         tolerateNotFound: true,
       }),
@@ -14308,28 +14336,44 @@ async function listGhlMessagesForConversation(conversation) {
   let lastError = null;
 
   for (const attempt of attempts) {
-    let response;
-    try {
-      response = await attempt();
-    } catch (error) {
-      lastError = error;
-      if (Number(error?.httpStatus) === 429) {
+    let lastMessageIdCursor = "";
+    let reachedEnd = false;
+    const seenCursorValues = new Set();
+
+    while (!reachedEnd && items.length < GHL_CLIENT_COMMUNICATION_MAX_ITEMS) {
+      let response;
+      try {
+        response = await attempt(lastMessageIdCursor);
+      } catch (error) {
+        lastError = error;
+        if (Number(error?.httpStatus) === 429) {
+          reachedEnd = true;
+          break;
+        }
         break;
       }
-      continue;
-    }
 
-    if (!response.ok) {
-      continue;
-    }
-
-    successfulRequestCount += 1;
-    const messages = extractGhlConversationMessagesFromPayload(response.body);
-    for (const message of messages) {
-      const parsed = buildGhlCommunicationRecord(message, conversation);
-      if (parsed) {
-        items.push(parsed);
+      if (!response.ok) {
+        break;
       }
+
+      successfulRequestCount += 1;
+      const envelope = parseGhlConversationMessagesEnvelope(response.body);
+      for (const message of envelope.items) {
+        const parsed = buildGhlCommunicationRecord(message, conversation);
+        if (parsed) {
+          items.push(parsed);
+        }
+      }
+
+      const nextCursor = sanitizeTextValue(envelope.lastMessageId, 220);
+      if (!envelope.nextPage || !nextCursor || seenCursorValues.has(nextCursor)) {
+        reachedEnd = true;
+        break;
+      }
+
+      seenCursorValues.add(nextCursor);
+      lastMessageIdCursor = nextCursor;
     }
 
     if (items.length > 0) {
