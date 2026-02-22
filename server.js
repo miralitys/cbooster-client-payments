@@ -754,6 +754,22 @@ const GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT, 20), 1),
   100,
 );
+const GHL_CLIENT_COMMUNICATION_LOOKUP_MAX_CONTACTS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_COMMUNICATION_LOOKUP_MAX_CONTACTS, 6), 1),
+  20,
+);
+const GHL_CLIENT_COMMUNICATION_MAX_CONVERSATIONS_PER_CONTACT = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_COMMUNICATION_MAX_CONVERSATIONS_PER_CONTACT, 30), 1),
+  100,
+);
+const GHL_CLIENT_COMMUNICATION_MAX_MESSAGES_PER_CONVERSATION = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_COMMUNICATION_MAX_MESSAGES_PER_CONVERSATION, 120), 1),
+  500,
+);
+const GHL_CLIENT_COMMUNICATION_MAX_ITEMS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_COMMUNICATION_MAX_ITEMS, 240), 1),
+  1000,
+);
 const GHL_LEADS_PIPELINE_NAME = sanitizeTextValue(process.env.GHL_LEADS_PIPELINE_NAME, 320) || "SALES 3 LINE";
 const GHL_LEADS_PIPELINE_ID = sanitizeTextValue(process.env.GHL_LEADS_PIPELINE_ID, 180);
 const GHL_LEADS_SYNC_TIME_ZONE = sanitizeTextValue(process.env.GHL_LEADS_SYNC_TIME_ZONE, 80) || "America/Chicago";
@@ -13783,6 +13799,670 @@ async function findGhlBasicNoteByClientName(clientName) {
     source,
     matchedContacts: contacts.length,
     inspectedContacts,
+  };
+}
+
+function extractGhlConversationsFromPayload(payload) {
+  const candidates = [
+    payload?.conversations,
+    payload?.data?.conversations,
+    payload?.data?.items,
+    payload?.items,
+    payload?.data,
+    payload?.result?.conversations,
+    payload?.result?.items,
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+
+    return candidate.filter((item) => item && typeof item === "object");
+  }
+
+  if (payload?.conversation && typeof payload.conversation === "object") {
+    return [payload.conversation];
+  }
+
+  return [];
+}
+
+function extractGhlConversationMessagesFromPayload(payload) {
+  const candidates = [
+    payload?.messages,
+    payload?.data?.messages,
+    payload?.data?.items,
+    payload?.items,
+    payload?.data,
+    payload?.result?.messages,
+    payload?.result?.items,
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+
+    return candidate.filter((item) => item && typeof item === "object");
+  }
+
+  if (payload?.message && typeof payload.message === "object") {
+    return [payload.message];
+  }
+
+  return [];
+}
+
+function extractGhlConversationId(conversation) {
+  return sanitizeTextValue(
+    conversation?.id ||
+      conversation?._id ||
+      conversation?.conversationId ||
+      conversation?.conversation_id ||
+      conversation?.threadId ||
+      conversation?.thread_id,
+    200,
+  );
+}
+
+function extractGhlConversationContactId(conversation) {
+  return sanitizeTextValue(
+    conversation?.contactId ||
+      conversation?.contact_id ||
+      conversation?.contact?.id ||
+      conversation?.contact?._id,
+    200,
+  );
+}
+
+function parseGhlConversationTimestamp(conversation) {
+  const timestampCandidates = [
+    conversation?.lastMessageAt,
+    conversation?.last_message_at,
+    conversation?.lastMessageDate,
+    conversation?.last_message_date,
+    conversation?.updatedAt,
+    conversation?.updated_at,
+    conversation?.createdAt,
+    conversation?.created_at,
+  ];
+
+  for (const candidate of timestampCandidates) {
+    const timestamp = parseGhlNoteTimestamp(candidate);
+    if (timestamp > 0) {
+      return timestamp;
+    }
+  }
+
+  return 0;
+}
+
+function normalizeGhlCommunicationDirection(rawValue, item = null) {
+  const normalized = sanitizeTextValue(rawValue, 80).toLowerCase();
+  if (normalized.includes("inbound") || normalized === "in") {
+    return "inbound";
+  }
+  if (normalized.includes("outbound") || normalized === "out") {
+    return "outbound";
+  }
+
+  if (item?.incoming === true || item?.inbound === true || item?.isInbound === true) {
+    return "inbound";
+  }
+  if (item?.outgoing === true || item?.outbound === true || item?.isOutbound === true) {
+    return "outbound";
+  }
+
+  return "unknown";
+}
+
+function normalizeGhlCommunicationKind(typeValue, hasRecording = false) {
+  const normalizedType = sanitizeTextValue(typeValue, 120).toLowerCase();
+  if (
+    normalizedType.includes("call") ||
+    normalizedType.includes("voice") ||
+    normalizedType.includes("voicemail")
+  ) {
+    return "call";
+  }
+
+  if (
+    normalizedType.includes("sms") ||
+    normalizedType.includes("text") ||
+    normalizedType.includes("message")
+  ) {
+    return "sms";
+  }
+
+  if (hasRecording) {
+    return "call";
+  }
+
+  return "sms";
+}
+
+function extractValidUrl(rawValue) {
+  const value = sanitizeTextValue(rawValue, 2000);
+  if (!value) {
+    return "";
+  }
+
+  if (!/^https?:\/\//i.test(value)) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.toString();
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
+function collectGhlRecordingUrlsFromValue(value, urls) {
+  if (!urls || !(urls instanceof Set) || value === null || value === undefined) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectGhlRecordingUrlsFromValue(item, urls);
+    }
+    return;
+  }
+
+  if (typeof value === "object") {
+    const candidates = [
+      value.url,
+      value.recordingUrl,
+      value.recording_url,
+      value.fileUrl,
+      value.file_url,
+      value.mediaUrl,
+      value.media_url,
+      value.publicUrl,
+      value.public_url,
+      value.link,
+      value.src,
+    ];
+    for (const candidate of candidates) {
+      collectGhlRecordingUrlsFromValue(candidate, urls);
+    }
+    return;
+  }
+
+  const maybeUrl = extractValidUrl(value);
+  if (maybeUrl) {
+    urls.add(maybeUrl);
+  }
+}
+
+function extractGhlRecordingUrls(message) {
+  const urls = new Set();
+  const candidates = [
+    message?.recordingUrl,
+    message?.recording_url,
+    message?.callRecordingUrl,
+    message?.call_recording_url,
+    message?.voicemailUrl,
+    message?.voicemail_url,
+    message?.audioUrl,
+    message?.audio_url,
+    message?.mediaUrl,
+    message?.media_url,
+    message?.url,
+    message?.link,
+    message?.attachments,
+    message?.attachment,
+    message?.files,
+    message?.media,
+  ];
+
+  for (const candidate of candidates) {
+    collectGhlRecordingUrlsFromValue(candidate, urls);
+  }
+
+  return [...urls];
+}
+
+function buildGhlCommunicationRecord(message, conversation) {
+  if (!message || typeof message !== "object") {
+    return null;
+  }
+
+  const conversationId = extractGhlConversationId(conversation);
+  const messageId = sanitizeTextValue(
+    message.id || message._id || message.messageId || message.message_id,
+    220,
+  );
+  const direction = normalizeGhlCommunicationDirection(
+    message.direction || message.messageDirection || message.message_direction || message.typeDirection,
+    message,
+  );
+
+  const recordingUrls = extractGhlRecordingUrls(message);
+  const rawType = sanitizeTextValue(
+    message.type || message.messageType || message.message_type || message.channel || conversation?.type,
+    120,
+  );
+  const kind = normalizeGhlCommunicationKind(rawType, recordingUrls.length > 0);
+  const body = normalizeGhlNoteBody(
+    message.body ||
+      message.message ||
+      message.text ||
+      message.content ||
+      message.note ||
+      message.description ||
+      message.transcript,
+    8000,
+  );
+
+  const timestamp = parseGhlNoteTimestamp(
+    message.dateAdded ||
+      message.date_added ||
+      message.createdAt ||
+      message.created_at ||
+      message.timestamp ||
+      message.sentAt ||
+      message.sent_at,
+  );
+  const createdAt = timestamp > 0 ? new Date(timestamp).toISOString() : "";
+  const status = sanitizeTextValue(
+    message.status || message.deliveryStatus || message.delivery_status,
+    120,
+  );
+  const key = messageId || `${conversationId}:${createdAt}:${kind}:${direction}:${sanitizeTextValue(body, 300)}`;
+  if (!key) {
+    return null;
+  }
+
+  return {
+    id: key,
+    conversationId,
+    kind,
+    direction,
+    body,
+    status,
+    createdAt,
+    timestamp,
+    recordingUrls,
+    source: sanitizeTextValue(rawType || conversation?.source, 120) || "gohighlevel.conversations",
+  };
+}
+
+function dedupeAndSortGhlCommunicationRecords(items) {
+  const source = Array.isArray(items) ? items : [];
+  const byId = new Map();
+
+  for (const item of source) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const key = sanitizeTextValue(item.id, 260);
+    if (!key) {
+      continue;
+    }
+
+    if (byId.has(key)) {
+      const existing = byId.get(key);
+      if ((existing?.recordingUrls || []).length < (item?.recordingUrls || []).length) {
+        byId.set(key, item);
+      }
+      continue;
+    }
+
+    byId.set(key, item);
+  }
+
+  const deduped = [...byId.values()];
+  deduped.sort((left, right) => {
+    const leftTime = Number.isFinite(left?.timestamp) ? left.timestamp : 0;
+    const rightTime = Number.isFinite(right?.timestamp) ? right.timestamp : 0;
+    if (leftTime !== rightTime) {
+      return rightTime - leftTime;
+    }
+    return sanitizeTextValue(right?.id, 260).localeCompare(sanitizeTextValue(left?.id, 260), "en", { sensitivity: "base" });
+  });
+
+  return deduped;
+}
+
+function toGhlConversationCandidate(contactId, contactName, conversation) {
+  const conversationId = extractGhlConversationId(conversation);
+  if (!conversationId) {
+    return null;
+  }
+
+  const conversationContactId = extractGhlConversationContactId(conversation) || contactId;
+  const source = sanitizeTextValue(
+    conversation?.type || conversation?.channel || conversation?.source,
+    120,
+  );
+  return {
+    id: conversationId,
+    contactId: sanitizeTextValue(conversationContactId, 200),
+    contactName: sanitizeTextValue(contactName, 300),
+    source: source || "gohighlevel.conversations",
+    timestamp: parseGhlConversationTimestamp(conversation),
+  };
+}
+
+async function listGhlConversationsForContact(contactId, contactName = "") {
+  const normalizedContactId = sanitizeTextValue(contactId, 200);
+  if (!normalizedContactId) {
+    return [];
+  }
+
+  const attempts = [
+    () =>
+      requestGhlApi("/conversations/search", {
+        method: "POST",
+        body: {
+          locationId: GHL_LOCATION_ID,
+          contactId: normalizedContactId,
+          page: 1,
+          pageLimit: GHL_CLIENT_COMMUNICATION_MAX_CONVERSATIONS_PER_CONTACT,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/conversations/search", {
+        method: "POST",
+        body: {
+          locationId: GHL_LOCATION_ID,
+          contactId: normalizedContactId,
+          page: 1,
+          limit: GHL_CLIENT_COMMUNICATION_MAX_CONVERSATIONS_PER_CONTACT,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/conversations", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+          contactId: normalizedContactId,
+          page: 1,
+          limit: GHL_CLIENT_COMMUNICATION_MAX_CONVERSATIONS_PER_CONTACT,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/conversations/", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+          contactId: normalizedContactId,
+          page: 1,
+          limit: GHL_CLIENT_COMMUNICATION_MAX_CONVERSATIONS_PER_CONTACT,
+        },
+        tolerateNotFound: true,
+      }),
+  ];
+
+  const conversationsById = new Map();
+  let successfulRequestCount = 0;
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt();
+    } catch (error) {
+      lastError = error;
+      if (Number(error?.httpStatus) === 429) {
+        break;
+      }
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    successfulRequestCount += 1;
+    const conversations = extractGhlConversationsFromPayload(response.body);
+    for (const conversation of conversations) {
+      const conversationContactId = extractGhlConversationContactId(conversation);
+      if (conversationContactId && conversationContactId !== normalizedContactId) {
+        continue;
+      }
+
+      const candidate = toGhlConversationCandidate(normalizedContactId, contactName, conversation);
+      if (!candidate) {
+        continue;
+      }
+
+      conversationsById.set(candidate.id, candidate);
+    }
+
+    if (conversationsById.size > 0) {
+      break;
+    }
+  }
+
+  if (!successfulRequestCount && lastError) {
+    throw lastError;
+  }
+
+  const ordered = [...conversationsById.values()];
+  ordered.sort((left, right) => {
+    if (left.timestamp !== right.timestamp) {
+      return right.timestamp - left.timestamp;
+    }
+    return left.id.localeCompare(right.id, "en", { sensitivity: "base" });
+  });
+  return ordered;
+}
+
+async function listGhlMessagesForConversation(conversation) {
+  const conversationId = sanitizeTextValue(conversation?.id, 220);
+  if (!conversationId) {
+    return [];
+  }
+
+  const encodedConversationId = encodeURIComponent(conversationId);
+  const attempts = [
+    () =>
+      requestGhlApi(`/conversations/${encodedConversationId}/messages`, {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+          limit: GHL_CLIENT_COMMUNICATION_MAX_MESSAGES_PER_CONVERSATION,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi(`/conversations/${encodedConversationId}/messages/`, {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+          limit: GHL_CLIENT_COMMUNICATION_MAX_MESSAGES_PER_CONVERSATION,
+        },
+        tolerateNotFound: true,
+      }),
+    () =>
+      requestGhlApi("/conversations/messages", {
+        method: "GET",
+        query: {
+          locationId: GHL_LOCATION_ID,
+          conversationId,
+          limit: GHL_CLIENT_COMMUNICATION_MAX_MESSAGES_PER_CONVERSATION,
+        },
+        tolerateNotFound: true,
+      }),
+  ];
+
+  const items = [];
+  let successfulRequestCount = 0;
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    let response;
+    try {
+      response = await attempt();
+    } catch (error) {
+      lastError = error;
+      if (Number(error?.httpStatus) === 429) {
+        break;
+      }
+      continue;
+    }
+
+    if (!response.ok) {
+      continue;
+    }
+
+    successfulRequestCount += 1;
+    const messages = extractGhlConversationMessagesFromPayload(response.body);
+    for (const message of messages) {
+      const parsed = buildGhlCommunicationRecord(message, conversation);
+      if (parsed) {
+        items.push(parsed);
+      }
+    }
+
+    if (items.length > 0) {
+      break;
+    }
+  }
+
+  if (!successfulRequestCount && lastError) {
+    throw lastError;
+  }
+
+  return items;
+}
+
+function toGhlCommunicationContactCandidate(contact, fallbackClientName = "") {
+  const contactId = sanitizeTextValue(contact?.id || contact?._id || contact?.contactId, 200);
+  if (!contactId) {
+    return null;
+  }
+
+  return {
+    id: contactId,
+    name: sanitizeTextValue(buildContactCandidateName(contact), 300) || sanitizeTextValue(fallbackClientName, 300),
+  };
+}
+
+function buildEmptyGhlClientCommunicationsPayload(clientName = "") {
+  return {
+    status: "not_found",
+    clientName: sanitizeTextValue(clientName, 300),
+    contactName: "",
+    contactId: "",
+    source: "gohighlevel.conversations",
+    matchedContacts: 0,
+    inspectedContacts: 0,
+    smsCount: 0,
+    callCount: 0,
+    items: [],
+  };
+}
+
+async function findGhlClientCommunicationsByClientName(clientName, options = {}) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return buildEmptyGhlClientCommunicationsPayload("");
+  }
+
+  const preferredContactId = sanitizeTextValue(options?.preferredContactId, 200);
+  const preferredContactName = sanitizeTextValue(options?.preferredContactName, 300);
+  const contactCandidates = [];
+  const seenContactIds = new Set();
+  if (preferredContactId) {
+    contactCandidates.push({
+      id: preferredContactId,
+      name: preferredContactName || normalizedClientName,
+    });
+    seenContactIds.add(preferredContactId);
+  }
+
+  const contacts = await searchGhlContactsByClientName(normalizedClientName);
+  for (const contact of contacts) {
+    const candidate = toGhlCommunicationContactCandidate(contact, normalizedClientName);
+    if (!candidate || seenContactIds.has(candidate.id)) {
+      continue;
+    }
+    seenContactIds.add(candidate.id);
+    contactCandidates.push(candidate);
+  }
+
+  if (!contactCandidates.length) {
+    return buildEmptyGhlClientCommunicationsPayload(normalizedClientName);
+  }
+
+  const contactsToInspect = contactCandidates.slice(0, GHL_CLIENT_COMMUNICATION_LOOKUP_MAX_CONTACTS);
+  let inspectedContacts = 0;
+  let successfulLookups = 0;
+  let lastLookupError = null;
+  const allItems = [];
+  let resolvedContact = contactsToInspect[0] || null;
+
+  for (const contact of contactsToInspect) {
+    inspectedContacts += 1;
+    const conversations = await listGhlConversationsForContact(contact.id, contact.name)
+      .catch((error) => {
+        lastLookupError = error;
+        return [];
+      });
+
+    if (!conversations.length) {
+      continue;
+    }
+
+    successfulLookups += 1;
+    if (!resolvedContact) {
+      resolvedContact = contact;
+    }
+
+    for (const conversation of conversations) {
+      const items = await listGhlMessagesForConversation(conversation).catch((error) => {
+        lastLookupError = error;
+        return [];
+      });
+      for (const item of items) {
+        allItems.push(item);
+      }
+    }
+
+    if (allItems.length >= GHL_CLIENT_COMMUNICATION_MAX_ITEMS) {
+      break;
+    }
+  }
+
+  if (!successfulLookups && inspectedContacts > 0 && lastLookupError) {
+    throw lastLookupError;
+  }
+
+  const sortedItems = dedupeAndSortGhlCommunicationRecords(allItems).slice(0, GHL_CLIENT_COMMUNICATION_MAX_ITEMS);
+  let smsCount = 0;
+  let callCount = 0;
+  for (const item of sortedItems) {
+    if (item.kind === "call") {
+      callCount += 1;
+      continue;
+    }
+    smsCount += 1;
+  }
+
+  return {
+    status: resolvedContact ? "found" : "not_found",
+    clientName: normalizedClientName,
+    contactName: sanitizeTextValue(resolvedContact?.name, 300),
+    contactId: sanitizeTextValue(resolvedContact?.id, 200),
+    source: "gohighlevel.conversations",
+    matchedContacts: contactCandidates.length,
+    inspectedContacts,
+    smsCount,
+    callCount,
+    items: sortedItems,
   };
 }
 
@@ -31693,6 +32373,69 @@ app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PER
 
     res.status(error.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 600) || "Failed to refresh GoHighLevel BASIC note.",
+    });
+  }
+});
+
+app.get("/api/ghl/client-communications", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_communications",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "Communication lookup limit reached. Please wait before retrying.",
+      code: "ghl_client_communications_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const input = resolveGhlBasicNoteInput(req, "query");
+  if (!input.requestedClientName) {
+    res.status(400).json({
+      error: "Query parameter `clientName` is required.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  try {
+    const context = await resolveGhlBasicNoteContext(req, input);
+    let preferredContactId = "";
+    let preferredContactName = "";
+    if (pool) {
+      const cachedRow = await getCachedGhlBasicNoteByClientName(context.clientName);
+      preferredContactId = sanitizeTextValue(cachedRow?.contactId, 200);
+      preferredContactName = sanitizeTextValue(cachedRow?.contactName, 300);
+    }
+
+    const communications = await findGhlClientCommunicationsByClientName(context.clientName, {
+      preferredContactId,
+      preferredContactName,
+    });
+
+    res.json({
+      ok: true,
+      ...communications,
+    });
+  } catch (error) {
+    console.error("GET /api/ghl/client-communications failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load client communications from GoHighLevel.",
     });
   }
 });
