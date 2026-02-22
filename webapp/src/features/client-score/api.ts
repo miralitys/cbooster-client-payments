@@ -1,3 +1,4 @@
+import { apiRequest } from "@/shared/api/fetcher";
 import type { PaymentFeatures } from "@/features/client-score/domain/scoring";
 
 export interface PaymentProbabilityResponse {
@@ -9,17 +10,11 @@ export interface PaymentProbabilityResponse {
 }
 
 export async function fetchPaymentProbability(features: PaymentFeatures): Promise<PaymentProbabilityResponse> {
-  const response = await fetch("/api/payment-probability", {
+  return apiRequest<PaymentProbabilityResponse>("/api/payment-probability", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ features }),
   });
-
-  if (!response.ok) {
-    throw new Error("Failed to fetch payment probability");
-  }
-
-  return (await response.json()) as PaymentProbabilityResponse;
 }
