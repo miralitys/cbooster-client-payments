@@ -35148,9 +35148,7 @@ app.get("/api/ghl/client-communications/recording", requireWebPermission(WEB_AUT
     }
 
     const contentType = sanitizeTextValue(response.headers.get("content-type"), 200) || "audio/mpeg";
-    const contentDisposition =
-      sanitizeTextValue(response.headers.get("content-disposition"), 500) ||
-      `inline; filename=\"ghl-recording-${sanitizeTextValue(messageId, 80)}.mp3\"`;
+    const contentDisposition = `inline; filename=\"ghl-recording-${sanitizeTextValue(messageId, 80)}.mp3\"`;
     const arrayBuffer = await response.arrayBuffer();
     const payload = Buffer.from(arrayBuffer);
 
