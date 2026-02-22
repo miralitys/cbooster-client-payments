@@ -658,19 +658,7 @@ export default function QuickBooksPage() {
         key: "clientName",
         label: "Client Name",
         align: "left",
-        cell: (item) => (
-          <div className="quickbooks-client-cell">
-            <span>{formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0)}</span>
-            <button
-              type="button"
-              className="quickbooks-info-button"
-              onClick={() => openInsightModal(item)}
-              aria-label={`Open transaction insight for ${formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0)}`}
-            >
-              i
-            </button>
-          </div>
-        ),
+        cell: (item) => formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0),
       },
       {
         key: "clientPhone",
