@@ -25911,6 +25911,54 @@ function dedupeIdentityIqBureauScores(items) {
   return orderedScores;
 }
 
+function extractIdentityIqBureauScoresFromNamedScorePairs(text) {
+  const normalizedText = normalizeIdentityIqPageText(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const searchTexts = Array.from(
+    new Set([
+      normalizedText,
+      normalizedText.replace(/\\"/g, '"'),
+      normalizedText.replace(/\\u0022/gi, '"'),
+    ]),
+  );
+  const matches = [];
+
+  for (const candidateText of searchTexts) {
+    const scoreThenNamePattern = /"score"\s*:\s*"?([2-9]\d{2})"?[^{}]{0,420}?"name"\s*:\s*"([^"]+)"/gi;
+    let scoreThenNameMatch;
+    while ((scoreThenNameMatch = scoreThenNamePattern.exec(candidateText)) !== null) {
+      const score = parseIdentityIqScoreNumber(scoreThenNameMatch[1]);
+      const bureau = resolveIdentityIqBureauName(scoreThenNameMatch[2]);
+      if (score === null || !bureau) {
+        continue;
+      }
+      matches.push({
+        bureau,
+        score,
+      });
+    }
+
+    const nameThenScorePattern = /"name"\s*:\s*"([^"]+)"[^{}]{0,420}?"score"\s*:\s*"?([2-9]\d{2})"?/gi;
+    let nameThenScoreMatch;
+    while ((nameThenScoreMatch = nameThenScorePattern.exec(candidateText)) !== null) {
+      const bureau = resolveIdentityIqBureauName(nameThenScoreMatch[1]);
+      const score = parseIdentityIqScoreNumber(nameThenScoreMatch[2]);
+      if (score === null || !bureau) {
+        continue;
+      }
+      matches.push({
+        bureau,
+        score,
+      });
+    }
+  }
+
+  return matches;
+}
+
 function collectIdentityIqScoreCandidatesWithIndex(text) {
   const normalizedText = normalizeIdentityIqPageText(text);
   if (!normalizedText) {
@@ -25969,7 +26017,7 @@ function parseIdentityIqBureauScores(text) {
     return [];
   }
 
-  const matches = [];
+  const matches = [...extractIdentityIqBureauScoresFromNamedScorePairs(normalizedText)];
 
   for (const entry of IDENTITYIQ_BUREAU_SCORE_PATTERNS) {
     const hasBureauScore = matches.some((item) => item.bureau === entry.bureau);
