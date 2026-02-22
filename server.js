@@ -472,6 +472,13 @@ const IDENTITYIQ_POST_LOGIN_SETTLE_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.IDENTITYIQ_POST_LOGIN_SETTLE_MS, 2000), 500),
   12000,
 );
+const IDENTITYIQ_PLAYWRIGHT_INSTALL_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.IDENTITYIQ_PLAYWRIGHT_INSTALL_TIMEOUT_MS, 6 * 60 * 1000), 20 * 1000),
+  15 * 60 * 1000,
+);
+const IDENTITYIQ_PLAYWRIGHT_INSTALL_ON_DEMAND =
+  resolveOptionalBoolean(process.env.IDENTITYIQ_PLAYWRIGHT_INSTALL_ON_DEMAND) !== false;
+const IDENTITYIQ_PLAYWRIGHT_BROWSERS_PATH_DEFAULT = "0";
 const GHL_API_KEY = (process.env.GHL_API_KEY || process.env.GOHIGHLEVEL_API_KEY || "").toString().trim();
 const GHL_LOCATION_ID = (process.env.GHL_LOCATION_ID || "").toString().trim();
 const GHL_API_BASE_URL = (
@@ -1541,6 +1548,7 @@ let quickBooksRuntimeAccessToken = "";
 let quickBooksRuntimeAccessTokenExpiresAtMs = 0;
 let quickBooksAccessTokenRefreshPromise = null;
 let identityIqPlaywrightChromiumPromise = null;
+let identityIqPlaywrightInstallPromise = null;
 let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
   items: [],
@@ -25221,11 +25229,138 @@ function toIdentityIqOperationError(message, options = {}) {
   return error;
 }
 
+function ensureIdentityIqPlaywrightEnvDefaults() {
+  const currentPath = (process.env.PLAYWRIGHT_BROWSERS_PATH || "").toString().trim();
+  if (!currentPath) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = IDENTITYIQ_PLAYWRIGHT_BROWSERS_PATH_DEFAULT;
+  }
+}
+
+function isIdentityIqMissingBrowserExecutableError(error) {
+  const message = sanitizeTextValue(error?.message, 1600).toLowerCase();
+  if (!message) {
+    return false;
+  }
+  return (
+    message.includes("executable doesn't exist") ||
+    message.includes("browser executable") ||
+    message.includes("chrome-headless-shell")
+  );
+}
+
+async function installIdentityIqPlaywrightChromium() {
+  if (!IDENTITYIQ_PLAYWRIGHT_INSTALL_ON_DEMAND) {
+    return false;
+  }
+  if (identityIqPlaywrightInstallPromise) {
+    return identityIqPlaywrightInstallPromise;
+  }
+
+  ensureIdentityIqPlaywrightEnvDefaults();
+  identityIqPlaywrightInstallPromise = new Promise((resolve, reject) => {
+    const installEnv = {
+      ...process.env,
+      PLAYWRIGHT_BROWSERS_PATH: (process.env.PLAYWRIGHT_BROWSERS_PATH || IDENTITYIQ_PLAYWRIGHT_BROWSERS_PATH_DEFAULT)
+        .toString()
+        .trim(),
+    };
+    const installCommand = process.platform === "win32" ? "npx.cmd" : "npx";
+    const installArgs = ["playwright", "install", "chromium"];
+    const child = spawn(installCommand, installArgs, {
+      env: installEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let timeoutTriggered = false;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const timeoutId = setTimeout(() => {
+      timeoutTriggered = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // no-op
+      }
+    }, IDENTITYIQ_PLAYWRIGHT_INSTALL_TIMEOUT_MS);
+
+    function appendChunk(target, chunk) {
+      if (!chunk) {
+        return;
+      }
+      const value = sanitizeTextValue(chunk.toString(), 1600);
+      if (!value) {
+        return;
+      }
+      target.push(value);
+      while (target.length > 8) {
+        target.shift();
+      }
+    }
+
+    child.stdout?.on("data", (chunk) => appendChunk(stdoutChunks, chunk));
+    child.stderr?.on("data", (chunk) => appendChunk(stderrChunks, chunk));
+
+    child.once("error", (error) => {
+      clearTimeout(timeoutId);
+      reject(
+        toIdentityIqOperationError(
+          `Failed to run Playwright browser install command: ${sanitizeTextValue(error?.message, 220) || "unknown error"}.`,
+          {
+            code: "identityiq_playwright_install_command_failed",
+            httpStatus: 503,
+          },
+        ),
+      );
+    });
+
+    child.once("close", (code) => {
+      clearTimeout(timeoutId);
+      if (timeoutTriggered) {
+        reject(
+          toIdentityIqOperationError(
+            "Timed out while installing Playwright Chromium runtime.",
+            {
+              code: "identityiq_playwright_install_timeout",
+              httpStatus: 503,
+            },
+          ),
+        );
+        return;
+      }
+      if (code !== 0) {
+        const stderrPreview = sanitizeTextValue(stderrChunks.join(" | "), 300);
+        const stdoutPreview = sanitizeTextValue(stdoutChunks.join(" | "), 200);
+        reject(
+          toIdentityIqOperationError(
+            `Playwright Chromium install failed.${stderrPreview ? ` ${stderrPreview}` : stdoutPreview ? ` ${stdoutPreview}` : ""}`,
+            {
+              code: "identityiq_playwright_install_failed",
+              httpStatus: 503,
+            },
+          ),
+        );
+        return;
+      }
+
+      resolve(true);
+    });
+  })
+    .catch((error) => {
+      throw error;
+    })
+    .finally(() => {
+      identityIqPlaywrightInstallPromise = null;
+    });
+
+  return identityIqPlaywrightInstallPromise;
+}
+
 async function loadIdentityIqPlaywrightChromium() {
   if (identityIqPlaywrightChromiumPromise) {
     return identityIqPlaywrightChromiumPromise;
   }
 
+  ensureIdentityIqPlaywrightEnvDefaults();
   identityIqPlaywrightChromiumPromise = (async () => {
     try {
       const playwrightModule = await import("playwright");
@@ -25258,6 +25393,24 @@ async function loadIdentityIqPlaywrightChromium() {
   });
 
   return identityIqPlaywrightChromiumPromise;
+}
+
+async function launchIdentityIqBrowser(chromium) {
+  const launchOptions = {
+    headless: true,
+    args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  };
+
+  try {
+    return await chromium.launch(launchOptions);
+  } catch (error) {
+    if (!isIdentityIqMissingBrowserExecutableError(error) || !IDENTITYIQ_PLAYWRIGHT_INSTALL_ON_DEMAND) {
+      throw error;
+    }
+
+    await installIdentityIqPlaywrightChromium();
+    return chromium.launch(launchOptions);
+  }
 }
 
 async function waitForIdentityIqAnySelector(page, selectors, timeoutMs = 12000) {
@@ -25546,9 +25699,17 @@ function isIdentityIqLikelyAuthenticated(url, bodyText, scorePayload) {
 
 async function fetchIdentityIqCreditScore(payload) {
   const chromium = await loadIdentityIqPlaywrightChromium();
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  const browser = await launchIdentityIqBrowser(chromium).catch((error) => {
+    if (isIdentityIqMissingBrowserExecutableError(error)) {
+      throw toIdentityIqOperationError(
+        "Playwright Chromium runtime is missing on the server and automatic install did not complete.",
+        {
+          code: "identityiq_playwright_browser_missing",
+          httpStatus: 503,
+        },
+      );
+    }
+    throw error;
   });
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
