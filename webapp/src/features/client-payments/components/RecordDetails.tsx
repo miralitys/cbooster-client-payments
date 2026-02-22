@@ -10,7 +10,7 @@ import type {
 import type { ClientRecord } from "@/shared/types/records";
 import { FIELD_DEFINITIONS, PAYMENT_PAIRS } from "@/features/client-payments/domain/constants";
 import { formatDate, formatMoney, getRecordStatusFlags, parseMoneyValue } from "@/features/client-payments/domain/calculations";
-import { Badge } from "@/shared/ui";
+import { Badge, Button } from "@/shared/ui";
 
 interface RecordDetailsProps {
   record: ClientRecord;
@@ -51,6 +51,7 @@ interface BadgeMeta {
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
 const MAX_RENDERED_COMMUNICATION_ITEMS = 120;
+const COMMUNICATIONS_PAGE_SIZE = 5;
 
 export function RecordDetails({ record }: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
@@ -59,6 +60,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const [ghlCommunications, setGhlCommunications] = useState<GhlClientCommunicationsPayload | null>(null);
   const [isLoadingGhlCommunications, setIsLoadingGhlCommunications] = useState(false);
   const [ghlCommunicationsError, setGhlCommunicationsError] = useState("");
+  const [visibleCommunicationCount, setVisibleCommunicationCount] = useState(COMMUNICATIONS_PAGE_SIZE);
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
   const contractDisplay = useMemo(() => formatMoneyCell(record.contractTotals), [record.contractTotals]);
@@ -131,8 +133,11 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       setGhlCommunications(null);
       setGhlCommunicationsError("");
       setIsLoadingGhlCommunications(false);
+      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
       return;
     }
+
+    setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
 
     const abortController = new AbortController();
     let isActive = true;
@@ -171,11 +176,17 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   }, [normalizedClientName]);
 
   const contactInfo = useMemo(() => resolveContactInfo(record, ghlBasicNote), [ghlBasicNote, record]);
-  const communicationItems = useMemo(
+  const communicationItemsLoaded = useMemo(
     () => (ghlCommunications?.items || []).slice(0, MAX_RENDERED_COMMUNICATION_ITEMS),
     [ghlCommunications?.items],
   );
-  const hiddenCommunicationCount = Math.max(0, (ghlCommunications?.items?.length || 0) - communicationItems.length);
+  const communicationItemsVisible = useMemo(
+    () => communicationItemsLoaded.slice(0, visibleCommunicationCount),
+    [communicationItemsLoaded, visibleCommunicationCount],
+  );
+  const hiddenCommunicationCount = Math.max(0, communicationItemsLoaded.length - communicationItemsVisible.length);
+  const truncatedByServerCount = Math.max(0, (ghlCommunications?.items?.length || 0) - communicationItemsLoaded.length);
+  const nextBatchSize = Math.min(COMMUNICATIONS_PAGE_SIZE, hiddenCommunicationCount);
   const requestedClientFields = useMemo<RequestedClientField[]>(
     () =>
       [
@@ -404,19 +415,19 @@ export function RecordDetails({ record }: RecordDetailsProps) {
             {!isLoadingGhlCommunications &&
             !ghlCommunicationsError &&
             ghlCommunications?.status === "found" &&
-            communicationItems.length === 0 ? (
+            communicationItemsVisible.length === 0 ? (
               <p className="react-user-footnote">No SMS or call history found for this client.</p>
             ) : null}
             {!isLoadingGhlCommunications &&
             !ghlCommunicationsError &&
             ghlCommunications?.status === "found" &&
-            communicationItems.length > 0 ? (
+            communicationItemsVisible.length > 0 ? (
               <>
                 <p className="react-user-footnote">
                   SMS: {ghlCommunications.smsCount || 0} · Calls: {ghlCommunications.callCount || 0}
                 </p>
                 <div className="record-details-communications__list" role="list">
-                  {communicationItems.map((item) => (
+                  {communicationItemsVisible.map((item) => (
                     <article key={item.id} className="record-details-communications__item" role="listitem">
                       <div className="record-details-communications__meta">
                         <span className={`record-details-communications__kind record-details-communications__kind--${normalizeCommunicationKind(item.kind)}`}>
@@ -460,7 +471,26 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                   ))}
                 </div>
                 {hiddenCommunicationCount > 0 ? (
-                  <p className="react-user-footnote">Showing latest {communicationItems.length} items. Hidden: {hiddenCommunicationCount}.</p>
+                  <div className="record-details-communications__footer">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      type="button"
+                      onClick={() => setVisibleCommunicationCount((current) => current + COMMUNICATIONS_PAGE_SIZE)}
+                    >
+                      Show {nextBatchSize} more
+                    </Button>
+                  </div>
+                ) : null}
+                {hiddenCommunicationCount > 0 ? (
+                  <p className="react-user-footnote">
+                    Showing {communicationItemsVisible.length} of {communicationItemsLoaded.length}.
+                  </p>
+                ) : null}
+                {truncatedByServerCount > 0 ? (
+                  <p className="react-user-footnote">
+                    Additional {truncatedByServerCount} messages are not displayed due to server cap.
+                  </p>
                 ) : null}
               </>
             ) : null}
