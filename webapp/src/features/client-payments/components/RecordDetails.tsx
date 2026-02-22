@@ -53,6 +53,7 @@ const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
 const MAX_RENDERED_COMMUNICATION_ITEMS = 120;
 const COMMUNICATIONS_PAGE_SIZE = 5;
+type CommunicationFilter = "all" | "sms" | "calls" | "documents";
 
 export function RecordDetails({ record }: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
@@ -63,6 +64,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const [ghlCommunicationsError, setGhlCommunicationsError] = useState("");
   const [visibleCommunicationCount, setVisibleCommunicationCount] = useState(COMMUNICATIONS_PAGE_SIZE);
   const [selectedCommunicationTranscript, setSelectedCommunicationTranscript] = useState<GhlClientCommunicationItem | null>(null);
+  const [activeCommunicationFilter, setActiveCommunicationFilter] = useState<CommunicationFilter>("all");
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
   const contractDisplay = useMemo(() => formatMoneyCell(record.contractTotals), [record.contractTotals]);
@@ -137,11 +139,13 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       setIsLoadingGhlCommunications(false);
       setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
       setSelectedCommunicationTranscript(null);
+      setActiveCommunicationFilter("all");
       return;
     }
 
     setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
     setSelectedCommunicationTranscript(null);
+    setActiveCommunicationFilter("all");
 
     const abortController = new AbortController();
     let isActive = true;
@@ -184,13 +188,41 @@ export function RecordDetails({ record }: RecordDetailsProps) {
     () => (ghlCommunications?.items || []).slice(0, MAX_RENDERED_COMMUNICATION_ITEMS),
     [ghlCommunications?.items],
   );
-  const communicationItemsVisible = useMemo(
-    () => communicationItemsLoaded.slice(0, visibleCommunicationCount),
-    [communicationItemsLoaded, visibleCommunicationCount],
+  const communicationItemsFiltered = useMemo(
+    () =>
+      communicationItemsLoaded.filter((item) => {
+        if (activeCommunicationFilter === "sms") {
+          return normalizeCommunicationKind(item.kind) === "sms";
+        }
+        if (activeCommunicationFilter === "calls") {
+          return normalizeCommunicationKind(item.kind) === "call";
+        }
+        if (activeCommunicationFilter === "documents") {
+          return hasCommunicationDocuments(item);
+        }
+        return true;
+      }),
+    [activeCommunicationFilter, communicationItemsLoaded],
   );
-  const hiddenCommunicationCount = Math.max(0, communicationItemsLoaded.length - communicationItemsVisible.length);
+  const communicationItemsVisible = useMemo(
+    () => communicationItemsFiltered.slice(0, visibleCommunicationCount),
+    [communicationItemsFiltered, visibleCommunicationCount],
+  );
+  const hiddenCommunicationCount = Math.max(0, communicationItemsFiltered.length - communicationItemsVisible.length);
   const truncatedByServerCount = Math.max(0, (ghlCommunications?.items?.length || 0) - communicationItemsLoaded.length);
   const nextBatchSize = Math.min(COMMUNICATIONS_PAGE_SIZE, hiddenCommunicationCount);
+  const communicationEmptyMessage = useMemo(() => {
+    if (activeCommunicationFilter === "sms") {
+      return "No SMS history found for this client.";
+    }
+    if (activeCommunicationFilter === "calls") {
+      return "No call history found for this client.";
+    }
+    if (activeCommunicationFilter === "documents") {
+      return "No documents found for this client.";
+    }
+    return "No SMS or call history found for this client.";
+  }, [activeCommunicationFilter]);
   const requestedClientFields = useMemo<RequestedClientField[]>(
     () =>
       [
@@ -419,94 +451,135 @@ export function RecordDetails({ record }: RecordDetailsProps) {
             {!isLoadingGhlCommunications &&
             !ghlCommunicationsError &&
             ghlCommunications?.status === "found" &&
-            communicationItemsVisible.length === 0 ? (
+            communicationItemsLoaded.length === 0 ? (
               <p className="react-user-footnote">No SMS or call history found for this client.</p>
             ) : null}
             {!isLoadingGhlCommunications &&
             !ghlCommunicationsError &&
             ghlCommunications?.status === "found" &&
-            communicationItemsVisible.length > 0 ? (
+            communicationItemsLoaded.length > 0 ? (
               <>
                 <p className="react-user-footnote">
                   SMS: {ghlCommunications.smsCount || 0} · Calls: {ghlCommunications.callCount || 0}
                 </p>
-                <div className="record-details-communications__list" role="list">
-                  {communicationItemsVisible.map((item) => {
-                    const normalizedKind = normalizeCommunicationKind(item.kind);
-                    const transcriptText = resolveCommunicationTranscript(item);
-                    return (
-                      <article key={item.id} className="record-details-communications__item" role="listitem">
-                        <div className="record-details-communications__meta">
-                          <span className={`record-details-communications__kind record-details-communications__kind--${normalizedKind}`}>
-                            {formatCommunicationKind(item.kind)}
-                          </span>
-                          <span className="record-details-communications__direction">{formatCommunicationDirection(item.direction)}</span>
-                          <span className="record-details-communications__date">{formatOptionalDateTime(item.createdAt)}</span>
-                        </div>
-                        <p className="record-details-communications__body">{item.body || "No text body."}</p>
-                        {normalizedKind === "call" ? (
-                          <div className="record-details-communications__actions">
-                            <Button variant="secondary" size="sm" type="button" onClick={() => setSelectedCommunicationTranscript(item)}>
-                              {transcriptText ? "Transcript" : "Transcript (not available)"}
-                            </Button>
-                          </div>
-                        ) : null}
-                        {item.recordingUrls && item.recordingUrls.length > 0 ? (
-                          <div className="record-details-communications__recordings">
-                            {item.recordingUrls.map((recordingUrl, index) => (
-                              <div key={`${item.id}:${recordingUrl}:${index}`} className="record-details-communications__recording-item">
-                                <span className="record-details-communications__recording-label">Recording {index + 1}</span>
-                                <audio className="record-details-communications__audio" controls preload="none" src={recordingUrl}>
-                                  Your browser does not support audio playback.
-                                </audio>
-                                <a
-                                  href={recordingUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="record-details-communications__recording-link"
-                                >
-                                  Open in new tab
-                                </a>
-                              </div>
-                            ))}
-                          </div>
-                        ) : null}
-                        {item.attachmentUrls && item.attachmentUrls.length > 0 ? (
-                          <div className="record-details-communications__recordings">
-                            {item.attachmentUrls.map((attachmentUrl, index) => (
-                              <a
-                                key={`${item.id}:${attachmentUrl}:${index}`}
-                                href={attachmentUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="record-details-communications__recording-link"
-                              >
-                                Attachment {index + 1}
-                              </a>
-                            ))}
-                          </div>
-                        ) : null}
-                      </article>
-                    );
-                  })}
+                <div className="record-details-communications__filters">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={activeCommunicationFilter === "sms" ? "primary" : "secondary"}
+                    onClick={() => {
+                      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+                      setActiveCommunicationFilter((previous) => (previous === "sms" ? "all" : "sms"));
+                    }}
+                  >
+                    SMS
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={activeCommunicationFilter === "calls" ? "primary" : "secondary"}
+                    onClick={() => {
+                      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+                      setActiveCommunicationFilter((previous) => (previous === "calls" ? "all" : "calls"));
+                    }}
+                  >
+                    Звонки
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={activeCommunicationFilter === "documents" ? "primary" : "secondary"}
+                    onClick={() => {
+                      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+                      setActiveCommunicationFilter((previous) => (previous === "documents" ? "all" : "documents"));
+                    }}
+                  >
+                    Документы
+                  </Button>
                 </div>
-                {hiddenCommunicationCount > 0 ? (
-                  <div className="record-details-communications__footer">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      type="button"
-                      onClick={() => setVisibleCommunicationCount((current) => current + COMMUNICATIONS_PAGE_SIZE)}
-                    >
-                      Show {nextBatchSize} more
-                    </Button>
-                  </div>
-                ) : null}
-                {hiddenCommunicationCount > 0 ? (
-                  <p className="react-user-footnote">
-                    Showing {communicationItemsVisible.length} of {communicationItemsLoaded.length}.
-                  </p>
-                ) : null}
+                {communicationItemsVisible.length === 0 ? (
+                  <p className="react-user-footnote">{communicationEmptyMessage}</p>
+                ) : (
+                  <>
+                    <div className="record-details-communications__list" role="list">
+                      {communicationItemsVisible.map((item) => {
+                        const normalizedKind = normalizeCommunicationKind(item.kind);
+                        const transcriptText = resolveCommunicationTranscript(item);
+                        return (
+                          <article key={item.id} className="record-details-communications__item" role="listitem">
+                            <div className="record-details-communications__meta">
+                              <span className={`record-details-communications__kind record-details-communications__kind--${normalizedKind}`}>
+                                {formatCommunicationKind(item.kind)}
+                              </span>
+                              <span className="record-details-communications__direction">{formatCommunicationDirection(item.direction)}</span>
+                              <span className="record-details-communications__date">{formatOptionalDateTime(item.createdAt)}</span>
+                            </div>
+                            <p className="record-details-communications__body">{item.body || "No text body."}</p>
+                            {normalizedKind === "call" ? (
+                              <div className="record-details-communications__actions">
+                                <Button variant="secondary" size="sm" type="button" onClick={() => setSelectedCommunicationTranscript(item)}>
+                                  {transcriptText ? "Transcript" : "Transcript (not available)"}
+                                </Button>
+                              </div>
+                            ) : null}
+                            {item.recordingUrls && item.recordingUrls.length > 0 ? (
+                              <div className="record-details-communications__recordings">
+                                {item.recordingUrls.map((recordingUrl, index) => (
+                                  <div key={`${item.id}:${recordingUrl}:${index}`} className="record-details-communications__recording-item">
+                                    <span className="record-details-communications__recording-label">Recording {index + 1}</span>
+                                    <audio className="record-details-communications__audio" controls preload="none" src={recordingUrl}>
+                                      Your browser does not support audio playback.
+                                    </audio>
+                                    <a
+                                      href={recordingUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="record-details-communications__recording-link"
+                                    >
+                                      Open in new tab
+                                    </a>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                            {item.attachmentUrls && item.attachmentUrls.length > 0 ? (
+                              <div className="record-details-communications__recordings">
+                                {item.attachmentUrls.map((attachmentUrl, index) => (
+                                  <a
+                                    key={`${item.id}:${attachmentUrl}:${index}`}
+                                    href={attachmentUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="record-details-communications__recording-link"
+                                  >
+                                    Attachment {index + 1}
+                                  </a>
+                                ))}
+                              </div>
+                            ) : null}
+                          </article>
+                        );
+                      })}
+                    </div>
+                    {hiddenCommunicationCount > 0 ? (
+                      <div className="record-details-communications__footer">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          type="button"
+                          onClick={() => setVisibleCommunicationCount((current) => current + COMMUNICATIONS_PAGE_SIZE)}
+                        >
+                          Show {nextBatchSize} more
+                        </Button>
+                      </div>
+                    ) : null}
+                    {hiddenCommunicationCount > 0 ? (
+                      <p className="react-user-footnote">
+                        Showing {communicationItemsVisible.length} of {communicationItemsFiltered.length}.
+                      </p>
+                    ) : null}
+                  </>
+                )}
                 {truncatedByServerCount > 0 ? (
                   <p className="react-user-footnote">
                     Additional {truncatedByServerCount} messages are not displayed due to server cap.
@@ -618,6 +691,10 @@ function resolveCommunicationTranscript(item: GhlClientCommunicationItem): strin
     return "";
   }
   return body;
+}
+
+function hasCommunicationDocuments(item: GhlClientCommunicationItem): boolean {
+  return Array.isArray(item?.attachmentUrls) && item.attachmentUrls.length > 0;
 }
 
 function resolveStatusBadge(record: ClientRecord): BadgeMeta {
