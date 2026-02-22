@@ -27431,7 +27431,8 @@ function extractIdentityIqBureauScoresFromNamedScorePairs(text) {
   const matches = [];
 
   for (const candidateText of searchTexts) {
-    const scoreThenNamePattern = /"score"\s*:\s*"?([2-9]\d{2})"?[\s\S]{0,420}?"name"\s*:\s*"([^"]+)"/gi;
+    // Keep matches inside one object to avoid crossing into the next bureau item.
+    const scoreThenNamePattern = /"score"\s*:\s*"?([2-9]\d{2})"?[^{}]{0,420}?"name"\s*:\s*"([^"]+)"/gi;
     let scoreThenNameMatch;
     while ((scoreThenNameMatch = scoreThenNamePattern.exec(candidateText)) !== null) {
       const score = parseIdentityIqScoreNumber(scoreThenNameMatch[1]);
@@ -27445,7 +27446,7 @@ function extractIdentityIqBureauScoresFromNamedScorePairs(text) {
       });
     }
 
-    const nameThenScorePattern = /"name"\s*:\s*"([^"]+)"[\s\S]{0,420}?"score"\s*:\s*"?([2-9]\d{2})"?/gi;
+    const nameThenScorePattern = /"name"\s*:\s*"([^"]+)"[^{}]{0,420}?"score"\s*:\s*"?([2-9]\d{2})"?/gi;
     let nameThenScoreMatch;
     while ((nameThenScoreMatch = nameThenScorePattern.exec(candidateText)) !== null) {
       const bureau = resolveIdentityIqBureauName(nameThenScoreMatch[1]);
@@ -27526,11 +27527,18 @@ function parseIdentityIqBureauScores(text) {
     ...extractIdentityIqBureauScoresFromNamedScorePairs(normalizedText),
   ]);
   const matches = [...structuredMatches];
-  const allowLooseMentionHeuristic = structuredMatches.length < 2;
+  const allowTextHeuristics = structuredMatches.length === 0;
+  if (structuredMatches.length >= IDENTITYIQ_BUREAU_ORDER.length) {
+    return structuredMatches;
+  }
 
   for (const entry of IDENTITYIQ_BUREAU_SCORE_PATTERNS) {
     const hasBureauScore = matches.some((item) => item.bureau === entry.bureau);
     if (hasBureauScore) {
+      continue;
+    }
+
+    if (!allowTextHeuristics) {
       continue;
     }
 
@@ -27564,10 +27572,6 @@ function parseIdentityIqBureauScores(text) {
     }
 
     if (matches.some((item) => item.bureau === entry.bureau)) {
-      continue;
-    }
-
-    if (!allowLooseMentionHeuristic) {
       continue;
     }
 
