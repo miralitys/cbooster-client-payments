@@ -242,7 +242,14 @@ export default function QuickBooksPage() {
     [expenseCategorySummaryRows],
   );
   const incomingTotalAmount = useMemo(
-    () => incomingTransactions.reduce((total, row) => total + (Number(row.paymentAmount) || 0), 0),
+    () =>
+      incomingTransactions.reduce((total, row) => {
+        const amount = Number(row.paymentAmount) || 0;
+        if (isQuickBooksWriteOffTransaction(row.transactionType, amount, row.clientName)) {
+          return total;
+        }
+        return total + amount;
+      }, 0),
     [incomingTransactions],
   );
   const profitAndLossAmount = useMemo(
@@ -1923,10 +1930,22 @@ function formatQuickBooksClientLabel(clientName: string, transactionType: string
   if (normalizedType === "refund") {
     return `${normalizedName} (Refund)`;
   }
-  if (normalizedType === "creditmemo" || (normalizedType === "payment" && amount < 0)) {
+  if (isQuickBooksWriteOffTransaction(transactionType, amount, normalizedName)) {
+    if (normalizedName.toLowerCase().includes("write-off")) {
+      return normalizedName;
+    }
     return `${normalizedName} (Write-off)`;
   }
   return normalizedName;
+}
+
+function isQuickBooksWriteOffTransaction(transactionType: string, amount: number, clientName = ""): boolean {
+  const normalizedType = String(transactionType || "").trim().toLowerCase();
+  if (normalizedType === "creditmemo" || (normalizedType === "payment" && amount < 0)) {
+    return true;
+  }
+  const normalizedClientName = String(clientName || "").trim().toLowerCase();
+  return normalizedClientName.includes("write-off");
 }
 
 function formatQuickBooksPayeeLabel(payeeName: string): string {
