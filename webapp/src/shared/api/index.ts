@@ -30,3 +30,4 @@ export {
   updateCustomDashboardTasksSource,
   uploadCustomDashboardFile,
 } from "@/shared/api/customDashboard";
+export { getIdentityIqCreditScore } from "@/shared/api/identityIq";

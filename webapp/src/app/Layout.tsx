@@ -15,6 +15,7 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/custom-dashboard", label: "Custom Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
   { to: "/payment-probability", label: "Client Payment Probability" },
+  { to: "/identityiq-score", label: "IdentityIQ Scores" },
   { to: "/quickbooks", label: "QuickBooks" },
   { to: "/leads", label: "Leads" },
   { to: "/ghl-contracts", label: "GHL Contracts" },
@@ -40,6 +41,10 @@ function resolvePageTitle(pathname: string): string {
 
   if (pathname.startsWith("/payment-probability") || pathname.startsWith("/client-score")) {
     return "Client Payment Probability";
+  }
+
+  if (pathname.startsWith("/identityiq-score")) {
+    return "IdentityIQ Scores";
   }
 
   if (pathname.startsWith("/ghl-contracts")) {
