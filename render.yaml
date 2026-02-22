@@ -3,7 +3,7 @@ services:
     name: cbooster-client-payments
     runtime: node
     plan: starter
-    buildCommand: npm install --ignore-scripts && npm --prefix webapp install && npm run quality:gate
+    buildCommand: npm install --ignore-scripts && npx playwright install chromium && npm --prefix webapp install && npm run quality:gate
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
