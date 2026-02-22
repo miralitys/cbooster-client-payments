@@ -240,6 +240,14 @@ export default function QuickBooksPage() {
     () => expenseCategorySummaryRows.reduce((total, summaryRow) => total + (Number(summaryRow.totalAmount) || 0), 0),
     [expenseCategorySummaryRows],
   );
+  const incomingTotalAmount = useMemo(
+    () => incomingTransactions.reduce((total, row) => total + (Number(row.paymentAmount) || 0), 0),
+    [incomingTransactions],
+  );
+  const profitAndLossAmount = useMemo(
+    () => incomingTotalAmount - expenseCategoryTotalAmount,
+    [expenseCategoryTotalAmount, incomingTotalAmount],
+  );
 
   useEffect(() => {
     if (!monthOptions.length) {
@@ -1190,9 +1198,19 @@ export default function QuickBooksPage() {
                     </div>
                   ))}
                 </div>
-                <div className="quickbooks-expense-summary__total">
-                  <span>Total</span>
-                  <strong>{CURRENCY_FORMATTER.format(expenseCategoryTotalAmount)}</strong>
+                <div className="quickbooks-expense-summary__totals">
+                  <div className="quickbooks-expense-summary__total">
+                    <span>Total Expense</span>
+                    <strong>{CURRENCY_FORMATTER.format(expenseCategoryTotalAmount)}</strong>
+                  </div>
+                  <div className="quickbooks-expense-summary__total">
+                    <span>Total Income</span>
+                    <strong>{CURRENCY_FORMATTER.format(incomingTotalAmount)}</strong>
+                  </div>
+                  <div className="quickbooks-expense-summary__total">
+                    <span>Profit&Loss</span>
+                    <strong>{CURRENCY_FORMATTER.format(profitAndLossAmount)}</strong>
+                  </div>
                 </div>
               </div>
             </aside>
