@@ -4,6 +4,7 @@ export type GhlClientCommunicationDirection = "inbound" | "outbound" | "unknown"
 
 export interface GhlClientCommunicationItem {
   id: string;
+  messageId: string;
   conversationId: string;
   kind: GhlClientCommunicationKind;
   direction: GhlClientCommunicationDirection;
