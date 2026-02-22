@@ -1,6 +1,7 @@
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const zlib = require("zlib");
 const { spawn } = require("child_process");
 const bcrypt = require("bcryptjs");
 const fs = require("fs");
@@ -701,6 +702,10 @@ const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_TIMEOUT_MS = Math.min(
 const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_MAX_CANDIDATES = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_MAX_CANDIDATES, 2), 1),
   8,
+);
+const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_CANDIDATES = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_CANDIDATES, 6), 1),
+  20,
 );
 const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_REQUEST_TIMEOUT_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_REQUEST_TIMEOUT_MS, 2500), 1000),
@@ -28757,6 +28762,235 @@ function buildGhlContractDownloadDiagnosticFallbackText(clientName, lookupRow, d
   return lines.join("\n");
 }
 
+function decodePdfLiteralString(rawValue) {
+  const value = sanitizeTextValue(rawValue, 400000);
+  if (!value) {
+    return "";
+  }
+
+  let result = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value[index];
+    if (current !== "\\") {
+      result += current;
+      continue;
+    }
+
+    const next = value[index + 1];
+    if (!next) {
+      break;
+    }
+    index += 1;
+
+    if (next === "n") {
+      result += "\n";
+      continue;
+    }
+    if (next === "r") {
+      result += "\r";
+      continue;
+    }
+    if (next === "t") {
+      result += "\t";
+      continue;
+    }
+    if (next === "b") {
+      result += "\b";
+      continue;
+    }
+    if (next === "f") {
+      result += "\f";
+      continue;
+    }
+    if (next === "(" || next === ")" || next === "\\") {
+      result += next;
+      continue;
+    }
+    if (/[0-7]/.test(next)) {
+      const octalDigits = [next];
+      for (let lookahead = 0; lookahead < 2; lookahead += 1) {
+        const octalChar = value[index + 1];
+        if (!octalChar || !/[0-7]/.test(octalChar)) {
+          break;
+        }
+        octalDigits.push(octalChar);
+        index += 1;
+      }
+      const code = Number.parseInt(octalDigits.join(""), 8);
+      if (Number.isFinite(code) && code >= 0) {
+        result += String.fromCharCode(code);
+      }
+      continue;
+    }
+
+    // Unknown escape sequence: keep escaped char as-is.
+    result += next;
+  }
+
+  return result;
+}
+
+function decodePdfHexText(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 400000).replace(/[^0-9a-f]/gi, "");
+  if (!normalized) {
+    return "";
+  }
+
+  const evenHex = normalized.length % 2 === 0 ? normalized : `${normalized}0`;
+  const buffer = Buffer.from(evenHex, "hex");
+  if (!buffer.length) {
+    return "";
+  }
+
+  // UTF-16BE BOM.
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    let output = "";
+    for (let index = 2; index + 1 < buffer.length; index += 2) {
+      const code = buffer.readUInt16BE(index);
+      if (code === 0) {
+        continue;
+      }
+      output += String.fromCharCode(code);
+    }
+    return output;
+  }
+
+  return buffer.toString("latin1");
+}
+
+function collectPdfTextFragmentsFromContent(content, onFragment) {
+  const text = sanitizeTextValue(content, 2000000);
+  if (!text || typeof onFragment !== "function") {
+    return;
+  }
+
+  const literalTokenPattern = /\((?:\\.|[^\\()])*\)\s*(?:Tj|')/g;
+  for (const match of text.matchAll(literalTokenPattern)) {
+    const token = sanitizeTextValue(match[0], 500000);
+    if (!token) {
+      continue;
+    }
+    const openIndex = token.indexOf("(");
+    const closeIndex = token.lastIndexOf(")");
+    if (openIndex < 0 || closeIndex <= openIndex) {
+      continue;
+    }
+    const literal = token.slice(openIndex + 1, closeIndex);
+    onFragment(decodePdfLiteralString(literal));
+  }
+
+  const hexTokenPattern = /<([0-9a-fA-F\s]+)>\s*(?:Tj|')/g;
+  for (const match of text.matchAll(hexTokenPattern)) {
+    onFragment(decodePdfHexText(match[1]));
+  }
+
+  const arrayPattern = /\[(.*?)\]\s*TJ/gs;
+  for (const arrayMatch of text.matchAll(arrayPattern)) {
+    const arrayBody = sanitizeTextValue(arrayMatch[1], 1000000);
+    if (!arrayBody) {
+      continue;
+    }
+
+    for (const literalMatch of arrayBody.matchAll(/\((?:\\.|[^\\()])*\)/g)) {
+      const literalToken = sanitizeTextValue(literalMatch[0], 500000);
+      if (!literalToken || literalToken.length < 2) {
+        continue;
+      }
+      onFragment(decodePdfLiteralString(literalToken.slice(1, -1)));
+    }
+    for (const hexMatch of arrayBody.matchAll(/<([0-9a-fA-F\s]+)>/g)) {
+      onFragment(decodePdfHexText(hexMatch[1]));
+    }
+  }
+}
+
+function extractGhlTextFromPdfBuffer(pdfBuffer) {
+  if (!Buffer.isBuffer(pdfBuffer) || !pdfBuffer.length) {
+    return "";
+  }
+
+  const fragments = [];
+  const seen = new Set();
+  const pushFragment = (rawFragment) => {
+    const normalized = normalizeGhlContractTextFragment(rawFragment);
+    if (!normalized || normalized.length < 4) {
+      return;
+    }
+    const dedupeKey = normalizeGhlContractComparableText(normalized).slice(0, 500);
+    if (!dedupeKey || seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+    fragments.push(normalized);
+  };
+
+  const pdfText = pdfBuffer.toString("latin1");
+  collectPdfTextFragmentsFromContent(pdfText, pushFragment);
+
+  const objectPattern = /(\d+\s+\d+\s+obj[\s\S]*?endobj)/g;
+  for (const objectMatch of pdfText.matchAll(objectPattern)) {
+    const objectBody = objectMatch[1];
+    if (!objectBody || !/stream[\r\n]/i.test(objectBody) || !/endstream/i.test(objectBody)) {
+      continue;
+    }
+
+    const streamMarkerIndex = objectBody.indexOf("stream");
+    const endStreamIndex = objectBody.lastIndexOf("endstream");
+    if (streamMarkerIndex < 0 || endStreamIndex <= streamMarkerIndex + 6) {
+      continue;
+    }
+
+    let streamStartWithinObject = streamMarkerIndex + 6;
+    const firstAfterMarker = objectBody[streamStartWithinObject];
+    const secondAfterMarker = objectBody[streamStartWithinObject + 1];
+    if (firstAfterMarker === "\r" && secondAfterMarker === "\n") {
+      streamStartWithinObject += 2;
+    } else if (firstAfterMarker === "\r" || firstAfterMarker === "\n") {
+      streamStartWithinObject += 1;
+    }
+
+    const objectStart = objectMatch.index || 0;
+    const absoluteStart = objectStart + streamStartWithinObject;
+    const absoluteEnd = objectStart + endStreamIndex;
+    if (absoluteEnd <= absoluteStart || absoluteStart < 0 || absoluteEnd > pdfBuffer.length) {
+      continue;
+    }
+
+    let streamBuffer = pdfBuffer.subarray(absoluteStart, absoluteEnd);
+    if (!streamBuffer.length) {
+      continue;
+    }
+
+    const isFlate = /\/FlateDecode\b/.test(objectBody);
+    if (isFlate) {
+      try {
+        streamBuffer = zlib.inflateSync(streamBuffer);
+      } catch {
+        try {
+          streamBuffer = zlib.inflateRawSync(streamBuffer);
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    collectPdfTextFragmentsFromContent(streamBuffer.toString("latin1"), pushFragment);
+  }
+
+  if (!fragments.length) {
+    return "";
+  }
+
+  const joined = fragments.join("\n\n").trim();
+  if (!joined) {
+    return "";
+  }
+  if (joined.length <= GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS) {
+    return joined;
+  }
+  return `${joined.slice(0, GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS).trim()}\n…`;
+}
+
 const GHL_CONTRACT_TEXT_KEY_HINT_PATTERN =
   /\b(contract|agreement|terms?|clause|section|body|content|html|message|description|template|document)\b/i;
 
@@ -30005,6 +30239,183 @@ function collectGhlContractTextLookupCandidates(lookupRow) {
     .slice(0, GHL_CLIENT_CONTRACT_TEXT_MAX_CANDIDATES);
 }
 
+function collectGhlContractTextPdfCandidates(lookupRow) {
+  const diagnostics = lookupRow?.diagnostics && typeof lookupRow.diagnostics === "object" ? lookupRow.diagnostics : null;
+  const fallbackContactId = sanitizeTextValue(lookupRow?.contactId, 160);
+  const fallbackContactName = sanitizeTextValue(lookupRow?.contactName, 300);
+  const byUrl = new Map();
+
+  function pushCandidate(rawCandidate, fallback = {}) {
+    if (!rawCandidate || typeof rawCandidate !== "object") {
+      return;
+    }
+
+    const urls = extractGhlResolvableUrls(
+      rawCandidate?.url ||
+        rawCandidate?.contractUrl ||
+        rawCandidate?.downloadUrl ||
+        rawCandidate?.fileUrl ||
+        rawCandidate?.href ||
+        rawCandidate?.link,
+    );
+    if (!urls.length) {
+      return;
+    }
+
+    const candidateId = extractLikelyGhlEntityId(rawCandidate?.candidateId || rawCandidate?.id || rawCandidate?.documentId);
+    const source = sanitizeTextValue(rawCandidate?.source || fallback?.source, 200);
+    const score = Number.isFinite(rawCandidate?.score) ? rawCandidate.score : Number.isFinite(fallback?.score) ? fallback.score : 0;
+    const contactId = sanitizeTextValue(rawCandidate?.contactId || fallback?.contactId, 160) || fallbackContactId;
+    const contactName = sanitizeTextValue(rawCandidate?.contactName || fallback?.contactName, 300) || fallbackContactName;
+
+    for (const rawUrl of urls) {
+      const url = sanitizeTextValue(rawUrl, 2000);
+      if (!url || !isAllowedGhlContractDownloadUrl(url)) {
+        continue;
+      }
+
+      const key = url.toLowerCase();
+      const next = {
+        url,
+        candidateId,
+        source,
+        score,
+        contactId,
+        contactName,
+      };
+      const prev = byUrl.get(key);
+      if (!prev) {
+        byUrl.set(key, next);
+        continue;
+      }
+
+      const preferNext =
+        next.score > prev.score ||
+        (!prev.candidateId && Boolean(next.candidateId)) ||
+        (!prev.contactId && Boolean(next.contactId)) ||
+        (!prev.contactName && Boolean(next.contactName));
+      if (preferNext) {
+        byUrl.set(key, {
+          ...prev,
+          ...next,
+        });
+        continue;
+      }
+
+      if (!prev.source && next.source) {
+        prev.source = next.source;
+      }
+    }
+  }
+
+  if (lookupRow?.contractUrl) {
+    pushCandidate(
+      {
+        url: lookupRow.contractUrl,
+      },
+      {
+        source: "lookup.contract_url",
+        score: 5000,
+      },
+    );
+  }
+
+  if (diagnostics?.selectedCandidate) {
+    pushCandidate(diagnostics.selectedCandidate, {
+      source: "lookup.selected",
+      score: 2500,
+      contactId: fallbackContactId,
+      contactName: fallbackContactName,
+    });
+  }
+
+  const diagnosticsContacts = Array.isArray(diagnostics?.contacts) ? diagnostics.contacts : [];
+  for (const contact of diagnosticsContacts) {
+    const contactId = sanitizeTextValue(contact?.contactId, 160) || fallbackContactId;
+    const contactName = sanitizeTextValue(contact?.contactName, 300) || fallbackContactName;
+    if (contact?.selectedCandidate) {
+      pushCandidate(contact.selectedCandidate, {
+        source: "lookup.contact.selected",
+        score: 2000,
+        contactId,
+        contactName,
+      });
+    }
+    if (Array.isArray(contact?.topCandidates)) {
+      for (const topCandidate of contact.topCandidates) {
+        pushCandidate(topCandidate, {
+          source: "lookup.contact.top",
+          score: 800,
+          contactId,
+          contactName,
+        });
+      }
+    }
+  }
+
+  if (diagnostics?.byNameFallback?.selectedCandidate) {
+    pushCandidate(diagnostics.byNameFallback.selectedCandidate, {
+      source: "lookup.by_name.selected",
+      score: 1200,
+      contactId: fallbackContactId,
+      contactName: fallbackContactName,
+    });
+  }
+  if (Array.isArray(diagnostics?.byNameFallback?.topCandidates)) {
+    for (const topCandidate of diagnostics.byNameFallback.topCandidates) {
+      pushCandidate(topCandidate, {
+        source: "lookup.by_name.top",
+        score: 600,
+        contactId: fallbackContactId,
+        contactName: fallbackContactName,
+      });
+    }
+  }
+
+  return [...byUrl.values()]
+    .sort((left, right) => {
+      const scoreDiff = Number(right?.score || 0) - Number(left?.score || 0);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return (left?.url || "").localeCompare(right?.url || "", "en", { sensitivity: "base" });
+    })
+    .slice(0, GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_CANDIDATES);
+}
+
+function computeGhlContractTextQualityScore(rawText) {
+  const text = normalizeGhlContractTextFragment(rawText);
+  if (!text) {
+    return 0;
+  }
+
+  const normalized = normalizeGhlContractComparableText(text);
+  const words = normalized ? normalized.split(" ").filter(Boolean).length : 0;
+  let score = 0;
+  if (text.length >= 80) {
+    score += 1;
+  }
+  if (text.length >= 180) {
+    score += 1;
+  }
+  if (text.length >= 400) {
+    score += 1;
+  }
+  if (words >= 18) {
+    score += 1;
+  }
+  if (words >= 50) {
+    score += 1;
+  }
+  if (/\n/.test(text)) {
+    score += 1;
+  }
+  if (/\b(contract|agreement|credit|payment|terms?|service|client|balance)\b/.test(normalized)) {
+    score += 1;
+  }
+  return score;
+}
+
 async function resolveGhlContractTextByCandidateId(candidateId, context = {}, debugTrace = null, options = {}) {
   const normalizedCandidateId = extractLikelyGhlEntityId(candidateId);
   if (!normalizedCandidateId) {
@@ -30438,6 +30849,83 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
 
   const resolvedContactId = sanitizeTextValue(normalizedLookupRow?.contactId, 160) || normalizedPreferredContactId;
   const resolvedContactName = sanitizeTextValue(normalizedLookupRow?.contactName, 300) || normalizedClientName;
+  const deadlineAtMs = Date.now() + GHL_CLIENT_CONTRACT_TEXT_FALLBACK_TIMEOUT_MS;
+  const bestResult = {
+    score: -1,
+    textLength: 0,
+    value: null,
+  };
+
+  function registerCandidateResult(rawResult) {
+    const text = normalizeGhlContractTextFragment(rawResult?.text);
+    if (!text) {
+      return false;
+    }
+    const score = computeGhlContractTextQualityScore(text);
+    const textLength = text.length;
+    if (score < bestResult.score) {
+      return false;
+    }
+    if (score === bestResult.score && textLength <= bestResult.textLength) {
+      return false;
+    }
+
+    bestResult.score = score;
+    bestResult.textLength = textLength;
+    bestResult.value = {
+      ...rawResult,
+      text,
+      textLength,
+      lookupStatus,
+      lookupRow: normalizedLookupRow,
+    };
+    return true;
+  }
+
+  const pdfCandidatesToProbe = collectGhlContractTextPdfCandidates(normalizedLookupRow);
+  for (const pdfCandidate of pdfCandidatesToProbe) {
+    if (Date.now() >= deadlineAtMs) {
+      break;
+    }
+
+    const remainingMs = Math.max(0, deadlineAtMs - Date.now());
+    const requestTimeoutMs = Math.max(
+      500,
+      Math.min(remainingMs, GHL_CLIENT_CONTRACT_TEXT_FALLBACK_REQUEST_TIMEOUT_MS),
+    );
+    if (requestTimeoutMs < 500) {
+      break;
+    }
+
+    let downloadedPdf;
+    try {
+      downloadedPdf = await fetchGhlContractFileForDownload(pdfCandidate.url, {
+        timeoutMs: requestTimeoutMs,
+      });
+    } catch {
+      continue;
+    }
+
+    const extractedPdfText = extractGhlTextFromPdfBuffer(downloadedPdf?.buffer);
+    if (!extractedPdfText) {
+      continue;
+    }
+
+    registerCandidateResult({
+      clientName: normalizedClientName,
+      contactId: pdfCandidate.contactId || resolvedContactId,
+      contactName: pdfCandidate.contactName || resolvedContactName,
+      candidateId: pdfCandidate.candidateId || "",
+      source: sanitizeTextValue(pdfCandidate.source, 220) || "contract_text.pdf_download",
+      text: extractedPdfText,
+      fragmentsCount: 0,
+      truncated: extractedPdfText.length > GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS,
+      fallbackMode: "pdf",
+    });
+    if (bestResult.score >= 5 || bestResult.textLength >= 450) {
+      return bestResult.value;
+    }
+  }
 
   const candidatesById = new Map();
   function pushCandidate(rawCandidate, fallback = {}) {
@@ -30517,7 +31005,6 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
   const candidatesToProbe = [...candidatesById.values()]
     .sort((left, right) => Number(right?.score || 0) - Number(left?.score || 0))
     .slice(0, GHL_CLIENT_CONTRACT_TEXT_FALLBACK_MAX_CANDIDATES);
-  const deadlineAtMs = Date.now() + GHL_CLIENT_CONTRACT_TEXT_FALLBACK_TIMEOUT_MS;
   if (candidatesToProbe.length) {
     for (const candidate of candidatesToProbe) {
       if (Date.now() >= deadlineAtMs) {
@@ -30538,17 +31025,21 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
         continue;
       }
 
-      return {
+      registerCandidateResult({
         clientName: normalizedClientName,
         contactId: candidate.contactId || resolvedContactId,
         contactName: candidate.contactName || resolvedContactName,
         candidateId: candidate.candidateId,
         source: sanitizeTextValue(textResult.source, 220) || sanitizeTextValue(candidate.source, 220),
         text: textResult.text,
-        textLength: Number.isFinite(textResult.textLength) ? textResult.textLength : textResult.text.length,
-        lookupStatus,
-        lookupRow: normalizedLookupRow,
-      };
+        fragmentsCount: Number.isFinite(textResult.fragmentsCount) ? textResult.fragmentsCount : 0,
+        truncated: Boolean(textResult.truncated),
+        sourceNodeCount: Number.isFinite(textResult.sourceNodeCount) ? textResult.sourceNodeCount : 0,
+        fallbackMode: "candidate_text",
+      });
+      if (bestResult.score >= 5 || bestResult.textLength >= 450) {
+        return bestResult.value;
+      }
     }
   }
 
@@ -30567,21 +31058,22 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
       },
     );
     if (textFromSearch?.text) {
-      return {
+      registerCandidateResult({
         clientName: normalizedClientName,
         contactId: resolvedContactId,
         contactName: resolvedContactName,
         candidateId: extractLikelyGhlEntityId(textFromSearch?.candidateId),
         source: sanitizeTextValue(textFromSearch?.source, 220) || "contract_text.search",
         text: textFromSearch.text,
-        textLength: Number.isFinite(textFromSearch.textLength) ? textFromSearch.textLength : textFromSearch.text.length,
-        lookupStatus,
-        lookupRow: normalizedLookupRow,
-      };
+        fragmentsCount: Number.isFinite(textFromSearch.fragmentsCount) ? textFromSearch.fragmentsCount : 0,
+        truncated: Boolean(textFromSearch.truncated),
+        sourceNodeCount: Number.isFinite(textFromSearch.sourceNodeCount) ? textFromSearch.sourceNodeCount : 0,
+        fallbackMode: "search",
+      });
     }
   }
 
-  return null;
+  return bestResult.value || null;
 }
 
 async function listGhlContractDownloadCandidatesForContact(contactId, options = {}) {
@@ -31397,7 +31889,7 @@ async function buildGhlClientContractDownloadRows(clientNames, options = {}) {
   return rows.filter(Boolean);
 }
 
-async function fetchGhlContractFileForDownload(contractUrl) {
+async function fetchGhlContractFileForDownload(contractUrl, options = {}) {
   const resolvedUrl = resolveAbsoluteGhlContractDownloadUrl(contractUrl);
   if (!resolvedUrl) {
     throw createHttpError("Contract file URL is invalid.", 400);
@@ -31405,6 +31897,11 @@ async function fetchGhlContractFileForDownload(contractUrl) {
   if (!isAllowedGhlContractDownloadUrl(resolvedUrl.toString())) {
     throw createHttpError("Contract file URL is not allowed for secure download.", 400);
   }
+
+  const requestTimeoutMs = Math.min(
+    Math.max(parsePositiveInteger(options?.timeoutMs, GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS), 500),
+    GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS,
+  );
 
   const attempts = [
     {
@@ -31425,7 +31922,7 @@ async function fetchGhlContractFileForDownload(contractUrl) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
-    }, GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS);
+    }, requestTimeoutMs);
 
     let response;
     try {
@@ -31437,7 +31934,7 @@ async function fetchGhlContractFileForDownload(contractUrl) {
     } catch (error) {
       clearTimeout(timeoutId);
       if (error?.name === "AbortError") {
-        lastErrorMessage = `Download request timed out after ${GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS}ms.`;
+        lastErrorMessage = `Download request timed out after ${requestTimeoutMs}ms.`;
       } else {
         lastErrorMessage = sanitizeTextValue(error?.message, 300) || "network error";
       }
