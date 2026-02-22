@@ -1,4 +1,4 @@
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 
 import { getIdentityIqCreditScore } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
@@ -19,6 +19,14 @@ interface IdentityIqHistoryRow extends IdentityIqCreditScoreResult {
 
 const HISTORY_MAX_ROWS = 20;
 const BUREAU_ORDER = ["TransUnion", "Equifax", "Experian"] as const;
+const LOADING_STATUS_MESSAGES = [
+  "Connecting to IdentityIQ...",
+  "Submitting client credentials...",
+  "Passing security verification...",
+  "Opening member dashboard...",
+  "Reading credit score signals...",
+  "Preparing final score result...",
+] as const;
 
 export default function IdentityIqScorePage() {
   const [form, setForm] = useState<IdentityIqFormState>({
@@ -30,8 +38,35 @@ export default function IdentityIqScorePage() {
   const [isLoading, setIsLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready to request score from IdentityIQ.");
   const [submitError, setSubmitError] = useState("");
+  const [loadingStatusIndex, setLoadingStatusIndex] = useState(0);
   const [latestResult, setLatestResult] = useState<IdentityIqCreditScoreResult | null>(null);
   const [historyRows, setHistoryRows] = useState<IdentityIqHistoryRow[]>([]);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingStatusIndex(0);
+      return;
+    }
+
+    setLoadingStatusIndex(0);
+    const timerId = window.setInterval(() => {
+      setLoadingStatusIndex((previous) => (previous + 1) % LOADING_STATUS_MESSAGES.length);
+    }, 2000);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [isLoading]);
+
+  const visibleStatusMessage = useMemo(() => {
+    if (submitError) {
+      return submitError;
+    }
+    if (isLoading) {
+      return LOADING_STATUS_MESSAGES[loadingStatusIndex] || LOADING_STATUS_MESSAGES[0];
+    }
+    return statusMessage;
+  }, [isLoading, loadingStatusIndex, statusMessage, submitError]);
 
   const bureauRows = useMemo(() => {
     const source = Array.isArray(latestResult?.bureauScores) ? latestResult.bureauScores : [];
@@ -111,7 +146,7 @@ export default function IdentityIqScorePage() {
     }
 
     setIsLoading(true);
-    setStatusMessage("Logging in to IdentityIQ and reading the score...");
+    setStatusMessage("Starting IdentityIQ check...");
 
     try {
       const payload = await getIdentityIqCreditScore({
@@ -168,7 +203,9 @@ export default function IdentityIqScorePage() {
         subtitle="Secure login-based score read for each client"
         meta={
           <>
-            <p className={`dashboard-message ${submitError ? "error" : ""}`.trim()}>{submitError || statusMessage}</p>
+            <p className={`dashboard-message ${submitError ? "error" : ""} ${isLoading ? "is-live" : ""}`.trim()}>
+              {visibleStatusMessage}
+            </p>
             <p className="react-user-footnote">
               Credentials are used only for the live request. Password and SSN4 are cleared from the form after successful check.
             </p>
