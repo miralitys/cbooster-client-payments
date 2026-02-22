@@ -1570,6 +1570,12 @@ a {
   overflow-wrap: anywhere;
 }
 
+.record-details-communications__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .record-details-communications__recordings {
   display: grid;
   gap: 8px;
