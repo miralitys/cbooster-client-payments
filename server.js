@@ -14759,6 +14759,13 @@ function buildGhlCommunicationRecord(message, conversation) {
     message.status || message.deliveryStatus || message.delivery_status,
     120,
   );
+  const callMeta =
+    message?.meta && typeof message.meta === "object" && message.meta.call && typeof message.meta.call === "object"
+      ? message.meta.call
+      : null;
+  const callStatus = sanitizeTextValue(callMeta?.status || "", 120);
+  const callDurationRaw = Number.parseInt(sanitizeTextValue(callMeta?.duration, 40), 10);
+  const callDurationSec = Number.isFinite(callDurationRaw) ? Math.max(0, callDurationRaw) : null;
   const key = messageId || `${conversationId}:${createdAt}:${kind}:${direction}:${sanitizeTextValue(body, 300)}`;
   if (!key) {
     return null;
@@ -14766,6 +14773,7 @@ function buildGhlCommunicationRecord(message, conversation) {
 
   return {
     id: key,
+    messageId: messageId || key,
     conversationId,
     kind,
     direction,
@@ -14775,6 +14783,8 @@ function buildGhlCommunicationRecord(message, conversation) {
     timestamp,
     recordingUrls,
     attachmentUrls,
+    callStatus,
+    callDurationSec,
     source: sanitizeTextValue(rawType || conversation?.source, 120) || "gohighlevel.conversations",
   };
 }
@@ -15050,6 +15060,42 @@ function buildEmptyGhlClientCommunicationsPayload(clientName = "") {
   };
 }
 
+function buildGhlClientCommunicationRecordingProxyUrl(clientName, messageId) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  const normalizedMessageId = sanitizeTextValue(messageId, 220);
+  if (!normalizedClientName || !normalizedMessageId) {
+    return "";
+  }
+
+  const query = new URLSearchParams({
+    clientName: normalizedClientName,
+    messageId: normalizedMessageId,
+  });
+  return `/api/ghl/client-communications/recording?${query.toString()}`;
+}
+
+function shouldAddProxyRecordingForCall(item) {
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+  if (sanitizeTextValue(item.kind, 40).toLowerCase() !== "call") {
+    return false;
+  }
+
+  const callStatus = sanitizeTextValue(item.callStatus, 120).toLowerCase();
+  const callDuration = Number.parseInt(sanitizeTextValue(item.callDurationSec, 40), 10);
+  const callDidConnect = !Number.isFinite(callDuration) || callDuration > 0;
+  const blockedStatuses = new Set(["no-answer", "ringing", "busy", "failed", "canceled", "cancelled"]);
+  if (blockedStatuses.has(callStatus)) {
+    return false;
+  }
+  if (!callDidConnect) {
+    return false;
+  }
+
+  return true;
+}
+
 async function findGhlClientCommunicationsByClientName(clientName, options = {}) {
   const normalizedClientName = sanitizeTextValue(clientName, 300);
   if (!normalizedClientName) {
@@ -15125,7 +15171,27 @@ async function findGhlClientCommunicationsByClientName(clientName, options = {})
     throw lastLookupError;
   }
 
-  const sortedItems = dedupeAndSortGhlCommunicationRecords(allItems).slice(0, GHL_CLIENT_COMMUNICATION_MAX_ITEMS);
+  const sortedItems = dedupeAndSortGhlCommunicationRecords(allItems)
+    .slice(0, GHL_CLIENT_COMMUNICATION_MAX_ITEMS)
+    .map((item) => {
+      const normalizedMessageId = sanitizeTextValue(item?.messageId || item?.id, 220);
+      const recordingUrls = Array.isArray(item?.recordingUrls) ? item.recordingUrls : [];
+      if (recordingUrls.length === 0 && normalizedMessageId && shouldAddProxyRecordingForCall(item)) {
+        const proxyRecordingUrl = buildGhlClientCommunicationRecordingProxyUrl(normalizedClientName, normalizedMessageId);
+        if (proxyRecordingUrl) {
+          return {
+            ...item,
+            messageId: normalizedMessageId,
+            recordingUrls: [proxyRecordingUrl],
+          };
+        }
+      }
+
+      return {
+        ...item,
+        messageId: normalizedMessageId || sanitizeTextValue(item?.id, 220),
+      };
+    });
   let smsCount = 0;
   let callCount = 0;
   for (const item of sortedItems) {
@@ -33903,6 +33969,110 @@ app.get("/api/ghl/client-communications", requireWebPermission(WEB_AUTH_PERMISSI
     console.error("GET /api/ghl/client-communications failed:", error);
     res.status(error.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 600) || "Failed to load client communications from GoHighLevel.",
+    });
+  }
+});
+
+app.get("/api/ghl/client-communications/recording", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_communications.recording",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "Recording lookup limit reached. Please wait before retrying.",
+      code: "ghl_client_communications_recording_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const requestedClientName = sanitizeTextValue(req.query?.clientName, 300);
+  const messageId = sanitizeTextValue(req.query?.messageId, 220);
+  if (!requestedClientName || !messageId) {
+    res.status(400).json({
+      error: "Query parameters `clientName` and `messageId` are required.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  try {
+    const context = await resolveGhlBasicNoteContext(req, {
+      requestedClientName,
+      writtenOffFlag: null,
+    });
+    if (!context?.clientName) {
+      throw createHttpError("Access denied. This client is outside your visible scope.", 403);
+    }
+
+    const normalizedMessageId = encodeURIComponent(messageId);
+    const normalizedLocationId = encodeURIComponent(GHL_LOCATION_ID);
+    const url = buildGhlUrl(`/conversations/messages/${normalizedMessageId}/locations/${normalizedLocationId}/recording`);
+    const headers = {
+      Authorization: `Bearer ${GHL_API_KEY}`,
+      Version: GHL_API_VERSION,
+      Accept: "*/*",
+    };
+
+    const controller = new AbortController();
+    const timeoutMs = Math.min(Math.max(GHL_REQUEST_TIMEOUT_MS, 2000), 60000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      const errorPreview = sanitizeTextValue(errorText, 500);
+      res.status(response.status === 404 ? 404 : response.status >= 500 ? 502 : response.status).json({
+        error: errorPreview || "Call recording is not available for this message.",
+      });
+      return;
+    }
+
+    const contentType = sanitizeTextValue(response.headers.get("content-type"), 200) || "audio/mpeg";
+    const contentDisposition =
+      sanitizeTextValue(response.headers.get("content-disposition"), 500) ||
+      `inline; filename=\"ghl-recording-${sanitizeTextValue(messageId, 80)}.mp3\"`;
+    const arrayBuffer = await response.arrayBuffer();
+    const payload = Buffer.from(arrayBuffer);
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", contentDisposition);
+    res.setHeader("Cache-Control", "private, max-age=60");
+    res.status(200).send(payload);
+  } catch (error) {
+    const message = sanitizeTextValue(error?.message, 600) || "Failed to load call recording from GoHighLevel.";
+    console.error("GET /api/ghl/client-communications/recording failed:", error);
+    if (error?.name === "AbortError") {
+      res.status(504).json({
+        error: "Call recording request timed out.",
+      });
+      return;
+    }
+    res.status(error.httpStatus || 502).json({
+      error: message,
     });
   }
 });
