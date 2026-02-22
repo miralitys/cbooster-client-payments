@@ -89,6 +89,7 @@ interface LoadOptions {
   sync?: boolean;
   fullSync?: boolean;
   range?: QuickBooksRange;
+  silent?: boolean;
 }
 
 const QUICKBOOKS_MONEY_FLOW_TABS = [
@@ -734,15 +735,18 @@ export default function QuickBooksPage() {
     const shouldSync = Boolean(options.sync);
     const shouldTotalRefresh = Boolean(options.fullSync);
     const targetRange = options.range || selectedRange;
+    const isSilent = Boolean(options.silent);
     const previousItems = [...incomingTransactionsRef.current];
-    setIsLoading(true);
-    setLoadError("");
-    setSyncWarning("");
+    if (!isSilent) {
+      setIsLoading(true);
+      setLoadError("");
+      setSyncWarning("");
 
-    if (shouldTotalRefresh) {
-      setStatusText("Running total refresh from QuickBooks...");
-    } else {
-      setStatusText(shouldSync ? "Refreshing from QuickBooks..." : "Loading saved transactions...");
+      if (shouldTotalRefresh) {
+        setStatusText("Running total refresh from QuickBooks...");
+      } else {
+        setStatusText(shouldSync ? "Refreshing from QuickBooks..." : "Loading saved transactions...");
+      }
     }
 
     try {
@@ -774,10 +778,15 @@ export default function QuickBooksPage() {
           signature: quickBooksRowSignature,
         }),
       );
-      setRangeText(payload.range?.from && payload.range?.to ? `Range: ${payload.range.from} -> ${payload.range.to}` : "");
-      setLastLoadPrefix(buildLoadPrefixFromPayload(payload, shouldSync, shouldTotalRefresh, syncMetaOverride));
-      setSyncWarning("");
+      if (!isSilent) {
+        setRangeText(payload.range?.from && payload.range?.to ? `Range: ${payload.range.from} -> ${payload.range.to}` : "");
+        setLastLoadPrefix(buildLoadPrefixFromPayload(payload, shouldSync, shouldTotalRefresh, syncMetaOverride));
+        setSyncWarning("");
+      }
     } catch (error) {
+      if (isSilent) {
+        return;
+      }
       const message = error instanceof Error ? error.message : "Failed to load transactions.";
       if (!previousItems.length) {
         setLoadError(message);
@@ -792,7 +801,9 @@ export default function QuickBooksPage() {
         setIncomingTransactions(previousItems);
       }
     } finally {
-      setIsLoading(false);
+      if (!isSilent) {
+        setIsLoading(false);
+      }
     }
   }, [pollQuickBooksSyncJob, selectedRange]);
 
@@ -881,6 +892,16 @@ export default function QuickBooksPage() {
     setRefundOnly(false);
     void loadOutgoingQuickBooksPayments();
   }, [activeTab, loadIncomingQuickBooksPayments, loadOutgoingQuickBooksPayments]);
+
+  useEffect(() => {
+    if (activeTab !== "outgoing") {
+      return;
+    }
+    void loadIncomingQuickBooksPayments({
+      range: selectedRange,
+      silent: true,
+    });
+  }, [activeTab, loadIncomingQuickBooksPayments, selectedRange]);
 
   useEffect(() => {
     setStatusText(
