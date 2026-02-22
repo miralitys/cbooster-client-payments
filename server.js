@@ -493,6 +493,12 @@ const IDENTITYIQ_PLAYWRIGHT_INSTALL_TIMEOUT_MS = Math.min(
 const IDENTITYIQ_PLAYWRIGHT_INSTALL_ON_DEMAND =
   resolveOptionalBoolean(process.env.IDENTITYIQ_PLAYWRIGHT_INSTALL_ON_DEMAND) !== false;
 const IDENTITYIQ_PLAYWRIGHT_BROWSERS_PATH_DEFAULT = "0";
+const GHL_PLAYWRIGHT_INSTALL_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_PLAYWRIGHT_INSTALL_TIMEOUT_MS, 6 * 60 * 1000), 20 * 1000),
+  15 * 60 * 1000,
+);
+const GHL_PLAYWRIGHT_INSTALL_ON_DEMAND = resolveOptionalBoolean(process.env.GHL_PLAYWRIGHT_INSTALL_ON_DEMAND) !== false;
+const GHL_PLAYWRIGHT_BROWSERS_PATH_DEFAULT = "0";
 const GHL_APP_BASE_URL = (
   (process.env.GHL_APP_BASE_URL || process.env.GOHIGHLEVEL_APP_BASE_URL || "https://app.gohighlevel.com")
     .toString()
@@ -1634,6 +1640,7 @@ let quickBooksAccessTokenRefreshPromise = null;
 let identityIqPlaywrightChromiumPromise = null;
 let identityIqPlaywrightInstallPromise = null;
 let ghlPlaywrightChromiumPromise = null;
+let ghlPlaywrightInstallPromise = null;
 let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
   items: [],
@@ -27360,6 +27367,7 @@ async function loadGhlPlaywrightChromium() {
     return ghlPlaywrightChromiumPromise;
   }
 
+  ensureGhlPlaywrightEnvDefaults();
   ghlPlaywrightChromiumPromise = (async () => {
     try {
       const playwrightModule = await import("playwright");
@@ -27392,6 +27400,150 @@ async function loadGhlPlaywrightChromium() {
   });
 
   return ghlPlaywrightChromiumPromise;
+}
+
+function ensureGhlPlaywrightEnvDefaults() {
+  const currentPath = (process.env.PLAYWRIGHT_BROWSERS_PATH || "").toString().trim();
+  if (!currentPath) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = GHL_PLAYWRIGHT_BROWSERS_PATH_DEFAULT;
+  }
+}
+
+function isGhlMissingBrowserExecutableError(error) {
+  const message = sanitizeTextValue(error?.message, 1600).toLowerCase();
+  if (!message) {
+    return false;
+  }
+  return (
+    message.includes("executable doesn't exist") ||
+    message.includes("browser executable") ||
+    message.includes("chrome-headless-shell")
+  );
+}
+
+async function installGhlPlaywrightChromium() {
+  if (!GHL_PLAYWRIGHT_INSTALL_ON_DEMAND) {
+    return false;
+  }
+  if (ghlPlaywrightInstallPromise) {
+    return ghlPlaywrightInstallPromise;
+  }
+
+  ensureGhlPlaywrightEnvDefaults();
+  ghlPlaywrightInstallPromise = new Promise((resolve, reject) => {
+    const installEnv = {
+      ...process.env,
+      PLAYWRIGHT_BROWSERS_PATH: (process.env.PLAYWRIGHT_BROWSERS_PATH || GHL_PLAYWRIGHT_BROWSERS_PATH_DEFAULT)
+        .toString()
+        .trim(),
+    };
+    const installCommand = process.platform === "win32" ? "npx.cmd" : "npx";
+    const installArgs = ["playwright", "install", "chromium"];
+    const child = spawn(installCommand, installArgs, {
+      env: installEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let timeoutTriggered = false;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const timeoutId = setTimeout(() => {
+      timeoutTriggered = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // no-op
+      }
+    }, GHL_PLAYWRIGHT_INSTALL_TIMEOUT_MS);
+
+    function appendChunk(target, chunk) {
+      if (!chunk) {
+        return;
+      }
+      const value = sanitizeTextValue(chunk.toString(), 1600);
+      if (!value) {
+        return;
+      }
+      target.push(value);
+      while (target.length > 8) {
+        target.shift();
+      }
+    }
+
+    child.stdout?.on("data", (chunk) => appendChunk(stdoutChunks, chunk));
+    child.stderr?.on("data", (chunk) => appendChunk(stderrChunks, chunk));
+
+    child.once("error", (error) => {
+      clearTimeout(timeoutId);
+      reject(
+        toGhlContractTextOperationError(
+          `Failed to run Playwright browser install command: ${sanitizeTextValue(error?.message, 220) || "unknown error"}.`,
+          {
+            code: "ghl_playwright_install_command_failed",
+            httpStatus: 503,
+          },
+        ),
+      );
+    });
+
+    child.once("close", (code) => {
+      clearTimeout(timeoutId);
+      if (timeoutTriggered) {
+        reject(
+          toGhlContractTextOperationError(
+            "Timed out while installing Playwright Chromium runtime.",
+            {
+              code: "ghl_playwright_install_timeout",
+              httpStatus: 503,
+            },
+          ),
+        );
+        return;
+      }
+      if (code !== 0) {
+        const stderrPreview = sanitizeTextValue(stderrChunks.join(" | "), 300);
+        const stdoutPreview = sanitizeTextValue(stdoutChunks.join(" | "), 200);
+        reject(
+          toGhlContractTextOperationError(
+            `Playwright Chromium install failed.${stderrPreview ? ` ${stderrPreview}` : stdoutPreview ? ` ${stdoutPreview}` : ""}`,
+            {
+              code: "ghl_playwright_install_failed",
+              httpStatus: 503,
+            },
+          ),
+        );
+        return;
+      }
+
+      resolve(true);
+    });
+  })
+    .catch((error) => {
+      throw error;
+    })
+    .finally(() => {
+      ghlPlaywrightInstallPromise = null;
+    });
+
+  return ghlPlaywrightInstallPromise;
+}
+
+async function launchGhlBrowser(chromium) {
+  const launchOptions = {
+    headless: true,
+    args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  };
+
+  try {
+    return await chromium.launch(launchOptions);
+  } catch (error) {
+    if (!isGhlMissingBrowserExecutableError(error) || !GHL_PLAYWRIGHT_INSTALL_ON_DEMAND) {
+      throw error;
+    }
+
+    await installGhlPlaywrightChromium();
+    return chromium.launch(launchOptions);
+  }
 }
 
 async function waitForIdentityIqAnySelector(page, selectors, timeoutMs = 12000) {
@@ -29220,9 +29372,17 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
   }
 
   const chromium = await loadGhlPlaywrightChromium();
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  const browser = await launchGhlBrowser(chromium).catch((error) => {
+    if (isGhlMissingBrowserExecutableError(error)) {
+      throw toGhlContractTextOperationError(
+        "Playwright Chromium runtime is missing on the server and automatic install did not complete.",
+        {
+          code: "ghl_playwright_browser_missing",
+          httpStatus: 503,
+        },
+      );
+    }
+    throw error;
   });
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
