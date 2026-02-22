@@ -1,0 +1,342 @@
+import { type FormEvent, useMemo, useState } from "react";
+
+import { getIdentityIqCreditScore } from "@/shared/api";
+import { showToast } from "@/shared/lib/toast";
+import type { IdentityIqBureauScore, IdentityIqCreditScoreResult } from "@/shared/types/identityIq";
+import { Badge, Button, EmptyState, Field, Input, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
+import type { TableColumn } from "@/shared/ui";
+
+interface IdentityIqFormState {
+  clientName: string;
+  email: string;
+  password: string;
+  ssnLast4: string;
+}
+
+interface IdentityIqHistoryRow extends IdentityIqCreditScoreResult {
+  id: string;
+}
+
+const HISTORY_MAX_ROWS = 20;
+
+export default function IdentityIqScorePage() {
+  const [form, setForm] = useState<IdentityIqFormState>({
+    clientName: "",
+    email: "",
+    password: "",
+    ssnLast4: "",
+  });
+  const [isLoading, setIsLoading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("Ready to request score from IdentityIQ.");
+  const [submitError, setSubmitError] = useState("");
+  const [latestResult, setLatestResult] = useState<IdentityIqCreditScoreResult | null>(null);
+  const [historyRows, setHistoryRows] = useState<IdentityIqHistoryRow[]>([]);
+
+  const bureauRows = useMemo(() => {
+    const source = Array.isArray(latestResult?.bureauScores) ? latestResult.bureauScores : [];
+    return source.map((item, index) => ({
+      id: `${item.bureau}-${item.score}-${index}`,
+      bureau: item.bureau,
+      score: item.score,
+    }));
+  }, [latestResult]);
+
+  const bureauColumns = useMemo<TableColumn<BureauRow>[]>(() => {
+    return [
+      {
+        key: "bureau",
+        label: "Credit Bureau",
+        align: "left",
+        cell: (row) => row.bureau,
+      },
+      {
+        key: "score",
+        label: "Score",
+        align: "center",
+        cell: (row) => <Badge tone="info">{row.score}</Badge>,
+      },
+    ];
+  }, []);
+
+  const historyColumns = useMemo<TableColumn<IdentityIqHistoryRow>[]>(() => {
+    return [
+      {
+        key: "client",
+        label: "Client",
+        align: "left",
+        cell: (row) => (
+          <div>
+            <strong>{row.clientName || "Unnamed client"}</strong>
+            <div className="react-user-footnote">{row.emailMasked || "-"}</div>
+          </div>
+        ),
+      },
+      {
+        key: "score",
+        label: "Score",
+        align: "center",
+        cell: (row) => <Badge tone={row.status === "ok" ? "success" : "warning"}>{formatScore(row.score)}</Badge>,
+      },
+      {
+        key: "fetchedAt",
+        label: "Checked At",
+        align: "center",
+        cell: (row) => formatDateTime(row.fetchedAt),
+      },
+    ];
+  }, []);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitError("");
+
+    const validationError = validateIdentityIqForm(form);
+    if (validationError) {
+      setSubmitError(validationError);
+      return;
+    }
+
+    setIsLoading(true);
+    setStatusMessage("Logging in to IdentityIQ and reading the score...");
+
+    try {
+      const payload = await getIdentityIqCreditScore({
+        clientName: form.clientName.trim(),
+        email: form.email.trim(),
+        password: form.password,
+        ssnLast4: form.ssnLast4.trim(),
+      });
+
+      const result = payload?.result;
+      if (!result) {
+        throw new Error("IdentityIQ returned an empty result.");
+      }
+
+      setLatestResult(result);
+      setHistoryRows((previous) => {
+        const nextItem: IdentityIqHistoryRow = {
+          ...result,
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        };
+        return [nextItem, ...previous].slice(0, HISTORY_MAX_ROWS);
+      });
+      setStatusMessage(`Last check completed at ${formatDateTime(result.fetchedAt)}.`);
+      setForm((previous) => ({
+        ...previous,
+        password: "",
+        ssnLast4: "",
+      }));
+      showToast({
+        type: "success",
+        message: "IdentityIQ score loaded.",
+        dedupeKey: "identityiq-load-success",
+        cooldownMs: 2200,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load IdentityIQ score.";
+      setSubmitError(message);
+      setStatusMessage("IdentityIQ request failed.");
+      showToast({
+        type: "error",
+        message,
+        dedupeKey: `identityiq-load-error-${message}`,
+        cooldownMs: 2200,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  return (
+    <PageShell className="identityiq-score-react-page">
+      <PageHeader
+        title="IdentityIQ Credit Score"
+        subtitle="Secure login-based score read for each client"
+        meta={
+          <>
+            <p className={`dashboard-message ${submitError ? "error" : ""}`.trim()}>{submitError || statusMessage}</p>
+            <p className="react-user-footnote">
+              Credentials are used only for the live request. Password and SSN4 are cleared from the form after successful check.
+            </p>
+          </>
+        }
+      />
+
+      <Panel className="table-panel" title="Check Client">
+        <form className="identityiq-score-form" onSubmit={handleSubmit}>
+          <Field label="Client Name (optional)" htmlFor="identityiq-client-name">
+            <Input
+              id="identityiq-client-name"
+              autoComplete="off"
+              value={form.clientName}
+              onChange={(event) => setForm((previous) => ({ ...previous, clientName: event.target.value }))}
+              placeholder="Oleksandr Savras"
+            />
+          </Field>
+
+          <Field label="Email" htmlFor="identityiq-email">
+            <Input
+              id="identityiq-email"
+              type="email"
+              autoComplete="username"
+              value={form.email}
+              onChange={(event) => setForm((previous) => ({ ...previous, email: event.target.value }))}
+              placeholder="client@example.com"
+              hasError={Boolean(submitError) && !form.email.trim()}
+            />
+          </Field>
+
+          <Field label="Password" htmlFor="identityiq-password">
+            <Input
+              id="identityiq-password"
+              type="password"
+              autoComplete="current-password"
+              value={form.password}
+              onChange={(event) => setForm((previous) => ({ ...previous, password: event.target.value }))}
+              placeholder="********"
+              hasError={Boolean(submitError) && !form.password.trim()}
+            />
+          </Field>
+
+          <Field label="SSN Last 4" htmlFor="identityiq-ssn4" hint="Exactly 4 digits">
+            <Input
+              id="identityiq-ssn4"
+              inputMode="numeric"
+              autoComplete="off"
+              value={form.ssnLast4}
+              onChange={(event) =>
+                setForm((previous) => ({
+                  ...previous,
+                  ssnLast4: event.target.value.replace(/\D/g, "").slice(0, 4),
+                }))
+              }
+              placeholder="9205"
+              hasError={Boolean(submitError) && !/^\d{4}$/.test(form.ssnLast4)}
+            />
+          </Field>
+
+          <div className="identityiq-score-actions">
+            <Button type="submit" size="sm" isLoading={isLoading}>
+              Get Credit Score
+            </Button>
+          </div>
+        </form>
+      </Panel>
+
+      <Panel className="table-panel" title="Latest Result">
+        {!latestResult ? (
+          <EmptyState title="No score loaded yet." description="Run a client check to see score details here." />
+        ) : (
+          <div className="identityiq-score-result">
+            <div className="identityiq-score-summary">
+              <div>
+                <p className="react-user-footnote">Client</p>
+                <p className="identityiq-score-summary__value">{latestResult.clientName || "Unnamed client"}</p>
+              </div>
+              <div>
+                <p className="react-user-footnote">Overall Score</p>
+                <p className="identityiq-score-summary__value">{formatScore(latestResult.score)}</p>
+              </div>
+              <div>
+                <p className="react-user-footnote">Status</p>
+                <Badge tone={latestResult.status === "ok" ? "success" : "warning"}>{latestResult.status}</Badge>
+              </div>
+            </div>
+
+            <div className="identityiq-score-meta">
+              <p className="react-user-footnote">
+                Checked at: {formatDateTime(latestResult.fetchedAt)} ({latestResult.elapsedMs} ms)
+              </p>
+              {latestResult.dashboardUrl ? (
+                <p className="react-user-footnote">
+                  Dashboard URL:
+                  {" "}
+                  <a href={latestResult.dashboardUrl} target="_blank" rel="noreferrer">
+                    {latestResult.dashboardUrl}
+                  </a>
+                </p>
+              ) : null}
+              {latestResult.note ? <p className="react-user-footnote">{latestResult.note}</p> : null}
+            </div>
+
+            {bureauRows.length ? (
+              <div className="identityiq-score-bureaus">
+                <Table
+                  columns={bureauColumns}
+                  rows={bureauRows}
+                  rowKey={(row) => row.id}
+                  className="identityiq-score-table-wrap"
+                  density="compact"
+                />
+              </div>
+            ) : (
+              <EmptyState title="No bureau-specific score blocks were found." />
+            )}
+
+            {latestResult.snippets.length ? (
+              <div className="identityiq-score-snippets">
+                <p className="react-user-footnote">Matched score snippets:</p>
+                <ul>
+                  {latestResult.snippets.map((snippet, index) => (
+                    <li key={`${snippet}-${index}`}>{snippet}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </Panel>
+
+      <Panel className="table-panel" title="Recent Checks">
+        <Table
+          columns={historyColumns}
+          rows={historyRows}
+          rowKey={(row) => row.id}
+          className="identityiq-score-table-wrap"
+          emptyState="No checks run in this browser session yet."
+          density="compact"
+        />
+      </Panel>
+    </PageShell>
+  );
+}
+
+interface BureauRow extends IdentityIqBureauScore {
+  id: string;
+}
+
+function validateIdentityIqForm(form: IdentityIqFormState): string {
+  const email = form.email.trim();
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return "Valid client email is required.";
+  }
+
+  if (!form.password.trim()) {
+    return "Client password is required.";
+  }
+
+  if (!/^\d{4}$/.test(form.ssnLast4.trim())) {
+    return "SSN last 4 must contain exactly 4 digits.";
+  }
+
+  return "";
+}
+
+function formatScore(score: number | null | undefined): string {
+  return Number.isFinite(score) ? String(score) : "N/A";
+}
+
+function formatDateTime(rawValue: string): string {
+  const date = new Date(rawValue);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
