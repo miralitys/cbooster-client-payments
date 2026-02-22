@@ -10,6 +10,7 @@ interface GhlContractTextFormState {
   clientName: string;
   login: string;
   password: string;
+  mfaCode: string;
   locationId: string;
 }
 
@@ -24,6 +25,7 @@ export default function GhlContractsPage() {
     clientName: "",
     login: "",
     password: "",
+    mfaCode: "",
     locationId: "",
   });
   const [isLoading, setIsLoading] = useState(false);
@@ -84,6 +86,7 @@ export default function GhlContractsPage() {
         clientName: form.clientName.trim(),
         login: form.login.trim() || undefined,
         password: form.password || undefined,
+        mfaCode: form.mfaCode.trim() || undefined,
         locationId: form.locationId.trim() || undefined,
       });
 
@@ -104,6 +107,7 @@ export default function GhlContractsPage() {
       setForm((previous) => ({
         ...previous,
         password: "",
+        mfaCode: "",
       }));
       showToast({
         type: "success",
@@ -136,6 +140,7 @@ export default function GhlContractsPage() {
             <p className={`dashboard-message ${submitError ? "error" : ""}`.trim()}>{submitError || statusMessage}</p>
             <p className="react-user-footnote">
               You can leave login/password empty to use server env vars: `GHL_ADMIN_LOGIN` and `GHL_ADMIN_PASSWORD`.
+              Use `GHL_ADMIN_MFA_CODE` only if you rotate it per request.
             </p>
           </>
         }
@@ -172,6 +177,17 @@ export default function GhlContractsPage() {
               value={form.password}
               onChange={(event) => setForm((previous) => ({ ...previous, password: event.target.value }))}
               placeholder="********"
+            />
+          </Field>
+
+          <Field label="MFA Code (optional)" htmlFor="ghl-contract-mfa-code">
+            <Input
+              id="ghl-contract-mfa-code"
+              autoComplete="one-time-code"
+              inputMode="numeric"
+              value={form.mfaCode}
+              onChange={(event) => setForm((previous) => ({ ...previous, mfaCode: event.target.value }))}
+              placeholder="123456"
             />
           </Field>
 

@@ -27113,6 +27113,22 @@ const GHL_APP_PASSWORD_INPUT_SELECTORS = Object.freeze([
   "input[id*='password' i]",
   "input[autocomplete='current-password']",
 ]);
+const GHL_APP_MFA_INPUT_SELECTORS = Object.freeze([
+  "input[autocomplete='one-time-code']",
+  "input[name*='verification' i]",
+  "input[name*='verify' i]",
+  "input[name*='auth' i]",
+  "input[name*='otp' i]",
+  "input[name*='code' i]",
+  "input[id*='verification' i]",
+  "input[id*='verify' i]",
+  "input[id*='auth' i]",
+  "input[id*='otp' i]",
+  "input[id*='code' i]",
+  "input[placeholder*='code' i]",
+  "input[inputmode='numeric']",
+  "input[type='tel']",
+]);
 const GHL_APP_PRIMARY_BUTTON_SELECTORS = Object.freeze([
   "button[type='submit']",
   "button:has-text('Sign In')",
@@ -27122,10 +27138,22 @@ const GHL_APP_PRIMARY_BUTTON_SELECTORS = Object.freeze([
   "button:has-text('Continue')",
   "[role='button']:has-text('Sign In')",
 ]);
+const GHL_APP_MFA_PRIMARY_BUTTON_SELECTORS = Object.freeze([
+  "button[type='submit']",
+  "button:has-text('Verify')",
+  "button:has-text('Continue')",
+  "button:has-text('Submit')",
+  "[role='button']:has-text('Verify')",
+  "[role='button']:has-text('Continue')",
+]);
 const GHL_APP_PROPOSAL_STATUSES = Object.freeze(["completed", "accepted", "viewed", "sent", "draft"]);
 
 function normalizeGhlAppLogin(rawValue) {
   return sanitizeTextValue(rawValue, 320);
+}
+
+function normalizeGhlMfaCode(rawValue) {
+  return sanitizeTextValue(rawValue, 32).replace(/\s+/g, "");
 }
 
 function maskGhlAppLogin(rawValue) {
@@ -27555,6 +27583,177 @@ async function launchGhlBrowser(chromium) {
     await installGhlPlaywrightChromium();
     return chromium.launch(launchOptions);
   }
+}
+
+function isGhlMfaChallengeText(rawText) {
+  const text = normalizeGhlContractComparableText(rawText);
+  if (!text) {
+    return false;
+  }
+  return /\b(two factor|2fa|verification code|authenticator|otp|one-time code)\b/i.test(text);
+}
+
+async function fillGhlMfaCode(page, rawCode) {
+  const mfaCode = normalizeGhlMfaCode(rawCode);
+  if (!mfaCode) {
+    return false;
+  }
+
+  for (const selector of GHL_APP_MFA_INPUT_SELECTORS) {
+    const locator = page.locator(selector).first();
+    try {
+      const count = await locator.count();
+      if (!count) {
+        continue;
+      }
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const disabled = await locator.isDisabled().catch(() => false);
+      if (disabled) {
+        continue;
+      }
+      const maxLengthRaw = sanitizeTextValue(await locator.getAttribute("maxlength"), 8);
+      const maxLength = Number.parseInt(maxLengthRaw, 10);
+      if (maxLength === 1) {
+        continue;
+      }
+      await locator.click({ timeout: 2000 }).catch(() => {});
+      await locator.fill(mfaCode, { timeout: 2500 });
+      return true;
+    } catch {
+      // Continue with fallback strategies.
+    }
+  }
+
+  const allInputs = page.locator("input");
+  const maxInputsToInspect = Math.min(await allInputs.count().catch(() => 0), 80);
+  const candidates = [];
+
+  for (let index = 0; index < maxInputsToInspect; index += 1) {
+    const locator = allInputs.nth(index);
+    try {
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const disabled = await locator.isDisabled().catch(() => false);
+      if (disabled) {
+        continue;
+      }
+
+      const type = sanitizeTextValue(await locator.getAttribute("type"), 40).toLowerCase();
+      if (new Set(["hidden", "checkbox", "radio", "submit", "button", "file", "reset"]).has(type)) {
+        continue;
+      }
+      const readOnly = sanitizeTextValue(await locator.getAttribute("readonly"), 20).toLowerCase();
+      if (readOnly) {
+        continue;
+      }
+
+      const maxLength = Number.parseInt(sanitizeTextValue(await locator.getAttribute("maxlength"), 8), 10);
+      const inputMode = sanitizeTextValue(await locator.getAttribute("inputmode"), 40).toLowerCase();
+      const autoComplete = sanitizeTextValue(await locator.getAttribute("autocomplete"), 80).toLowerCase();
+      const hintText = [
+        sanitizeTextValue(await locator.getAttribute("name"), 100),
+        sanitizeTextValue(await locator.getAttribute("id"), 100),
+        sanitizeTextValue(await locator.getAttribute("placeholder"), 160),
+        sanitizeTextValue(await locator.getAttribute("aria-label"), 160),
+        autoComplete,
+        inputMode,
+      ]
+        .join(" ")
+        .toLowerCase();
+      const hasMfaHint = /\b(verify|verification|auth|otp|code|2fa|two[- ]?factor|one[- ]?time)\b/i.test(hintText);
+      const isSingleCharInput = maxLength === 1;
+      const looksLikeMfa =
+        hasMfaHint || isSingleCharInput || autoComplete === "one-time-code" || inputMode === "numeric";
+      if (!looksLikeMfa) {
+        continue;
+      }
+
+      const priority =
+        (isSingleCharInput ? 4 : 0) + (hasMfaHint ? 3 : 0) + (autoComplete === "one-time-code" ? 2 : 0) + (inputMode === "numeric" ? 1 : 0);
+      candidates.push({
+        locator,
+        maxLength,
+        priority,
+      });
+    } catch {
+      // Continue scanning inputs.
+    }
+  }
+
+  if (!candidates.length) {
+    return false;
+  }
+
+  const singleCharCandidates = candidates
+    .filter((entry) => entry.maxLength === 1)
+    .sort((left, right) => right.priority - left.priority);
+  if (singleCharCandidates.length >= mfaCode.length) {
+    let filledChars = 0;
+    for (let index = 0; index < mfaCode.length; index += 1) {
+      const locator = singleCharCandidates[index]?.locator;
+      if (!locator) {
+        break;
+      }
+      try {
+        await locator.click({ timeout: 1800 }).catch(() => {});
+        await locator.fill(mfaCode[index], { timeout: 1800 });
+        filledChars += 1;
+      } catch {
+        break;
+      }
+    }
+    if (filledChars === mfaCode.length) {
+      return true;
+    }
+  }
+
+  const fullInputCandidates = candidates.sort((left, right) => right.priority - left.priority);
+  for (const entry of fullInputCandidates) {
+    if (entry.maxLength === 1) {
+      continue;
+    }
+    try {
+      await entry.locator.click({ timeout: 1800 }).catch(() => {});
+      await entry.locator.fill(mfaCode, { timeout: 2200 });
+      return true;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return false;
+}
+
+async function submitGhlMfaChallenge(page) {
+  const submitted = await clickIdentityIqPrimaryAction(page, GHL_APP_MFA_PRIMARY_BUTTON_SELECTORS);
+  if (submitted) {
+    return true;
+  }
+
+  for (const selector of GHL_APP_MFA_INPUT_SELECTORS) {
+    const locator = page.locator(selector).first();
+    try {
+      const count = await locator.count();
+      if (!count) {
+        continue;
+      }
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      await locator.press("Enter", { timeout: 1500 });
+      return true;
+    } catch {
+      // Continue to next selector.
+    }
+  }
+
+  return false;
 }
 
 async function waitForIdentityIqAnySelector(page, selectors, timeoutMs = 12000) {
@@ -29373,6 +29572,7 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
   const clientName = sanitizeTextValue(payload?.clientName, 300);
   const login = normalizeGhlAppLogin(payload?.login);
   const password = sanitizeTextValue(payload?.password, 260);
+  const mfaCode = normalizeGhlMfaCode(payload?.mfaCode);
   const requestedLocationId = sanitizeTextValue(payload?.locationId, 160);
 
   if (!clientName || !login || !password) {
@@ -29449,8 +29649,8 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
     }).catch(() => {});
     await page.waitForTimeout(GHL_APP_POST_LOGIN_SETTLE_MS);
 
-    const storageSnapshot = await readGhlBrowserStorageSnapshot(page);
-    const normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
+    let storageSnapshot = await readGhlBrowserStorageSnapshot(page);
+    let normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
     if (/\b(captcha|recaptcha|i am not a robot|human verification)\b/i.test(normalizedBody)) {
       throw toGhlContractTextOperationError(
         "GoHighLevel requested CAPTCHA/human verification. Complete login manually, then retry.",
@@ -29460,14 +29660,55 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
         },
       );
     }
-    if (/\b(two factor|2fa|verification code|authenticator|otp)\b/i.test(normalizedBody)) {
-      throw toGhlContractTextOperationError(
-        "GoHighLevel requested MFA/verification code. Complete verification manually, then retry.",
-        {
-          code: "ghl_mfa_required",
-          httpStatus: 409,
-        },
-      );
+    if (isGhlMfaChallengeText(normalizedBody)) {
+      if (!mfaCode) {
+        throw toGhlContractTextOperationError(
+          "GoHighLevel requested MFA/verification code. Enter MFA code in the form and retry.",
+          {
+            code: "ghl_mfa_required",
+            httpStatus: 409,
+          },
+        );
+      }
+
+      const mfaFilled = await fillGhlMfaCode(page, mfaCode);
+      if (!mfaFilled) {
+        throw toGhlContractTextOperationError(
+          "GoHighLevel requested MFA, but verification code field was not detected automatically.",
+          {
+            code: "ghl_mfa_field_not_found",
+            httpStatus: 409,
+          },
+        );
+      }
+
+      const mfaSubmitted = await submitGhlMfaChallenge(page);
+      if (!mfaSubmitted) {
+        throw toGhlContractTextOperationError(
+          "GoHighLevel requested MFA, but verification submit action was not detected automatically.",
+          {
+            code: "ghl_mfa_submit_unavailable",
+            httpStatus: 409,
+          },
+        );
+      }
+
+      await page.waitForLoadState("networkidle", {
+        timeout: GHL_APP_NAVIGATION_TIMEOUT_MS,
+      }).catch(() => {});
+      await page.waitForTimeout(GHL_APP_POST_LOGIN_SETTLE_MS);
+
+      storageSnapshot = await readGhlBrowserStorageSnapshot(page);
+      normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
+      if (isGhlMfaChallengeText(normalizedBody)) {
+        throw toGhlContractTextOperationError(
+          "GoHighLevel MFA code was rejected or expired. Enter a fresh code and retry.",
+          {
+            code: "ghl_mfa_invalid_code",
+            httpStatus: 409,
+          },
+        );
+      }
     }
     if (/\b(invalid|incorrect|wrong|does not match|try again)\b/i.test(normalizedBody) && /\b(email|password|credential|login)\b/i.test(normalizedBody)) {
       throw toGhlContractTextOperationError("GoHighLevel rejected the credentials. Check login and password.", {
@@ -29660,6 +29901,9 @@ app.post("/api/ghl/contract-text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW
   const clientName = sanitizeTextValue(req.body?.clientName, 300);
   const login = normalizeGhlAppLogin(req.body?.login || req.body?.email || process.env.GHL_ADMIN_LOGIN || process.env.GHL_ADMIN_EMAIL);
   const password = sanitizeTextValue(req.body?.password || process.env.GHL_ADMIN_PASSWORD, 260);
+  const mfaCode = normalizeGhlMfaCode(
+    req.body?.mfaCode || req.body?.verificationCode || req.body?.otp || process.env.GHL_ADMIN_MFA_CODE,
+  );
   const locationId = sanitizeTextValue(req.body?.locationId || process.env.GHL_LOCATION_ID, 160);
 
   if (!clientName) {
@@ -29683,6 +29927,7 @@ app.post("/api/ghl/contract-text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW
       clientName,
       login,
       password,
+      mfaCode,
       locationId,
     });
 
