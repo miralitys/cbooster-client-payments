@@ -29,6 +29,7 @@
     "helmet": "^8.1.0",
     "multer": "^2.0.2",
     "pg": "^8.13.3",
-    "playwright": "^1.58.2"
+    "playwright": "^1.58.2",
+    "qrcode": "^1.5.4"
   }
 }
