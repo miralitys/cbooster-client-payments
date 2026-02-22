@@ -54,6 +54,14 @@ const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
 const MAX_RENDERED_COMMUNICATION_ITEMS = 120;
 const COMMUNICATIONS_PAGE_SIZE = 5;
 type CommunicationFilter = "all" | "sms" | "calls" | "documents";
+type SpeakerRole = "manager" | "client";
+
+interface SpeakerTranscriptTurn {
+  id: string;
+  role: SpeakerRole;
+  label: string;
+  text: string;
+}
 
 export function RecordDetails({ record }: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
@@ -250,6 +258,10 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const selectedCommunicationTranscriptText = useMemo(
     () => resolveCommunicationTranscript(selectedCommunicationTranscript, generatedTranscriptsByMessageId),
     [generatedTranscriptsByMessageId, selectedCommunicationTranscript],
+  );
+  const selectedCommunicationTranscriptTurns = useMemo(
+    () => parseSpeakerTranscriptTurns(selectedCommunicationTranscriptText),
+    [selectedCommunicationTranscriptText],
   );
   const canTranscribeSelectedCommunication = useMemo(() => {
     if (!selectedCommunicationTranscript || normalizeCommunicationKind(selectedCommunicationTranscript.kind) !== "call") {
@@ -711,7 +723,21 @@ export function RecordDetails({ record }: RecordDetailsProps) {
               {formatOptionalDateTime(selectedCommunicationTranscript.createdAt)}
             </p>
             {selectedCommunicationTranscriptText ? (
-              <pre className="record-details-communications__transcript">{selectedCommunicationTranscriptText}</pre>
+              selectedCommunicationTranscriptTurns.length > 0 ? (
+                <div className="record-details-communications__transcript-turns">
+                  {selectedCommunicationTranscriptTurns.map((turn) => (
+                    <article
+                      key={turn.id}
+                      className={`record-details-communications__transcript-turn record-details-communications__transcript-turn--${turn.role}`}
+                    >
+                      <header className="record-details-communications__transcript-turn-header">{turn.label}</header>
+                      <p className="record-details-communications__transcript-turn-body">{turn.text}</p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <pre className="record-details-communications__transcript">{selectedCommunicationTranscriptText}</pre>
+              )
             ) : (
               <p className="react-user-footnote">
                 {isGeneratingTranscript
@@ -817,6 +843,51 @@ function resolveCommunicationTranscript(
     return "";
   }
   return body;
+}
+
+function parseSpeakerTranscriptTurns(rawTranscript: string): SpeakerTranscriptTurn[] {
+  const transcript = (rawTranscript || "").toString().replace(/\r\n/g, "\n").trim();
+  if (!transcript) {
+    return [];
+  }
+
+  const lines = transcript
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    return [];
+  }
+
+  const turns: SpeakerTranscriptTurn[] = [];
+  let currentTurn: SpeakerTranscriptTurn | null = null;
+  const speakerPattern = /^(?:\[(?:\d{1,2}:)?\d{1,2}:\d{2}\]\s*)?(manager|client|менеджер|клиент)\s*:\s*(.*)$/i;
+
+  for (const line of lines) {
+    const match = line.match(speakerPattern);
+    if (match) {
+      const rawSpeaker = (match[1] || "").toLowerCase();
+      const role: SpeakerRole = rawSpeaker === "client" || rawSpeaker === "клиент" ? "client" : "manager";
+      const label = role === "manager" ? "Manager" : "Client";
+      const text = (match[2] || "").trim();
+      currentTurn = {
+        id: `${turns.length + 1}-${role}`,
+        role,
+        label,
+        text: text || "...",
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+
+    if (currentTurn) {
+      currentTurn.text = `${currentTurn.text} ${line}`.trim();
+    } else {
+      return [];
+    }
+  }
+
+  return turns.filter((turn) => turn.text);
 }
 
 function hasCommunicationDocuments(item: GhlClientCommunicationItem): boolean {

@@ -569,6 +569,17 @@ const OPENAI_TRANSCRIPTION_MAX_FILE_BYTES = Math.min(
   Math.max(parsePositiveInteger(process.env.OPENAI_TRANSCRIPTION_MAX_FILE_BYTES, 24 * 1024 * 1024), 1024 * 1024),
   64 * 1024 * 1024,
 );
+const OPENAI_TRANSCRIPT_FORMAT_MODEL =
+  (process.env.OPENAI_TRANSCRIPT_FORMAT_MODEL || OPENAI_MODEL || "gpt-4.1-mini").toString().trim() || "gpt-4.1-mini";
+const OPENAI_TRANSCRIPT_FORMAT_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.OPENAI_TRANSCRIPT_FORMAT_TIMEOUT_MS, 25000), 3000),
+  120000,
+);
+const OPENAI_TRANSCRIPT_FORMAT_MAX_OUTPUT_TOKENS = Math.min(
+  Math.max(parsePositiveInteger(process.env.OPENAI_TRANSCRIPT_FORMAT_MAX_OUTPUT_TOKENS, 2600), 400),
+  8000,
+);
+const OPENAI_TRANSCRIPT_FORMAT_ENABLED = resolveOptionalBoolean(process.env.OPENAI_TRANSCRIPT_FORMAT_ENABLED) !== false;
 const ASSISTANT_LLM_PII_MODES = new Set(["redact", "minimal", "full"]);
 const ASSISTANT_LLM_PII_MODE = resolveAssistantLlmPiiMode(process.env.LLM_PII_MODE || process.env.OPENAI_LLM_PII_MODE || "minimal");
 const ASSISTANT_REVIEW_PII_MODES = new Set(["redact", "minimal", "full"]);
@@ -15386,6 +15397,122 @@ async function transcribeAudioBufferViaOpenAi(audioPayload, options = {}) {
   return transcript;
 }
 
+function normalizeSpeakerFormattedTranscript(rawValue) {
+  const value = sanitizeTextValue(rawValue, 160000);
+  if (!value) {
+    return "";
+  }
+
+  return value
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => sanitizeTextValue(line, 5000))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function isSpeakerFormattedTranscript(rawValue) {
+  const value = sanitizeTextValue(rawValue, 4000);
+  if (!value) {
+    return false;
+  }
+
+  return /(?:^|\n)\s*(?:manager|client|менеджер|клиент)\s*:/i.test(value);
+}
+
+async function formatTranscriptWithSpeakerLabelsViaOpenAi(rawTranscript, options = {}) {
+  const transcript = sanitizeTextValue(rawTranscript, 120000);
+  if (!transcript) {
+    return "";
+  }
+
+  if (!OPENAI_TRANSCRIPT_FORMAT_ENABLED || !OPENAI_API_KEY) {
+    return transcript;
+  }
+
+  if (isSpeakerFormattedTranscript(transcript)) {
+    return transcript;
+  }
+
+  const clientName = sanitizeTextValue(options?.clientName, 220);
+  const direction = sanitizeTextValue(options?.direction, 60);
+  const requestBody = {
+    model: OPENAI_TRANSCRIPT_FORMAT_MODEL,
+    instructions: [
+      "You are a call transcript formatter.",
+      "Task: convert raw transcript into dialogue turns and label each line as either 'Manager:' or 'Client:'.",
+      "Rules:",
+      "1) Keep original language and wording, do not summarize.",
+      "2) Preserve all important content.",
+      "3) Output plain text only, one utterance per line.",
+      "4) Every line must start with 'Manager:' or 'Client:'.",
+      "5) If uncertain, choose the most likely speaker based on context.",
+    ].join("\n"),
+    input: [
+      clientName ? `Client name: ${clientName}` : "",
+      direction ? `Call direction: ${direction}` : "",
+      "Transcript:",
+      transcript,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    max_output_tokens: OPENAI_TRANSCRIPT_FORMAT_MAX_OUTPUT_TOKENS,
+  };
+
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    abortController.abort("timeout");
+  }, OPENAI_TRANSCRIPT_FORMAT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${OPENAI_API_BASE_URL}/v1/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+      signal: abortController.signal,
+    });
+
+    const rawResponseText = await response.text().catch(() => "");
+    if (!response.ok) {
+      throw createHttpError(
+        `OpenAI transcript format failed with status ${response.status}. ${sanitizeTextValue(rawResponseText, 500) || "No details."}`,
+        502,
+        "openai_transcript_format_http_error",
+      );
+    }
+
+    let payload = null;
+    try {
+      payload = rawResponseText ? JSON.parse(rawResponseText) : null;
+    } catch {
+      payload = null;
+    }
+    const formatted = normalizeSpeakerFormattedTranscript(extractOpenAiAssistantText(payload) || rawResponseText);
+    if (!formatted || !isSpeakerFormattedTranscript(formatted)) {
+      return transcript;
+    }
+    return formatted;
+  } catch (error) {
+    if (abortController.signal.aborted || error?.name === "AbortError") {
+      console.warn(
+        `OpenAI transcript format timed out after ${OPENAI_TRANSCRIPT_FORMAT_TIMEOUT_MS}ms.`,
+      );
+      return transcript;
+    }
+
+    console.warn(
+      "OpenAI transcript format failed:",
+      sanitizeTextValue(error?.message, 400) || "unknown",
+    );
+    return transcript;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function mapGhlCallTranscriptCacheRow(row) {
   if (!row) {
     return null;
@@ -15397,6 +15524,7 @@ function mapGhlCallTranscriptCacheRow(row) {
     messageId: sanitizeTextValue(row?.message_id, 220),
     contactId: sanitizeTextValue(row?.contact_id, 200),
     transcript: sanitizeTextValue(row?.transcript, 120000),
+    formattedTranscript: sanitizeTextValue(row?.formatted_transcript, 160000),
     source: sanitizeTextValue(row?.source, 160) || "openai.audio.transcriptions",
     audioContentType: sanitizeTextValue(row?.audio_content_type, 200),
     audioSizeBytes: Number.isFinite(audioSizeBytes) && audioSizeBytes >= 0 ? audioSizeBytes : 0,
@@ -15425,6 +15553,7 @@ async function getCachedGhlCallTranscriptByClientAndMessageId(clientName, messag
         message_id,
         contact_id,
         transcript,
+        formatted_transcript,
         source,
         audio_content_type,
         audio_size_bytes,
@@ -15467,6 +15596,7 @@ async function listCachedGhlCallTranscriptsByMessageIds(clientName, messageIds) 
         message_id,
         contact_id,
         transcript,
+        formatted_transcript,
         source,
         audio_content_type,
         audio_size_bytes,
@@ -15514,6 +15644,7 @@ async function upsertGhlCallTranscriptCacheRow(row) {
           message_id,
           contact_id,
           transcript,
+          formatted_transcript,
           source,
           audio_content_type,
           audio_size_bytes,
@@ -15521,11 +15652,12 @@ async function upsertGhlCallTranscriptCacheRow(row) {
           updated_at
         )
       VALUES
-        ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::timestamptz, NOW()), NOW())
+        ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::timestamptz, NOW()), NOW())
       ON CONFLICT (client_name, message_id)
       DO UPDATE SET
         contact_id = EXCLUDED.contact_id,
         transcript = EXCLUDED.transcript,
+        formatted_transcript = EXCLUDED.formatted_transcript,
         source = EXCLUDED.source,
         audio_content_type = EXCLUDED.audio_content_type,
         audio_size_bytes = EXCLUDED.audio_size_bytes,
@@ -15537,6 +15669,7 @@ async function upsertGhlCallTranscriptCacheRow(row) {
       messageId,
       sanitizeTextValue(normalizedRow?.contactId, 200),
       transcript,
+      sanitizeTextValue(normalizedRow?.formattedTranscript, 160000),
       sanitizeTextValue(normalizedRow?.source, 160) || "openai.audio.transcriptions",
       sanitizeTextValue(normalizedRow?.audioContentType, 200),
       Number.isFinite(audioSizeBytes) && audioSizeBytes >= 0 ? audioSizeBytes : 0,
@@ -15579,7 +15712,9 @@ async function applyCachedTranscriptsToGhlCommunicationItems(clientName, items) 
 
     const messageId = sanitizeTextValue(item?.messageId || item?.id, 220);
     const cached = messageId ? transcriptsByMessageId.get(messageId) : null;
-    if (!cached?.transcript) {
+    const cachedTranscript =
+      sanitizeTextValue(cached?.formattedTranscript, 160000) || sanitizeTextValue(cached?.transcript, 120000);
+    if (!cachedTranscript) {
       return item;
     }
 
@@ -15589,7 +15724,7 @@ async function applyCachedTranscriptsToGhlCommunicationItems(clientName, items) 
 
     return {
       ...item,
-      transcript: cached.transcript,
+      transcript: cachedTranscript,
       source: sanitizeTextValue(item?.source, 120) || "gohighlevel.conversations",
     };
   });
@@ -21626,6 +21761,7 @@ async function ensureDatabaseReady() {
           message_id TEXT NOT NULL,
           contact_id TEXT NOT NULL DEFAULT '',
           transcript TEXT NOT NULL DEFAULT '',
+          formatted_transcript TEXT NOT NULL DEFAULT '',
           source TEXT NOT NULL DEFAULT 'openai.audio.transcriptions',
           audio_content_type TEXT NOT NULL DEFAULT '',
           audio_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (audio_size_bytes >= 0),
@@ -21638,6 +21774,11 @@ async function ensureDatabaseReady() {
       await pool.query(`
         CREATE INDEX IF NOT EXISTS ${GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME}_updated_at_idx
         ON ${GHL_CALL_TRANSCRIPT_CACHE_TABLE} (updated_at DESC)
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_CALL_TRANSCRIPT_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS formatted_transcript TEXT NOT NULL DEFAULT ''
       `);
 
       await pool.query(`
@@ -36024,11 +36165,41 @@ app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_A
       return null;
     });
     if (cachedTranscript?.transcript) {
+      let formattedTranscript = sanitizeTextValue(cachedTranscript.formattedTranscript, 160000);
+      const rawTranscript = sanitizeTextValue(cachedTranscript.transcript, 120000);
+      if (!formattedTranscript && rawTranscript) {
+        formattedTranscript = await formatTranscriptWithSpeakerLabelsViaOpenAi(rawTranscript, {
+          clientName: context.clientName,
+        });
+        if (formattedTranscript && formattedTranscript !== rawTranscript) {
+          void upsertGhlCallTranscriptCacheRow({
+            clientName: context.clientName,
+            messageId: cachedTranscript.messageId || sanitizeTextValue(messageId, 220),
+            contactId: sanitizeTextValue(cachedTranscript.contactId, 200),
+            transcript: rawTranscript,
+            formattedTranscript,
+            source: sanitizeTextValue(cachedTranscript.source, 160) || "openai.audio.transcriptions",
+            audioContentType: sanitizeTextValue(cachedTranscript.audioContentType, 200),
+            audioSizeBytes: Number.isFinite(cachedTranscript.audioSizeBytes) ? cachedTranscript.audioSizeBytes : 0,
+            generatedAt: cachedTranscript.generatedAt || cachedTranscript.updatedAt || new Date().toISOString(),
+          }).catch((error) => {
+            console.warn(
+              "POST /api/ghl/client-communications/transcript cache update failed:",
+              sanitizeTextValue(error?.message, 300) || "unknown",
+            );
+          });
+        }
+      }
+
+      const displayTranscript = formattedTranscript || rawTranscript;
       res.json({
         ok: true,
         clientName: context.clientName,
         messageId: cachedTranscript.messageId || sanitizeTextValue(messageId, 220),
-        transcript: cachedTranscript.transcript,
+        transcript: displayTranscript,
+        rawTranscript,
+        formattedTranscript: formattedTranscript || "",
+        speakerLabeled: isSpeakerFormattedTranscript(displayTranscript),
         generatedAt: cachedTranscript.generatedAt || cachedTranscript.updatedAt || new Date().toISOString(),
         source: sanitizeTextValue(cachedTranscript.source, 160) || "cache.openai.audio.transcriptions",
         cached: true,
@@ -36041,12 +36212,17 @@ app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_A
       contentType: recording.contentType,
       messageId: recording.messageId,
     });
+    const formattedTranscript = await formatTranscriptWithSpeakerLabelsViaOpenAi(transcript, {
+      clientName: context.clientName,
+    });
+    const displayTranscript = sanitizeTextValue(formattedTranscript, 160000) || sanitizeTextValue(transcript, 120000);
     const generatedAt = new Date().toISOString();
     void upsertGhlCallTranscriptCacheRow({
       clientName: context.clientName,
       messageId: recording.messageId,
       contactId: "",
       transcript,
+      formattedTranscript,
       source: "openai.audio.transcriptions",
       audioContentType: recording.contentType,
       audioSizeBytes: recording.payload.length,
@@ -36062,7 +36238,10 @@ app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_A
       ok: true,
       clientName: context.clientName,
       messageId: recording.messageId,
-      transcript,
+      transcript: displayTranscript,
+      rawTranscript: transcript,
+      formattedTranscript: formattedTranscript || "",
+      speakerLabeled: isSpeakerFormattedTranscript(displayTranscript),
       generatedAt,
       source: "openai.audio.transcriptions",
       cached: false,
