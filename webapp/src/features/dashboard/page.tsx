@@ -103,7 +103,6 @@ export default function DashboardPage() {
   const [sessionCanReview, setSessionCanReview] = useState(false);
 
   const [overviewPeriod, setOverviewPeriod] = useState<OverviewPeriodKey>("currentWeek");
-  const [overviewCollapsed, setOverviewCollapsed] = useState(false);
   const [records, setRecords] = useState<ClientRecord[]>([]);
   const [recordsLoading, setRecordsLoading] = useState(true);
   const [recordsError, setRecordsError] = useState("");
@@ -137,10 +136,6 @@ export default function DashboardPage() {
   const overviewMetrics = useMemo(
     () => calculateOverviewMetrics(records, overviewPeriod),
     [overviewPeriod, records],
-  );
-  const currentWeekMetrics = useMemo(
-    () => calculateOverviewMetrics(records, "currentWeek"),
-    [records],
   );
   const todayQuickBooksKpi = useMemo(() => {
     if (!todayPayments.length) {
@@ -511,30 +506,14 @@ export default function DashboardPage() {
       <Panel
         className="period-dashboard-shell-react"
         header={
-          <button
+          <div
             id="toggle-overview-panel"
-            type="button"
             className="period-dashboard-shell__header period-dashboard-shell__header--toggle"
-            aria-label={overviewCollapsed ? "Expand overview" : "Collapse overview"}
             aria-controls="react-dashboard-overview-content"
-            aria-expanded={!overviewCollapsed}
-            onClick={() => setOverviewCollapsed((prev) => !prev)}
+            aria-expanded
           >
             <div className="period-dashboard-shell__header-main">
               <h2 className="period-dashboard-shell__heading-text">Overview</h2>
-              {overviewCollapsed ? (
-                <span className="overview-collapsed-summary" aria-hidden={false}>
-                  <span className="overview-collapsed-summary__item">
-                    Received: <strong>{formatKpiMoney(currentWeekMetrics.received)}</strong>
-                  </span>
-                  <span className="overview-collapsed-summary__item">
-                    Sales: <strong>{formatKpiMoney(currentWeekMetrics.sales)}</strong>
-                  </span>
-                  <span className="overview-collapsed-summary__item">
-                    Debt: <strong>{formatKpiMoney(overviewMetrics.debt)}</strong>
-                  </span>
-                </span>
-              ) : null}
             </div>
             <div className="period-dashboard-shell__header-actions">
               <SegmentedControl
@@ -542,32 +521,27 @@ export default function DashboardPage() {
                 options={OVERVIEW_PERIOD_OPTIONS}
                 onChange={(value) => setOverviewPeriod(value as OverviewPeriodKey)}
               />
-              <span className="overview-toggle-icon" aria-hidden="true">
-                {overviewCollapsed ? "▸" : "▾"}
-              </span>
             </div>
-          </button>
+          </div>
         }
       >
-        {!overviewCollapsed ? (
-          <div id="react-dashboard-overview-content" className="overview-cards">
-            <article className="overview-card" aria-label="Total received by period">
-              <h3 className="overview-card__title">Total Received</h3>
-              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.received)}</p>
-              <p className="overview-card__context">{labelByPeriod(overviewPeriod)}</p>
-            </article>
-            <article className="overview-card" aria-label="Total sales by period">
-              <h3 className="overview-card__title">Total Sales</h3>
-              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.sales)}</p>
-              <p className="overview-card__context">{labelByPeriod(overviewPeriod)}</p>
-            </article>
-            <article className="overview-card" aria-label="Total debt">
-              <h3 className="overview-card__title">Total Debt</h3>
-              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.debt)}</p>
-              <p className="overview-card__context">As of today</p>
-            </article>
-          </div>
-        ) : null}
+        <div id="react-dashboard-overview-content" className="overview-cards">
+          <article className="overview-card" aria-label="Total received by period">
+            <h3 className="overview-card__title">Total Received</h3>
+            <p className="overview-card__value">{formatKpiMoney(overviewMetrics.received)}</p>
+            <p className="overview-card__context">{labelByPeriod(overviewPeriod)}</p>
+          </article>
+          <article className="overview-card" aria-label="Total sales by period">
+            <h3 className="overview-card__title">Total Sales</h3>
+            <p className="overview-card__value">{formatKpiMoney(overviewMetrics.sales)}</p>
+            <p className="overview-card__context">{labelByPeriod(overviewPeriod)}</p>
+          </article>
+          <article className="overview-card" aria-label="Total debt">
+            <h3 className="overview-card__title">Total Debt</h3>
+            <p className="overview-card__value">{formatKpiMoney(overviewMetrics.debt)}</p>
+            <p className="overview-card__context">As of today</p>
+          </article>
+        </div>
         {recordsLoading ? <LoadingSkeleton rows={3} /> : null}
         {!recordsLoading && recordsError ? (
           <ErrorState
