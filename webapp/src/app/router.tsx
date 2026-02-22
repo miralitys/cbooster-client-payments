@@ -6,7 +6,6 @@ import ClientPaymentsPage from "@/features/client-payments/page";
 import ClientScorePage from "@/features/client-score/page";
 import CustomDashboardPage from "@/features/custom-dashboard/page";
 import DashboardPage from "@/features/dashboard/page";
-import GhlContractsPage from "@/features/ghl-contracts/page";
 import IdentityIqScorePage from "@/features/identityiq-score/page";
 import LeadsPage from "@/features/leads/page";
 import QuickBooksPage from "@/features/quickbooks/page";
@@ -26,7 +25,6 @@ export function AppRouter() {
         <Route path="quickbooks-payments" element={<QuickBooksPage />} />
         <Route path="client-managers" element={<Navigate to="/client-payments" replace />} />
         <Route path="leads" element={<LeadsPage />} />
-        <Route path="ghl-contracts" element={<GhlContractsPage />} />
         <Route path="access-control" element={<AccessControlPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/client-payments" replace />} />

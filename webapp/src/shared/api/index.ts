@@ -17,7 +17,6 @@ export {
 } from "@/shared/api/quickbooks";
 export { getClientManagers } from "@/shared/api/clientManagers";
 export { getGhlLeads } from "@/shared/api/ghlLeads";
-export { downloadGhlClientContract, getGhlClientContracts } from "@/shared/api/ghlDocuments";
 export { getGhlClientBasicNote } from "@/shared/api/ghlNotes";
 export { getGhlClientCommunications } from "@/shared/api/ghlCommunications";
 export { createAccessUser, deleteAccessUser, getAccessModel, listAccessUsers, updateAccessUser } from "@/shared/api/accessControl";
