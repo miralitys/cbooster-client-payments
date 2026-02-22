@@ -178,59 +178,63 @@ export default function IdentityIqScorePage() {
 
       <Panel className="table-panel" title="Check Client">
         <form className="identityiq-score-form" onSubmit={handleSubmit}>
-          <Field label="Client Name (optional)" htmlFor="identityiq-client-name">
-            <Input
-              id="identityiq-client-name"
-              autoComplete="off"
-              value={form.clientName}
-              onChange={(event) => setForm((previous) => ({ ...previous, clientName: event.target.value }))}
-              placeholder="Oleksandr Savras"
-            />
-          </Field>
+          <div className="identityiq-score-form__fields">
+            <Field label="Client Name (optional)" htmlFor="identityiq-client-name">
+              <Input
+                id="identityiq-client-name"
+                autoComplete="off"
+                value={form.clientName}
+                onChange={(event) => setForm((previous) => ({ ...previous, clientName: event.target.value }))}
+                placeholder="Oleksandr Savras"
+              />
+            </Field>
 
-          <Field label="Email" htmlFor="identityiq-email">
-            <Input
-              id="identityiq-email"
-              type="email"
-              autoComplete="username"
-              value={form.email}
-              onChange={(event) => setForm((previous) => ({ ...previous, email: event.target.value }))}
-              placeholder="client@example.com"
-              hasError={Boolean(submitError) && !form.email.trim()}
-            />
-          </Field>
+            <Field label="Email" htmlFor="identityiq-email">
+              <Input
+                id="identityiq-email"
+                type="email"
+                autoComplete="username"
+                value={form.email}
+                onChange={(event) => setForm((previous) => ({ ...previous, email: event.target.value }))}
+                placeholder="client@example.com"
+                hasError={Boolean(submitError) && !form.email.trim()}
+              />
+            </Field>
 
-          <Field label="Password" htmlFor="identityiq-password">
-            <Input
-              id="identityiq-password"
-              type="password"
-              autoComplete="current-password"
-              value={form.password}
-              onChange={(event) => setForm((previous) => ({ ...previous, password: event.target.value }))}
-              placeholder="********"
-              hasError={Boolean(submitError) && !form.password.trim()}
-            />
-          </Field>
+            <Field label="Password" htmlFor="identityiq-password">
+              <Input
+                id="identityiq-password"
+                type="password"
+                autoComplete="current-password"
+                value={form.password}
+                onChange={(event) => setForm((previous) => ({ ...previous, password: event.target.value }))}
+                placeholder="********"
+                hasError={Boolean(submitError) && !form.password.trim()}
+              />
+            </Field>
 
-          <Field label="SSN Last 4" htmlFor="identityiq-ssn4" hint="Exactly 4 digits">
-            <Input
-              id="identityiq-ssn4"
-              inputMode="numeric"
-              autoComplete="off"
-              value={form.ssnLast4}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  ssnLast4: event.target.value.replace(/\D/g, "").slice(0, 4),
-                }))
-              }
-              placeholder="9205"
-              hasError={Boolean(submitError) && !/^\d{4}$/.test(form.ssnLast4)}
-            />
-          </Field>
+            <Field label="SSN Last 4" htmlFor="identityiq-ssn4" hint="Exactly 4 digits">
+              <Input
+                id="identityiq-ssn4"
+                inputMode="numeric"
+                autoComplete="off"
+                value={form.ssnLast4}
+                onChange={(event) =>
+                  setForm((previous) => ({
+                    ...previous,
+                    ssnLast4: event.target.value.replace(/\D/g, "").slice(0, 4),
+                  }))
+                }
+                placeholder="9205"
+                hasError={Boolean(submitError) && !/^\d{4}$/.test(form.ssnLast4)}
+              />
+            </Field>
+          </div>
 
           <div className="identityiq-score-actions">
-            <Button type="submit" size="sm" isLoading={isLoading}>
+            <p className="identityiq-score-actions__title">Run live check</p>
+            <p className="identityiq-score-actions__hint">Credentials are used for one request only.</p>
+            <Button type="submit" size="md" isLoading={isLoading}>
               Get Credit Score
             </Button>
           </div>
