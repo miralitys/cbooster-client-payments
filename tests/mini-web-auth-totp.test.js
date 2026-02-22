@@ -205,6 +205,14 @@ function getSetCookieHeaders(response) {
   return single.split(/,(?=[^;]+?=)/g);
 }
 
+function buildCookieHeaderFromSetCookie(response) {
+  const setCookieHeaders = getSetCookieHeaders(response);
+  return setCookieHeaders
+    .map((cookie) => cookie.split(";")[0]?.trim())
+    .filter(Boolean)
+    .join("; ");
+}
+
 test("POST /api/auth/login enforces TOTP for configured users", async () => {
   const users = [
     {
@@ -299,6 +307,142 @@ test("POST /api/auth/login enforces TOTP for configured users", async () => {
       assert.equal(ownerLoginResponse.status, 200);
       assert.equal(ownerLoginBody.ok, true);
       assert.equal(ownerLoginBody.user?.totpEnabled, false);
+    },
+  );
+});
+
+test("first login bypasses TOTP and first-password page includes QR setup", async () => {
+  const users = [
+    {
+      username: "new.user",
+      password: "TempPass123!",
+      displayName: "New User",
+      department: "sales",
+      role: "manager",
+      mustChangePassword: true,
+      totpSecret: TEST_TOTP_SECRET,
+      totpEnabled: true,
+    },
+  ];
+
+  await withServer(
+    {
+      WEB_AUTH_USERNAME: "owner",
+      WEB_AUTH_PASSWORD: "OwnerPass123!",
+      WEB_AUTH_OWNER_USERNAME: "owner",
+      WEB_AUTH_USERS_JSON: JSON.stringify(users),
+    },
+    async ({ baseUrl }) => {
+      const firstApiLoginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: "new.user",
+          password: "TempPass123!",
+        }),
+      });
+      const firstApiLoginBody = await firstApiLoginResponse.json();
+
+      assert.equal(firstApiLoginResponse.status, 200);
+      assert.equal(firstApiLoginBody.ok, true);
+      assert.equal(firstApiLoginBody.mustChangePassword, true);
+      assert.equal(firstApiLoginBody.passwordChangePath, "/first-password");
+
+      const webLoginResponse = await fetch(`${baseUrl}/login`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          username: "new.user",
+          password: "TempPass123!",
+          next: "/app/dashboard",
+        }).toString(),
+      });
+
+      assert.equal(webLoginResponse.status, 302);
+      const firstPasswordLocation = webLoginResponse.headers.get("location") || "";
+      assert.match(firstPasswordLocation, /^\/first-password\?next=/);
+
+      const sessionCookies = buildCookieHeaderFromSetCookie(webLoginResponse);
+      assert.match(sessionCookies, /cbooster_auth_session=/);
+
+      const firstPasswordPageResponse = await fetch(`${baseUrl}${firstPasswordLocation}`, {
+        method: "GET",
+        headers: {
+          Cookie: sessionCookies,
+          Accept: "text/html",
+        },
+      });
+      const firstPasswordHtml = await firstPasswordPageResponse.text();
+
+      assert.equal(firstPasswordPageResponse.status, 200);
+      assert.match(firstPasswordHtml, /Authenticator setup QR code/);
+      assert.match(firstPasswordHtml, /Install Google Authenticator/);
+      assert.match(firstPasswordHtml, /name="totpSecret"/);
+
+      const totpSecretMatch = firstPasswordHtml.match(/name="totpSecret"\s+value="([A-Z2-7]+)"/);
+      assert.ok(totpSecretMatch, "Expected hidden totpSecret in /first-password form");
+      const setupSecret = totpSecretMatch[1];
+
+      const firstPasswordSubmitResponse = await fetch(`${baseUrl}/first-password`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          Cookie: sessionCookies,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          next: "/app/dashboard",
+          newPassword: "UpdatedPass123!",
+          confirmPassword: "UpdatedPass123!",
+          totpSecret: setupSecret,
+        }).toString(),
+      });
+
+      assert.equal(firstPasswordSubmitResponse.status, 302);
+      assert.equal(firstPasswordSubmitResponse.headers.get("location"), "/app/dashboard");
+
+      const secondApiLoginWithoutCode = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: "new.user",
+          password: "UpdatedPass123!",
+        }),
+      });
+      const secondApiLoginWithoutCodeBody = await secondApiLoginWithoutCode.json();
+
+      assert.equal(secondApiLoginWithoutCode.status, 401);
+      assert.equal(secondApiLoginWithoutCodeBody.code, "two_factor_required");
+      assert.equal(secondApiLoginWithoutCodeBody.twoFactorRequired, true);
+
+      const validCode = buildTotpCode(setupSecret);
+      const secondApiLoginWithCode = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: "new.user",
+          password: "UpdatedPass123!",
+          totpCode: validCode,
+        }),
+      });
+      const secondApiLoginWithCodeBody = await secondApiLoginWithCode.json();
+
+      assert.equal(secondApiLoginWithCode.status, 200);
+      assert.equal(secondApiLoginWithCodeBody.ok, true);
+      assert.equal(secondApiLoginWithCodeBody.mustChangePassword, false);
+      assert.equal(secondApiLoginWithCodeBody.user?.totpEnabled, true);
     },
   );
 });

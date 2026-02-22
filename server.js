@@ -10,6 +10,7 @@ const express = require("express");
 const compression = require("compression");
 const helmet = require("helmet");
 const multer = require("multer");
+const QRCode = require("qrcode");
 const { Pool } = require("pg");
 const {
   PATCH_OPERATION_DELETE,
@@ -3007,6 +3008,112 @@ function validateWebAuthTwoFactorCode(userProfile, rawCode) {
     required: true,
     code: "",
     error: "",
+  };
+}
+
+function encodeWebAuthTotpSecretBase32(rawBuffer) {
+  const bytes = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer || "");
+  if (!bytes.length) {
+    return "";
+  }
+
+  let bits = 0;
+  let value = 0;
+  let output = "";
+
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+
+    while (bits >= 5) {
+      output += WEB_AUTH_TOTP_BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+
+  if (bits > 0) {
+    output += WEB_AUTH_TOTP_BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  }
+
+  return output;
+}
+
+function generateWebAuthTotpSecret(sizeBytes = 20) {
+  const normalizedSize = Math.min(Math.max(Number.parseInt(sizeBytes, 10) || 20, 10), 64);
+  return normalizeWebAuthTotpSecret(encodeWebAuthTotpSecretBase32(crypto.randomBytes(normalizedSize)));
+}
+
+function buildWebAuthTotpSetupUri(username, secret) {
+  const normalizedUsername = normalizeWebAuthUsername(username);
+  const normalizedSecret = normalizeWebAuthTotpSecret(secret);
+  if (!normalizedUsername || !normalizedSecret) {
+    return "";
+  }
+
+  const issuer = sanitizeTextValue(WEB_AUTH_TOTP_ISSUER, 120) || "Credit Booster";
+  const label = `${issuer}:${normalizedUsername}`;
+  const query = new URLSearchParams({
+    secret: normalizedSecret,
+    issuer,
+    algorithm: "SHA1",
+    digits: String(WEB_AUTH_TOTP_DIGITS),
+    period: String(WEB_AUTH_TOTP_PERIOD_SEC),
+  });
+
+  return `otpauth://totp/${encodeURIComponent(label)}?${query.toString()}`;
+}
+
+function formatWebAuthTotpSecretForDisplay(secret, groupSize = 4) {
+  const normalized = normalizeWebAuthTotpSecret(secret);
+  if (!normalized) {
+    return "";
+  }
+
+  const safeGroupSize = Math.min(Math.max(Number.parseInt(groupSize, 10) || 4, 2), 8);
+  const chunks = [];
+  for (let index = 0; index < normalized.length; index += safeGroupSize) {
+    chunks.push(normalized.slice(index, index + safeGroupSize));
+  }
+  return chunks.join(" ");
+}
+
+async function buildWebFirstPasswordTotpSetup(userProfile, rawPreferredSecret = "") {
+  const username = normalizeWebAuthUsername(userProfile?.username);
+  if (!username) {
+    return {
+      secret: "",
+      secretDisplay: "",
+      uri: "",
+      qrDataUrl: "",
+      qrFailed: false,
+    };
+  }
+
+  const preferredSecret = normalizeWebAuthTotpSecret(rawPreferredSecret);
+  const existingSecret = normalizeWebAuthTotpSecret(userProfile?.totpSecret);
+  const secret = preferredSecret || existingSecret || generateWebAuthTotpSecret();
+  const uri = buildWebAuthTotpSetupUri(username, secret);
+
+  let qrDataUrl = "";
+  let qrFailed = false;
+  if (uri) {
+    try {
+      qrDataUrl = await QRCode.toDataURL(uri, {
+        errorCorrectionLevel: "M",
+        margin: 1,
+        width: 220,
+      });
+    } catch {
+      qrFailed = true;
+    }
+  }
+
+  return {
+    secret,
+    secretDisplay: formatWebAuthTotpSecretForDisplay(secret),
+    uri,
+    qrDataUrl,
+    qrFailed,
   };
 }
 
@@ -11671,10 +11778,11 @@ function setWebAuthUserPassword(username, nextPassword, options = {}) {
   });
 }
 
-function normalizeWebAuthFirstPasswordPayload(rawBody, userProfile) {
+function normalizeWebAuthFirstPasswordPayload(rawBody, userProfile, options = {}) {
   const payload = rawBody && typeof rawBody === "object" ? rawBody : {};
   const nextPassword = normalizeWebAuthConfigValue(payload.newPassword || payload.password);
   const confirmPassword = normalizeWebAuthConfigValue(payload.confirmPassword || payload.confirm);
+  const requireTotpSetup = resolveOptionalBoolean(options.requireTotpSetup) === true;
 
   if (!nextPassword || nextPassword.length < 8) {
     throw createHttpError("New password must be at least 8 characters.", 400);
@@ -11692,19 +11800,42 @@ function normalizeWebAuthFirstPasswordPayload(rawBody, userProfile) {
     throw createHttpError("New password must be different from the temporary password.", 400);
   }
 
+  const providedTotpSecret = normalizeWebAuthTotpSecret(
+    payload.totpSecret || payload.totp_secret || payload.twoFactorSecret || payload.otpSecret,
+  );
+  const existingTotpSecret = normalizeWebAuthTotpSecret(userProfile?.totpSecret);
+  const totpSecret = providedTotpSecret || existingTotpSecret;
+  if (requireTotpSetup && !totpSecret) {
+    throw createHttpError("Authenticator setup is required. Reload the page and scan the QR code.", 400);
+  }
+
   return {
     password: nextPassword,
+    totpSecret,
   };
 }
 
-function applyWebAuthFirstPasswordChange(userProfile, rawBody) {
+function applyWebAuthFirstPasswordChange(userProfile, rawBody, options = {}) {
   if (!isWebAuthPasswordChangeRequired(userProfile)) {
     throw createHttpError("Password change is not required.", 409);
   }
 
-  const normalizedPayload = normalizeWebAuthFirstPasswordPayload(rawBody, userProfile);
-  return setWebAuthUserPassword(userProfile.username, normalizedPayload.password, {
+  const normalizedPayload = normalizeWebAuthFirstPasswordPayload(rawBody, userProfile, options);
+  const updatedUser = setWebAuthUserPassword(userProfile.username, normalizedPayload.password, {
     clearMustChangePassword: true,
+  });
+
+  const finalizedTotpSecret = normalizeWebAuthTotpSecret(normalizedPayload.totpSecret);
+  if (!finalizedTotpSecret) {
+    return updatedUser;
+  }
+
+  return upsertWebAuthUserInDirectory({
+    ...updatedUser,
+    totpSecret: finalizedTotpSecret,
+    totpEnabled: true,
+    passwordConfiguredAsPlaintext: false,
+    invalidPasswordHashConfigured: false,
   });
 }
 
@@ -12630,12 +12761,47 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
 </html>`;
 }
 
-function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
+function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "", totpSetup = null } = {}) {
   const safeNextPath = resolveSafeNextPath(nextPath);
   const safeError = sanitizeTextValue(errorMessage, 200);
   const messageBlock = safeError
     ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
-    : `<p class="auth-help">For security, create a new password before you continue.</p>`;
+    : `<p class="auth-help">For security, create a new password and complete Authenticator setup.</p>`;
+
+  const normalizedTotpSecret = normalizeWebAuthTotpSecret(totpSetup?.secret);
+  const totpSecretDisplay = sanitizeTextValue(totpSetup?.secretDisplay, 260);
+  const totpUri = sanitizeTextValue(totpSetup?.uri, 2000);
+  const totpQrDataUrl = sanitizeTextValue(totpSetup?.qrDataUrl, 600000);
+  const totpQrFailed = Boolean(totpSetup?.qrFailed);
+
+  let totpSection = "";
+  if (normalizedTotpSecret) {
+    const qrBlock = totpQrDataUrl
+      ? `<img src="${escapeHtml(totpQrDataUrl)}" alt="Authenticator setup QR code" class="totp-qr" />`
+      : `<p class="auth-help">QR preview is unavailable right now. Use the setup key manually.</p>`;
+    const qrErrorBlock = totpQrFailed
+      ? `<p class="auth-help">QR code could not be rendered automatically. You can still add the key manually.</p>`
+      : "";
+    const uriBlock = totpUri
+      ? `
+      <label class="totp-label">
+        Manual URI (optional)
+        <input type="text" value="${escapeHtml(totpUri)}" readonly onfocus="this.select()" />
+      </label>`
+      : "";
+    const displaySecret = totpSecretDisplay || formatWebAuthTotpSecretForDisplay(normalizedTotpSecret);
+    totpSection = `
+      <section class="totp-card">
+        <h2>Step 2: Scan Authenticator QR</h2>
+        <p class="auth-help">Open your Authenticator app and scan this QR code.</p>
+        ${qrBlock}
+        ${qrErrorBlock}
+        <p class="totp-key-label">Setup key</p>
+        <p class="totp-key">${escapeHtml(displaySecret)}</p>
+        ${uriBlock}
+        <input type="hidden" name="totpSecret" value="${escapeHtml(normalizedTotpSecret)}" />
+      </section>`;
+  }
 
   return `<!doctype html>
 <html lang="en">
@@ -12675,7 +12841,7 @@ function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "" } = {
       }
 
       .auth-shell {
-        width: min(460px, 100%);
+        width: min(520px, 100%);
         border: 1px solid var(--color-border);
         border-radius: 18px;
         background: var(--color-surface);
@@ -12698,6 +12864,14 @@ function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "" } = {
         margin: 0;
         font-family: var(--font-family-heading);
         font-size: 1.62rem;
+        line-height: 1.2;
+        font-weight: 700;
+      }
+
+      h2 {
+        margin: 0;
+        font-family: var(--font-family-heading);
+        font-size: 1rem;
         line-height: 1.2;
         font-weight: 700;
       }
@@ -12776,6 +12950,49 @@ function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "" } = {
         border-radius: 10px;
         padding: 8px 10px;
       }
+
+      .totp-card {
+        border: 1px solid var(--color-border);
+        border-radius: 12px;
+        padding: 12px;
+        display: grid;
+        gap: 8px;
+        background: #f8fafc;
+      }
+
+      .totp-qr {
+        width: 220px;
+        height: 220px;
+        max-width: 100%;
+        border-radius: 10px;
+        border: 1px solid var(--color-border);
+        background: #fff;
+      }
+
+      .totp-key-label {
+        margin: 0;
+        color: var(--color-text-muted);
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .totp-key {
+        margin: 0;
+        font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.86rem;
+        word-break: break-all;
+      }
+
+      .totp-label {
+        gap: 4px;
+        letter-spacing: 0.04em;
+      }
+
+      .app-download-note {
+        margin-top: 4px;
+      }
     </style>
   </head>
   <body>
@@ -12787,13 +13004,15 @@ function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "" } = {
       <form method="post" action="/first-password" novalidate>
         <input type="hidden" name="next" value="${escapeHtml(safeNextPath)}" />
         <label>
-          New Password
+          Step 1: New Password
           <input type="password" name="newPassword" autocomplete="new-password" required minlength="8" />
         </label>
         <label>
           Confirm New Password
           <input type="password" name="confirmPassword" autocomplete="new-password" required minlength="8" />
         </label>
+        ${totpSection}
+        <p class="auth-help app-download-note">Install Google Authenticator (iOS/Android) or Microsoft Authenticator, then scan the QR code.</p>
         <button type="submit">Save Password</button>
       </form>
     </main>
@@ -24535,17 +24754,20 @@ app.post("/login", (req, res) => {
     return;
   }
 
-  const twoFactorResult = validateWebAuthTwoFactorCode(authUser, totpCode);
-  if (!twoFactorResult.ok) {
-    registerFailedLoginAttempt(req, authUser.username);
-    clearWebAuthSessionCookie(req, res);
-    res.redirect(302, `/login?error=${encodeURIComponent(twoFactorResult.code)}&next=${encodeURIComponent(nextPath)}`);
-    return;
+  const mustChangePassword = isWebAuthPasswordChangeRequired(authUser);
+  if (!mustChangePassword) {
+    const twoFactorResult = validateWebAuthTwoFactorCode(authUser, totpCode);
+    if (!twoFactorResult.ok) {
+      registerFailedLoginAttempt(req, authUser.username);
+      clearWebAuthSessionCookie(req, res);
+      res.redirect(302, `/login?error=${encodeURIComponent(twoFactorResult.code)}&next=${encodeURIComponent(nextPath)}`);
+      return;
+    }
   }
 
   clearFailedLoginAttempts(req, authUser.username);
   setWebAuthSessionCookie(req, res, authUser.username);
-  if (isWebAuthPasswordChangeRequired(authUser)) {
+  if (mustChangePassword) {
     res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
     return;
   }
@@ -24571,16 +24793,19 @@ function handleApiAuthLogin(req, res) {
     return;
   }
 
-  const twoFactorResult = validateWebAuthTwoFactorCode(authUser, totpCode);
-  if (!twoFactorResult.ok) {
-    registerFailedLoginAttempt(req, authUser.username);
-    clearWebAuthSessionCookie(req, res);
-    res.status(401).json({
-      error: twoFactorResult.error,
-      code: twoFactorResult.code,
-      twoFactorRequired: true,
-    });
-    return;
+  const mustChangePassword = isWebAuthPasswordChangeRequired(authUser);
+  if (!mustChangePassword) {
+    const twoFactorResult = validateWebAuthTwoFactorCode(authUser, totpCode);
+    if (!twoFactorResult.ok) {
+      registerFailedLoginAttempt(req, authUser.username);
+      clearWebAuthSessionCookie(req, res);
+      res.status(401).json({
+        error: twoFactorResult.error,
+        code: twoFactorResult.code,
+        twoFactorRequired: true,
+      });
+      return;
+    }
   }
 
   clearFailedLoginAttempts(req, authUser.username);
@@ -24602,7 +24827,6 @@ function handleApiAuthLogin(req, res) {
     setWebAuthSessionCookie(req, res, authUser.username, sessionToken);
   }
 
-  const mustChangePassword = isWebAuthPasswordChangeRequired(authUser);
   if (isMobileApiLogin) {
     clearWebAuthSessionCookie(req, res);
   }
@@ -24708,7 +24932,7 @@ registerCustomDashboardModule({
 
 app.get([...WEB_STATIC_ASSET_ALLOWLIST.keys()], sendWhitelistedWebStaticAsset);
 
-app.get("/first-password", (req, res) => {
+app.get("/first-password", async (req, res) => {
   const nextPath = resolveSafeNextPath(req.query.next);
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
   if (!userProfile) {
@@ -24722,16 +24946,28 @@ app.get("/first-password", (req, res) => {
     return;
   }
 
-  res.setHeader("Cache-Control", "no-store, private");
-  res.status(200).type("html").send(
-    buildWebFirstPasswordPageHtml({
-      nextPath,
-      errorMessage: "",
-    }),
-  );
+  try {
+    const totpSetup = await buildWebFirstPasswordTotpSetup(userProfile);
+    res.setHeader("Cache-Control", "no-store, private");
+    res.status(200).type("html").send(
+      buildWebFirstPasswordPageHtml({
+        nextPath,
+        errorMessage: "",
+        totpSetup,
+      }),
+    );
+  } catch (error) {
+    res.setHeader("Cache-Control", "no-store, private");
+    res.status(500).type("html").send(
+      buildWebFirstPasswordPageHtml({
+        nextPath,
+        errorMessage: "Failed to prepare authenticator setup. Please refresh the page.",
+      }),
+    );
+  }
 });
 
-app.post("/first-password", (req, res) => {
+app.post("/first-password", async (req, res) => {
   const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
   if (!userProfile) {
@@ -24746,7 +24982,9 @@ app.post("/first-password", (req, res) => {
   }
 
   try {
-    const updatedUser = applyWebAuthFirstPasswordChange(userProfile, req.body);
+    const updatedUser = applyWebAuthFirstPasswordChange(userProfile, req.body, {
+      requireTotpSetup: true,
+    });
     revokeWebAuthMobileSessionsForUser(updatedUser.username);
     const sessionToken = createWebAuthSessionToken(updatedUser.username);
     setWebAuthSessionCookie(req, res, updatedUser.username, sessionToken);
@@ -24754,6 +24992,12 @@ app.post("/first-password", (req, res) => {
     req.webAuthProfile = updatedUser;
     res.redirect(302, nextPath);
   } catch (error) {
+    let totpSetup = null;
+    try {
+      totpSetup = await buildWebFirstPasswordTotpSetup(userProfile, req.body?.totpSecret);
+    } catch {
+      totpSetup = null;
+    }
     res.setHeader("Cache-Control", "no-store, private");
     res
       .status(error.httpStatus || 400)
@@ -24762,6 +25006,7 @@ app.post("/first-password", (req, res) => {
         buildWebFirstPasswordPageHtml({
           nextPath,
           errorMessage: sanitizeTextValue(error?.message, 260) || "Failed to update password.",
+          totpSetup,
         }),
       );
   }
@@ -27157,7 +27402,78 @@ function buildGhlContractDownloadDiagnosticFallbackText(clientName, lookupRow, d
     "Note:",
     "This fallback file was generated by the app because GoHighLevel API did not provide downloadable contract content.",
   );
+
+  if (hasGhlContractScopeAuthorizationIssue(lookupRow)) {
+    lines.push(
+      "",
+      "Possible root cause:",
+      "GoHighLevel token is missing scope to read proposal document content (HTTP 401 not authorized for this scope).",
+      "Action: re-issue GHL API token with proposal/document read scope and retry.",
+    );
+  }
   return lines.join("\n");
+}
+
+function isGhlScopeAuthorizationErrorMessage(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 800).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.includes("not authorized for this scope")) {
+    return true;
+  }
+  return normalized.includes("http 401") && normalized.includes("proposals/document");
+}
+
+function hasGhlContractScopeAuthorizationIssue(lookupRow) {
+  const diagnostics = lookupRow?.diagnostics;
+  if (!diagnostics || typeof diagnostics !== "object") {
+    return false;
+  }
+
+  let hasScopeIssue = false;
+  const visited = new Set();
+  function walk(node, depth = 0) {
+    if (hasScopeIssue || depth > 8 || node === null || node === undefined) {
+      return;
+    }
+    if (typeof node === "string") {
+      if (isGhlScopeAuthorizationErrorMessage(node)) {
+        hasScopeIssue = true;
+      }
+      return;
+    }
+    if (typeof node !== "object") {
+      return;
+    }
+    if (visited.has(node)) {
+      return;
+    }
+    visited.add(node);
+
+    if (Array.isArray(node)) {
+      for (const item of node.slice(0, 200)) {
+        walk(item, depth + 1);
+        if (hasScopeIssue) {
+          return;
+        }
+      }
+      return;
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "rawText") {
+        continue;
+      }
+      walk(value, depth + 1);
+      if (hasScopeIssue) {
+        return;
+      }
+    }
+  }
+
+  walk(diagnostics, 0);
+  return hasScopeIssue;
 }
 
 function decodePdfLiteralString(rawValue) {
@@ -30612,23 +30928,29 @@ app.get("/api/ghl/client-contracts/text", requireWebPermission(WEB_AUTH_PERMISSI
       throw createHttpError(sanitizeTextValue(lookupRow?.error, 500) || "Failed to locate contract in GoHighLevel.", 502);
     }
 
+    const hasScopeIssue = hasGhlContractScopeAuthorizationIssue(lookupRow);
     let resolvedText = await resolveGhlContractTextForDownloadFallback(matchedClientName, lookupRow, {
       preferredContactId: requestedContactId,
       candidateId: requestedCandidateId,
     });
-    if (!resolvedText?.text) {
+    const resolvedTextQuality = computeGhlContractTextQualityScore(resolvedText?.text);
+    const isWeakTemplateLikeText =
+      Boolean(resolvedText?.text) &&
+      resolvedTextQuality < 2 &&
+      Number(resolvedText?.textLength || 0) < 120;
+    if (!resolvedText?.text || (lookupStatus === "no_contract" && isWeakTemplateLikeText)) {
       const diagnosticText = buildGhlContractDownloadDiagnosticFallbackText(matchedClientName, lookupRow, "");
       resolvedText = {
         clientName: matchedClientName,
         contactId: sanitizeTextValue(lookupRow?.contactId, 160),
         contactName: sanitizeTextValue(lookupRow?.contactName, 300) || matchedClientName,
         candidateId: "",
-        source: "diagnostic.fallback",
+        source: hasScopeIssue ? "diagnostic.scope_missing" : "diagnostic.fallback",
         text: diagnosticText,
         textLength: diagnosticText.length,
         lookupStatus,
         lookupRow,
-        fallbackMode: "diagnostic",
+        fallbackMode: hasScopeIssue ? "scope_missing" : "diagnostic",
       };
     }
 
@@ -30647,6 +30969,7 @@ app.get("/api/ghl/client-contracts/text", requireWebPermission(WEB_AUTH_PERMISSI
       truncated: Boolean(resolvedText.truncated),
       lookupStatus,
       fallbackMode: sanitizeTextValue(resolvedText.fallbackMode, 80) || "",
+      scopeIssue: hasScopeIssue,
       updatedAt: state.updatedAt || null,
       debugMode,
       ...(debugMode
@@ -30654,6 +30977,7 @@ app.get("/api/ghl/client-contracts/text", requireWebPermission(WEB_AUTH_PERMISSI
             diagnostics: {
               lookup: lookupRow?.diagnostics || null,
               candidateId: sanitizeTextValue(requestedCandidateId, 220),
+              scopeIssue: hasScopeIssue,
             },
           }
         : {}),
