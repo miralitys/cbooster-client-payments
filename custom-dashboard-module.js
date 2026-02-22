@@ -7,6 +7,14 @@ const CUSTOM_DASHBOARD_UPLOAD_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 const CUSTOM_DASHBOARD_MAX_ROWS_PER_UPLOAD = 50000;
 const CUSTOM_DASHBOARD_ALLOWED_TEXT_UPLOAD_EXTENSIONS = new Set([".csv", ".tsv", ".txt"]);
 const CUSTOM_DASHBOARD_WIDGET_KEYS = ["managerTasks", "specialistTasks", "salesReport", "callsByManager"];
+const CUSTOM_DASHBOARD_WIDGET_ROWS_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_WIDGET_ROWS_LIMIT, 1200), 100),
+  5000,
+);
+const CUSTOM_DASHBOARD_WIDGET_OPTIONS_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.CUSTOM_DASHBOARD_WIDGET_OPTIONS_LIMIT, 500), 50),
+  2000,
+);
 
 const CUSTOM_DASHBOARD_UPLOAD_TYPES = new Set(["tasks", "contacts", "calls"]);
 const CUSTOM_DASHBOARD_DIRECTION_INCOMING = "incoming";
@@ -1898,7 +1906,9 @@ function registerCustomDashboardModule(config) {
     }
   }
 
-  async function enrichCallsDataManagerNames(callsData) {
+  async function enrichCallsDataManagerNames(callsData, options = {}) {
+    const allowNetworkLookup = Boolean(options.allowNetworkLookup);
+    const persistResolvedData = Boolean(options.persistResolvedData);
     const source = normalizeComparableText(callsData?.source || callsData?.fileName, 80);
     if (!source.includes("ghl")) {
       return callsData;
@@ -1928,6 +1938,7 @@ function registerCustomDashboardModule(config) {
     const cacheRaw = await readAppDataValue(CUSTOM_DASHBOARD_GHL_USER_NAMES_CACHE_KEY, null);
     const cached = normalizeGhlUserNamesCache(cacheRaw);
     const managerNameCache = new Map(Object.entries(cached.names));
+    let cacheChanged = false;
 
     const unresolvedIds = [];
     for (const managerId of managerIds) {
@@ -1937,26 +1948,32 @@ function registerCustomDashboardModule(config) {
       }
     }
 
-    if (unresolvedIds.length && isGhlTasksSyncConfigured()) {
-      const usersIndex = await listGhlUsersIndex();
-      for (const [userId, managerName] of usersIndex.entries()) {
-        const normalizedUserId = sanitizeTextValue(userId, 160);
-        const normalizedManagerName = sanitizeTextValue(managerName, 220);
-        if (!normalizedUserId || !normalizedManagerName || looksLikeOpaqueUserId(normalizedManagerName)) {
-          continue;
+    if (allowNetworkLookup && unresolvedIds.length && isGhlTasksSyncConfigured()) {
+      try {
+        const usersIndex = await listGhlUsersIndex();
+        for (const [userId, managerName] of usersIndex.entries()) {
+          const normalizedUserId = sanitizeTextValue(userId, 160);
+          const normalizedManagerName = sanitizeTextValue(managerName, 220);
+          if (!normalizedUserId || !normalizedManagerName || looksLikeOpaqueUserId(normalizedManagerName)) {
+            continue;
+          }
+          if (managerNameCache.get(normalizedUserId) !== normalizedManagerName) {
+            managerNameCache.set(normalizedUserId, normalizedManagerName);
+            cacheChanged = true;
+          }
         }
-        if (!managerNameCache.has(normalizedUserId)) {
-          managerNameCache.set(normalizedUserId, normalizedManagerName);
-        }
-      }
 
-      await mapWithConcurrency(unresolvedIds, 5, async (managerId) => {
-        const resolved = await resolveGhlManagerNameById(managerId, usersIndex, managerNameCache);
-        const normalizedResolved = sanitizeTextValue(resolved, 220);
-        if (normalizedResolved && !looksLikeOpaqueUserId(normalizedResolved)) {
-          managerNameCache.set(managerId, normalizedResolved);
-        }
-      });
+        await mapWithConcurrency(unresolvedIds, 5, async (managerId) => {
+          const resolved = await resolveGhlManagerNameById(managerId, usersIndex, managerNameCache);
+          const normalizedResolved = sanitizeTextValue(resolved, 220);
+          if (normalizedResolved && !looksLikeOpaqueUserId(normalizedResolved) && managerNameCache.get(managerId) !== normalizedResolved) {
+            managerNameCache.set(managerId, normalizedResolved);
+            cacheChanged = true;
+          }
+        });
+      } catch {
+        // Read path must stay resilient even when GHL API is unavailable.
+      }
     }
 
     let itemsChanged = false;
@@ -1987,11 +2004,13 @@ function registerCustomDashboardModule(config) {
       };
     });
 
-    const nextCache = {
-      updatedAt: new Date().toISOString(),
-      names: Object.fromEntries([...managerNameCache.entries()]),
-    };
-    await upsertAppDataValue(CUSTOM_DASHBOARD_GHL_USER_NAMES_CACHE_KEY, nextCache);
+    if (persistResolvedData && cacheChanged) {
+      const nextCache = {
+        updatedAt: new Date().toISOString(),
+        names: Object.fromEntries([...managerNameCache.entries()]),
+      };
+      await upsertAppDataValue(CUSTOM_DASHBOARD_GHL_USER_NAMES_CACHE_KEY, nextCache);
+    }
 
     if (!itemsChanged) {
       return callsData;
@@ -2002,7 +2021,9 @@ function registerCustomDashboardModule(config) {
       items: nextItems,
       count: nextItems.length,
     };
-    await upsertAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.calls, nextCallsData);
+    if (persistResolvedData) {
+      await upsertAppDataValue(CUSTOM_DASHBOARD_LATEST_UPLOAD_KEYS.calls, nextCallsData);
+    }
     return nextCallsData;
   }
 
@@ -2681,11 +2702,23 @@ function registerCustomDashboardModule(config) {
     const callItems = Array.isArray(callsData?.items) ? callsData.items : [];
 
     return {
-      managerTasks: uniqueSortedNames(taskItems.map((item) => item.managerName)),
-      specialistTasks: uniqueSortedNames(taskItems.map((item) => item.specialistName)),
-      salesReport: uniqueSortedNames([...contactItems.map((item) => item.managerName), ...callItems.map((item) => item.managerName)]),
-      callsByManager: uniqueSortedNames(callItems.map((item) => item.managerName)),
+      managerTasks: limitRows(uniqueSortedNames(taskItems.map((item) => item.managerName)), CUSTOM_DASHBOARD_WIDGET_OPTIONS_LIMIT),
+      specialistTasks: limitRows(uniqueSortedNames(taskItems.map((item) => item.specialistName)), CUSTOM_DASHBOARD_WIDGET_OPTIONS_LIMIT),
+      salesReport: limitRows(
+        uniqueSortedNames([...contactItems.map((item) => item.managerName), ...callItems.map((item) => item.managerName)]),
+        CUSTOM_DASHBOARD_WIDGET_OPTIONS_LIMIT,
+      ),
+      callsByManager: limitRows(uniqueSortedNames(callItems.map((item) => item.managerName)), CUSTOM_DASHBOARD_WIDGET_OPTIONS_LIMIT),
     };
+  }
+
+  function limitRows(items, limit = CUSTOM_DASHBOARD_WIDGET_ROWS_LIMIT) {
+    const source = Array.isArray(items) ? items : [];
+    const normalizedLimit = Math.max(1, toSafeInteger(limit, CUSTOM_DASHBOARD_WIDGET_ROWS_LIMIT));
+    if (source.length <= normalizedLimit) {
+      return source;
+    }
+    return source.slice(0, normalizedLimit);
   }
 
   function filterByVisibility(items, getter, visibleNames) {
@@ -2796,7 +2829,7 @@ function registerCustomDashboardModule(config) {
       enabled: true,
       visibleNames: normalizedWidgetSettings.visibleNames,
       totals,
-      rows,
+      rows: limitRows(rows),
     };
   }
 
@@ -2868,21 +2901,23 @@ function registerCustomDashboardModule(config) {
       }
       return left.title.localeCompare(right.title, "en-US", { sensitivity: "base" });
     });
+    const overdueTasks = sortedTasks.filter((item) => item.isOverdue);
+    const dueTodayTasks = sortedTasks.filter((item) => item.isDueToday);
 
     return {
       enabled: true,
       visibleNames: normalizedWidgetSettings.visibleNames,
-      specialistOptions,
+      specialistOptions: limitRows(specialistOptions, CUSTOM_DASHBOARD_WIDGET_OPTIONS_LIMIT),
       selectedSpecialist,
       totals: {
         all: sortedTasks.length,
         open: sortedTasks.filter((item) => !item.isCompleted).length,
-        overdue: sortedTasks.filter((item) => item.isOverdue).length,
-        dueToday: sortedTasks.filter((item) => item.isDueToday).length,
+        overdue: overdueTasks.length,
+        dueToday: dueTodayTasks.length,
       },
-      allTasks: sortedTasks,
-      overdueTasks: sortedTasks.filter((item) => item.isOverdue),
-      dueTodayTasks: sortedTasks.filter((item) => item.isDueToday),
+      allTasks: limitRows(sortedTasks),
+      overdueTasks: limitRows(overdueTasks),
+      dueTodayTasks: limitRows(dueTodayTasks),
     };
   }
 
@@ -2989,7 +3024,7 @@ function registerCustomDashboardModule(config) {
       enabled: true,
       visibleNames: normalizedWidgetSettings.visibleNames,
       periods,
-      managerBreakdown,
+      managerBreakdown: limitRows(managerBreakdown),
     };
   }
 
@@ -3151,11 +3186,11 @@ function registerCustomDashboardModule(config) {
     return {
       enabled: true,
       visibleNames: normalizedWidgetSettings.visibleNames,
-      managerOptions,
+      managerOptions: limitRows(managerOptions, CUSTOM_DASHBOARD_WIDGET_OPTIONS_LIMIT),
       todaySummary,
-      todayByManager,
-      stats,
-      missedCalls,
+      todayByManager: limitRows(todayByManager),
+      stats: limitRows(stats),
+      missedCalls: limitRows(missedCalls),
     };
   }
 
@@ -3180,7 +3215,10 @@ function registerCustomDashboardModule(config) {
     const contactsData = normalizeUploadData(contactsDataRaw, "contacts");
     let callsData = normalizeUploadData(callsDataRaw, "calls");
     const callsSyncState = normalizeGhlCallsSyncState(callsSyncStateRaw);
-    callsData = await enrichCallsDataManagerNames(callsData);
+    callsData = await enrichCallsDataManagerNames(callsData, {
+      allowNetworkLookup: false,
+      persistResolvedData: false,
+    });
 
     const options = buildWidgetOptions(tasksData, contactsData, callsData);
     const activeUserProfile = req.webAuthProfile && typeof req.webAuthProfile === "object" ? req.webAuthProfile : null;
@@ -3236,7 +3274,10 @@ function registerCustomDashboardModule(config) {
     const tasksData = tasksSourceSelected === CUSTOM_DASHBOARD_TASKS_SOURCE_GHL ? tasksGhlData : tasksUploadData;
     const contactsData = normalizeUploadData(contactsDataRaw, "contacts");
     let callsData = normalizeUploadData(callsDataRaw, "calls");
-    callsData = await enrichCallsDataManagerNames(callsData);
+    callsData = await enrichCallsDataManagerNames(callsData, {
+      allowNetworkLookup: false,
+      persistResolvedData: false,
+    });
 
     const options = buildWidgetOptions(tasksData, contactsData, callsData);
     const users = (typeof listWebAuthUsers === "function" ? listWebAuthUsers() : [])
