@@ -96,6 +96,7 @@ export interface AssistantReviewListPayload {
 export interface AssistantReviewUpdatePayload {
   correctedReply?: string;
   correctionNote?: string;
+  markCorrect?: boolean;
 }
 
 export interface AssistantReviewUpdateResponse {
