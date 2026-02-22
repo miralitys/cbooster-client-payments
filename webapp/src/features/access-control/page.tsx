@@ -874,7 +874,7 @@ export default function AccessControlPage() {
                       <div className="access-control-assistant-review-expanded-react">
                         <div className="access-control-assistant-review-meta-react">
                           <span>#{item.id}</span>
-                          <span>{item.mode === "voice" ? "Voice" : "Text"}</span>
+                          <span>{item.mode === "voice" ? "Voice" : item.mode === "gpt" ? "GPT" : "Text"}</span>
                           <span>{item.provider || "-"}</span>
                           <span>{item.recordsUsed} records</span>
                         </div>

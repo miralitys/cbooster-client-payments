@@ -1,4 +1,4 @@
-export type AssistantMode = "text" | "voice";
+export type AssistantMode = "text" | "voice" | "gpt";
 export type AssistantScopeSource = "explicit" | "mention" | "none";
 
 export interface AssistantChatRequest {

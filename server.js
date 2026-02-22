@@ -10746,7 +10746,9 @@ function buildOpenAiAssistantInstructions(isRussian, mode, piiMode = ASSISTANT_L
   const brevityHint =
     mode === "voice"
       ? "Keep response concise and spoken-friendly: 2-5 short sentences."
-      : "Keep response concise and structured with short lines.";
+      : mode === "gpt"
+        ? "Answer conversationally with clear structure and useful detail."
+        : "Keep response concise and structured with short lines.";
 
   return [
     "You are the CBooster internal payments assistant.",
@@ -24085,7 +24087,11 @@ function getReviewerIdentity(req) {
 }
 
 function normalizeAssistantChatMode(rawMode) {
-  return sanitizeTextValue(rawMode, 20).toLowerCase() === "voice" ? "voice" : "text";
+  const normalized = sanitizeTextValue(rawMode, 20).toLowerCase();
+  if (normalized === "voice" || normalized === "gpt") {
+    return normalized;
+  }
+  return "text";
 }
 
 function resolveAssistantLlmPiiMode(rawMode) {
@@ -28211,10 +28217,11 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     const filteredRecords = preparedData.visibleRecords;
     const sessionScope = shouldResetContext ? null : await getAssistantSessionScope(tenantKey, req.webAuthUser, sessionId);
     const fallbackPayload = buildAssistantReplyPayload(message, filteredRecords, state.updatedAt, sessionScope, preparedData);
+    const isGptMode = mode === "gpt";
     let finalReply = normalizeAssistantReplyForDisplay(fallbackPayload.reply);
     let provider = "rules";
 
-    if (isOpenAiAssistantConfigured() && !fallbackPayload.handledByRules) {
+    if (isOpenAiAssistantConfigured() && (isGptMode || !fallbackPayload.handledByRules)) {
       try {
         const llmReply = await requestOpenAiAssistantReply(message, mode, filteredRecords, state.updatedAt);
         if (llmReply) {
@@ -28226,6 +28233,8 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
           `[assistant] OpenAI fallback triggered: ${sanitizeTextValue(openAiError?.message, 320) || "unknown error"}`,
         );
       }
+    } else if (isGptMode) {
+      console.warn("[assistant] GPT mode requested but OpenAI is not configured; using rules fallback.");
     }
 
     const normalizedReply = normalizeAssistantReplyForDisplay(finalReply);
