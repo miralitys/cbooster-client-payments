@@ -18,7 +18,6 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/identityiq-score", label: "IdentityIQ Scores" },
   { to: "/quickbooks", label: "QuickBooks" },
   { to: "/leads", label: "Leads" },
-  { to: "/ghl-contracts", label: "GHL Contracts" },
   { to: "/access-control", label: "Access Control" },
 ];
 
@@ -46,11 +45,6 @@ function resolvePageTitle(pathname: string): string {
   if (pathname.startsWith("/identityiq-score")) {
     return "IdentityIQ Scores";
   }
-
-  if (pathname.startsWith("/ghl-contracts")) {
-    return "GHL Contracts";
-  }
-
   if (pathname.startsWith("/access-control")) {
     return "Access Control";
   }
