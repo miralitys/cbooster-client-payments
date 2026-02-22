@@ -559,6 +559,16 @@ const GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY = Math.min(
 const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").toString().trim();
 const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4.1-mini").toString().trim() || "gpt-4.1-mini";
 const OPENAI_API_BASE_URL = ((process.env.OPENAI_API_BASE_URL || "https://api.openai.com").toString().trim() || "https://api.openai.com").replace(/\/+$/, "");
+const OPENAI_TRANSCRIPTION_MODEL =
+  (process.env.OPENAI_TRANSCRIPTION_MODEL || process.env.OPENAI_AUDIO_TRANSCRIPTION_MODEL || "whisper-1").toString().trim() || "whisper-1";
+const OPENAI_TRANSCRIPTION_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS, 45000), 3000),
+  180000,
+);
+const OPENAI_TRANSCRIPTION_MAX_FILE_BYTES = Math.min(
+  Math.max(parsePositiveInteger(process.env.OPENAI_TRANSCRIPTION_MAX_FILE_BYTES, 24 * 1024 * 1024), 1024 * 1024),
+  64 * 1024 * 1024,
+);
 const ASSISTANT_LLM_PII_MODES = new Set(["redact", "minimal", "full"]);
 const ASSISTANT_LLM_PII_MODE = resolveAssistantLlmPiiMode(process.env.LLM_PII_MODE || process.env.OPENAI_LLM_PII_MODE || "minimal");
 const ASSISTANT_REVIEW_PII_MODES = new Set(["redact", "minimal", "full"]);
@@ -15213,6 +15223,161 @@ function buildGhlClientCommunicationRecordingProxyUrl(clientName, messageId) {
     messageId: normalizedMessageId,
   });
   return `/api/ghl/client-communications/recording?${query.toString()}`;
+}
+
+function buildGhlCallRecordingFetchUrl(messageId) {
+  const normalizedMessageId = encodeURIComponent(sanitizeTextValue(messageId, 220));
+  const normalizedLocationId = encodeURIComponent(GHL_LOCATION_ID);
+  return buildGhlUrl(`/conversations/messages/${normalizedMessageId}/locations/${normalizedLocationId}/recording`);
+}
+
+async function fetchGhlCallRecordingByMessageId(messageId) {
+  const normalizedMessageId = sanitizeTextValue(messageId, 220);
+  if (!normalizedMessageId) {
+    throw createHttpError("Message id is required.", 400, "ghl_recording_message_id_required");
+  }
+
+  const url = buildGhlCallRecordingFetchUrl(normalizedMessageId);
+  const headers = {
+    Authorization: `Bearer ${GHL_API_KEY}`,
+    Version: GHL_API_VERSION,
+    Accept: "*/*",
+  };
+
+  const controller = new AbortController();
+  const timeoutMs = Math.min(Math.max(GHL_REQUEST_TIMEOUT_MS, 2000), 60000);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw createHttpError("Call recording request timed out.", 504, "ghl_recording_timeout");
+    }
+    const message = sanitizeTextValue(error?.message, 500) || "Failed to request call recording from GoHighLevel.";
+    throw createHttpError(message, 502, "ghl_recording_request_failed");
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    const details = sanitizeTextValue(errorText, 500);
+    const status = Number.parseInt(sanitizeTextValue(response.status, 20), 10);
+    const mappedStatus = status === 404 ? 404 : status >= 500 ? 502 : status;
+    throw createHttpError(details || "Call recording is not available for this message.", mappedStatus, "ghl_recording_unavailable");
+  }
+
+  const contentType = sanitizeTextValue(response.headers.get("content-type"), 200) || "audio/mpeg";
+  const arrayBuffer = await response.arrayBuffer();
+  const payload = Buffer.from(arrayBuffer);
+  if (!payload.length) {
+    throw createHttpError("Call recording payload is empty.", 404, "ghl_recording_empty");
+  }
+
+  return {
+    messageId: normalizedMessageId,
+    contentType,
+    payload,
+  };
+}
+
+function detectAudioFileExtensionFromContentType(contentType) {
+  const normalized = sanitizeTextValue(contentType, 200).toLowerCase();
+  if (normalized.includes("mpeg") || normalized.includes("mp3")) {
+    return "mp3";
+  }
+  if (normalized.includes("wav")) {
+    return "wav";
+  }
+  if (normalized.includes("mp4") || normalized.includes("m4a")) {
+    return "m4a";
+  }
+  if (normalized.includes("ogg")) {
+    return "ogg";
+  }
+  if (normalized.includes("webm")) {
+    return "webm";
+  }
+  if (normalized.includes("flac")) {
+    return "flac";
+  }
+  return "mp3";
+}
+
+async function transcribeAudioBufferViaOpenAi(audioPayload, options = {}) {
+  if (!OPENAI_API_KEY) {
+    throw createHttpError("OpenAI is not configured. Set OPENAI_API_KEY.", 503, "openai_not_configured");
+  }
+
+  const payload = Buffer.isBuffer(audioPayload) ? audioPayload : Buffer.from(audioPayload || "");
+  if (!payload.length) {
+    throw createHttpError("Audio payload is empty.", 400, "audio_payload_empty");
+  }
+
+  if (payload.length > OPENAI_TRANSCRIPTION_MAX_FILE_BYTES) {
+    throw createHttpError(
+      `Audio payload exceeds ${Math.floor(OPENAI_TRANSCRIPTION_MAX_FILE_BYTES / (1024 * 1024))}MB limit.`,
+      413,
+      "audio_payload_too_large",
+    );
+  }
+
+  const contentType = sanitizeTextValue(options.contentType, 200) || "audio/mpeg";
+  const fileExtension = detectAudioFileExtensionFromContentType(contentType);
+  const messageId = sanitizeTextValue(options.messageId, 120) || "call";
+  const fileName = `ghl-recording-${messageId}.${fileExtension}`;
+
+  const formData = new FormData();
+  formData.append("model", OPENAI_TRANSCRIPTION_MODEL);
+  formData.append("response_format", "json");
+  formData.append("file", new Blob([payload], { type: contentType }), fileName);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OPENAI_TRANSCRIPTION_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(`${OPENAI_API_BASE_URL}/v1/audio/transcriptions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: formData,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw createHttpError(`OpenAI transcription timed out after ${OPENAI_TRANSCRIPTION_TIMEOUT_MS}ms.`, 504, "openai_timeout");
+    }
+    const message = sanitizeTextValue(error?.message, 300) || "OpenAI transcription request failed.";
+    throw createHttpError(message, 502, "openai_transcription_request_failed");
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const responseText = await response.text().catch(() => "");
+  if (!response.ok) {
+    const safeErrorText = sanitizeTextValue(responseText, 500) || "No details provided.";
+    throw createHttpError(`OpenAI transcription failed with status ${response.status}. ${safeErrorText}`, 502, "openai_transcription_failed");
+  }
+
+  let transcript = "";
+  try {
+    const parsed = responseText ? JSON.parse(responseText) : {};
+    transcript = sanitizeTextValue(parsed?.text || parsed?.transcript, 120000);
+  } catch {
+    transcript = sanitizeTextValue(responseText, 120000);
+  }
+
+  if (!transcript) {
+    throw createHttpError("OpenAI returned an empty transcript.", 502, "openai_transcription_empty");
+  }
+
+  return transcript;
 }
 
 function shouldAddProxyRecordingForCall(item) {
@@ -35531,51 +35696,18 @@ app.get("/api/ghl/client-communications/recording", requireWebPermission(WEB_AUT
       throw createHttpError("Access denied. This client is outside your visible scope.", 403);
     }
 
-    const normalizedMessageId = encodeURIComponent(messageId);
-    const normalizedLocationId = encodeURIComponent(GHL_LOCATION_ID);
-    const url = buildGhlUrl(`/conversations/messages/${normalizedMessageId}/locations/${normalizedLocationId}/recording`);
-    const headers = {
-      Authorization: `Bearer ${GHL_API_KEY}`,
-      Version: GHL_API_VERSION,
-      Accept: "*/*",
-    };
+    const recording = await fetchGhlCallRecordingByMessageId(messageId);
+    const fileExtension = detectAudioFileExtensionFromContentType(recording.contentType);
+    const contentDisposition = `inline; filename=\"ghl-recording-${sanitizeTextValue(recording.messageId, 80)}.${fileExtension}\"`;
 
-    const controller = new AbortController();
-    const timeoutMs = Math.min(Math.max(GHL_REQUEST_TIMEOUT_MS, 2000), 60000);
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    let response;
-    try {
-      response = await fetch(url, {
-        method: "GET",
-        headers,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeoutId);
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      const errorPreview = sanitizeTextValue(errorText, 500);
-      res.status(response.status === 404 ? 404 : response.status >= 500 ? 502 : response.status).json({
-        error: errorPreview || "Call recording is not available for this message.",
-      });
-      return;
-    }
-
-    const contentType = sanitizeTextValue(response.headers.get("content-type"), 200) || "audio/mpeg";
-    const contentDisposition = `inline; filename=\"ghl-recording-${sanitizeTextValue(messageId, 80)}.mp3\"`;
-    const arrayBuffer = await response.arrayBuffer();
-    const payload = Buffer.from(arrayBuffer);
-
-    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Type", recording.contentType);
     res.setHeader("Content-Disposition", contentDisposition);
     res.setHeader("Cache-Control", "private, max-age=60");
-    res.status(200).send(payload);
+    res.status(200).send(recording.payload);
   } catch (error) {
     const message = sanitizeTextValue(error?.message, 600) || "Failed to load call recording from GoHighLevel.";
     console.error("GET /api/ghl/client-communications/recording failed:", error);
-    if (error?.name === "AbortError") {
+    if (error?.code === "ghl_recording_timeout" || error?.name === "AbortError") {
       res.status(504).json({
         error: "Call recording request timed out.",
       });
@@ -35583,6 +35715,83 @@ app.get("/api/ghl/client-communications/recording", requireWebPermission(WEB_AUT
     }
     res.status(error.httpStatus || 502).json({
       error: message,
+    });
+  }
+});
+
+app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_communications.transcript",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "Transcript generation limit reached. Please wait before retrying.",
+      code: "ghl_client_communications_transcript_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const requestedClientName = sanitizeTextValue(req.body?.clientName, 300);
+  const messageId = sanitizeTextValue(req.body?.messageId, 220);
+  if (!requestedClientName || !messageId) {
+    res.status(400).json({
+      error: "Body fields `clientName` and `messageId` are required.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  if (!OPENAI_API_KEY) {
+    res.status(503).json({
+      error: "OpenAI transcription is not configured. Set OPENAI_API_KEY.",
+      code: "openai_not_configured",
+    });
+    return;
+  }
+
+  try {
+    const context = await resolveGhlBasicNoteContext(req, {
+      requestedClientName,
+      writtenOffFlag: null,
+    });
+    if (!context?.clientName) {
+      throw createHttpError("Access denied. This client is outside your visible scope.", 403);
+    }
+
+    const recording = await fetchGhlCallRecordingByMessageId(messageId);
+    const transcript = await transcribeAudioBufferViaOpenAi(recording.payload, {
+      contentType: recording.contentType,
+      messageId: recording.messageId,
+    });
+
+    res.json({
+      ok: true,
+      clientName: context.clientName,
+      messageId: recording.messageId,
+      transcript,
+      generatedAt: new Date().toISOString(),
+      source: "openai.audio.transcriptions",
+    });
+  } catch (error) {
+    console.error("POST /api/ghl/client-communications/transcript failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to generate call transcript.",
+      code: sanitizeTextValue(error?.code, 120) || "ghl_transcript_failed",
     });
   }
 });

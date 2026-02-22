@@ -30,3 +30,12 @@ export interface GhlClientCommunicationsPayload {
   callCount: number;
   items: GhlClientCommunicationItem[];
 }
+
+export interface GhlClientCommunicationTranscriptPayload {
+  ok: boolean;
+  clientName: string;
+  messageId: string;
+  transcript: string;
+  generatedAt: string;
+  source: string;
+}
