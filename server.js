@@ -7426,6 +7426,22 @@ function parseAssistantDateRangeFromMessage(rawMessage) {
     }
   }
 
+  const monthOnlyMatch = normalized.match(
+    /(?:^|[\s,.;:!?()«»"'`])(?:in|for|за|в)\s+([a-zа-яё]{3,})(?=$|[\s,.;:!?()«»"'`])/i,
+  );
+  if (monthOnlyMatch) {
+    const monthIndex = resolveAssistantMonthIndexFromToken(monthOnlyMatch[1]);
+    if (Number.isFinite(monthIndex)) {
+      const today = new Date(todayStart);
+      const currentYear = today.getUTCFullYear();
+      const currentMonthIndex = today.getUTCMonth() + 1;
+      const resolvedYear = monthIndex > currentMonthIndex ? currentYear - 1 : currentYear;
+      const monthStart = Date.UTC(resolvedYear, monthIndex - 1, 1);
+      const monthEnd = Date.UTC(resolvedYear, monthIndex, 0);
+      return buildAssistantDateRange(monthStart, monthEnd, "month_only");
+    }
+  }
+
   return null;
 }
 
@@ -9834,6 +9850,12 @@ function buildAssistantIntentProfile(message) {
     wantsCompare: /(compare|сравни|versus|vs|против)/i.test(normalizedMessage),
     wantsAnomaly: /(anomal|ошиб|аномал|некоррект|проверь|inconsisten|mismatch)/i.test(normalizedMessage),
     wantsCallList: /(call list|обзвон|позвон|follow[\s-]*up)/i.test(normalizedMessage),
+    wantsClosedClientsByFirstPaymentAlias:
+      Boolean(parsedDateRange) &&
+      /(closed clients?|клиент(?:ов|ы|а).*(закрыл|закрыли|закрыт)|закрыт(?:ых|ые|ого|ому|ым|ыми)?\s+клиент(?:ов|ы|а)?|закрыли\s+клиент(?:ов|а)?)/i.test(
+        normalizedMessage,
+      ) &&
+      !/(fully[\s-]*paid|paid[\s-]*off|полностью\s+оплачен|полностью\s+оплачены)/i.test(normalizedMessage),
     wantsRevenue:
       /(revenue|выручк|cash flow)/i.test(normalizedMessage) ||
       (/(собрано|collected|поступлен|доход)/i.test(normalizedMessage) &&
@@ -10059,6 +10081,7 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
     wantsCompare,
     wantsAnomaly,
     wantsCallList,
+    wantsClosedClientsByFirstPaymentAlias,
     wantsRevenue,
     wantsDebtDynamics,
     wantsNewClients,
@@ -10140,6 +10163,7 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
     hasExplicitClientListIntent &&
     wantsClientLookup &&
     parsedDateRange &&
+    !wantsClosedClientsByFirstPaymentAlias &&
     !primaryManager &&
     !primaryCompany;
   const shouldListClientsByRange =
@@ -10157,6 +10181,7 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
       !wantsStoppedPaying &&
       !wantsNewClients &&
       !wantsFirstPayment &&
+      !wantsClosedClientsByFirstPaymentAlias &&
       !wantsRevenue &&
       !wantsDebtDynamics);
 
@@ -10210,6 +10235,24 @@ function buildAssistantReplyPayload(message, records, updatedAt, sessionScope = 
         parsedDateRange,
         isRussian,
         topLimit,
+        wantsByManager || wantsManager,
+      ),
+      true,
+      wantsByManager || wantsManager ? null : buildAssistantScopeFromComparableList(firstPaymentEntries.map((entry) => entry.clientComparable), parsedDateRange),
+    );
+  }
+
+  if (wantsClosedClientsByFirstPaymentAlias && parsedDateRange) {
+    const firstPaymentEntries = buildAssistantFirstPaymentEntriesFromEvents(paymentEvents).filter((entry) =>
+      isAssistantTimestampInRange(entry.dateTimestamp, parsedDateRange),
+    );
+    return respond(
+      buildAssistantFirstPaymentsInRangeReply(
+        analyzedRows,
+        paymentEvents,
+        parsedDateRange,
+        isRussian,
+        Math.max(topLimit, 20),
         wantsByManager || wantsManager,
       ),
       true,
