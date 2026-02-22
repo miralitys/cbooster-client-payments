@@ -2,7 +2,7 @@ import { type FormEvent, useMemo, useState } from "react";
 
 import { getIdentityIqCreditScore } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
-import type { IdentityIqBureauScore, IdentityIqCreditScoreResult } from "@/shared/types/identityIq";
+import type { IdentityIqCreditScoreResult } from "@/shared/types/identityIq";
 import { Badge, Button, EmptyState, Field, Input, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
@@ -18,6 +18,7 @@ interface IdentityIqHistoryRow extends IdentityIqCreditScoreResult {
 }
 
 const HISTORY_MAX_ROWS = 20;
+const BUREAU_ORDER = ["TransUnion", "Equifax", "Experian"] as const;
 
 export default function IdentityIqScorePage() {
   const [form, setForm] = useState<IdentityIqFormState>({
@@ -34,12 +35,25 @@ export default function IdentityIqScorePage() {
 
   const bureauRows = useMemo(() => {
     const source = Array.isArray(latestResult?.bureauScores) ? latestResult.bureauScores : [];
-    return source.map((item, index) => ({
-      id: `${item.bureau}-${item.score}-${index}`,
-      bureau: item.bureau,
-      score: item.score,
+    const scoreByBureau = new Map<string, number>();
+    for (const item of source) {
+      const bureau = item?.bureau?.trim();
+      if (!bureau || !Number.isFinite(item?.score) || scoreByBureau.has(bureau)) {
+        continue;
+      }
+      scoreByBureau.set(bureau, Number(item.score));
+    }
+    return BUREAU_ORDER.map((bureau) => ({
+      id: `${bureau}-${scoreByBureau.get(bureau) ?? "na"}`,
+      bureau,
+      score: scoreByBureau.get(bureau) ?? null,
     }));
   }, [latestResult]);
+
+  const hasMissingBureauScores = useMemo(
+    () => bureauRows.some((row) => !Number.isFinite(row.score)),
+    [bureauRows],
+  );
 
   const bureauColumns = useMemo<TableColumn<BureauRow>[]>(() => {
     return [
@@ -53,7 +67,7 @@ export default function IdentityIqScorePage() {
         key: "score",
         label: "Score",
         align: "center",
-        cell: (row) => <Badge tone="info">{row.score}</Badge>,
+        cell: (row) => <Badge tone={Number.isFinite(row.score) ? "info" : "warning"}>{formatScore(row.score)}</Badge>,
       },
     ];
   }, []);
@@ -259,19 +273,20 @@ export default function IdentityIqScorePage() {
               {latestResult.note ? <p className="react-user-footnote">{latestResult.note}</p> : null}
             </div>
 
-            {bureauRows.length ? (
-              <div className="identityiq-score-bureaus">
-                <Table
-                  columns={bureauColumns}
-                  rows={bureauRows}
-                  rowKey={(row) => row.id}
-                  className="identityiq-score-table-wrap"
-                  density="compact"
-                />
-              </div>
-            ) : (
-              <EmptyState title="No bureau-specific score blocks were found." />
-            )}
+            <div className="identityiq-score-bureaus">
+              <Table
+                columns={bureauColumns}
+                rows={bureauRows}
+                rowKey={(row) => row.id}
+                className="identityiq-score-table-wrap"
+                density="compact"
+              />
+              {hasMissingBureauScores ? (
+                <p className="react-user-footnote">
+                  One or more bureau scores were not found in the IdentityIQ response for this check.
+                </p>
+              ) : null}
+            </div>
 
             {latestResult.snippets.length ? (
               <div className="identityiq-score-snippets">
@@ -301,8 +316,10 @@ export default function IdentityIqScorePage() {
   );
 }
 
-interface BureauRow extends IdentityIqBureauScore {
+interface BureauRow {
   id: string;
+  bureau: string;
+  score: number | null;
 }
 
 function validateIdentityIqForm(form: IdentityIqFormState): string {
