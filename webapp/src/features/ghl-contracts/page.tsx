@@ -117,10 +117,12 @@ export default function GhlContractsPage() {
       });
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && GHL_MFA_ERROR_CODES.has(error.code)) {
+        const mfaSessionId = extractMfaSessionIdFromApiError(error) || request.mfaSessionId || "";
         setPendingMfaRequest({
           clientName: request.clientName,
           login: request.login,
           password: request.password,
+          mfaSessionId: mfaSessionId || undefined,
           locationId: request.locationId,
         });
         setSubmitError("");
@@ -187,12 +189,18 @@ export default function GhlContractsPage() {
       setMfaError("Login session for MFA verification has expired. Run request again.");
       return;
     }
+    const activeMfaSessionId = pendingMfaRequest.mfaSessionId?.trim();
+    if (!activeMfaSessionId) {
+      setMfaError("MFA verification session was not found. Start extraction again.");
+      return;
+    }
 
     setMfaError("");
     await executeContractTextRequest(
       {
         ...pendingMfaRequest,
         mfaCode: normalizedCode,
+        mfaSessionId: activeMfaSessionId,
       },
       "mfa",
     );
@@ -369,6 +377,15 @@ export default function GhlContractsPage() {
       </Modal>
     </PageShell>
   );
+}
+
+function extractMfaSessionIdFromApiError(error: ApiError): string {
+  const payload = error.payload;
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const rawSessionId = (payload as Record<string, unknown>).mfaSessionId;
+  return typeof rawSessionId === "string" ? rawSessionId.trim() : "";
 }
 
 function validateGhlContractTextForm(form: GhlContractTextFormState): string {
