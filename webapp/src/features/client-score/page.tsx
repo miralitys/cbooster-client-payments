@@ -60,6 +60,7 @@ interface ClientProbabilityRow {
   probabilityMonth1: number;
   probabilityMonth2: number;
   probabilityMonth3: number;
+  probabilitySource: "legacy" | "ml";
 }
 
 interface ProbabilityRowSeed {
@@ -230,8 +231,10 @@ export default function ClientScorePage() {
     if (loadError) {
       return loadError;
     }
-    return `Showing first ${version2Rows.length} clients. As of ${formatScoreAsOfDate(asOfDate)}.`;
-  }, [asOfDate, isLoading, isVersion2Loading, loadError, version2Rows.length]);
+    const mlRows = version2Rows.filter((row) => row.probabilitySource === "ml").length;
+    const fallbackRows = Math.max(0, version2Rows.length - mlRows);
+    return `Showing first ${version2Rows.length} clients (ML: ${mlRows}, fallback: ${fallbackRows}). As of ${formatScoreAsOfDate(asOfDate)}.`;
+  }, [asOfDate, isLoading, isVersion2Loading, loadError, version2Rows]);
 
   const activeStatusText = activeVersion === "v1" ? statusText : version2StatusText;
   const activeRows = activeVersion === "v1" ? legacyRows : version2Rows;
@@ -297,22 +300,22 @@ export default function ClientScorePage() {
 function buildLegacyProbabilityRow(record: ClientRecord, asOfDate: Date): ClientProbabilityRow {
   const seed = buildProbabilityRowSeed(record, asOfDate);
   const probabilities = computeLegacyPaymentProbabilities(seed.features);
-  return createProbabilityRow(seed, probabilities);
+  return createProbabilityRow(seed, probabilities, "legacy");
 }
 
 async function buildVersion2ProbabilityRow(record: ClientRecord, asOfDate: Date): Promise<ClientProbabilityRow> {
   const seed = buildProbabilityRowSeed(record, asOfDate);
 
   if (seed.features.writtenOff === true || seed.features.balance <= 0) {
-    return createProbabilityRow(seed, { p1: 0, p2: 0, p3: 0 });
+    return createProbabilityRow(seed, { p1: 0, p2: 0, p3: 0 }, "legacy");
   }
 
   try {
     const probabilities = await fetchPaymentProbability(seed.features);
-    return createProbabilityRow(seed, probabilities);
+    return createProbabilityRow(seed, probabilities, "ml");
   } catch {
     const fallback = computeLegacyPaymentProbabilities(seed.features);
-    return createProbabilityRow(seed, fallback);
+    return createProbabilityRow(seed, fallback, "legacy");
   }
 }
 
@@ -350,7 +353,11 @@ function buildProbabilityRowSeed(record: ClientRecord, asOfDate: Date): Probabil
   };
 }
 
-function createProbabilityRow(seed: ProbabilityRowSeed, probabilities: PaymentProbabilities): ClientProbabilityRow {
+function createProbabilityRow(
+  seed: ProbabilityRowSeed,
+  probabilities: PaymentProbabilities,
+  probabilitySource: ClientProbabilityRow["probabilitySource"],
+): ClientProbabilityRow {
   return {
     id: seed.id,
     clientName: seed.clientName,
@@ -363,6 +370,7 @@ function createProbabilityRow(seed: ProbabilityRowSeed, probabilities: PaymentPr
     probabilityMonth1: clampProbability(probabilities.p1),
     probabilityMonth2: clampProbability(probabilities.p2),
     probabilityMonth3: clampProbability(probabilities.p3),
+    probabilitySource,
   };
 }
 
