@@ -851,6 +851,10 @@ const GHL_CLIENT_COMMUNICATION_MAX_ITEMS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_COMMUNICATION_MAX_ITEMS, 240), 1),
   1000,
 );
+const GHL_CLIENT_COMMUNICATION_NORMALIZE_DEFAULT_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_COMMUNICATION_NORMALIZE_DEFAULT_LIMIT, 180), 1),
+  GHL_CLIENT_COMMUNICATION_MAX_ITEMS,
+);
 const GHL_LEADS_PIPELINE_NAME = sanitizeTextValue(process.env.GHL_LEADS_PIPELINE_NAME, 320) || "SALES 3 LINE";
 const GHL_LEADS_PIPELINE_ID = sanitizeTextValue(process.env.GHL_LEADS_PIPELINE_ID, 180);
 const GHL_LEADS_SYNC_TIME_ZONE = sanitizeTextValue(process.env.GHL_LEADS_SYNC_TIME_ZONE, 80) || "America/Chicago";
@@ -15727,7 +15731,11 @@ async function applyCachedTranscriptsToGhlCommunicationItems(clientName, items) 
       return item;
     }
 
-    if (sanitizeTextValue(item?.transcript, 120000)) {
+    const currentTranscript = sanitizeTextValue(item?.transcript, 120000);
+    const shouldApplyCachedTranscript =
+      !currentTranscript ||
+      (!isSpeakerFormattedTranscript(currentTranscript) && isSpeakerFormattedTranscript(cachedTranscript));
+    if (!shouldApplyCachedTranscript || currentTranscript === cachedTranscript) {
       return item;
     }
 
@@ -15737,6 +15745,132 @@ async function applyCachedTranscriptsToGhlCommunicationItems(clientName, items) 
       source: sanitizeTextValue(item?.source, 120) || "gohighlevel.conversations",
     };
   });
+}
+
+function resolveGhlCommunicationTranscriptNormalizeLimit(rawValue) {
+  const parsed = Number.parseInt(sanitizeTextValue(rawValue, 24), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return GHL_CLIENT_COMMUNICATION_NORMALIZE_DEFAULT_LIMIT;
+  }
+  return Math.min(Math.max(parsed, 1), GHL_CLIENT_COMMUNICATION_MAX_ITEMS);
+}
+
+function buildNormalizedGhlTranscriptEntry(entry) {
+  const normalized = entry && typeof entry === "object" ? entry : {};
+  const rawTranscript = sanitizeTextValue(normalized.rawTranscript, 120000);
+  const formattedTranscript = sanitizeTextValue(normalized.formattedTranscript, 160000);
+  const transcript = sanitizeTextValue(normalized.transcript, 160000) || formattedTranscript || rawTranscript;
+  return {
+    messageId: sanitizeTextValue(normalized.messageId, 220),
+    transcript,
+    rawTranscript,
+    formattedTranscript,
+    speakerLabeled: isSpeakerFormattedTranscript(transcript),
+    cached: normalized.cached === true,
+  };
+}
+
+async function normalizeExistingGhlCallTranscriptsForClient(clientName, options = {}) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return {
+      clientName: "",
+      totalCandidates: 0,
+      requestedLimit: resolveGhlCommunicationTranscriptNormalizeLimit(options.limit),
+      processed: 0,
+      formatted: 0,
+      cached: 0,
+      failed: 0,
+      entries: [],
+    };
+  }
+
+  const communications = await findGhlClientCommunicationsByClientName(normalizedClientName, {
+    preferredContactId: sanitizeTextValue(options.preferredContactId, 200),
+    preferredContactName: sanitizeTextValue(options.preferredContactName, 300),
+  });
+  const requestedLimit = resolveGhlCommunicationTranscriptNormalizeLimit(options.limit);
+  const callCandidates = (Array.isArray(communications?.items) ? communications.items : [])
+    .filter((item) => sanitizeTextValue(item?.kind, 40).toLowerCase() === "call")
+    .map((item) => ({
+      item,
+      messageId: sanitizeTextValue(item?.messageId || item?.id, 220),
+      transcript: sanitizeTextValue(item?.transcript, 120000),
+    }))
+    .filter((candidate) => Boolean(candidate.messageId && candidate.transcript));
+
+  const selectedCandidates = callCandidates.slice(0, requestedLimit);
+  let processed = 0;
+  let formatted = 0;
+  let cached = 0;
+  let failed = 0;
+  const entries = [];
+
+  for (const candidate of selectedCandidates) {
+    processed += 1;
+    const rawTranscript = sanitizeTextValue(candidate.transcript, 120000);
+    const messageId = sanitizeTextValue(candidate.messageId, 220);
+    const callDirection = sanitizeTextValue(candidate.item?.direction, 80);
+    const wasSpeakerLabeled = isSpeakerFormattedTranscript(rawTranscript);
+    let formattedTranscript = rawTranscript;
+    let displayTranscript = rawTranscript;
+    let isCached = false;
+
+    try {
+      if (!wasSpeakerLabeled) {
+        formattedTranscript = await formatTranscriptWithSpeakerLabelsViaOpenAi(rawTranscript, {
+          clientName: normalizedClientName,
+          direction: callDirection,
+        });
+      }
+      formattedTranscript = normalizeSpeakerFormattedTranscript(formattedTranscript);
+      displayTranscript = formattedTranscript || rawTranscript;
+      if (!wasSpeakerLabeled && isSpeakerFormattedTranscript(displayTranscript)) {
+        formatted += 1;
+      }
+
+      const savedRow = await upsertGhlCallTranscriptCacheRow({
+        clientName: normalizedClientName,
+        messageId,
+        contactId: sanitizeTextValue(communications?.contactId, 200),
+        transcript: rawTranscript,
+        formattedTranscript: isSpeakerFormattedTranscript(displayTranscript) ? displayTranscript : "",
+        source: sanitizeTextValue(candidate.item?.source, 160) || "gohighlevel.conversations",
+        audioContentType: "",
+        audioSizeBytes: 0,
+        generatedAt: sanitizeTextValue(candidate.item?.createdAt, 60) || new Date().toISOString(),
+      });
+      if (savedRow?.messageId) {
+        isCached = true;
+        cached += 1;
+      }
+    } catch (error) {
+      failed += 1;
+      console.warn(
+        `[ghl communications] transcript normalize failed for ${messageId}:`,
+        sanitizeTextValue(error?.message, 300) || "unknown",
+      );
+    }
+
+    entries.push(buildNormalizedGhlTranscriptEntry({
+      messageId,
+      transcript: displayTranscript || rawTranscript,
+      rawTranscript,
+      formattedTranscript: isSpeakerFormattedTranscript(displayTranscript) ? displayTranscript : "",
+      cached: isCached,
+    }));
+  }
+
+  return {
+    clientName: normalizedClientName,
+    totalCandidates: callCandidates.length,
+    requestedLimit,
+    processed,
+    formatted,
+    cached,
+    failed,
+    entries,
+  };
 }
 
 function shouldAddProxyRecordingForCall(item) {
@@ -36756,6 +36890,89 @@ app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_A
     res.status(error.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 600) || "Failed to generate call transcript.",
       code: sanitizeTextValue(error?.code, 120) || "ghl_transcript_failed",
+    });
+  }
+});
+
+app.post("/api/ghl/client-communications/normalize-transcripts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_communications.normalize_transcripts",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "Transcript formatting limit reached. Please wait before retrying.",
+      code: "ghl_client_communications_normalize_transcripts_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const requestedClientName = sanitizeTextValue(req.body?.clientName, 300);
+  const requestedLimit = resolveGhlCommunicationTranscriptNormalizeLimit(req.body?.limit);
+  if (!requestedClientName) {
+    res.status(400).json({
+      error: "Body field `clientName` is required.",
+      code: "ghl_client_name_required",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+      code: "ghl_not_configured",
+    });
+    return;
+  }
+
+  if (!OPENAI_API_KEY) {
+    res.status(503).json({
+      error: "OpenAI transcript formatting is not configured. Set OPENAI_API_KEY.",
+      code: "openai_not_configured",
+    });
+    return;
+  }
+
+  try {
+    const context = await resolveGhlBasicNoteContext(req, {
+      requestedClientName,
+      writtenOffFlag: null,
+    });
+    if (!context?.clientName) {
+      throw createHttpError("Access denied. This client is outside your visible scope.", 403);
+    }
+
+    let preferredContactId = "";
+    let preferredContactName = "";
+    if (pool) {
+      const cachedRow = await getCachedGhlBasicNoteByClientName(context.clientName);
+      preferredContactId = sanitizeTextValue(cachedRow?.contactId, 200);
+      preferredContactName = sanitizeTextValue(cachedRow?.contactName, 300);
+    }
+
+    const normalized = await normalizeExistingGhlCallTranscriptsForClient(context.clientName, {
+      preferredContactId,
+      preferredContactName,
+      limit: requestedLimit,
+    });
+
+    res.json({
+      ok: true,
+      ...normalized,
+    });
+  } catch (error) {
+    console.error("POST /api/ghl/client-communications/normalize-transcripts failed:", error);
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to normalize call transcripts.",
+      code: sanitizeTextValue(error?.code, 120) || "ghl_normalize_transcripts_failed",
     });
   }
 });

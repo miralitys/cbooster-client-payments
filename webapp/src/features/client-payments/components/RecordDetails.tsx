@@ -1,6 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { getGhlClientBasicNote, getGhlClientCommunications, postGhlClientCommunicationTranscript } from "@/shared/api";
+import {
+  getGhlClientBasicNote,
+  getGhlClientCommunications,
+  postGhlClientCommunicationNormalizeTranscripts,
+  postGhlClientCommunicationTranscript,
+} from "@/shared/api";
 import { evaluateClientScore } from "@/features/client-score/domain/scoring";
 import type { GhlClientBasicNotePayload } from "@/shared/types/ghlNotes";
 import type {
@@ -53,6 +58,7 @@ const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
 const MAX_RENDERED_COMMUNICATION_ITEMS = 120;
 const COMMUNICATIONS_PAGE_SIZE = 5;
+const TRANSCRIPT_NORMALIZE_BATCH_LIMIT = 240;
 type CommunicationFilter = "all" | "sms" | "calls" | "documents";
 type SpeakerRole = "manager" | "client";
 
@@ -75,7 +81,10 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const [generatedTranscriptsByMessageId, setGeneratedTranscriptsByMessageId] = useState<Record<string, string>>({});
   const [isGeneratingTranscript, setIsGeneratingTranscript] = useState(false);
   const [transcriptGenerationError, setTranscriptGenerationError] = useState("");
+  const [isNormalizingTranscripts, setIsNormalizingTranscripts] = useState(false);
+  const [transcriptNormalizeError, setTranscriptNormalizeError] = useState("");
   const [activeCommunicationFilter, setActiveCommunicationFilter] = useState<CommunicationFilter>("all");
+  const transcriptNormalizationByClientRef = useRef<Record<string, boolean>>({});
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
   const contractDisplay = useMemo(() => formatMoneyCell(record.contractTotals), [record.contractTotals]);
@@ -168,6 +177,8 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       setGeneratedTranscriptsByMessageId({});
       setIsGeneratingTranscript(false);
       setTranscriptGenerationError("");
+      setIsNormalizingTranscripts(false);
+      setTranscriptNormalizeError("");
       setActiveCommunicationFilter("all");
       return;
     }
@@ -177,6 +188,8 @@ export function RecordDetails({ record }: RecordDetailsProps) {
     setGeneratedTranscriptsByMessageId({});
     setIsGeneratingTranscript(false);
     setTranscriptGenerationError("");
+    setIsNormalizingTranscripts(false);
+    setTranscriptNormalizeError("");
     setActiveCommunicationFilter("all");
 
     const abortController = new AbortController();
@@ -214,6 +227,128 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       abortController.abort();
     };
   }, [normalizedClientName]);
+
+  useEffect(() => {
+    if (!normalizedClientName || !ghlCommunications || ghlCommunications.status !== "found") {
+      return;
+    }
+    if (isLoadingGhlCommunications || ghlCommunicationsError) {
+      return;
+    }
+    if (transcriptNormalizationByClientRef.current[normalizedClientName]) {
+      return;
+    }
+
+    const callItemsWithLegacyTranscript = (Array.isArray(ghlCommunications.items) ? ghlCommunications.items : []).filter((item) => {
+      if (normalizeCommunicationKind(item.kind) !== "call") {
+        return false;
+      }
+      const transcript = (item.transcript || "").toString().trim();
+      return Boolean(transcript && !isSpeakerLabeledTranscript(transcript));
+    });
+    if (!callItemsWithLegacyTranscript.length) {
+      return;
+    }
+
+    transcriptNormalizationByClientRef.current[normalizedClientName] = true;
+    let isActive = true;
+    setIsNormalizingTranscripts(true);
+    setTranscriptNormalizeError("");
+
+    async function normalizeExistingTranscripts() {
+      try {
+        const payload = await postGhlClientCommunicationNormalizeTranscripts(normalizedClientName, {
+          limit: TRANSCRIPT_NORMALIZE_BATCH_LIMIT,
+        });
+        if (!isActive) {
+          return;
+        }
+
+        const entries = Array.isArray(payload.entries) ? payload.entries : [];
+        if (!entries.length) {
+          return;
+        }
+
+        const nextTranscriptsByMessageId: Record<string, string> = {};
+        for (const entry of entries) {
+          const messageId = (entry?.messageId || "").toString().trim();
+          const transcript = (entry?.transcript || entry?.formattedTranscript || entry?.rawTranscript || "").toString().trim();
+          if (!messageId || !transcript) {
+            continue;
+          }
+          nextTranscriptsByMessageId[messageId] = transcript;
+        }
+        if (!Object.keys(nextTranscriptsByMessageId).length) {
+          return;
+        }
+
+        setGeneratedTranscriptsByMessageId((previous) => ({
+          ...previous,
+          ...nextTranscriptsByMessageId,
+        }));
+        setGhlCommunications((previous) => {
+          if (!previous) {
+            return previous;
+          }
+          let hasChanges = false;
+          const nextItems = (Array.isArray(previous.items) ? previous.items : []).map((item) => {
+            const transcriptKey = getCommunicationTranscriptCacheKey(item);
+            const normalizedTranscript = transcriptKey ? nextTranscriptsByMessageId[transcriptKey] : "";
+            if (!normalizedTranscript) {
+              return item;
+            }
+            if ((item.transcript || "").toString().trim() === normalizedTranscript) {
+              return item;
+            }
+            hasChanges = true;
+            return {
+              ...item,
+              transcript: normalizedTranscript,
+            };
+          });
+          if (!hasChanges) {
+            return previous;
+          }
+          return {
+            ...previous,
+            items: nextItems,
+          };
+        });
+        setSelectedCommunicationTranscript((previous) => {
+          if (!previous) {
+            return previous;
+          }
+          const transcriptKey = getCommunicationTranscriptCacheKey(previous);
+          if (!transcriptKey) {
+            return previous;
+          }
+          const normalizedTranscript = nextTranscriptsByMessageId[transcriptKey];
+          if (!normalizedTranscript) {
+            return previous;
+          }
+          return {
+            ...previous,
+            transcript: normalizedTranscript,
+          };
+        });
+      } catch (error) {
+        if (!isActive) {
+          return;
+        }
+        setTranscriptNormalizeError(error instanceof Error ? error.message : "Failed to normalize existing transcripts.");
+      } finally {
+        if (isActive) {
+          setIsNormalizingTranscripts(false);
+        }
+      }
+    }
+
+    void normalizeExistingTranscripts();
+
+    return () => {
+      isActive = false;
+    };
+  }, [ghlCommunications, ghlCommunicationsError, isLoadingGhlCommunications, normalizedClientName]);
 
   const contactInfo = useMemo(() => resolveContactInfo(record, ghlBasicNote), [ghlBasicNote, record]);
   const communicationItemsLoaded = useMemo(
@@ -263,15 +398,23 @@ export function RecordDetails({ record }: RecordDetailsProps) {
     () => parseSpeakerTranscriptTurns(selectedCommunicationTranscriptText),
     [selectedCommunicationTranscriptText],
   );
+  const selectedCommunicationNeedsFormatting = useMemo(
+    () => Boolean(selectedCommunicationTranscriptText && !isSpeakerLabeledTranscript(selectedCommunicationTranscriptText)),
+    [selectedCommunicationTranscriptText],
+  );
   const canTranscribeSelectedCommunication = useMemo(() => {
     if (!selectedCommunicationTranscript || normalizeCommunicationKind(selectedCommunicationTranscript.kind) !== "call") {
       return false;
     }
-    if (selectedCommunicationTranscriptText) {
+    const transcriptKey = getCommunicationTranscriptCacheKey(selectedCommunicationTranscript);
+    if (!normalizedClientName || !transcriptKey) {
       return false;
     }
-    return Boolean(normalizedClientName && getCommunicationTranscriptCacheKey(selectedCommunicationTranscript));
-  }, [normalizedClientName, selectedCommunicationTranscript, selectedCommunicationTranscriptText]);
+    if (!selectedCommunicationTranscriptText) {
+      return true;
+    }
+    return selectedCommunicationNeedsFormatting;
+  }, [normalizedClientName, selectedCommunicationNeedsFormatting, selectedCommunicationTranscript, selectedCommunicationTranscriptText]);
 
   async function handleGenerateTranscript() {
     if (!canTranscribeSelectedCommunication || !selectedCommunicationTranscript) {
@@ -551,6 +694,12 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                 <p className="react-user-footnote">
                   SMS: {ghlCommunications.smsCount || 0} · Calls: {ghlCommunications.callCount || 0}
                 </p>
+                {isNormalizingTranscripts ? (
+                  <p className="react-user-footnote">Formatting existing call transcripts...</p>
+                ) : null}
+                {!isNormalizingTranscripts && transcriptNormalizeError ? (
+                  <p className="record-details-ghl-note__error">{transcriptNormalizeError}</p>
+                ) : null}
                 <div className="record-details-communications__filters">
                   <Button
                     type="button"
@@ -699,7 +848,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
           <>
             {canTranscribeSelectedCommunication ? (
               <Button type="button" onClick={() => void handleGenerateTranscript()} isLoading={isGeneratingTranscript}>
-                Transcribe
+                {selectedCommunicationNeedsFormatting ? "Format Transcript" : "Transcribe"}
               </Button>
             ) : null}
             <Button
@@ -843,6 +992,14 @@ function resolveCommunicationTranscript(
     return "";
   }
   return body;
+}
+
+function isSpeakerLabeledTranscript(rawTranscript: string): boolean {
+  const transcript = (rawTranscript || "").toString().trim();
+  if (!transcript) {
+    return false;
+  }
+  return /(?:^|\n)\s*(?:manager|client|менеджер|клиент)\s*:/i.test(transcript);
 }
 
 function parseSpeakerTranscriptTurns(rawTranscript: string): SpeakerTranscriptTurn[] {

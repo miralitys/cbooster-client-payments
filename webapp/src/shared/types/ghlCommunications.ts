@@ -36,6 +36,31 @@ export interface GhlClientCommunicationTranscriptPayload {
   clientName: string;
   messageId: string;
   transcript: string;
+  rawTranscript?: string;
+  formattedTranscript?: string;
+  speakerLabeled?: boolean;
   generatedAt: string;
   source: string;
+  cached?: boolean;
+}
+
+export interface GhlClientCommunicationNormalizedTranscriptEntry {
+  messageId: string;
+  transcript: string;
+  rawTranscript: string;
+  formattedTranscript: string;
+  speakerLabeled: boolean;
+  cached: boolean;
+}
+
+export interface GhlClientCommunicationNormalizeTranscriptsPayload {
+  ok: boolean;
+  clientName: string;
+  totalCandidates: number;
+  requestedLimit: number;
+  processed: number;
+  formatted: number;
+  cached: number;
+  failed: number;
+  entries: GhlClientCommunicationNormalizedTranscriptEntry[];
 }
