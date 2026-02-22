@@ -9,6 +9,7 @@ export interface GhlClientCommunicationItem {
   kind: GhlClientCommunicationKind;
   direction: GhlClientCommunicationDirection;
   body: string;
+  transcript: string;
   status: string;
   createdAt: string;
   source: string;

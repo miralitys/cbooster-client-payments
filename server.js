@@ -14864,6 +14864,19 @@ function buildGhlCommunicationRecord(message, conversation) {
     120,
   );
   const kind = normalizeGhlCommunicationKind(rawType, messageType, message.type, recordingUrls.length > 0);
+  const callMeta =
+    message?.meta && typeof message.meta === "object" && message.meta.call && typeof message.meta.call === "object"
+      ? message.meta.call
+      : null;
+  const transcript = normalizeGhlNoteBody(
+    message.transcript ||
+      message.callTranscript ||
+      message.call_transcript ||
+      message.voiceTranscript ||
+      message.voice_transcript ||
+      callMeta?.transcript,
+    16000,
+  );
   const body = normalizeGhlNoteBody(
     message.body ||
       message.message ||
@@ -14889,10 +14902,6 @@ function buildGhlCommunicationRecord(message, conversation) {
     message.status || message.deliveryStatus || message.delivery_status,
     120,
   );
-  const callMeta =
-    message?.meta && typeof message.meta === "object" && message.meta.call && typeof message.meta.call === "object"
-      ? message.meta.call
-      : null;
   const callStatus = sanitizeTextValue(callMeta?.status || "", 120);
   const callDurationRaw = Number.parseInt(sanitizeTextValue(callMeta?.duration, 40), 10);
   const callDurationSec = Number.isFinite(callDurationRaw) ? Math.max(0, callDurationRaw) : null;
@@ -14908,6 +14917,7 @@ function buildGhlCommunicationRecord(message, conversation) {
     kind,
     direction,
     body,
+    transcript,
     status,
     createdAt,
     timestamp,
@@ -14936,7 +14946,8 @@ function dedupeAndSortGhlCommunicationRecords(items) {
       const existing = byId.get(key);
       if (
         (existing?.recordingUrls || []).length < (item?.recordingUrls || []).length ||
-        (existing?.attachmentUrls || []).length < (item?.attachmentUrls || []).length
+        (existing?.attachmentUrls || []).length < (item?.attachmentUrls || []).length ||
+        sanitizeTextValue(existing?.transcript, 16000).length < sanitizeTextValue(item?.transcript, 16000).length
       ) {
         byId.set(key, item);
       }

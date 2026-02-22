@@ -5,12 +5,13 @@ import { evaluateClientScore } from "@/features/client-score/domain/scoring";
 import type { GhlClientBasicNotePayload } from "@/shared/types/ghlNotes";
 import type {
   GhlClientCommunicationDirection,
+  GhlClientCommunicationItem,
   GhlClientCommunicationsPayload,
 } from "@/shared/types/ghlCommunications";
 import type { ClientRecord } from "@/shared/types/records";
 import { FIELD_DEFINITIONS, PAYMENT_PAIRS } from "@/features/client-payments/domain/constants";
 import { formatDate, formatMoney, getRecordStatusFlags, parseMoneyValue } from "@/features/client-payments/domain/calculations";
-import { Badge, Button } from "@/shared/ui";
+import { Badge, Button, Modal } from "@/shared/ui";
 
 interface RecordDetailsProps {
   record: ClientRecord;
@@ -61,6 +62,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const [isLoadingGhlCommunications, setIsLoadingGhlCommunications] = useState(false);
   const [ghlCommunicationsError, setGhlCommunicationsError] = useState("");
   const [visibleCommunicationCount, setVisibleCommunicationCount] = useState(COMMUNICATIONS_PAGE_SIZE);
+  const [selectedCommunicationTranscript, setSelectedCommunicationTranscript] = useState<GhlClientCommunicationItem | null>(null);
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
   const contractDisplay = useMemo(() => formatMoneyCell(record.contractTotals), [record.contractTotals]);
@@ -134,10 +136,12 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       setGhlCommunicationsError("");
       setIsLoadingGhlCommunications(false);
       setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+      setSelectedCommunicationTranscript(null);
       return;
     }
 
     setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+    setSelectedCommunicationTranscript(null);
 
     const abortController = new AbortController();
     let isActive = true;
@@ -427,53 +431,64 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                   SMS: {ghlCommunications.smsCount || 0} · Calls: {ghlCommunications.callCount || 0}
                 </p>
                 <div className="record-details-communications__list" role="list">
-                  {communicationItemsVisible.map((item) => (
-                    <article key={item.id} className="record-details-communications__item" role="listitem">
-                      <div className="record-details-communications__meta">
-                        <span className={`record-details-communications__kind record-details-communications__kind--${normalizeCommunicationKind(item.kind)}`}>
-                          {formatCommunicationKind(item.kind)}
-                        </span>
-                        <span className="record-details-communications__direction">{formatCommunicationDirection(item.direction)}</span>
-                        <span className="record-details-communications__date">{formatOptionalDateTime(item.createdAt)}</span>
-                      </div>
-                      <p className="record-details-communications__body">{item.body || "No text body."}</p>
-                      {item.recordingUrls && item.recordingUrls.length > 0 ? (
-                        <div className="record-details-communications__recordings">
-                          {item.recordingUrls.map((recordingUrl, index) => (
-                            <div key={`${item.id}:${recordingUrl}:${index}`} className="record-details-communications__recording-item">
-                              <span className="record-details-communications__recording-label">Recording {index + 1}</span>
-                              <audio className="record-details-communications__audio" controls preload="none" src={recordingUrl}>
-                                Your browser does not support audio playback.
-                              </audio>
+                  {communicationItemsVisible.map((item) => {
+                    const normalizedKind = normalizeCommunicationKind(item.kind);
+                    const transcriptText = resolveCommunicationTranscript(item);
+                    return (
+                      <article key={item.id} className="record-details-communications__item" role="listitem">
+                        <div className="record-details-communications__meta">
+                          <span className={`record-details-communications__kind record-details-communications__kind--${normalizedKind}`}>
+                            {formatCommunicationKind(item.kind)}
+                          </span>
+                          <span className="record-details-communications__direction">{formatCommunicationDirection(item.direction)}</span>
+                          <span className="record-details-communications__date">{formatOptionalDateTime(item.createdAt)}</span>
+                        </div>
+                        <p className="record-details-communications__body">{item.body || "No text body."}</p>
+                        {normalizedKind === "call" ? (
+                          <div className="record-details-communications__actions">
+                            <Button variant="secondary" size="sm" type="button" onClick={() => setSelectedCommunicationTranscript(item)}>
+                              {transcriptText ? "Transcript" : "Transcript (not available)"}
+                            </Button>
+                          </div>
+                        ) : null}
+                        {item.recordingUrls && item.recordingUrls.length > 0 ? (
+                          <div className="record-details-communications__recordings">
+                            {item.recordingUrls.map((recordingUrl, index) => (
+                              <div key={`${item.id}:${recordingUrl}:${index}`} className="record-details-communications__recording-item">
+                                <span className="record-details-communications__recording-label">Recording {index + 1}</span>
+                                <audio className="record-details-communications__audio" controls preload="none" src={recordingUrl}>
+                                  Your browser does not support audio playback.
+                                </audio>
+                                <a
+                                  href={recordingUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="record-details-communications__recording-link"
+                                >
+                                  Open in new tab
+                                </a>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {item.attachmentUrls && item.attachmentUrls.length > 0 ? (
+                          <div className="record-details-communications__recordings">
+                            {item.attachmentUrls.map((attachmentUrl, index) => (
                               <a
-                                href={recordingUrl}
+                                key={`${item.id}:${attachmentUrl}:${index}`}
+                                href={attachmentUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="record-details-communications__recording-link"
                               >
-                                Open in new tab
+                                Attachment {index + 1}
                               </a>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
-                      {item.attachmentUrls && item.attachmentUrls.length > 0 ? (
-                        <div className="record-details-communications__recordings">
-                          {item.attachmentUrls.map((attachmentUrl, index) => (
-                            <a
-                              key={`${item.id}:${attachmentUrl}:${index}`}
-                              href={attachmentUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="record-details-communications__recording-link"
-                            >
-                              Attachment {index + 1}
-                            </a>
-                          ))}
-                        </div>
-                      ) : null}
-                    </article>
-                  ))}
+                            ))}
+                          </div>
+                        ) : null}
+                      </article>
+                    );
+                  })}
                 </div>
                 {hiddenCommunicationCount > 0 ? (
                   <div className="record-details-communications__footer">
@@ -502,6 +517,30 @@ export function RecordDetails({ record }: RecordDetailsProps) {
           </section>
         </aside>
       </div>
+      <Modal
+        open={Boolean(selectedCommunicationTranscript)}
+        title="Call Transcript"
+        onClose={() => setSelectedCommunicationTranscript(null)}
+        footer={
+          <Button type="button" variant="secondary" onClick={() => setSelectedCommunicationTranscript(null)}>
+            Close
+          </Button>
+        }
+      >
+        {selectedCommunicationTranscript ? (
+          <div className="record-details-communications__transcript-modal">
+            <p className="react-user-footnote">
+              {formatCommunicationDirection(selectedCommunicationTranscript.direction)} ·{" "}
+              {formatOptionalDateTime(selectedCommunicationTranscript.createdAt)}
+            </p>
+            {resolveCommunicationTranscript(selectedCommunicationTranscript) ? (
+              <pre className="record-details-communications__transcript">{resolveCommunicationTranscript(selectedCommunicationTranscript)}</pre>
+            ) : (
+              <p className="react-user-footnote">Transcript is not available for this call yet.</p>
+            )}
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }
@@ -562,6 +601,23 @@ function formatCommunicationDirection(rawDirection: GhlClientCommunicationDirect
     return "Outbound";
   }
   return "Unknown";
+}
+
+function resolveCommunicationTranscript(item: GhlClientCommunicationItem): string {
+  const transcript = (item?.transcript || "").toString().trim();
+  if (transcript) {
+    return transcript;
+  }
+
+  if (normalizeCommunicationKind(item?.kind || "") !== "call") {
+    return "";
+  }
+
+  const body = (item?.body || "").toString().trim();
+  if (!body || body.toLowerCase() === "no text body.") {
+    return "";
+  }
+  return body;
 }
 
 function resolveStatusBadge(record: ClientRecord): BadgeMeta {
