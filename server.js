@@ -25273,10 +25273,26 @@ const IDENTITYIQ_PRIMARY_BUTTON_SELECTORS = Object.freeze([
   "[role='button']:has-text('Continue')",
 ]);
 const IDENTITYIQ_BUREAU_SCORE_PATTERNS = Object.freeze([
-  { bureau: "TransUnion", pattern: /transunion[^0-9]{0,32}([2-9]\d{2})/gi },
-  { bureau: "Equifax", pattern: /equifax[^0-9]{0,32}([2-9]\d{2})/gi },
-  { bureau: "Experian", pattern: /experian[^0-9]{0,32}([2-9]\d{2})/gi },
+  {
+    bureau: "TransUnion",
+    mentionPattern: /\btrans\s*[-_ ]?union\b/gi,
+    forwardPattern: /\btrans\s*[-_ ]?union\b[^0-9]{0,180}([2-9]\d(?:\s?\d))/gi,
+    reversePattern: /([2-9]\d(?:\s?\d))[^0-9]{0,120}\btrans\s*[-_ ]?union\b/gi,
+  },
+  {
+    bureau: "Equifax",
+    mentionPattern: /\bequifax\b/gi,
+    forwardPattern: /\bequifax\b[^0-9]{0,180}([2-9]\d(?:\s?\d))/gi,
+    reversePattern: /([2-9]\d(?:\s?\d))[^0-9]{0,120}\bequifax\b/gi,
+  },
+  {
+    bureau: "Experian",
+    mentionPattern: /\bexperian\b/gi,
+    forwardPattern: /\bexperian\b[^0-9]{0,180}([2-9]\d(?:\s?\d))/gi,
+    reversePattern: /([2-9]\d(?:\s?\d))[^0-9]{0,120}\bexperian\b/gi,
+  },
 ]);
+const IDENTITYIQ_BUREAU_ORDER = Object.freeze(IDENTITYIQ_BUREAU_SCORE_PATTERNS.map((entry) => entry.bureau));
 
 function normalizeIdentityIqEmail(rawValue) {
   const value = sanitizeTextValue(rawValue, 320).toLowerCase();
@@ -25637,7 +25653,7 @@ async function fillIdentityIqSecurityQuestionAnswer(page, ssnLast4) {
 }
 
 function normalizeIdentityIqPageText(value) {
-  return sanitizeTextValue((value || "").toString().replace(/\s+/g, " "), 60000);
+  return sanitizeTextValue((value || "").toString().replace(/\s+/g, " "), 180000);
 }
 
 async function readIdentityIqPageSignals(page) {
@@ -25645,6 +25661,8 @@ async function readIdentityIqPageSignals(page) {
     const text = document?.body?.innerText || "";
     const selectors = ["[data-testid*='score' i]", "[id*='score' i]", "[class*='score' i]", "[aria-label*='score' i]"];
     const fragments = [];
+    const keywordWindows = [];
+    const keywordSeen = new Set();
 
     for (const selector of selectors) {
       const nodes = document.querySelectorAll(selector);
@@ -25662,18 +25680,134 @@ async function readIdentityIqPageSignals(page) {
       }
     }
 
+    const rawHtml = (document?.documentElement?.innerHTML || "").replace(/\s+/g, " ");
+    const loweredHtml = rawHtml.toLowerCase();
+    const keywordMatchers = [
+      "transunion",
+      "trans union",
+      "equifax",
+      "experian",
+      "credit score",
+      "overall score",
+    ];
+    for (const keyword of keywordMatchers) {
+      let cursor = 0;
+      while (cursor < loweredHtml.length && keywordWindows.length < 28) {
+        const foundAt = loweredHtml.indexOf(keyword, cursor);
+        if (foundAt < 0) {
+          break;
+        }
+        const start = Math.max(0, foundAt - 120);
+        const end = Math.min(rawHtml.length, foundAt + keyword.length + 260);
+        const rawSnippet = rawHtml.slice(start, end);
+        const snippet = rawSnippet.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+        if (snippet && !keywordSeen.has(snippet)) {
+          keywordSeen.add(snippet);
+          keywordWindows.push(snippet);
+        }
+        cursor = foundAt + keyword.length;
+      }
+      if (keywordWindows.length >= 28) {
+        break;
+      }
+    }
+
     return {
       bodyText: text,
       fragments,
+      keywordWindows,
     };
   });
 
   const bodyText = normalizeIdentityIqPageText(payload?.bodyText || "");
   const fragments = Array.isArray(payload?.fragments) ? payload.fragments : [];
-  const composite = normalizeIdentityIqPageText([bodyText, ...fragments].join(" "));
+  const keywordWindows = Array.isArray(payload?.keywordWindows) ? payload.keywordWindows : [];
+  const composite = normalizeIdentityIqPageText([bodyText, ...fragments, ...keywordWindows].join(" "));
   return {
     bodyText,
     compositeText: composite,
+  };
+}
+
+function extractIdentityIqKeywordWindows(text, maxItems = 18) {
+  const normalizedText = normalizeIdentityIqPageText(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const windows = [];
+  const seen = new Set();
+  const matcher =
+    /\b(trans\s*[-_ ]?union|equifax|experian|credit\s*score|overall\s*score|vantage\s*score)\b/gi;
+  let match;
+  while ((match = matcher.exec(normalizedText)) !== null) {
+    const start = Math.max(0, match.index - 120);
+    const end = Math.min(normalizedText.length, match.index + match[0].length + 240);
+    const snippet = sanitizeTextValue(normalizedText.slice(start, end), 420);
+    if (!snippet || seen.has(snippet)) {
+      continue;
+    }
+    seen.add(snippet);
+    windows.push(snippet);
+    if (windows.length >= maxItems) {
+      break;
+    }
+  }
+
+  return windows;
+}
+
+function createIdentityIqResponseCollector(page) {
+  const snippets = [];
+  const seen = new Set();
+  const onResponse = async (response) => {
+    const status = Number.isFinite(response?.status?.()) ? response.status() : 0;
+    if (status >= 400) {
+      return;
+    }
+
+    const url = sanitizeTextValue(response?.url?.(), 700).toLowerCase();
+    if (!url.includes("identityiq.com")) {
+      return;
+    }
+
+    const headers = response?.headers?.() || {};
+    const contentType = sanitizeTextValue(headers["content-type"], 180).toLowerCase();
+    const likelyTextResponse =
+      /json|javascript|text|html/.test(contentType) ||
+      /\b(score|credit|bureau|dashboard|report|monitoring)\b/.test(url);
+    if (!likelyTextResponse) {
+      return;
+    }
+
+    let text = "";
+    try {
+      text = await response.text();
+    } catch {
+      return;
+    }
+
+    const windows = extractIdentityIqKeywordWindows(text, 8);
+    for (const snippet of windows) {
+      if (!snippet || seen.has(snippet)) {
+        continue;
+      }
+      seen.add(snippet);
+      snippets.push(snippet);
+      while (snippets.length > 42) {
+        snippets.shift();
+      }
+    }
+  };
+
+  page.on("response", onResponse);
+  return {
+    getCompositeText() {
+      return normalizeIdentityIqPageText(snippets.join(" "));
+    },
+    detach() {
+      page.off("response", onResponse);
+    },
   };
 }
 
@@ -25722,8 +25856,28 @@ function isIdentityIqLoginScreenLike(url, bodyText) {
   return loginPath && loginText;
 }
 
+function resolveIdentityIqBureauName(value) {
+  const normalized = sanitizeTextValue(value, 160).toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+
+  for (const entry of IDENTITYIQ_BUREAU_SCORE_PATTERNS) {
+    const matcher = new RegExp(entry.mentionPattern.source, "i");
+    if (matcher.test(normalized)) {
+      return entry.bureau;
+    }
+  }
+
+  return "";
+}
+
 function parseIdentityIqScoreNumber(value) {
-  const numeric = Number.parseInt(sanitizeTextValue(value, 12), 10);
+  const normalized = sanitizeTextValue(value, 24).replace(/\D/g, "");
+  if (!normalized || normalized.length !== 3) {
+    return null;
+  }
+  const numeric = Number.parseInt(normalized, 10);
   if (!Number.isFinite(numeric) || numeric < 250 || numeric > 900) {
     return null;
   }
@@ -25733,8 +25887,8 @@ function parseIdentityIqScoreNumber(value) {
 function dedupeIdentityIqBureauScores(items) {
   const byBureau = new Map();
   for (const item of Array.isArray(items) ? items : []) {
-    const bureau = sanitizeTextValue(item?.bureau, 32);
-    const score = Number.isFinite(item?.score) ? Number(item.score) : null;
+    const bureau = resolveIdentityIqBureauName(item?.bureau) || sanitizeTextValue(item?.bureau, 32);
+    const score = parseIdentityIqScoreNumber(item?.score);
     if (!bureau || score === null || byBureau.has(bureau)) {
       continue;
     }
@@ -25743,33 +25897,69 @@ function dedupeIdentityIqBureauScores(items) {
       score,
     });
   }
-  return Array.from(byBureau.values());
+
+  const orderedScores = [];
+  for (const bureau of IDENTITYIQ_BUREAU_ORDER) {
+    if (byBureau.has(bureau)) {
+      orderedScores.push(byBureau.get(bureau));
+      byBureau.delete(bureau);
+    }
+  }
+  for (const score of byBureau.values()) {
+    orderedScores.push(score);
+  }
+  return orderedScores;
 }
 
-function collectIdentityIqScoreCandidates(text) {
+function collectIdentityIqScoreCandidatesWithIndex(text) {
   const normalizedText = normalizeIdentityIqPageText(text);
   if (!normalizedText) {
     return [];
   }
 
-  const values = [];
-  const compactMatches = normalizedText.match(/\b([2-9]\d{2})\b/g) || [];
-  for (const match of compactMatches) {
-    const score = parseIdentityIqScoreNumber(match);
-    if (score !== null) {
-      values.push(score);
+  const candidates = [];
+  const seen = new Set();
+  const compactMatcher = /\b([2-9]\d{2})\b/g;
+  let compactMatch;
+  while ((compactMatch = compactMatcher.exec(normalizedText)) !== null) {
+    const score = parseIdentityIqScoreNumber(compactMatch[1]);
+    if (score === null) {
+      continue;
     }
+    const key = `${score}-${compactMatch.index}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    candidates.push({
+      score,
+      index: compactMatch.index,
+    });
   }
 
-  const splitDigitMatches = normalizedText.match(/\b([2-9]\d)\s+(\d)\b/g) || [];
-  for (const match of splitDigitMatches) {
-    const compactScore = sanitizeTextValue(match, 12).replace(/\s+/g, "");
-    const score = parseIdentityIqScoreNumber(compactScore);
-    if (score !== null) {
-      values.push(score);
+  const splitMatcher = /\b([2-9]\d)\s+(\d)\b/g;
+  let splitMatch;
+  while ((splitMatch = splitMatcher.exec(normalizedText)) !== null) {
+    const score = parseIdentityIqScoreNumber(`${splitMatch[1]}${splitMatch[2]}`);
+    if (score === null) {
+      continue;
     }
+    const key = `${score}-${splitMatch.index}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    candidates.push({
+      score,
+      index: splitMatch.index,
+    });
   }
 
+  return candidates;
+}
+
+function collectIdentityIqScoreCandidates(text) {
+  const values = collectIdentityIqScoreCandidatesWithIndex(text).map((candidate) => candidate.score);
   return Array.from(new Set(values));
 }
 
@@ -25779,30 +25969,72 @@ function parseIdentityIqBureauScores(text) {
     return [];
   }
 
-  const loweredText = normalizedText.toLowerCase();
   const matches = [];
 
   for (const entry of IDENTITYIQ_BUREAU_SCORE_PATTERNS) {
-    const needle = entry.bureau.toLowerCase();
-    let cursor = 0;
+    const hasBureauScore = matches.some((item) => item.bureau === entry.bureau);
+    if (hasBureauScore) {
+      continue;
+    }
 
-    while (cursor < loweredText.length) {
-      const foundAt = loweredText.indexOf(needle, cursor);
-      if (foundAt < 0) {
-        break;
-      }
-
-      const snippet = normalizedText.slice(foundAt, Math.min(foundAt + 220, normalizedText.length));
-      const candidates = collectIdentityIqScoreCandidates(snippet);
-      if (candidates.length) {
+    const forwardPattern = new RegExp(entry.forwardPattern.source, "gi");
+    let directMatch;
+    while ((directMatch = forwardPattern.exec(normalizedText)) !== null) {
+      const score = parseIdentityIqScoreNumber(directMatch[1]);
+      if (score !== null) {
         matches.push({
           bureau: entry.bureau,
-          score: candidates[0],
+          score,
         });
         break;
       }
+    }
 
-      cursor = foundAt + needle.length;
+    if (matches.some((item) => item.bureau === entry.bureau)) {
+      continue;
+    }
+
+    const reversePattern = new RegExp(entry.reversePattern.source, "gi");
+    while ((directMatch = reversePattern.exec(normalizedText)) !== null) {
+      const score = parseIdentityIqScoreNumber(directMatch[1]);
+      if (score !== null) {
+        matches.push({
+          bureau: entry.bureau,
+          score,
+        });
+        break;
+      }
+    }
+
+    if (matches.some((item) => item.bureau === entry.bureau)) {
+      continue;
+    }
+
+    const mentionPattern = new RegExp(entry.mentionPattern.source, "gi");
+    let mentionMatch;
+    while ((mentionMatch = mentionPattern.exec(normalizedText)) !== null) {
+      const mentionIndex = Number.isFinite(mentionMatch.index) ? mentionMatch.index : 0;
+      const start = Math.max(0, mentionIndex - 160);
+      const end = Math.min(normalizedText.length, mentionIndex + mentionMatch[0].length + 260);
+      const snippet = normalizedText.slice(start, end);
+      const localMentionOffset = mentionIndex - start;
+      const candidates = collectIdentityIqScoreCandidatesWithIndex(snippet);
+      if (!candidates.length) {
+        continue;
+      }
+      candidates.sort((left, right) => {
+        const leftDistance = Math.abs(left.index - localMentionOffset);
+        const rightDistance = Math.abs(right.index - localMentionOffset);
+        if (leftDistance !== rightDistance) {
+          return leftDistance - rightDistance;
+        }
+        return right.index - left.index;
+      });
+      matches.push({
+        bureau: entry.bureau,
+        score: candidates[0].score,
+      });
+      break;
     }
   }
 
@@ -25864,6 +26096,45 @@ function parseIdentityIqScoreFromText(text) {
   };
 }
 
+function mergeIdentityIqScorePayloads(payloads) {
+  const snippets = [];
+  const seenSnippets = new Set();
+  const bureauScores = [];
+  let score = null;
+
+  for (const payload of Array.isArray(payloads) ? payloads : []) {
+    if (!payload || typeof payload !== "object") {
+      continue;
+    }
+    if (score === null && Number.isFinite(payload.score)) {
+      score = Number(payload.score);
+    }
+
+    for (const bureauScore of Array.isArray(payload.bureauScores) ? payload.bureauScores : []) {
+      bureauScores.push(bureauScore);
+    }
+    for (const snippet of Array.isArray(payload.snippets) ? payload.snippets : []) {
+      const normalizedSnippet = sanitizeTextValue(snippet, 260);
+      if (!normalizedSnippet || seenSnippets.has(normalizedSnippet)) {
+        continue;
+      }
+      seenSnippets.add(normalizedSnippet);
+      snippets.push(normalizedSnippet);
+    }
+  }
+
+  const dedupedBureauScores = dedupeIdentityIqBureauScores(bureauScores);
+  if (score === null && dedupedBureauScores.length) {
+    score = dedupedBureauScores[0].score;
+  }
+
+  return {
+    score,
+    bureauScores: dedupedBureauScores,
+    snippets: snippets.slice(0, 10),
+  };
+}
+
 function isIdentityIqLikelyAuthenticated(url, bodyText, scorePayload) {
   const normalizedUrl = sanitizeTextValue(url, 600).toLowerCase();
   const normalizedBody = normalizeIdentityIqPageText(bodyText).toLowerCase();
@@ -25906,6 +26177,7 @@ async function fetchIdentityIqCreditScore(payload) {
     },
   });
   const page = await context.newPage();
+  const responseCollector = createIdentityIqResponseCollector(page);
   const startedAt = Date.now();
   page.setDefaultTimeout(IDENTITYIQ_NAVIGATION_TIMEOUT_MS);
 
@@ -26018,7 +26290,9 @@ async function fetchIdentityIqCreditScore(payload) {
       pageSignals = await readIdentityIqPageSignals(page);
     }
 
-    const scorePayload = parseIdentityIqScoreFromText(pageSignals.compositeText);
+    const pageScorePayload = parseIdentityIqScoreFromText(pageSignals.compositeText);
+    const responseScorePayload = parseIdentityIqScoreFromText(responseCollector.getCompositeText());
+    const scorePayload = mergeIdentityIqScorePayloads([pageScorePayload, responseScorePayload]);
     const authenticated = isIdentityIqLikelyAuthenticated(page.url(), pageSignals.bodyText, scorePayload);
 
     if (!authenticated && isIdentityIqLoginScreenLike(page.url(), pageSignals.bodyText)) {
@@ -26047,7 +26321,13 @@ async function fetchIdentityIqCreditScore(payload) {
       });
     }
 
-    const scoreState = Number.isFinite(scorePayload.score) ? "ok" : "partial";
+    const hasAllBureauScores = IDENTITYIQ_BUREAU_ORDER.every((bureau) =>
+      scorePayload.bureauScores.some((item) => item.bureau === bureau),
+    );
+    const scoreState = Number.isFinite(scorePayload.score) && hasAllBureauScores ? "ok" : "partial";
+    const missingBureaus = IDENTITYIQ_BUREAU_ORDER.filter(
+      (bureau) => !scorePayload.bureauScores.some((item) => item.bureau === bureau),
+    );
     return {
       provider: "identityiq",
       status: scoreState,
@@ -26061,10 +26341,13 @@ async function fetchIdentityIqCreditScore(payload) {
       elapsedMs: Date.now() - startedAt,
       note:
         scoreState === "partial"
-          ? "Login completed, but only partial score signals were found."
+          ? missingBureaus.length
+            ? `Login completed, but bureau scores were not detected for: ${missingBureaus.join(", ")}.`
+            : "Login completed, but only partial score signals were found."
           : "Score extracted from IdentityIQ member portal.",
     };
   } finally {
+    responseCollector.detach();
     await context.close().catch(() => {});
     await browser.close().catch(() => {});
   }
