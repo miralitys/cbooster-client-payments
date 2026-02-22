@@ -1,297 +1,289 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useMemo, useState } from "react";
 
-import { downloadGhlClientContract, getGhlClientContracts } from "@/shared/api";
-import type { GhlClientContractRow } from "@/shared/types/ghlDocuments";
-import { Badge, Button, EmptyState, ErrorState, Input, LoadingSkeleton, PageShell, Panel, Table } from "@/shared/ui";
+import { getGhlContractText } from "@/shared/api";
+import { showToast } from "@/shared/lib/toast";
+import type { GhlContractTextResult } from "@/shared/types/ghlContractText";
+import { Badge, Button, EmptyState, Field, Input, PageHeader, PageShell, Panel, Table, Textarea } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
-const DEFAULT_LIMIT = 25;
+interface GhlContractTextFormState {
+  clientName: string;
+  login: string;
+  password: string;
+  locationId: string;
+}
+
+interface GhlContractTextHistoryRow extends GhlContractTextResult {
+  id: string;
+}
+
+const HISTORY_MAX_ROWS = 20;
 
 export default function GhlContractsPage() {
-  const [items, setItems] = useState<GhlClientContractRow[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
-  const [statusText, setStatusText] = useState("Loading client list and searching signed PDF contracts in GoHighLevel...");
-  const [downloadingMap, setDownloadingMap] = useState<Record<string, boolean>>({});
-  const [clientNameInput, setClientNameInput] = useState("");
-  const [activeClientQuery, setActiveClientQuery] = useState("");
+  const [form, setForm] = useState<GhlContractTextFormState>({
+    clientName: "",
+    login: "",
+    password: "",
+    locationId: "",
+  });
+  const [isLoading, setIsLoading] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const [statusMessage, setStatusMessage] = useState("Ready to extract contract text from GoHighLevel.");
+  const [latestResult, setLatestResult] = useState<GhlContractTextResult | null>(null);
+  const [historyRows, setHistoryRows] = useState<GhlContractTextHistoryRow[]>([]);
 
-  const loadContracts = useCallback(async (options?: { clientName?: string }) => {
-    const normalizedClientName = (options?.clientName || "").toString().trim();
-    setIsLoading(true);
-    setLoadError("");
-    setStatusText(
-      normalizedClientName
-        ? `Searching "${normalizedClientName}" in GoHighLevel...`
-        : "Loading client list and searching signed PDF contracts in GoHighLevel...",
-    );
-
-    try {
-      const payload = await getGhlClientContracts(DEFAULT_LIMIT, {
-        clientName: normalizedClientName,
-      });
-      const nextItems = Array.isArray(payload.items) ? payload.items : [];
-      const readyCount = nextItems.filter((item) => normalizeStatus(item.status) === "ready").length;
-
-      setItems(nextItems);
-      setActiveClientQuery(normalizedClientName);
-      if (normalizedClientName) {
-        setStatusText(`Loaded ${nextItems.length} match for "${normalizedClientName}". Contracts ready: ${readyCount}.`);
-      } else {
-        setStatusText(`Loaded ${nextItems.length} clients. Contracts ready for download: ${readyCount}.`);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load contract download table.";
-      setItems([]);
-      setLoadError(message);
-      setStatusText(message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadContracts();
-  }, [loadContracts]);
-
-  const handleFindClient = useCallback(async () => {
-    const normalized = clientNameInput.trim();
-    if (!normalized) {
-      return;
-    }
-    await loadContracts({
-      clientName: normalized,
-    });
-  }, [clientNameInput, loadContracts]);
-
-  const handleShowFirstClients = useCallback(async () => {
-    setClientNameInput("");
-    await loadContracts();
-  }, [loadContracts]);
-
-  const handleDownload = useCallback(async (item: GhlClientContractRow) => {
-    const status = normalizeStatus(item.status);
-    if (status !== "ready" && status !== "no_contract") {
-      return;
-    }
-
-    const rowKey = buildRowKey(item);
-    setDownloadingMap((prev) => ({
-      ...prev,
-      [rowKey]: true,
-    }));
-
-    try {
-      const { blob, fileName, mode } = await downloadGhlClientContract(item.clientName, item.contactId);
-      triggerBlobDownload(blob, ensurePdfFileName(fileName || item.contractTitle || item.clientName));
-      if (mode === "text-fallback") {
-        setStatusText(`Downloaded fallback PDF (from extracted contract text) for "${item.clientName}".`);
-      } else if (mode === "diagnostic-fallback") {
-        setStatusText(`Downloaded diagnostic fallback PDF for "${item.clientName}" (contract content unavailable from GHL API).`);
-      } else {
-        setStatusText(`Downloaded PDF contract for "${item.clientName}".`);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : `Failed to download contract for "${item.clientName}".`;
-      setStatusText(message);
-    } finally {
-      setDownloadingMap((prev) => {
-        const next = { ...prev };
-        delete next[rowKey];
-        return next;
-      });
-    }
-  }, []);
-
-  const columns = useMemo<TableColumn<GhlClientContractRow>[]>(() => {
+  const historyColumns = useMemo<TableColumn<GhlContractTextHistoryRow>[]>(() => {
     return [
       {
-        key: "clientName",
-        label: "Client Name",
+        key: "client",
+        label: "Client",
         align: "left",
-        cell: (item) => item.clientName || "-",
-      },
-      {
-        key: "contactName",
-        label: "Matched Contact",
-        align: "left",
-        cell: (item) => `${item.contactName || "-"} (${Math.max(0, Number(item.matchedContacts) || 0)})`,
-      },
-      {
-        key: "contract",
-        label: "Contract",
-        align: "left",
-        cell: (item) => (
-          <div className="ghl-contracts-contract-cell">
-            <span className="ghl-contracts-contract-title">{item.contractTitle || "-"}</span>
-            {item.contractUrl ? (
-              <a href={item.contractUrl} target="_blank" rel="noopener noreferrer" className="ghl-contracts-open-link">
-                Open in GHL
-              </a>
-            ) : null}
+        cell: (row) => (
+          <div>
+            <strong>{row.clientName || "Unnamed client"}</strong>
+            <div className="react-user-footnote">{row.contactName || "-"}</div>
           </div>
         ),
       },
       {
         key: "status",
         label: "Status",
-        align: "left",
-        cell: (item) => <Badge tone={statusToBadgeTone(item.status)}>{formatStatus(item.status)}</Badge>,
+        align: "center",
+        cell: (row) => <Badge tone={row.status === "ok" ? "success" : "warning"}>{row.status}</Badge>,
       },
       {
-        key: "actions",
-        label: "Download",
-        align: "left",
-        cell: (item) => {
-          const rowKey = buildRowKey(item);
-          const normalizedStatus = normalizeStatus(item.status);
-          const canDownload = normalizedStatus === "ready" || normalizedStatus === "no_contract";
-          return (
-            <div className="ghl-contracts-actions">
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => void handleDownload(item)}
-                isLoading={Boolean(downloadingMap[rowKey])}
-                disabled={!canDownload}
-              >
-                Download PDF
-              </Button>
-            </div>
-          );
-        },
+        key: "length",
+        label: "Text Length",
+        align: "center",
+        cell: (row) => `${Math.max(0, Number(row.textLength) || 0)} chars`,
+      },
+      {
+        key: "fetchedAt",
+        label: "Checked At",
+        align: "center",
+        cell: (row) => formatDateTime(row.fetchedAt),
       },
     ];
-  }, [downloadingMap, handleDownload]);
+  }, []);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitError("");
+
+    const validationError = validateGhlContractTextForm(form);
+    if (validationError) {
+      setSubmitError(validationError);
+      return;
+    }
+
+    setIsLoading(true);
+    setStatusMessage("Logging in to GoHighLevel and extracting contract text...");
+
+    try {
+      const payload = await getGhlContractText({
+        clientName: form.clientName.trim(),
+        login: form.login.trim() || undefined,
+        password: form.password || undefined,
+        locationId: form.locationId.trim() || undefined,
+      });
+
+      const result = payload?.result;
+      if (!result?.contractText) {
+        throw new Error("GoHighLevel returned an empty contract text result.");
+      }
+
+      setLatestResult(result);
+      setHistoryRows((previous) => {
+        const nextItem: GhlContractTextHistoryRow = {
+          ...result,
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        };
+        return [nextItem, ...previous].slice(0, HISTORY_MAX_ROWS);
+      });
+      setStatusMessage(`Last extraction completed at ${formatDateTime(result.fetchedAt)}.`);
+      setForm((previous) => ({
+        ...previous,
+        password: "",
+      }));
+      showToast({
+        type: "success",
+        message: "Contract text extracted.",
+        dedupeKey: "ghl-contract-text-success",
+        cooldownMs: 2200,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to extract GoHighLevel contract text.";
+      setSubmitError(message);
+      setStatusMessage("GoHighLevel contract text request failed.");
+      showToast({
+        type: "error",
+        message,
+        dedupeKey: `ghl-contract-text-error-${message}`,
+        cooldownMs: 2200,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }
 
   return (
     <PageShell className="ghl-contracts-react-page">
-      <Panel
-        className="table-panel ghl-contracts-react-table-panel"
-        title="GoHighLevel Client Contracts (PDF Download)"
-        actions={
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => void loadContracts()}
-            isLoading={isLoading}
-            disabled={isLoading}
-          >
-            Refresh
-          </Button>
+      <PageHeader
+        title="GoHighLevel Contract Text"
+        subtitle="Admin login-based contract text extraction"
+        meta={
+          <>
+            <p className={`dashboard-message ${submitError ? "error" : ""}`.trim()}>{submitError || statusMessage}</p>
+            <p className="react-user-footnote">
+              You can leave login/password empty to use server env vars: `GHL_ADMIN_LOGIN` and `GHL_ADMIN_PASSWORD`.
+            </p>
+          </>
         }
-      >
-        {!loadError ? <p className="dashboard-message ghl-contracts-status">{statusText}</p> : null}
-        <div className="ghl-contracts-toolbar">
-          <Input
-            className="ghl-contracts-search-input"
-            placeholder="Find client (e.g. Vladyslav Novosiadlyi)"
-            value={clientNameInput}
-            onChange={(event) => setClientNameInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void handleFindClient();
-              }
-            }}
-            disabled={isLoading}
-          />
-          <Button type="button" size="sm" onClick={() => void handleFindClient()} disabled={isLoading || !clientNameInput.trim()}>
-            Find Client
-          </Button>
-          {activeClientQuery ? (
-            <Button type="button" size="sm" variant="secondary" onClick={() => void handleShowFirstClients()} disabled={isLoading}>
-              Show First 25
+      />
+
+      <Panel className="table-panel" title="Extract Contract Text">
+        <form className="ghl-contracts-form" onSubmit={handleSubmit}>
+          <Field label="Client Name" htmlFor="ghl-contract-client-name">
+            <Input
+              id="ghl-contract-client-name"
+              autoComplete="off"
+              value={form.clientName}
+              onChange={(event) => setForm((previous) => ({ ...previous, clientName: event.target.value }))}
+              placeholder="Vladyslav Novosiadlyi"
+              hasError={Boolean(submitError) && !form.clientName.trim()}
+            />
+          </Field>
+
+          <Field label="Admin Login (optional)" htmlFor="ghl-contract-login">
+            <Input
+              id="ghl-contract-login"
+              autoComplete="username"
+              value={form.login}
+              onChange={(event) => setForm((previous) => ({ ...previous, login: event.target.value }))}
+              placeholder="admin@company.com"
+            />
+          </Field>
+
+          <Field label="Admin Password (optional)" htmlFor="ghl-contract-password">
+            <Input
+              id="ghl-contract-password"
+              type="password"
+              autoComplete="current-password"
+              value={form.password}
+              onChange={(event) => setForm((previous) => ({ ...previous, password: event.target.value }))}
+              placeholder="********"
+            />
+          </Field>
+
+          <Field label="Location ID (optional)" htmlFor="ghl-contract-location-id">
+            <Input
+              id="ghl-contract-location-id"
+              autoComplete="off"
+              value={form.locationId}
+              onChange={(event) => setForm((previous) => ({ ...previous, locationId: event.target.value }))}
+              placeholder="XTqqycBohnAAVy4uneZR"
+            />
+          </Field>
+
+          <div className="ghl-contracts-actions">
+            <Button type="submit" size="sm" isLoading={isLoading}>
+              Get Contract Text
             </Button>
-          ) : null}
-        </div>
+          </div>
+        </form>
+      </Panel>
 
-        {isLoading ? <LoadingSkeleton rows={8} /> : null}
+      <Panel className="table-panel" title="Latest Result">
+        {!latestResult ? (
+          <EmptyState title="No contract text loaded yet." description="Run an extraction to see contract text here." />
+        ) : (
+          <div className="ghl-contracts-result">
+            <div className="ghl-contracts-summary">
+              <div>
+                <p className="react-user-footnote">Client</p>
+                <p className="ghl-contracts-summary__value">{latestResult.clientName || "Unnamed client"}</p>
+              </div>
+              <div>
+                <p className="react-user-footnote">Status</p>
+                <Badge tone={latestResult.status === "ok" ? "success" : "warning"}>{latestResult.status}</Badge>
+              </div>
+              <div>
+                <p className="react-user-footnote">Text Length</p>
+                <p className="ghl-contracts-summary__value">{Math.max(0, Number(latestResult.textLength) || 0)} chars</p>
+              </div>
+            </div>
 
-        {!isLoading && loadError ? (
-          <ErrorState
-            title="Failed to load contract download table"
-            description={loadError}
-            actionLabel="Retry"
-            onAction={() => void loadContracts()}
-          />
-        ) : null}
+            <div className="ghl-contracts-meta">
+              <p className="react-user-footnote">
+                Checked at: {formatDateTime(latestResult.fetchedAt)} ({latestResult.elapsedMs} ms)
+              </p>
+              <p className="react-user-footnote">
+                Source: {latestResult.source || "-"}
+                {latestResult.fallbackMode && latestResult.fallbackMode !== "none" ? ` (${latestResult.fallbackMode})` : ""}
+              </p>
+              {latestResult.note ? <p className="react-user-footnote">{latestResult.note}</p> : null}
+              {latestResult.dashboardUrl ? (
+                <p className="react-user-footnote">
+                  Dashboard URL:
+                  {" "}
+                  <a href={latestResult.dashboardUrl} target="_blank" rel="noreferrer">
+                    {latestResult.dashboardUrl}
+                  </a>
+                </p>
+              ) : null}
+            </div>
 
-        {!isLoading && !loadError && !items.length ? <EmptyState title="No clients found." /> : null}
+            <div className="ghl-contracts-text">
+              <Textarea
+                className="ghl-contracts-textarea"
+                readOnly
+                value={latestResult.contractText || ""}
+                rows={18}
+              />
+            </div>
+          </div>
+        )}
+      </Panel>
 
-        {!isLoading && !loadError && items.length ? (
-          <Table
-            className="ghl-contracts-react-table-wrap"
-            columns={columns}
-            rows={items}
-            rowKey={(item) => buildRowKey(item)}
-            density="compact"
-          />
-        ) : null}
+      <Panel className="table-panel" title="Recent Extractions">
+        <Table
+          columns={historyColumns}
+          rows={historyRows}
+          rowKey={(row) => row.id}
+          className="ghl-contracts-history-wrap"
+          emptyState="No extraction history in this browser session yet."
+          density="compact"
+        />
       </Panel>
     </PageShell>
   );
 }
 
-function buildRowKey(item: GhlClientContractRow): string {
-  return `${item.clientName || "client"}::${item.contactId || "-"}`;
+function validateGhlContractTextForm(form: GhlContractTextFormState): string {
+  if (!form.clientName.trim()) {
+    return "Client name is required.";
+  }
+
+  const hasLogin = Boolean(form.login.trim());
+  const hasPassword = Boolean(form.password.trim());
+  if (hasLogin !== hasPassword) {
+    return "Provide both admin login and password, or leave both empty to use server env credentials.";
+  }
+
+  return "";
 }
 
-function triggerBlobDownload(blob: Blob, fileName: string) {
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = fileName;
-  anchor.rel = "noopener";
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(objectUrl);
-}
+function formatDateTime(rawValue: string): string {
+  const date = new Date(rawValue);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
 
-function ensurePdfFileName(fileName: string): string {
-  const normalized = (fileName || "").toString().trim() || "contract";
-  return normalized.toLowerCase().endsWith(".pdf") ? normalized : `${normalized}.pdf`;
-}
-
-function normalizeStatus(status: string): "ready" | "no_contact" | "no_contract" | "error" {
-  const normalized = (status || "").toString().trim().toLowerCase();
-  if (normalized === "ready") {
-    return "ready";
-  }
-  if (normalized === "no_contact") {
-    return "no_contact";
-  }
-  if (normalized === "no_contract") {
-    return "no_contract";
-  }
-  return "error";
-}
-
-function statusToBadgeTone(status: string): "success" | "info" | "warning" | "danger" {
-  const normalized = normalizeStatus(status);
-  if (normalized === "ready") {
-    return "success";
-  }
-  if (normalized === "no_contact" || normalized === "no_contract") {
-    return "warning";
-  }
-  return "danger";
-}
-
-function formatStatus(status: string): string {
-  const normalized = normalizeStatus(status);
-  if (normalized === "ready") {
-    return "Ready to download";
-  }
-  if (normalized === "no_contact") {
-    return "Contact not found";
-  }
-  if (normalized === "no_contract") {
-    return "Contract not found";
-  }
-  if (normalized === "error") {
-    return "Lookup error";
-  }
-  return "Unknown";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }

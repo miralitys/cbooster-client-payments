@@ -20,13 +20,13 @@ export function AppRouter() {
         <Route path="client-score" element={<ClientScorePage />} />
         <Route path="payment-probability" element={<ClientScorePage />} />
         <Route path="identityiq-score" element={<IdentityIqScorePage />} />
+        <Route path="ghl-contracts" element={<GhlContractsPage />} />
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="custom-dashboard" element={<CustomDashboardPage />} />
         <Route path="quickbooks" element={<QuickBooksPage />} />
         <Route path="quickbooks-payments" element={<QuickBooksPage />} />
         <Route path="client-managers" element={<Navigate to="/client-payments" replace />} />
         <Route path="leads" element={<LeadsPage />} />
-        <Route path="ghl-contracts" element={<GhlContractsPage />} />
         <Route path="access-control" element={<AccessControlPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/client-payments" replace />} />

@@ -22,9 +22,8 @@ export {
 } from "@/shared/api/quickbooks";
 export { getClientManagers } from "@/shared/api/clientManagers";
 export { getGhlLeads } from "@/shared/api/ghlLeads";
-export { downloadGhlClientContract, getGhlClientContracts } from "@/shared/api/ghlDocuments";
 export { getGhlClientBasicNote } from "@/shared/api/ghlNotes";
-export { createAccessUser, getAccessModel, listAccessUsers, updateAccessUser } from "@/shared/api/accessControl";
+export { createAccessUser, deleteAccessUser, getAccessModel, listAccessUsers, updateAccessUser } from "@/shared/api/accessControl";
 export { listAssistantReviews, updateAssistantReview } from "@/shared/api/accessControl";
 export {
   getCustomDashboard,
@@ -35,3 +34,4 @@ export {
   uploadCustomDashboardFile,
 } from "@/shared/api/customDashboard";
 export { getIdentityIqCreditScore } from "@/shared/api/identityIq";
+export { getGhlContractText } from "@/shared/api/ghlContractText";

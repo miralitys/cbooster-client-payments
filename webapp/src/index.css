@@ -2218,6 +2218,21 @@ a {
   min-height: 120px;
 }
 
+.identityiq-history-row--selected td {
+  background: #eaf1ff;
+}
+
+.identityiq-history-row--selected:hover td {
+  background: #e0eaff;
+}
+
+.identityiq-history-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
 .identityiq-score-snippets {
   display: grid;
   gap: var(--space-2);
@@ -2309,56 +2324,63 @@ a {
   resize: vertical;
 }
 
-.ghl-contracts-status {
-  margin: 0;
-}
-
-.ghl-contracts-toolbar {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.ghl-contracts-search-input {
-  width: auto;
-  min-width: 280px;
-  max-width: 420px;
-  min-height: 34px;
-}
-
-.ghl-contracts-react-table-wrap {
-  min-height: 280px;
-  height: auto;
-  max-height: 72vh;
-  resize: vertical;
-}
-
-.ghl-contracts-contract-cell {
+.ghl-contracts-form {
   display: grid;
-  gap: 2px;
-}
-
-.ghl-contracts-contract-title {
-  font-weight: 600;
-}
-
-.ghl-contracts-open-link {
-  width: fit-content;
-  color: var(--color-primary);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.ghl-contracts-open-link:hover,
-.ghl-contracts-open-link:focus-visible {
-  color: var(--color-primary-hover);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+  align-items: end;
 }
 
 .ghl-contracts-actions {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-end;
+}
+
+.ghl-contracts-result {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.ghl-contracts-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--space-2);
+}
+
+.ghl-contracts-summary__value {
+  margin: 4px 0 0;
+  font-size: var(--font-size-lg);
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.ghl-contracts-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.ghl-contracts-meta p {
+  margin: 0;
+}
+
+.ghl-contracts-meta a {
+  color: var(--color-info);
+  text-decoration: underline;
+}
+
+.ghl-contracts-text {
+  display: grid;
+}
+
+.ghl-contracts-textarea {
+  min-height: 360px;
+  font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+}
+
+.ghl-contracts-history-wrap {
+  min-height: 120px;
 }
 
 .access-control-react-page {
@@ -2455,6 +2477,19 @@ a {
 .access-control-form-actions-react--end {
   width: 100%;
   justify-content: flex-end;
+}
+
+.access-control-form-actions-react--split {
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.access-control-form-actions-group-react {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 
 .access-control-users-table-wrap-react {

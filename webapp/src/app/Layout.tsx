@@ -16,9 +16,9 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/client-payments", label: "Client Payments" },
   { to: "/payment-probability", label: "Client Payment Probability" },
   { to: "/identityiq-score", label: "IdentityIQ Scores" },
+  { to: "/ghl-contracts", label: "GHL Contract Text" },
   { to: "/quickbooks", label: "QuickBooks" },
   { to: "/leads", label: "Leads" },
-  { to: "/ghl-contracts", label: "GHL Contracts" },
   { to: "/access-control", label: "Access Control" },
 ];
 
@@ -48,7 +48,7 @@ function resolvePageTitle(pathname: string): string {
   }
 
   if (pathname.startsWith("/ghl-contracts")) {
-    return "GHL Contracts";
+    return "GHL Contract Text";
   }
 
   if (pathname.startsWith("/access-control")) {
