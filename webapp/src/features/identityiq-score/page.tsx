@@ -269,8 +269,10 @@ export default function IdentityIqScorePage() {
           </div>
 
           <div className="identityiq-score-actions">
-            <p className="identityiq-score-actions__title">Run live check</p>
-            <p className="identityiq-score-actions__hint">Credentials are used for one request only.</p>
+            <div className="identityiq-score-actions__copy">
+              <p className="identityiq-score-actions__title">Run live check</p>
+              <p className="identityiq-score-actions__hint">Credentials are used for one request only.</p>
+            </div>
             <Button type="submit" size="md" isLoading={isLoading}>
               Get Credit Score
             </Button>
