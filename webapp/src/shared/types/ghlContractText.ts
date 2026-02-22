@@ -2,6 +2,7 @@ export interface GhlContractTextRequest {
   clientName: string;
   login?: string;
   password?: string;
+  mfaCode?: string;
   locationId?: string;
 }
 
