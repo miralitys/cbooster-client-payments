@@ -31,3 +31,4 @@ export {
   uploadCustomDashboardFile,
 } from "@/shared/api/customDashboard";
 export { getIdentityIqCreditScore } from "@/shared/api/identityIq";
+export { getGhlContractText } from "@/shared/api/ghlContractText";
