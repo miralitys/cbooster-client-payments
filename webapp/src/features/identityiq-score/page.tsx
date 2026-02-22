@@ -69,26 +69,13 @@ export default function IdentityIqScorePage() {
   }, [isLoading, loadingStatusIndex, statusMessage, submitError]);
 
   const bureauRows = useMemo(() => {
-    const source = Array.isArray(latestResult?.bureauScores) ? latestResult.bureauScores : [];
-    const scoreByBureau = new Map<string, number>();
-    for (const item of source) {
-      const bureau = item?.bureau?.trim();
-      if (!bureau || !Number.isFinite(item?.score) || scoreByBureau.has(bureau)) {
-        continue;
-      }
-      scoreByBureau.set(bureau, Number(item.score));
-    }
-    return BUREAU_ORDER.map((bureau) => ({
-      id: `${bureau}-${scoreByBureau.get(bureau) ?? "na"}`,
-      bureau,
-      score: scoreByBureau.get(bureau) ?? null,
+    const orderedScores = resolveOrderedBureauScores(latestResult?.bureauScores);
+    return orderedScores.map((item) => ({
+      id: `${item.bureau}-${item.score ?? "na"}`,
+      bureau: item.bureau,
+      score: item.score,
     }));
   }, [latestResult]);
-
-  const hasMissingBureauScores = useMemo(
-    () => bureauRows.some((row) => !Number.isFinite(row.score)),
-    [bureauRows],
-  );
 
   const historyColumns = useMemo<TableColumn<IdentityIqHistoryRow>[]>(() => {
     return [
@@ -104,10 +91,21 @@ export default function IdentityIqScorePage() {
         ),
       },
       {
-        key: "score",
-        label: "Score",
+        key: "bureaus",
+        label: "Bureaus",
         align: "center",
-        cell: (row) => <Badge tone={row.status === "ok" ? "success" : "warning"}>{formatScore(row.score)}</Badge>,
+        cell: (row) => {
+          const orderedScores = resolveOrderedBureauScores(row.bureauScores);
+          return (
+            <div className="identityiq-history-bureaus">
+              {orderedScores.map((item) => (
+                <Badge key={`${row.id}-${item.bureau}`} tone={Number.isFinite(item.score) ? "info" : "warning"}>
+                  {item.bureau.slice(0, 2).toUpperCase()} {formatScore(item.score)}
+                </Badge>
+              ))}
+            </div>
+          );
+        },
       },
       {
         key: "fetchedAt",
@@ -115,8 +113,24 @@ export default function IdentityIqScorePage() {
         align: "center",
         cell: (row) => formatDateTime(row.fetchedAt),
       },
+      {
+        key: "status",
+        label: "Status",
+        align: "center",
+        cell: (row) => <Badge tone={row.status === "ok" ? "success" : "warning"}>{formatResultStatus(row.status)}</Badge>,
+      },
     ];
   }, []);
+
+  const hasMissingBureauScores = useMemo(
+    () => bureauRows.some((row) => !Number.isFinite(row.score)),
+    [bureauRows],
+  );
+
+  const bureauLoadSummary = useMemo(() => {
+    const loadedCount = bureauRows.filter((row) => Number.isFinite(row.score)).length;
+    return `${loadedCount}/${bureauRows.length} bureaus loaded`;
+  }, [bureauRows]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -273,6 +287,10 @@ export default function IdentityIqScorePage() {
           <div className="identityiq-score-result">
             <div className="identityiq-latest-hero">
               <div className="identityiq-latest-hero__main">
+                <div className="identityiq-latest-hero__status-row">
+                  <Badge tone={latestResult.status === "ok" ? "success" : "warning"}>{formatResultStatus(latestResult.status)}</Badge>
+                  <span className="react-user-footnote">{bureauLoadSummary}</span>
+                </div>
                 <div>
                   <p className="react-user-footnote">Client</p>
                   <p className="identityiq-score-summary__value">{latestResult.clientName || "Unnamed client"}</p>
@@ -294,24 +312,18 @@ export default function IdentityIqScorePage() {
                   {latestResult.note ? <p className="react-user-footnote">{latestResult.note}</p> : null}
                 </div>
               </div>
-
-              <div className="identityiq-latest-hero__score">
-                <p className="react-user-footnote">Overall Score</p>
-                <p className="identityiq-overall-score__value">{formatScore(latestResult.score)}</p>
-                <Badge tone={latestResult.status === "ok" ? "success" : "warning"}>{formatResultStatus(latestResult.status)}</Badge>
-              </div>
             </div>
 
             <div className="identityiq-bureau-grid">
-              {bureauRows.map((row) => {
-                const visual = getScoreVisual(row.score);
+              {bureauRows.map((item) => {
+                const visual = getScoreVisual(item.score);
                 const barStyle = {
                   "--identityiq-score-ratio": `${visual.progress}%`,
                 } as CSSProperties;
                 return (
-                  <article key={row.id} className={`identityiq-bureau-card tone-${visual.tone}`}>
-                    <p className="identityiq-bureau-card__name">{row.bureau}</p>
-                    <p className="identityiq-bureau-card__score">{formatScore(row.score)}</p>
+                  <article key={item.id} className={`identityiq-bureau-card tone-${visual.tone}`}>
+                    <p className="identityiq-bureau-card__name">{item.bureau}</p>
+                    <p className="identityiq-bureau-card__score">{formatScore(item.score)}</p>
                     <p className="identityiq-bureau-card__tier">{visual.label}</p>
                     <div className="identityiq-bureau-card__bar" style={barStyle} />
                   </article>
@@ -351,6 +363,23 @@ export default function IdentityIqScorePage() {
       </Panel>
     </PageShell>
   );
+}
+
+function resolveOrderedBureauScores(source: IdentityIqCreditScoreResult["bureauScores"] | null | undefined): Array<{ bureau: string; score: number | null }> {
+  const scoreByBureau = new Map<string, number>();
+  for (const item of Array.isArray(source) ? source : []) {
+    const bureau = item?.bureau?.trim();
+    const score = Number.isFinite(item?.score) ? Number(item.score) : null;
+    if (!bureau || score === null || scoreByBureau.has(bureau)) {
+      continue;
+    }
+    scoreByBureau.set(bureau, score);
+  }
+
+  return BUREAU_ORDER.map((bureau) => ({
+    bureau,
+    score: scoreByBureau.get(bureau) ?? null,
+  }));
 }
 
 function validateIdentityIqForm(form: IdentityIqFormState): string {
