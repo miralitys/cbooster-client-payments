@@ -10,6 +10,7 @@ export interface AuthUser {
   isOwner: boolean;
   teamUsernames: string[];
   mustChangePassword?: boolean;
+  totpEnabled?: boolean;
 }
 
 export interface Session {

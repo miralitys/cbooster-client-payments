@@ -198,6 +198,18 @@ const LOGIN_FAILURE_IP_ACCOUNT_POLICY = Object.freeze({
   lockMs: 20 * 60 * 1000,
 });
 const WEB_AUTH_BCRYPT_COST = Math.min(Math.max(parsePositiveInteger(process.env.WEB_AUTH_BCRYPT_COST, 12), 10), 15);
+const WEB_AUTH_TOTP_ISSUER =
+  sanitizeTextValue(process.env.WEB_AUTH_TOTP_ISSUER, 140) || "Credit Booster";
+const WEB_AUTH_TOTP_PERIOD_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_TOTP_PERIOD_SEC, 30), 15),
+  120,
+);
+const WEB_AUTH_TOTP_WINDOW_STEPS = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_TOTP_WINDOW_STEPS, 1), 0),
+  3,
+);
+const WEB_AUTH_TOTP_DIGITS = 6;
+const WEB_AUTH_TOTP_BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const PERF_OBSERVABILITY_ENABLED = resolveOptionalBoolean(process.env.PERF_OBSERVABILITY_ENABLED) !== false;
 const PERF_HTTP_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.PERF_HTTP_SAMPLE_SIZE, 512), 64), 5000);
 const PERF_HTTP_MAX_ROUTES = Math.min(Math.max(parsePositiveInteger(process.env.PERF_HTTP_MAX_ROUTES, 250), 50), 2000);
@@ -2859,6 +2871,186 @@ function doesWebAuthPasswordMatchUser(userProfile, rawPassword) {
   }
 
   return false;
+}
+
+function resolveOptionalBooleanLoose(rawValue) {
+  if (typeof rawValue === "boolean") {
+    return rawValue;
+  }
+
+  if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+    if (rawValue === 1) {
+      return true;
+    }
+    if (rawValue === 0) {
+      return false;
+    }
+  }
+
+  return resolveOptionalBoolean(rawValue);
+}
+
+function normalizeWebAuthTotpSecret(rawValue) {
+  const value = sanitizeTextValue(rawValue, 260).toUpperCase();
+  if (!value) {
+    return "";
+  }
+
+  const normalized = value.replace(/[\s-]+/g, "").replace(/=+$/g, "");
+  if (normalized.length < 16 || normalized.length > 200) {
+    return "";
+  }
+  if (!/^[A-Z2-7]+$/.test(normalized)) {
+    return "";
+  }
+
+  return normalized;
+}
+
+function normalizeWebAuthTotpCode(rawValue) {
+  const value = sanitizeTextValue(rawValue, 40).replace(/\s+/g, "");
+  if (!/^\d{6}$/.test(value)) {
+    return "";
+  }
+  return value;
+}
+
+function decodeWebAuthTotpSecret(secret) {
+  const normalizedSecret = normalizeWebAuthTotpSecret(secret);
+  if (!normalizedSecret) {
+    return null;
+  }
+
+  let bits = 0;
+  let value = 0;
+  const bytes = [];
+
+  for (const char of normalizedSecret) {
+    const index = WEB_AUTH_TOTP_BASE32_ALPHABET.indexOf(char);
+    if (index < 0) {
+      return null;
+    }
+
+    value = (value << 5) | index;
+    bits += 5;
+
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+
+  if (!bytes.length) {
+    return null;
+  }
+
+  return Buffer.from(bytes);
+}
+
+function buildWebAuthTotpCode(secretBytes, counter) {
+  if (!Buffer.isBuffer(secretBytes) || !secretBytes.length) {
+    return "";
+  }
+
+  const normalizedCounter = Number.parseInt(counter, 10);
+  if (!Number.isFinite(normalizedCounter) || normalizedCounter < 0) {
+    return "";
+  }
+
+  const counterBuffer = Buffer.alloc(8);
+  counterBuffer.writeBigUInt64BE(BigInt(normalizedCounter), 0);
+
+  const digest = crypto.createHmac("sha1", secretBytes).update(counterBuffer).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binaryCode =
+    (((digest[offset] & 0x7f) << 24) |
+      ((digest[offset + 1] & 0xff) << 16) |
+      ((digest[offset + 2] & 0xff) << 8) |
+      (digest[offset + 3] & 0xff)) >>>
+    0;
+
+  const modulo = 10 ** WEB_AUTH_TOTP_DIGITS;
+  return String(binaryCode % modulo).padStart(WEB_AUTH_TOTP_DIGITS, "0");
+}
+
+function isWebAuthTotpCodeValid(secret, rawCode, nowMs = Date.now()) {
+  const code = normalizeWebAuthTotpCode(rawCode);
+  if (!code) {
+    return false;
+  }
+
+  const secretBytes = decodeWebAuthTotpSecret(secret);
+  if (!secretBytes) {
+    return false;
+  }
+
+  const normalizedNowMs = Number.parseInt(nowMs, 10);
+  const currentTimeMs = Number.isFinite(normalizedNowMs) ? normalizedNowMs : Date.now();
+  const stepMs = WEB_AUTH_TOTP_PERIOD_SEC * 1000;
+  const baseCounter = Math.floor(currentTimeMs / stepMs);
+
+  for (let offset = -WEB_AUTH_TOTP_WINDOW_STEPS; offset <= WEB_AUTH_TOTP_WINDOW_STEPS; offset += 1) {
+    const nextCounter = baseCounter + offset;
+    if (nextCounter < 0) {
+      continue;
+    }
+    const expected = buildWebAuthTotpCode(secretBytes, nextCounter);
+    if (expected && safeEqual(code, expected)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isWebAuthTwoFactorEnabled(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return false;
+  }
+
+  const secret = normalizeWebAuthTotpSecret(userProfile.totpSecret);
+  if (!secret) {
+    return false;
+  }
+
+  return resolveOptionalBooleanLoose(userProfile.totpEnabled) !== false;
+}
+
+function validateWebAuthTwoFactorCode(userProfile, rawCode) {
+  if (!isWebAuthTwoFactorEnabled(userProfile)) {
+    return {
+      ok: true,
+      required: false,
+      code: "",
+      error: "",
+    };
+  }
+
+  const code = normalizeWebAuthTotpCode(rawCode);
+  if (!code) {
+    return {
+      ok: false,
+      required: true,
+      code: "two_factor_required",
+      error: "Enter the 6-digit code from your Authenticator app.",
+    };
+  }
+
+  if (!isWebAuthTotpCodeValid(userProfile.totpSecret, code)) {
+    return {
+      ok: false,
+      required: true,
+      code: "two_factor_invalid",
+      error: "Invalid verification code.",
+    };
+  }
+
+  return {
+    ok: true,
+    required: true,
+    code: "",
+    error: "",
+  };
 }
 
 function resolveOptionalBoolean(rawValue) {
@@ -10944,6 +11136,16 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   let departmentId = normalizeWebAuthDepartmentId(rawUser.departmentId || rawUser.department);
   let roleId = normalizeWebAuthRoleId(rawUser.roleId || rawUser.role, departmentId);
   const teamUsernames = normalizeWebAuthTeamUsernames(rawUser.teamUsernames || rawUser.team);
+  const totpSecret = normalizeWebAuthTotpSecret(
+    rawUser.totpSecret || rawUser.totp_secret || rawUser.twoFactorSecret || rawUser.otpSecret,
+  );
+  const twoFactorSettingRaw =
+    rawUser.totpEnabled ??
+    rawUser.totp_enabled ??
+    rawUser.twoFactorEnabled ??
+    rawUser.requireTotp;
+  const twoFactorSetting = resolveOptionalBooleanLoose(twoFactorSettingRaw);
+  const totpEnabled = Boolean(totpSecret) && twoFactorSetting !== false;
   const isOwner = explicitOwner || roleId === WEB_AUTH_ROLE_OWNER || username === ownerUsername;
   const mustChangePassword = !isOwner && resolveOptionalBoolean(rawUser.mustChangePassword) === true;
 
@@ -10972,6 +11174,8 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     roleId,
     teamUsernames,
     mustChangePassword,
+    totpSecret,
+    totpEnabled,
     passwordConfiguredAsPlaintext: Boolean(password),
     invalidPasswordHashConfigured: Boolean(passwordHash) && !isPasswordHashValid,
   };
@@ -10988,6 +11192,16 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   let roleId = isOwner ? WEB_AUTH_ROLE_OWNER : normalizeWebAuthRoleId(rawUser?.roleId, departmentId);
   const teamUsernames = normalizeWebAuthTeamUsernames(rawUser?.teamUsernames || rawUser?.team)
     .filter((teamUsername) => teamUsername !== username);
+  const totpSecret = normalizeWebAuthTotpSecret(
+    rawUser?.totpSecret || rawUser?.totp_secret || rawUser?.twoFactorSecret || rawUser?.otpSecret,
+  );
+  const twoFactorSettingRaw =
+    rawUser?.totpEnabled ??
+    rawUser?.totp_enabled ??
+    rawUser?.twoFactorEnabled ??
+    rawUser?.requireTotp;
+  const twoFactorSetting = resolveOptionalBooleanLoose(twoFactorSettingRaw);
+  const totpEnabled = Boolean(totpSecret) && twoFactorSetting !== false;
   const mustChangePassword = !isOwner && resolveOptionalBoolean(rawUser?.mustChangePassword) === true;
 
   if (!isOwner) {
@@ -11022,6 +11236,8 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     roleName: getWebAuthRoleName(roleId),
     teamUsernames: isOwner ? [] : teamUsernames,
     mustChangePassword,
+    totpEnabled,
+    totpSecret,
     passwordConfiguredAsPlaintext: resolveOptionalBoolean(rawUser?.passwordConfiguredAsPlaintext) === true,
     invalidPasswordHashConfigured: resolveOptionalBoolean(rawUser?.invalidPasswordHashConfigured) === true,
   };
@@ -11221,6 +11437,7 @@ function buildWebAuthPublicUser(userProfile) {
       isOwner: false,
       teamUsernames: [],
       mustChangePassword: false,
+      totpEnabled: false,
     };
   }
 
@@ -11234,6 +11451,7 @@ function buildWebAuthPublicUser(userProfile) {
     isOwner: Boolean(userProfile.isOwner),
     teamUsernames: normalizeWebAuthTeamUsernames(userProfile.teamUsernames),
     mustChangePassword: !userProfile.isOwner && resolveOptionalBoolean(userProfile.mustChangePassword) === true,
+    totpEnabled: isWebAuthTwoFactorEnabled(userProfile),
   };
 }
 
@@ -11275,6 +11493,19 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
   }
 
   const teamUsernames = normalizeWebAuthTeamUsernames(payload.teamUsernames || payload.team);
+  const totpSecret = normalizeWebAuthTotpSecret(
+    payload.totpSecret || payload.totp_secret || payload.twoFactorSecret || payload.otpSecret,
+  );
+  const totpEnabledRaw =
+    payload.totpEnabled ??
+    payload.totp_enabled ??
+    payload.twoFactorEnabled ??
+    payload.requireTotp;
+  const totpEnabledRequested = resolveOptionalBooleanLoose(totpEnabledRaw);
+  if (totpEnabledRequested === true && !totpSecret) {
+    throw createHttpError("TOTP secret is required when two-factor authentication is enabled.", 400);
+  }
+  const totpEnabled = Boolean(totpSecret) && totpEnabledRequested !== false;
   const normalizedDisplayName = displayName || username;
   return {
     username,
@@ -11285,6 +11516,8 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     roleId,
     teamUsernames,
     mustChangePassword: true,
+    totpSecret,
+    totpEnabled,
   };
 }
 
@@ -11333,6 +11566,16 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
   const hasRoleInPayload = Object.prototype.hasOwnProperty.call(payload, "roleId") || Object.prototype.hasOwnProperty.call(payload, "role");
   const hasTeamInPayload = Object.prototype.hasOwnProperty.call(payload, "teamUsernames") || Object.prototype.hasOwnProperty.call(payload, "team");
   const hasMustChangePasswordInPayload = Object.prototype.hasOwnProperty.call(payload, "mustChangePassword");
+  const hasTotpSecretInPayload =
+    Object.prototype.hasOwnProperty.call(payload, "totpSecret") ||
+    Object.prototype.hasOwnProperty.call(payload, "totp_secret") ||
+    Object.prototype.hasOwnProperty.call(payload, "twoFactorSecret") ||
+    Object.prototype.hasOwnProperty.call(payload, "otpSecret");
+  const hasTotpEnabledInPayload =
+    Object.prototype.hasOwnProperty.call(payload, "totpEnabled") ||
+    Object.prototype.hasOwnProperty.call(payload, "totp_enabled") ||
+    Object.prototype.hasOwnProperty.call(payload, "twoFactorEnabled") ||
+    Object.prototype.hasOwnProperty.call(payload, "requireTotp");
 
   const departmentId = hasDepartmentInPayload
     ? normalizeWebAuthDepartmentId(payload.departmentId || payload.department)
@@ -11362,6 +11605,21 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
     mustChangePassword = true;
   }
 
+  const existingTotpSecret = normalizeWebAuthTotpSecret(existing.totpSecret);
+  const totpSecret = hasTotpSecretInPayload
+    ? normalizeWebAuthTotpSecret(
+      payload.totpSecret || payload.totp_secret || payload.twoFactorSecret || payload.otpSecret,
+    )
+    : existingTotpSecret;
+  const totpEnabledRaw = hasTotpEnabledInPayload
+    ? payload.totpEnabled ?? payload.totp_enabled ?? payload.twoFactorEnabled ?? payload.requireTotp
+    : existing.totpEnabled;
+  const totpEnabledRequested = resolveOptionalBooleanLoose(totpEnabledRaw);
+  if (totpEnabledRequested === true && !totpSecret) {
+    throw createHttpError("TOTP secret is required when two-factor authentication is enabled.", 400);
+  }
+  const totpEnabled = Boolean(totpSecret) && totpEnabledRequested !== false;
+
   return {
     username,
     password,
@@ -11372,6 +11630,8 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
     roleId,
     teamUsernames: roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER ? teamUsernames : [],
     mustChangePassword,
+    totpSecret,
+    totpEnabled,
     passwordConfiguredAsPlaintext: false,
     invalidPasswordHashConfigured: false,
   };
@@ -11526,6 +11786,11 @@ function buildWebAuthAccessModel() {
 
   return {
     ownerUsername: WEB_AUTH_OWNER_USERNAME,
+    totp: {
+      issuer: sanitizeTextValue(WEB_AUTH_TOTP_ISSUER, 120) || "Credit Booster",
+      periodSec: WEB_AUTH_TOTP_PERIOD_SEC,
+      digits: WEB_AUTH_TOTP_DIGITS,
+    },
     roles: WEB_AUTH_ROLE_DEFINITIONS.map((role) => ({ ...role })),
     departments,
     users,
@@ -12207,12 +12472,30 @@ function isWebAuthPasswordChangeAllowedPath(pathname) {
   );
 }
 
+function resolveWebLoginErrorMessage(rawCode) {
+  const code = sanitizeTextValue(rawCode, 80).toLowerCase();
+  if (!code) {
+    return "";
+  }
+
+  if (code === "invalid_credentials" || code === "1") {
+    return "Invalid login or password.";
+  }
+  if (code === "two_factor_required") {
+    return "Enter the 6-digit code from your Authenticator app.";
+  }
+  if (code === "two_factor_invalid") {
+    return "Invalid verification code.";
+  }
+  return "";
+}
+
 function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
   const safeNextPath = resolveSafeNextPath(nextPath);
   const safeError = sanitizeTextValue(errorMessage, 200);
   const errorBlock = safeError
     ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
-    : `<p class="auth-help">Use your account credentials to access the dashboard.</p>`;
+    : `<p class="auth-help">Use your account credentials. If 2FA is enabled, enter your Authenticator code.</p>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -12371,6 +12654,17 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
         <label>
           Password
           <input type="password" name="password" autocomplete="current-password" required />
+        </label>
+        <label>
+          Authenticator Code (if enabled)
+          <input
+            type="text"
+            name="totpCode"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            placeholder="6-digit code"
+            pattern="[0-9]{6}"
+          />
         </label>
         <button type="submit">Log In</button>
       </form>
@@ -25106,7 +25400,7 @@ app.get("/login", (req, res) => {
     return;
   }
 
-  const hasError = Boolean(sanitizeTextValue(req.query.error, 20));
+  const errorCode = sanitizeTextValue(req.query.error, 80);
   res.setHeader("Cache-Control", "no-store, private");
   res
     .status(200)
@@ -25114,7 +25408,7 @@ app.get("/login", (req, res) => {
     .send(
       buildWebLoginPageHtml({
         nextPath,
-        errorMessage: hasError ? "Invalid login or password." : "",
+        errorMessage: resolveWebLoginErrorMessage(errorCode),
       }),
     );
 });
@@ -25122,6 +25416,7 @@ app.get("/login", (req, res) => {
 app.post("/login", (req, res) => {
   const username = req.body?.username;
   const password = req.body?.password;
+  const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
   const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
   if (!ensureLoginAttemptAllowed(req, res, username, nextPath)) {
     return;
@@ -25132,7 +25427,15 @@ app.post("/login", (req, res) => {
   if (!authUser) {
     registerFailedLoginAttempt(req, username);
     clearWebAuthSessionCookie(req, res);
-    res.redirect(302, `/login?error=1&next=${encodeURIComponent(nextPath)}`);
+    res.redirect(302, `/login?error=invalid_credentials&next=${encodeURIComponent(nextPath)}`);
+    return;
+  }
+
+  const twoFactorResult = validateWebAuthTwoFactorCode(authUser, totpCode);
+  if (!twoFactorResult.ok) {
+    registerFailedLoginAttempt(req, authUser.username);
+    clearWebAuthSessionCookie(req, res);
+    res.redirect(302, `/login?error=${encodeURIComponent(twoFactorResult.code)}&next=${encodeURIComponent(nextPath)}`);
     return;
   }
 
@@ -25148,6 +25451,7 @@ app.post("/login", (req, res) => {
 function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
   const password = req.body?.password;
+  const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
   if (!ensureLoginAttemptAllowed(req, res, username, "/")) {
     return;
   }
@@ -25159,6 +25463,18 @@ function handleApiAuthLogin(req, res) {
     clearWebAuthSessionCookie(req, res);
     res.status(401).json({
       error: "Invalid login or password.",
+    });
+    return;
+  }
+
+  const twoFactorResult = validateWebAuthTwoFactorCode(authUser, totpCode);
+  if (!twoFactorResult.ok) {
+    registerFailedLoginAttempt(req, authUser.username);
+    clearWebAuthSessionCookie(req, res);
+    res.status(401).json({
+      error: twoFactorResult.error,
+      code: twoFactorResult.code,
+      twoFactorRequired: true,
     });
     return;
   }

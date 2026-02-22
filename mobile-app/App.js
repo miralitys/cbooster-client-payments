@@ -301,6 +301,7 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
+  const [loginTotpCode, setLoginTotpCode] = useState("");
   const [isSigningIn, setIsSigningIn] = useState(false);
 
   const [records, setRecords] = useState([]);
@@ -328,6 +329,7 @@ export default function App() {
   const [isSensitiveVisible, setIsSensitiveVisible] = useState(false);
   const [isSensitiveAuthModalVisible, setIsSensitiveAuthModalVisible] = useState(false);
   const [sensitiveAuthPassword, setSensitiveAuthPassword] = useState("");
+  const [sensitiveAuthTotpCode, setSensitiveAuthTotpCode] = useState("");
   const [sensitiveAuthError, setSensitiveAuthError] = useState("");
   const [isSensitiveAuthSubmitting, setIsSensitiveAuthSubmitting] = useState(false);
   const sensitiveRevealTimeoutRef = useRef(null);
@@ -364,6 +366,7 @@ export default function App() {
     setRecords([]);
     setRecordsUpdatedAt("");
     setRecordsError("");
+    setLoginTotpCode("");
     setPendingSubmissions([]);
     setModerationError("");
     setActiveSubmissionId("");
@@ -374,6 +377,7 @@ export default function App() {
     setIsSensitiveVisible(false);
     setIsSensitiveAuthModalVisible(false);
     setSensitiveAuthPassword("");
+    setSensitiveAuthTotpCode("");
     setSensitiveAuthError("");
     setIsSensitiveAuthSubmitting(false);
     setIsLoadingRecords(false);
@@ -417,6 +421,7 @@ export default function App() {
   const handleSignIn = useCallback(async () => {
     const username = loginUsername.trim();
     const password = loginPassword;
+    const totpCode = loginTotpCode.trim();
     if (!username || !password) {
       setAuthError("Enter username and password.");
       return;
@@ -434,6 +439,7 @@ export default function App() {
         body: JSON.stringify({
           username,
           password,
+          ...(totpCode ? { totpCode } : {}),
         }),
       }, {
         deviceId: mobileDeviceIdRef.current,
@@ -445,16 +451,23 @@ export default function App() {
       setAuthUser(nextUsername);
       setAuthState(AUTH_STATE_SIGNED_IN);
       setLoginPassword("");
+      setLoginTotpCode("");
     } catch (error) {
       setAuthState(AUTH_STATE_SIGNED_OUT);
       setAuthUser("");
       setMobileSessionToken("");
-      setAuthError(error.message || "Invalid login or password.");
+      if (error?.code === "two_factor_required") {
+        setAuthError("Enter your 6-digit Authenticator code.");
+      } else if (error?.code === "two_factor_invalid") {
+        setAuthError("Authenticator code is invalid.");
+      } else {
+        setAuthError(error.message || "Invalid login or password.");
+      }
       resetAppDataForSignedOut();
     } finally {
       setIsSigningIn(false);
     }
-  }, [loginPassword, loginUsername, resetAppDataForSignedOut]);
+  }, [loginPassword, loginTotpCode, loginUsername, resetAppDataForSignedOut]);
 
   const handleSignOut = useCallback(async () => {
     try {
@@ -469,6 +482,7 @@ export default function App() {
     setAuthUser("");
     setMobileSessionToken("");
     setLoginPassword("");
+    setLoginTotpCode("");
     setAuthError("");
     resetAppDataForSignedOut();
   }, [requestApiJson, resetAppDataForSignedOut]);
@@ -487,6 +501,7 @@ export default function App() {
     hideSensitiveDetails();
     setIsSensitiveAuthModalVisible(false);
     setSensitiveAuthPassword("");
+    setSensitiveAuthTotpCode("");
     setSensitiveAuthError("");
     setIsSensitiveAuthSubmitting(false);
   }, [hideSensitiveDetails]);
@@ -499,6 +514,7 @@ export default function App() {
       hideSensitiveDetails();
       setIsSensitiveAuthModalVisible(false);
       setSensitiveAuthPassword("");
+      setSensitiveAuthTotpCode("");
       setSensitiveAuthError("");
       setIsSensitiveAuthSubmitting(false);
     },
@@ -507,6 +523,7 @@ export default function App() {
 
   const openSensitiveRevealAuth = useCallback(() => {
     setSensitiveAuthPassword("");
+    setSensitiveAuthTotpCode("");
     setSensitiveAuthError("");
     setIsSensitiveAuthModalVisible(true);
   }, []);
@@ -517,11 +534,13 @@ export default function App() {
     }
     setIsSensitiveAuthModalVisible(false);
     setSensitiveAuthPassword("");
+    setSensitiveAuthTotpCode("");
     setSensitiveAuthError("");
   }, [isSensitiveAuthSubmitting]);
 
   const revealSensitiveDetails = useCallback(async () => {
     const password = sensitiveAuthPassword;
+    const totpCode = sensitiveAuthTotpCode.trim();
     const username = (authUser || "").toString().trim();
 
     if (!password) {
@@ -546,6 +565,7 @@ export default function App() {
         body: JSON.stringify({
           username,
           password,
+          ...(totpCode ? { totpCode } : {}),
         }),
       }, {
         deviceId: mobileDeviceIdRef.current,
@@ -558,6 +578,7 @@ export default function App() {
       setAuthUser((body?.user?.username || username).toString());
       setIsSensitiveAuthModalVisible(false);
       setSensitiveAuthPassword("");
+      setSensitiveAuthTotpCode("");
       setSensitiveAuthError("");
       setIsSensitiveVisible(true);
 
@@ -569,7 +590,11 @@ export default function App() {
         sensitiveRevealTimeoutRef.current = null;
       }, SENSITIVE_REVEAL_DURATION_MS);
     } catch (error) {
-      if (error?.status === 401) {
+      if (error?.code === "two_factor_required") {
+        setSensitiveAuthError("Enter your 6-digit Authenticator code.");
+      } else if (error?.code === "two_factor_invalid") {
+        setSensitiveAuthError("Authenticator code is invalid.");
+      } else if (error?.status === 401) {
         setSensitiveAuthError("Invalid password.");
       } else {
         setSensitiveAuthError(error.message || "Failed to verify password.");
@@ -577,7 +602,7 @@ export default function App() {
     } finally {
       setIsSensitiveAuthSubmitting(false);
     }
-  }, [applyUnauthorizedState, authUser, sensitiveAuthPassword]);
+  }, [applyUnauthorizedState, authUser, sensitiveAuthPassword, sensitiveAuthTotpCode]);
 
   const openTrustedAttachmentUrl = useCallback(async (pathOrUrl) => {
     const url = toAbsoluteApiUrl(pathOrUrl);
@@ -942,9 +967,11 @@ export default function App() {
           authError={authError}
           username={loginUsername}
           password={loginPassword}
+          totpCode={loginTotpCode}
           isSigningIn={isSigningIn}
           onChangeUsername={setLoginUsername}
           onChangePassword={setLoginPassword}
+          onChangeTotpCode={setLoginTotpCode}
           onSignIn={handleSignIn}
         />
       ) : null}
@@ -1104,6 +1131,21 @@ export default function App() {
                     autoCapitalize="none"
                     autoCorrect={false}
                     secureTextEntry
+                    editable={!isSensitiveAuthSubmitting}
+                  />
+                </View>
+
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>Authenticator Code (if enabled)</Text>
+                  <TextInput
+                    value={sensitiveAuthTotpCode}
+                    onChangeText={setSensitiveAuthTotpCode}
+                    placeholder="6-digit code"
+                    placeholderTextColor="#7b8ba5"
+                    style={styles.fieldInput}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="number-pad"
                     editable={!isSensitiveAuthSubmitting}
                   />
                 </View>
@@ -1484,9 +1526,11 @@ function AuthScreen({
   authError,
   username,
   password,
+  totpCode,
   isSigningIn,
   onChangeUsername,
   onChangePassword,
+  onChangeTotpCode,
   onSignIn,
 }) {
   return (
@@ -1524,6 +1568,20 @@ function AuthScreen({
             autoCapitalize="none"
             autoCorrect={false}
             secureTextEntry
+          />
+        </View>
+
+        <View style={styles.fieldGroup}>
+          <Text style={styles.fieldLabel}>Authenticator Code (if enabled)</Text>
+          <TextInput
+            value={totpCode}
+            onChangeText={onChangeTotpCode}
+            placeholder="6-digit code"
+            placeholderTextColor="#7b8ba5"
+            style={styles.fieldInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="number-pad"
           />
         </View>
 
@@ -3049,6 +3107,8 @@ async function requestJson(path, options = {}, authContext = {}) {
             body.error || body.details || `Request failed (${response.status})`,
           );
           error.status = response.status;
+          error.code = (body.code || "").toString().trim().toLowerCase();
+          error.payload = body;
           if (method === "GET" && attempt < retryAttempts && shouldRetryHttpStatus(response.status)) {
             await waitForDelay(computeRetryDelayMs(attempt + 1), optionSignal);
             continue;
