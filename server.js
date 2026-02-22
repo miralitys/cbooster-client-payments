@@ -29594,7 +29594,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-15",
+      matcherVersion: "ghl-contract-download-v2026-02-21-16",
       debugMode,
     });
   } catch (error) {
@@ -29665,7 +29665,8 @@ app.get("/api/ghl/client-contracts/download", requireWebPermission(WEB_AUTH_PERM
 
     const lookupRow = await resolveGhlClientContractDownloadRow(matchedClientName, {
       preferredContactId: requestedContactId,
-      debugEnabled: true,
+      fastMode: true,
+      debugEnabled: false,
     });
     const lookupStatus = normalizeGhlClientContractDownloadStatus(lookupRow?.status);
     if (lookupStatus === "error") {
