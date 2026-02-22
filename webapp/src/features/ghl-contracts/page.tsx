@@ -24,6 +24,9 @@ const GHL_MFA_ERROR_CODES = new Set([
   "ghl_mfa_invalid_code",
   "ghl_mfa_field_not_found",
   "ghl_mfa_submit_unavailable",
+  "ghl_mfa_session_expired",
+  "ghl_mfa_session_busy",
+  "ghl_mfa_code_required",
 ]);
 
 export default function GhlContractsPage() {
@@ -128,7 +131,9 @@ export default function GhlContractsPage() {
         setSubmitError("");
         setIsMfaDialogOpen(true);
         setStatusMessage("GoHighLevel requested MFA code. Enter it in the verification window.");
-        setMfaError(error.code === "ghl_mfa_invalid_code" ? "The code is invalid or expired. Enter a fresh code." : "");
+        setMfaError(
+          error.code === "ghl_mfa_invalid_code" ? "The code is invalid or expired. Enter a fresh code." : error.message,
+        );
         showToast({
           type: "info",
           message: "Enter the one-time code from email in the MFA window.",

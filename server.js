@@ -28155,6 +28155,47 @@ function isGhlMfaChallengeText(rawText) {
   return /\b(two factor|2fa|verification code|authenticator|otp|one-time code)\b/i.test(text);
 }
 
+async function hasVisibleGhlMfaInput(page) {
+  for (const selector of GHL_APP_MFA_INPUT_SELECTORS) {
+    const locator = page.locator(selector).first();
+    try {
+      const count = await locator.count();
+      if (!count) {
+        continue;
+      }
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const disabled = await locator.isDisabled().catch(() => false);
+      if (!disabled) {
+        return true;
+      }
+    } catch {
+      // Continue with next selector.
+    }
+  }
+  return false;
+}
+
+async function isGhlMfaChallengeActive(page, rawText = "") {
+  if (await hasVisibleGhlMfaInput(page)) {
+    return true;
+  }
+
+  const hasMfaText = isGhlMfaChallengeText(rawText);
+  if (!hasMfaText) {
+    return false;
+  }
+
+  const currentUrl = sanitizeTextValue(page?.url?.(), 2000).toLowerCase();
+  if (/\b(verify|verification|otp|two-factor|2fa|auth)\b/.test(currentUrl)) {
+    return true;
+  }
+
+  return false;
+}
+
 async function fillGhlMfaCode(page, rawCode) {
   const mfaCode = normalizeGhlMfaCode(rawCode);
   if (!mfaCode) {
@@ -30284,7 +30325,7 @@ async function submitGhlMfaAndWaitForCompletion(page, mfaCode, mfaSessionId = ""
 
   const storageSnapshot = await readGhlBrowserStorageSnapshot(page);
   const normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
-  if (isGhlMfaChallengeText(normalizedBody)) {
+  if (await isGhlMfaChallengeActive(page, normalizedBody)) {
     throw toGhlContractTextOperationError(
       "GoHighLevel MFA code was rejected or expired. Enter a fresh code and retry.",
       {
@@ -30322,7 +30363,7 @@ async function extractGhlContractTextFromAuthenticatedPage(page, options = {}) {
       },
     );
   }
-  if (isGhlMfaChallengeText(normalizedBody)) {
+  if (await isGhlMfaChallengeActive(page, normalizedBody)) {
     throw toGhlContractTextOperationError(
       mfaSessionId
         ? "GoHighLevel MFA code was rejected or expired. Enter a fresh code and retry."
@@ -30658,7 +30699,7 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
         },
       );
     }
-    if (isGhlMfaChallengeText(normalizedBody)) {
+    if (await isGhlMfaChallengeActive(page, normalizedBody)) {
       if (!mfaCode) {
         const createdMfaSessionId = createGhlContractTextMfaSession({
           browser,
