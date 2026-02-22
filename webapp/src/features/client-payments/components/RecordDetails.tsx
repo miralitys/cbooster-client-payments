@@ -70,6 +70,21 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const contractDisplay = useMemo(() => formatMoneyCell(record.contractTotals), [record.contractTotals]);
   const paidDisplay = useMemo(() => formatMoneyCell(record.totalPayments), [record.totalPayments]);
   const debtDisplay = useMemo(() => formatMoneyCell(record.futurePayments), [record.futurePayments]);
+  const managerDisplay = useMemo(() => {
+    const candidates = [
+      (record.closedBy || "").toString().trim(),
+      getOptionalRecordText(record, "manager"),
+      getOptionalRecordText(record, "assignedManager"),
+      getOptionalRecordText(record, "clientManager"),
+      getOptionalRecordText(record, "managerName"),
+    ];
+    for (const candidate of candidates) {
+      if (candidate) {
+        return candidate;
+      }
+    }
+    return "-";
+  }, [record]);
   const companyDisplay = useMemo(() => (record.companyName || "").trim() || "-", [record.companyName]);
   const avatarSource = useMemo(() => resolveAvatarSource(record, ghlBasicNote), [ghlBasicNote, record]);
   const avatarInitials = useMemo(() => buildAvatarInitials(normalizedClientName), [normalizedClientName]);
@@ -315,6 +330,10 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                   <span>
                     Debt: <strong>{debtDisplay}</strong>
                   </span>
+                </p>
+                <p className="record-profile-header__manager-line">
+                  <span className="record-profile-header__manager-label">Manager:</span>
+                  <strong>{managerDisplay}</strong>
                 </p>
               </div>
             </div>
