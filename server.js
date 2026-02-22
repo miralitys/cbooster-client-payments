@@ -604,6 +604,11 @@ const GHL_LEADS_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_LEADS_CACHE_TABLE_NAME,
   DEFAULT_GHL_LEADS_CACHE_TABLE_NAME,
 );
+const DEFAULT_GHL_CONTRACT_ARCHIVE_TABLE_NAME = "ghl_contract_pdf_archive";
+const GHL_CONTRACT_ARCHIVE_TABLE_NAME = resolveTableName(
+  process.env.DB_GHL_CONTRACT_ARCHIVE_TABLE_NAME,
+  DEFAULT_GHL_CONTRACT_ARCHIVE_TABLE_NAME,
+);
 const DEFAULT_ASSISTANT_REVIEW_TABLE_NAME = "assistant_review_queue";
 const ASSISTANT_REVIEW_TABLE_NAME = resolveTableName(
   process.env.DB_ASSISTANT_REVIEW_TABLE_NAME,
@@ -631,6 +636,7 @@ const QUICKBOOKS_AUTH_STATE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_AUTH_
 const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
 const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CACHE_TABLE_NAME);
 const GHL_LEADS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_LEADS_CACHE_TABLE_NAME);
+const GHL_CONTRACT_ARCHIVE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CONTRACT_ARCHIVE_TABLE_NAME);
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
 const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESSION_SCOPE_TABLE_NAME);
 const MINI_RUNTIME_STATE_TABLE = qualifyTableName(DB_SCHEMA, MINI_RUNTIME_STATE_TABLE_NAME);
@@ -658,6 +664,12 @@ const GHL_CLIENT_CONTRACT_DOWNLOAD_MAX_BYTES = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_DOWNLOAD_MAX_BYTES, 25 * 1024 * 1024), 1024 * 1024),
   150 * 1024 * 1024,
 );
+const GHL_CLIENT_CONTRACT_ARCHIVE_MAX_BYTES = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_ARCHIVE_MAX_BYTES, 25 * 1024 * 1024), 1024 * 1024),
+  150 * 1024 * 1024,
+);
+const GHL_CONTRACT_ARCHIVE_INGEST_TOKEN = sanitizeTextValue(process.env.GHL_CONTRACT_ARCHIVE_INGEST_TOKEN, 500);
+const GHL_CONTRACT_ARCHIVE_INGEST_TOKEN_HEADER_NAME = "x-ghl-contract-archive-token";
 const GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS, 55000), 4000),
   300000,
@@ -19714,6 +19726,79 @@ async function ensureDatabaseReady() {
       `);
 
       await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE} (
+          id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL DEFAULT '',
+          client_name_lookup TEXT NOT NULL DEFAULT '',
+          contact_id TEXT NOT NULL DEFAULT '',
+          contact_name TEXT NOT NULL DEFAULT '',
+          contract_title TEXT NOT NULL DEFAULT '',
+          contract_url TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'gohighlevel.archive',
+          event_type TEXT NOT NULL DEFAULT '',
+          external_id TEXT,
+          file_name TEXT NOT NULL DEFAULT '',
+          mime_type TEXT NOT NULL DEFAULT 'application/pdf',
+          size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+          content BYTEA NOT NULL,
+          metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+          archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
+        ADD COLUMN IF NOT EXISTS client_name_lookup TEXT NOT NULL DEFAULT ''
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
+        ADD COLUMN IF NOT EXISTS external_id TEXT
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
+        ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
+        ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      `);
+
+      await pool.query(`
+        ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE_NAME}_client_lookup_idx
+        ON ${GHL_CONTRACT_ARCHIVE_TABLE} (client_name_lookup)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE_NAME}_contact_id_idx
+        ON ${GHL_CONTRACT_ARCHIVE_TABLE} (contact_id)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE_NAME}_archived_at_idx
+        ON ${GHL_CONTRACT_ARCHIVE_TABLE} (archived_at DESC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE_NAME}_external_id_idx
+        ON ${GHL_CONTRACT_ARCHIVE_TABLE} (external_id)
+      `);
+
+      await pool.query(`
         CREATE TABLE IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE} (
           id BIGSERIAL PRIMARY KEY,
           asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -26731,6 +26816,480 @@ function ensurePdfFileName(rawFileName, fallbackBaseName = "contract") {
   return normalized.toLowerCase().endsWith(".pdf") ? normalized : `${normalized}.pdf`;
 }
 
+function pickFirstSanitizedTextValue(limit, ...values) {
+  const maxLength = Math.max(1, Math.min(parsePositiveInteger(limit, 120), 20000));
+  for (const value of values) {
+    const normalized = sanitizeTextValue(value, maxLength);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function resolveGhlContractArchiveIngestTokenFromRequest(req) {
+  const headerToken = sanitizeTextValue(req?.headers?.[GHL_CONTRACT_ARCHIVE_INGEST_TOKEN_HEADER_NAME], 2000);
+  if (headerToken) {
+    return headerToken;
+  }
+
+  const authorizationValue = sanitizeTextValue(req?.headers?.authorization, 2000);
+  const bearerMatch = authorizationValue.match(/^Bearer\s+(.+)$/i);
+  if (bearerMatch?.[1]) {
+    return sanitizeTextValue(bearerMatch[1], 2000);
+  }
+
+  const queryToken = sanitizeTextValue(req?.query?.token, 2000);
+  if (queryToken) {
+    return queryToken;
+  }
+
+  return sanitizeTextValue(req?.body?.token, 2000);
+}
+
+function isGhlContractArchiveIngestAuthorized(req) {
+  if (!GHL_CONTRACT_ARCHIVE_INGEST_TOKEN) {
+    return false;
+  }
+  const providedToken = resolveGhlContractArchiveIngestTokenFromRequest(req);
+  if (!providedToken) {
+    return false;
+  }
+  return safeEqual(providedToken, GHL_CONTRACT_ARCHIVE_INGEST_TOKEN);
+}
+
+function decodeGhlContractArchivePdfFromBase64(rawValue) {
+  const value = typeof rawValue === "string" ? rawValue.trim() : "";
+  if (!value) {
+    return null;
+  }
+
+  let encoded = value;
+  const dataUrlMatch = value.match(/^data:application\/pdf;base64,(.+)$/i);
+  if (dataUrlMatch?.[1]) {
+    encoded = dataUrlMatch[1];
+  }
+
+  const compact = encoded.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+  if (!compact) {
+    return null;
+  }
+  const estimatedBytes = Math.ceil((compact.length * 3) / 4);
+  if (estimatedBytes > GHL_CLIENT_CONTRACT_ARCHIVE_MAX_BYTES) {
+    throw createHttpError(
+      `Archived contract PDF is too large (${estimatedBytes} bytes). Max is ${GHL_CLIENT_CONTRACT_ARCHIVE_MAX_BYTES} bytes.`,
+      413,
+      "ghl_contract_archive_file_too_large",
+    );
+  }
+
+  let decoded;
+  try {
+    decoded = Buffer.from(compact, "base64");
+  } catch {
+    throw createHttpError("Invalid base64 contract PDF payload.", 400, "ghl_contract_archive_invalid_base64");
+  }
+
+  if (!decoded.length) {
+    throw createHttpError("Base64 contract PDF payload is empty.", 400, "ghl_contract_archive_empty_pdf");
+  }
+  if (decoded.length > GHL_CLIENT_CONTRACT_ARCHIVE_MAX_BYTES) {
+    throw createHttpError(
+      `Archived contract PDF is too large (${decoded.length} bytes). Max is ${GHL_CLIENT_CONTRACT_ARCHIVE_MAX_BYTES} bytes.`,
+      413,
+      "ghl_contract_archive_file_too_large",
+    );
+  }
+  if (decoded.length < 4 || decoded.subarray(0, 4).toString() !== "%PDF") {
+    throw createHttpError("Base64 payload is not a valid PDF file.", 400, "ghl_contract_archive_not_pdf");
+  }
+
+  return decoded;
+}
+
+function extractGhlContractArchiveIngestPayload(rawPayload) {
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : {};
+  const contract = payload?.contract && typeof payload.contract === "object" ? payload.contract : {};
+  const contact = payload?.contact && typeof payload.contact === "object" ? payload.contact : {};
+  const root = Object.keys(data).length ? data : payload;
+
+  const clientName = pickFirstSanitizedTextValue(
+    300,
+    root.clientName,
+    root.client_name,
+    contract.clientName,
+    contract.client_name,
+    payload.clientName,
+    payload.client_name,
+    root.contactName,
+    root.contact_name,
+    contact.name,
+    contact.fullName,
+  );
+  const contactName = pickFirstSanitizedTextValue(
+    300,
+    root.contactName,
+    root.contact_name,
+    contact.name,
+    contact.fullName,
+    payload.contactName,
+    payload.contact_name,
+    clientName,
+  );
+  const contactId = pickFirstSanitizedTextValue(
+    200,
+    root.contactId,
+    root.contact_id,
+    contact.id,
+    contact.contactId,
+    payload.contactId,
+    payload.contact_id,
+  );
+  const contractTitle = pickFirstSanitizedTextValue(
+    300,
+    root.contractTitle,
+    root.contract_title,
+    root.documentTitle,
+    root.document_title,
+    contract.title,
+    contract.name,
+    root.title,
+    payload.contractTitle,
+    payload.contract_title,
+  );
+  const contractUrl = pickFirstSanitizedTextValue(
+    2000,
+    root.contractUrl,
+    root.contract_url,
+    root.documentUrl,
+    root.document_url,
+    root.downloadUrl,
+    root.download_url,
+    contract.url,
+    payload.contractUrl,
+    payload.contract_url,
+  );
+  const source = pickFirstSanitizedTextValue(200, root.source, payload.source) || "gohighlevel.webhook";
+  const eventType = pickFirstSanitizedTextValue(
+    120,
+    root.eventType,
+    root.event_type,
+    root.event,
+    root.type,
+    payload.eventType,
+    payload.event_type,
+    payload.event,
+    payload.type,
+  );
+  const externalId =
+    pickFirstSanitizedTextValue(
+      240,
+      root.externalId,
+      root.external_id,
+      root.documentId,
+      root.document_id,
+      root.proposalId,
+      root.proposal_id,
+      root.id,
+      payload.externalId,
+      payload.external_id,
+      payload.documentId,
+      payload.document_id,
+      payload.id,
+    ) || "";
+  const fileName = pickFirstSanitizedTextValue(
+    260,
+    root.fileName,
+    root.file_name,
+    root.documentName,
+    root.document_name,
+    payload.fileName,
+    payload.file_name,
+  );
+  const mimeType = pickFirstSanitizedTextValue(
+    120,
+    root.mimeType,
+    root.mime_type,
+    payload.mimeType,
+    payload.mime_type,
+    "application/pdf",
+  );
+  const archivedAt = pickFirstSanitizedTextValue(
+    80,
+    root.archivedAt,
+    root.archived_at,
+    root.signedAt,
+    root.signed_at,
+    root.completedAt,
+    root.completed_at,
+    payload.archivedAt,
+    payload.archived_at,
+  );
+
+  let fileBase64 = "";
+  for (const candidate of [
+    root.fileBase64,
+    root.file_base64,
+    root.pdfBase64,
+    root.pdf_base64,
+    root.contentBase64,
+    root.content_base64,
+    payload.fileBase64,
+    payload.file_base64,
+    payload.pdfBase64,
+    payload.pdf_base64,
+  ]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      fileBase64 = candidate.trim();
+      break;
+    }
+  }
+
+  return {
+    clientName,
+    contactName,
+    contactId,
+    contractTitle,
+    contractUrl,
+    source,
+    eventType,
+    externalId,
+    fileName,
+    mimeType,
+    archivedAt,
+    fileBase64,
+    payloadSummary: summarizeGhlPayloadForDebug(payload),
+  };
+}
+
+function mapGhlContractArchiveRow(rawRow) {
+  if (!rawRow || typeof rawRow !== "object") {
+    return null;
+  }
+
+  let contentBuffer = Buffer.alloc(0);
+  if (Buffer.isBuffer(rawRow.content)) {
+    contentBuffer = rawRow.content;
+  } else if (rawRow.content) {
+    try {
+      contentBuffer = Buffer.from(rawRow.content);
+    } catch {
+      contentBuffer = Buffer.alloc(0);
+    }
+  }
+
+  return {
+    id: sanitizeTextValue(rawRow.id, 180),
+    clientName: sanitizeTextValue(rawRow.client_name, 300),
+    clientNameLookup: sanitizeTextValue(rawRow.client_name_lookup, 320),
+    contactId: sanitizeTextValue(rawRow.contact_id, 200),
+    contactName: sanitizeTextValue(rawRow.contact_name, 300),
+    contractTitle: sanitizeTextValue(rawRow.contract_title, 300),
+    contractUrl: sanitizeTextValue(rawRow.contract_url, 2000),
+    source: sanitizeTextValue(rawRow.source, 200),
+    eventType: sanitizeTextValue(rawRow.event_type, 120),
+    externalId: sanitizeTextValue(rawRow.external_id, 240),
+    fileName: sanitizeTextValue(rawRow.file_name, 300),
+    mimeType: sanitizeTextValue(rawRow.mime_type, 120) || "application/pdf",
+    sizeBytes: Number.isFinite(rawRow.size_bytes) ? Number(rawRow.size_bytes) : contentBuffer.length,
+    metadata: rawRow.metadata && typeof rawRow.metadata === "object" && !Array.isArray(rawRow.metadata) ? rawRow.metadata : {},
+    archivedAt: rawRow.archived_at || rawRow.updated_at || rawRow.created_at || null,
+    updatedAt: rawRow.updated_at || null,
+    createdAt: rawRow.created_at || null,
+    contentBuffer,
+  };
+}
+
+async function insertGhlContractArchiveRow(entry = {}) {
+  await ensureDatabaseReady();
+
+  const normalizedClientName = sanitizeTextValue(entry?.clientName, 300);
+  if (!normalizedClientName) {
+    throw createHttpError("Client name is required for contract archive.", 400, "ghl_contract_archive_client_required");
+  }
+  const normalizedClientNameLookup = normalizeNameForLookup(normalizedClientName);
+  const normalizedContactName = sanitizeTextValue(entry?.contactName, 300) || normalizedClientName;
+  const normalizedContactId = sanitizeTextValue(entry?.contactId, 200);
+  const normalizedContractTitle = sanitizeTextValue(entry?.contractTitle, 300) || "Contract";
+  const normalizedContractUrl = sanitizeTextValue(entry?.contractUrl, 2000);
+  const normalizedSource = sanitizeTextValue(entry?.source, 200) || "gohighlevel.archive";
+  const normalizedEventType = sanitizeTextValue(entry?.eventType, 120);
+  const normalizedExternalId = sanitizeTextValue(entry?.externalId, 240) || null;
+  const normalizedMimeType = normalizeAttachmentMimeType(entry?.mimeType) || "application/pdf";
+  const normalizedFileName = ensurePdfFileName(
+    sanitizeTextValue(entry?.fileName, 300) || normalizedContractTitle,
+    `${normalizedClientName} contract`,
+  );
+  const archivedAtIso = normalizeIsoTimestampOrNull(entry?.archivedAt) || new Date().toISOString();
+
+  const contentBuffer = Buffer.isBuffer(entry?.content) ? entry.content : Buffer.alloc(0);
+  if (!contentBuffer.length) {
+    throw createHttpError("Contract archive content is empty.", 400, "ghl_contract_archive_content_missing");
+  }
+  if (contentBuffer.length > GHL_CLIENT_CONTRACT_ARCHIVE_MAX_BYTES) {
+    throw createHttpError(
+      `Archived contract PDF is too large (${contentBuffer.length} bytes). Max is ${GHL_CLIENT_CONTRACT_ARCHIVE_MAX_BYTES} bytes.`,
+      413,
+      "ghl_contract_archive_file_too_large",
+    );
+  }
+  if (contentBuffer.length < 4 || contentBuffer.subarray(0, 4).toString() !== "%PDF") {
+    throw createHttpError("Archived contract content must be a PDF file.", 400, "ghl_contract_archive_not_pdf");
+  }
+
+  const metadataInput = entry?.metadata;
+  const normalizedMetadata =
+    metadataInput && typeof metadataInput === "object" && !Array.isArray(metadataInput)
+      ? metadataInput
+      : {};
+  const archiveId = `ghl-contract-${generateId()}`;
+  const result = await pool.query(
+    `
+      INSERT INTO ${GHL_CONTRACT_ARCHIVE_TABLE}
+        (
+          id,
+          client_name,
+          client_name_lookup,
+          contact_id,
+          contact_name,
+          contract_title,
+          contract_url,
+          source,
+          event_type,
+          external_id,
+          file_name,
+          mime_type,
+          size_bytes,
+          content,
+          metadata,
+          archived_at,
+          updated_at,
+          created_at
+        )
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::timestamptz, NOW(), NOW())
+      RETURNING
+        id,
+        client_name,
+        client_name_lookup,
+        contact_id,
+        contact_name,
+        contract_title,
+        contract_url,
+        source,
+        event_type,
+        external_id,
+        file_name,
+        mime_type,
+        size_bytes,
+        content,
+        metadata,
+        archived_at,
+        updated_at,
+        created_at
+    `,
+    [
+      archiveId,
+      normalizedClientName,
+      normalizedClientNameLookup,
+      normalizedContactId,
+      normalizedContactName,
+      normalizedContractTitle,
+      normalizedContractUrl,
+      normalizedSource,
+      normalizedEventType,
+      normalizedExternalId,
+      normalizedFileName,
+      normalizedMimeType,
+      contentBuffer.length,
+      contentBuffer,
+      JSON.stringify(normalizedMetadata),
+      archivedAtIso,
+    ],
+  );
+
+  return mapGhlContractArchiveRow(result.rows[0]);
+}
+
+async function getLatestGhlContractArchiveRow(clientName, contactId = "") {
+  await ensureDatabaseReady();
+
+  const normalizedContactId = sanitizeTextValue(contactId, 200);
+  if (normalizedContactId) {
+    const byContactId = await pool.query(
+      `
+        SELECT
+          id,
+          client_name,
+          client_name_lookup,
+          contact_id,
+          contact_name,
+          contract_title,
+          contract_url,
+          source,
+          event_type,
+          external_id,
+          file_name,
+          mime_type,
+          size_bytes,
+          content,
+          metadata,
+          archived_at,
+          updated_at,
+          created_at
+        FROM ${GHL_CONTRACT_ARCHIVE_TABLE}
+        WHERE contact_id = $1
+          AND size_bytes > 0
+        ORDER BY archived_at DESC, updated_at DESC, created_at DESC, id DESC
+        LIMIT 1
+      `,
+      [normalizedContactId],
+    );
+    if (byContactId.rows.length) {
+      return mapGhlContractArchiveRow(byContactId.rows[0]);
+    }
+  }
+
+  const normalizedClientNameLookup = normalizeNameForLookup(clientName);
+  if (!normalizedClientNameLookup) {
+    return null;
+  }
+  const byClientName = await pool.query(
+    `
+      SELECT
+        id,
+        client_name,
+        client_name_lookup,
+        contact_id,
+        contact_name,
+        contract_title,
+        contract_url,
+        source,
+        event_type,
+        external_id,
+        file_name,
+        mime_type,
+        size_bytes,
+        content,
+        metadata,
+        archived_at,
+        updated_at,
+        created_at
+      FROM ${GHL_CONTRACT_ARCHIVE_TABLE}
+      WHERE client_name_lookup = $1
+        AND size_bytes > 0
+      ORDER BY archived_at DESC, updated_at DESC, created_at DESC, id DESC
+      LIMIT 1
+    `,
+    [normalizedClientNameLookup],
+  );
+  if (!byClientName.rows.length) {
+    return null;
+  }
+  return mapGhlContractArchiveRow(byClientName.rows[0]);
+}
+
 function normalizeGhlContractTextForPdf(rawValue) {
   const value = sanitizeTextValue(rawValue, GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS + 2000);
   if (!value) {
@@ -29836,6 +30395,103 @@ app.post("/api/ghl/client-managers/refresh", requireWebPermission(WEB_AUTH_PERMI
   await respondGhlClientManagers(req, res, resolvedRefreshMode, "POST /api/ghl/client-managers/refresh");
 });
 
+app.post("/api/ghl/client-contracts/archive", async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  if (!GHL_CONTRACT_ARCHIVE_INGEST_TOKEN) {
+    res.status(503).json({
+      error: "Contract archive ingest is not configured. Set GHL_CONTRACT_ARCHIVE_INGEST_TOKEN.",
+    });
+    return;
+  }
+
+  if (!isGhlContractArchiveIngestAuthorized(req)) {
+    res.status(401).json({
+      error: `Unauthorized ingest request. Provide token via '${GHL_CONTRACT_ARCHIVE_INGEST_TOKEN_HEADER_NAME}' header, Bearer auth, or ?token=...`,
+    });
+    return;
+  }
+
+  try {
+    const payload = extractGhlContractArchiveIngestPayload(req.body);
+    if (!payload.clientName) {
+      res.status(400).json({
+        error: "Ingest payload is missing clientName.",
+      });
+      return;
+    }
+
+    let contractBuffer = null;
+    let resolvedFileName = payload.fileName;
+    let resolvedMimeType = payload.mimeType;
+    let resolvedContractUrl = payload.contractUrl;
+
+    if (payload.fileBase64) {
+      contractBuffer = decodeGhlContractArchivePdfFromBase64(payload.fileBase64);
+      if (!resolvedFileName) {
+        resolvedFileName = ensurePdfFileName(`${payload.clientName} contract`, `${payload.clientName} contract`);
+      }
+      if (!resolvedMimeType) {
+        resolvedMimeType = "application/pdf";
+      }
+    } else if (payload.contractUrl) {
+      const downloaded = await fetchGhlContractFileForDownload(payload.contractUrl);
+      contractBuffer = downloaded.buffer;
+      resolvedFileName = downloaded.fileName || resolvedFileName;
+      resolvedMimeType = downloaded.contentType || resolvedMimeType || "application/pdf";
+      resolvedContractUrl = payload.contractUrl;
+    } else {
+      res.status(400).json({
+        error: "Ingest payload must include contractUrl or fileBase64.",
+      });
+      return;
+    }
+
+    const archived = await insertGhlContractArchiveRow({
+      clientName: payload.clientName,
+      contactName: payload.contactName || payload.clientName,
+      contactId: payload.contactId,
+      contractTitle: payload.contractTitle || "Contract",
+      contractUrl: resolvedContractUrl,
+      source: payload.source || "gohighlevel.webhook",
+      eventType: payload.eventType,
+      externalId: payload.externalId,
+      fileName: resolvedFileName || `${payload.clientName} contract`,
+      mimeType: resolvedMimeType || "application/pdf",
+      content: contractBuffer,
+      archivedAt: payload.archivedAt,
+      metadata: {
+        ingest: "webhook",
+        payloadSummary: payload.payloadSummary,
+      },
+    });
+
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      ok: true,
+      archived: true,
+      id: archived?.id || "",
+      clientName: archived?.clientName || payload.clientName,
+      contactName: archived?.contactName || payload.contactName || payload.clientName,
+      contactId: archived?.contactId || payload.contactId || "",
+      fileName: archived?.fileName || resolvedFileName || "",
+      sizeBytes: Number.isFinite(archived?.sizeBytes) ? archived.sizeBytes : Buffer.byteLength(contractBuffer || Buffer.alloc(0)),
+      source: archived?.source || payload.source || "gohighlevel.webhook",
+      archivedAt: archived?.archivedAt || new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("POST /api/ghl/client-contracts/archive failed:", error);
+    res.status(error.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to archive GHL contract PDF.",
+    });
+  }
+});
+
 app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
@@ -29927,7 +30583,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-17",
+      matcherVersion: "ghl-contract-download-v2026-02-21-18",
       debugMode,
     });
   } catch (error) {
@@ -30018,6 +30674,31 @@ app.get("/api/ghl/client-contracts/download", requireWebPermission(WEB_AUTH_PERM
     if (lookupStatus === "ready" && lookupRow?.contractUrl) {
       try {
         const downloadResult = await fetchGhlContractFileForDownload(lookupRow.contractUrl);
+        try {
+          await insertGhlContractArchiveRow({
+            clientName: matchedClientName,
+            contactName: lookupRow?.contactName || matchedClientName,
+            contactId: lookupRow?.contactId,
+            contractTitle: lookupRow?.contractTitle || "Contract",
+            contractUrl: lookupRow?.contractUrl,
+            source: "gohighlevel.download.direct",
+            eventType: "direct_download",
+            externalId: extractLikelyGhlEntityId(lookupRow?.resolveById || lookupRow?.candidateId),
+            fileName: downloadResult.fileName || lookupRow?.contractTitle,
+            mimeType: downloadResult.contentType || "application/pdf",
+            content: downloadResult.buffer,
+            metadata: {
+              mode: "direct",
+              lookupStatus,
+            },
+          });
+        } catch (archiveError) {
+          console.warn(
+            "[ghl contracts] failed to persist direct contract archive:",
+            sanitizeTextValue(archiveError?.message, 320) || "unknown error",
+          );
+        }
+
         const fileName = ensurePdfFileName(downloadResult.fileName || lookupRow.contractTitle, fallbackBaseName);
         res.setHeader("Cache-Control", "no-store");
         res.setHeader("Content-Type", "application/pdf");
@@ -30029,6 +30710,28 @@ app.get("/api/ghl/client-contracts/download", requireWebPermission(WEB_AUTH_PERM
       } catch (directDownloadError) {
         directDownloadErrorMessage = sanitizeTextValue(directDownloadError?.message, 260);
       }
+    }
+
+    const archivedContract = await getLatestGhlContractArchiveRow(
+      matchedClientName,
+      sanitizeTextValue(lookupRow?.contactId, 200) || requestedContactId,
+    );
+    if (archivedContract?.contentBuffer?.length) {
+      const archivedFileName = ensurePdfFileName(
+        archivedContract.fileName || archivedContract.contractTitle || `${fallbackBaseName} archived`,
+        `${fallbackBaseName} archived`,
+      );
+      const archivedMimeType = normalizeAttachmentMimeType(archivedContract.mimeType) || "application/pdf";
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Content-Type", archivedMimeType);
+      res.setHeader("Content-Length", String(archivedContract.contentBuffer.length));
+      res.setHeader("Content-Disposition", buildContentDisposition("attachment", archivedFileName));
+      res.setHeader("X-Contract-Download-Mode", "archived");
+      if (archivedContract.id) {
+        res.setHeader("X-Contract-Archive-Id", archivedContract.id);
+      }
+      res.status(200).send(archivedContract.contentBuffer);
+      return;
     }
 
     const textFallback = await resolveGhlContractTextForDownloadFallback(matchedClientName, lookupRow, {
