@@ -1,5 +1,6 @@
 import { apiRequest } from "@/shared/api/fetcher";
 import type {
+  GhlClientCommunicationNormalizeTranscriptsPayload,
   GhlClientCommunicationTranscriptPayload,
   GhlClientCommunicationsPayload,
 } from "@/shared/types/ghlCommunications";
@@ -32,6 +33,25 @@ export async function postGhlClientCommunicationTranscript(
     body: JSON.stringify({
       clientName: normalizedClientName,
       messageId: normalizedMessageId,
+    }),
+  });
+}
+
+export async function postGhlClientCommunicationNormalizeTranscripts(
+  clientName: string,
+  options: {
+    limit?: number;
+  } = {},
+): Promise<GhlClientCommunicationNormalizeTranscriptsPayload> {
+  const normalizedClientName = (clientName || "").toString().trim();
+  return apiRequest<GhlClientCommunicationNormalizeTranscriptsPayload>("/api/ghl/client-communications/normalize-transcripts", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      clientName: normalizedClientName,
+      limit: Number.isFinite(options.limit) ? Number(options.limit) : undefined,
     }),
   });
 }
