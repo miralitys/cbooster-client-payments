@@ -1,20 +1,27 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { getRecords } from "@/shared/api";
+import { fetchPaymentProbability } from "@/features/client-score/api";
 import {
   formatMoney,
   getRecordStatusFlags,
   normalizeRecords,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
-import { evaluateClientScore, formatScoreAsOfDate, type ClientScoreResult } from "@/features/client-score/domain/scoring";
+import {
+  computeLegacyPaymentProbabilities,
+  computePaymentFeatures,
+  evaluateClientScore,
+  formatScoreAsOfDate,
+  type ClientScoreResult,
+  type PaymentFeatures,
+  type PaymentProbabilities,
+} from "@/features/client-score/domain/scoring";
+import { getRecords } from "@/shared/api";
 import type { ClientRecord } from "@/shared/types/records";
 import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const MAX_CLIENTS = 20;
-const MONTH_2_DISCOUNT = 0.9;
-const MONTH_3_DISCOUNT = 0.8;
 
 const PAYMENT_AMOUNT_KEYS: Array<keyof ClientRecord> = [
   "payment1",
@@ -40,11 +47,24 @@ interface ClientProbabilityRow {
   probabilityMonth3: number;
 }
 
+interface ProbabilityRowSeed {
+  id: string;
+  clientName: string;
+  companyName: string;
+  closedBy: string;
+  score: ClientScoreResult;
+  contractTotal: number | null;
+  paidTotal: number | null;
+  features: PaymentFeatures;
+}
+
 export default function ClientScorePage() {
   const [records, setRecords] = useState<ClientRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [asOfDate, setAsOfDate] = useState(() => new Date());
+  const [version2Rows, setVersion2Rows] = useState<ClientProbabilityRow[]>([]);
+  const [isVersion2Loading, setIsVersion2Loading] = useState(false);
 
   const loadProbabilityTable = useCallback(async () => {
     setIsLoading(true);
@@ -77,10 +97,56 @@ export default function ClientScorePage() {
     [asOfDate],
   );
 
-  const rows = useMemo<ClientProbabilityRow[]>(() => {
-    const source = records.slice(0, MAX_CLIENTS);
-    return source.map((record) => buildProbabilityRow(record, asOfDate));
+  const legacyRows = useMemo<ClientProbabilityRow[]>(() => {
+    return records.slice(0, MAX_CLIENTS).map((record) => buildLegacyProbabilityRow(record, asOfDate));
   }, [asOfDate, records]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    const source = records.slice(0, MAX_CLIENTS);
+
+    if (isLoading || loadError) {
+      setVersion2Rows([]);
+      setIsVersion2Loading(false);
+      return () => {
+        isCancelled = true;
+      };
+    }
+
+    if (!source.length) {
+      setVersion2Rows([]);
+      setIsVersion2Loading(false);
+      return () => {
+        isCancelled = true;
+      };
+    }
+
+    const loadVersion2Rows = async () => {
+      setIsVersion2Loading(true);
+
+      try {
+        const nextRows = await Promise.all(source.map((record) => buildVersion2ProbabilityRow(record, asOfDate)));
+
+        if (!isCancelled) {
+          setVersion2Rows(nextRows);
+        }
+      } catch {
+        if (!isCancelled) {
+          setVersion2Rows(source.map((record) => buildLegacyProbabilityRow(record, asOfDate)));
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsVersion2Loading(false);
+        }
+      }
+    };
+
+    void loadVersion2Rows();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [asOfDate, isLoading, loadError, records]);
 
   const columns = useMemo<TableColumn<ClientProbabilityRow>[]>(() => {
     return [
@@ -101,9 +167,7 @@ export default function ClientScorePage() {
         label: "Score",
         align: "center",
         cell: (row) => (
-          <Badge tone={row.score.tone}>
-            {row.score.displayScore === null ? "N/A" : String(row.score.displayScore)}
-          </Badge>
+          <Badge tone={row.score.tone}>{row.score.displayScore === null ? "N/A" : String(row.score.displayScore)}</Badge>
         ),
       },
       {
@@ -140,8 +204,18 @@ export default function ClientScorePage() {
     if (loadError) {
       return loadError;
     }
-    return `Showing first ${rows.length} clients. As of ${formatScoreAsOfDate(asOfDate)}.`;
-  }, [asOfDate, isLoading, loadError, rows.length]);
+    return `Showing first ${legacyRows.length} clients. As of ${formatScoreAsOfDate(asOfDate)}.`;
+  }, [asOfDate, isLoading, legacyRows.length, loadError]);
+
+  const version2StatusText = useMemo(() => {
+    if (isLoading || isVersion2Loading) {
+      return "Calculating payment probability (Version 2)...";
+    }
+    if (loadError) {
+      return loadError;
+    }
+    return `Showing first ${version2Rows.length} clients. As of ${formatScoreAsOfDate(asOfDate)}.`;
+  }, [asOfDate, isLoading, isVersion2Loading, loadError, version2Rows.length]);
 
   return (
     <PageShell className="client-score-react-page">
@@ -155,13 +229,16 @@ export default function ClientScorePage() {
           <>
             <p className={`dashboard-message ${loadError ? "error" : ""}`.trim()}>{statusText}</p>
             <p className="react-user-footnote">
-              Model v1: score + overdue + paid ratio + payment pace. Horizon discount: Month +2 = Month +1 x 0.9, Month +3 = Month +1 x 0.8.
+              Version 1: deterministic model (score + overdue + paid ratio + payment pace).
+            </p>
+            <p className="react-user-footnote">
+              Version 2: backend ML endpoint (`/api/payment-probability`) + frontend guard + legacy fallback.
             </p>
           </>
         }
       />
 
-      <Panel className="table-panel" title="Client Payment Probability">
+      <Panel className="table-panel" title="Версия 1">
         {isLoading ? <LoadingSkeleton rows={8} /> : null}
         {!isLoading && loadError ? (
           <ErrorState
@@ -171,14 +248,37 @@ export default function ClientScorePage() {
             onAction={() => void loadProbabilityTable()}
           />
         ) : null}
-        {!isLoading && !loadError && !rows.length ? (
-          <EmptyState title="No client records found." />
-        ) : null}
-        {!isLoading && !loadError && rows.length ? (
+        {!isLoading && !loadError && !legacyRows.length ? <EmptyState title="No client records found." /> : null}
+        {!isLoading && !loadError && legacyRows.length ? (
           <Table
             className="client-managers-react-table-wrap"
             columns={columns}
-            rows={rows}
+            rows={legacyRows}
+            rowKey={(row) => row.id}
+            density="compact"
+          />
+        ) : null}
+      </Panel>
+
+      <Panel className="table-panel" title="Версия 2">
+        <p className="react-user-footnote">{version2StatusText}</p>
+        {isLoading || isVersion2Loading ? <LoadingSkeleton rows={8} /> : null}
+        {!isLoading && loadError ? (
+          <ErrorState
+            title="Failed to load payment probability table"
+            description={loadError}
+            actionLabel="Retry"
+            onAction={() => void loadProbabilityTable()}
+          />
+        ) : null}
+        {!isLoading && !loadError && !isVersion2Loading && !version2Rows.length ? (
+          <EmptyState title="No client records found." />
+        ) : null}
+        {!isLoading && !loadError && !isVersion2Loading && version2Rows.length ? (
+          <Table
+            className="client-managers-react-table-wrap"
+            columns={columns}
+            rows={version2Rows}
             rowKey={(row) => row.id}
             density="compact"
           />
@@ -188,27 +288,47 @@ export default function ClientScorePage() {
   );
 }
 
-function buildProbabilityRow(record: ClientRecord, asOfDate: Date): ClientProbabilityRow {
+function buildLegacyProbabilityRow(record: ClientRecord, asOfDate: Date): ClientProbabilityRow {
+  const seed = buildProbabilityRowSeed(record, asOfDate);
+  const probabilities = computeLegacyPaymentProbabilities(seed.features);
+  return createProbabilityRow(seed, probabilities);
+}
+
+async function buildVersion2ProbabilityRow(record: ClientRecord, asOfDate: Date): Promise<ClientProbabilityRow> {
+  const seed = buildProbabilityRowSeed(record, asOfDate);
+
+  if (seed.features.writtenOff === true || seed.features.balance <= 0) {
+    return createProbabilityRow(seed, { p1: 0, p2: 0, p3: 0 });
+  }
+
+  try {
+    const probabilities = await fetchPaymentProbability(seed.features);
+    return createProbabilityRow(seed, probabilities);
+  } catch {
+    const fallback = computeLegacyPaymentProbabilities(seed.features);
+    return createProbabilityRow(seed, fallback);
+  }
+}
+
+function buildProbabilityRowSeed(record: ClientRecord, asOfDate: Date): ProbabilityRowSeed {
   const score = evaluateClientScore(record, asOfDate);
   const status = getRecordStatusFlags(record);
 
   const contractTotal = parseMoneyValue(record.contractTotals);
-  const paidTotal = parseMoneyValue(record.totalPayments) ?? estimatePaidTotal(record);
-  const balanceFromRecord = parseMoneyValue(record.futurePayments);
+  const totalPayments = parseMoneyValue(record.totalPayments);
+  const futurePayments = parseMoneyValue(record.futurePayments);
+  const payments = collectPaymentAmounts(record);
 
-  const paidValue = paidTotal ?? 0;
-  const fallbackBalance = contractTotal === null ? 0 : contractTotal - paidValue;
-  const balance = Math.max(0, balanceFromRecord ?? fallbackBalance);
-  const paidRatio = contractTotal && contractTotal > 0 ? clamp(paidValue / contractTotal, 0, 1.5) : 0;
-
-  const monthlyPayment = estimateMonthlyPayment(record, paidValue, contractTotal);
-  const probabilities = calculateProbabilities({
-    score: score.displayScore,
-    paidRatio,
-    overdueDays: status.overdueDays,
+  const monthlyPayment = estimateMonthlyPayment(payments, totalPayments, contractTotal);
+  const features = computePaymentFeatures({
+    contractTotal: contractTotal ?? 0,
+    totalPayments,
+    payments,
     monthlyPayment,
-    balance,
+    displayScore: score.displayScore,
+    overdueDays: status.overdueDays,
     openMilestones: score.openMilestones,
+    futurePayments,
     writtenOff: status.isWrittenOff,
   });
 
@@ -219,17 +339,29 @@ function buildProbabilityRow(record: ClientRecord, asOfDate: Date): ClientProbab
     closedBy: record.closedBy || "",
     score,
     contractTotal,
-    paidTotal,
-    balance,
-    probabilityMonth1: probabilities.month1,
-    probabilityMonth2: probabilities.month2,
-    probabilityMonth3: probabilities.month3,
+    paidTotal: totalPayments ?? (payments.length > 0 ? features.paidTotal : null),
+    features,
   };
 }
 
-function estimatePaidTotal(record: ClientRecord): number | null {
-  let total = 0;
-  let hasValue = false;
+function createProbabilityRow(seed: ProbabilityRowSeed, probabilities: PaymentProbabilities): ClientProbabilityRow {
+  return {
+    id: seed.id,
+    clientName: seed.clientName,
+    companyName: seed.companyName,
+    closedBy: seed.closedBy,
+    score: seed.score,
+    contractTotal: seed.contractTotal,
+    paidTotal: seed.paidTotal,
+    balance: seed.features.balance,
+    probabilityMonth1: clampProbability(probabilities.p1),
+    probabilityMonth2: clampProbability(probabilities.p2),
+    probabilityMonth3: clampProbability(probabilities.p3),
+  };
+}
+
+function collectPaymentAmounts(record: ClientRecord): number[] {
+  const values: number[] = [];
 
   for (const key of PAYMENT_AMOUNT_KEYS) {
     const amount = parseMoneyValue(record[key]);
@@ -237,25 +369,20 @@ function estimatePaidTotal(record: ClientRecord): number | null {
       continue;
     }
 
-    hasValue = true;
-    total += amount;
+    values.push(amount);
   }
 
-  return hasValue ? total : null;
+  return values;
 }
 
-function estimateMonthlyPayment(record: ClientRecord, paidValue: number, contractTotal: number | null): number {
-  const payments = PAYMENT_AMOUNT_KEYS.map((key) => parseMoneyValue(record[key])).filter(
-    (value): value is number => value !== null && value > 0,
-  );
-
+function estimateMonthlyPayment(payments: number[], paidTotal: number | null, contractTotal: number | null): number {
   if (payments.length > 0) {
     const sum = payments.reduce((total, value) => total + value, 0);
     return sum / payments.length;
   }
 
-  if (paidValue > 0) {
-    return paidValue;
+  if (paidTotal !== null && paidTotal > 0) {
+    return paidTotal;
   }
 
   if (contractTotal !== null && contractTotal > 0) {
@@ -263,38 +390,6 @@ function estimateMonthlyPayment(record: ClientRecord, paidValue: number, contrac
   }
 
   return 0;
-}
-
-function calculateProbabilities(input: {
-  score: number | null;
-  paidRatio: number;
-  overdueDays: number;
-  monthlyPayment: number;
-  balance: number;
-  openMilestones: number;
-  writtenOff: boolean;
-}): { month1: number; month2: number; month3: number } {
-  if (input.writtenOff || input.balance <= 0) {
-    return { month1: 0, month2: 0, month3: 0 };
-  }
-
-  const scoreFactor = clamp((input.score ?? 50) / 100, 0, 1.1);
-  const overduePenalty = Math.min(Math.max(input.overdueDays, 0), 120);
-  const paymentPace = clamp(input.monthlyPayment / Math.max(input.balance, 1), 0, 2);
-
-  const z =
-    -2.45 +
-    scoreFactor * 3.2 +
-    input.paidRatio * 1.15 +
-    paymentPace * 0.4 -
-    overduePenalty * 0.02 -
-    input.openMilestones * 0.35;
-
-  const month1 = clamp(sigmoid(z), 0.05, 0.95);
-  const month2 = clamp(month1 * MONTH_2_DISCOUNT, 0.03, 0.9);
-  const month3 = clamp(month1 * MONTH_3_DISCOUNT, 0.02, 0.85);
-
-  return { month1, month2, month3 };
 }
 
 function resolveProbabilityTone(probability: number): "success" | "info" | "warning" | "danger" {
@@ -323,8 +418,8 @@ function formatFutureMonthLabel(baseDate: Date, offset: number): string {
   });
 }
 
-function sigmoid(value: number): number {
-  return 1 / (1 + Math.exp(-value));
+function clampProbability(value: number): number {
+  return clamp(value, 0, 1);
 }
 
 function clamp(value: number, minValue: number, maxValue: number): number {
