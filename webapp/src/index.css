@@ -2876,11 +2876,34 @@ a {
   resize: none;
 }
 
+.identityiq-history-table {
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.identityiq-history-table .identityiq-history-col-client {
+  width: 34%;
+}
+
+.identityiq-history-table .identityiq-history-col-bureaus {
+  width: 46%;
+  white-space: normal;
+}
+
+.identityiq-history-table .identityiq-history-col-time {
+  width: 20%;
+}
+
 .identityiq-history-bureaus {
   display: inline-flex;
+  align-items: center;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 6px;
+}
+
+.identityiq-history-bureaus .cb-badge {
+  white-space: nowrap;
 }
 
 .identityiq-history-row--selected td {
@@ -2939,6 +2962,11 @@ a {
 
   .identityiq-latest-hero {
     grid-template-columns: 1fr;
+  }
+
+  .identityiq-history-table {
+    min-width: 760px;
+    table-layout: auto;
   }
 }
 
