@@ -1576,6 +1576,11 @@ a {
   gap: 8px;
 }
 
+.record-details-communications__footer {
+  display: flex;
+  justify-content: flex-start;
+}
+
 .record-details-communications__recording-link {
   color: var(--color-primary);
   font-size: var(--font-size-xs);
