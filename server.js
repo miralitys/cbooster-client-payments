@@ -29999,72 +29999,31 @@ app.get("/api/ghl/client-contracts/text", requireWebPermission(WEB_AUTH_PERMISSI
 
     const lookupRow = await resolveGhlClientContractDownloadRow(matchedClientName, {
       preferredContactId: requestedContactId,
-      debugEnabled: true,
+      debugEnabled: debugMode,
     });
     const lookupStatus = normalizeGhlClientContractDownloadStatus(lookupRow?.status);
     if (lookupStatus === "error") {
       throw createHttpError(sanitizeTextValue(lookupRow?.error, 500) || "Failed to locate contract in GoHighLevel.", 502);
     }
 
-    const lookupCandidates = collectGhlContractTextLookupCandidates(lookupRow);
-    const candidatesToProbe = requestedCandidateId
-      ? [
-          {
-            candidateId: requestedCandidateId,
-            contactId: requestedContactId || sanitizeTextValue(lookupRow?.contactId, 160),
-            contactName: sanitizeTextValue(lookupRow?.contactName, 300) || matchedClientName,
-            source: "query.candidate_id",
-            score: 1000,
-          },
-        ]
-      : lookupCandidates;
-
-    if (!candidatesToProbe.length) {
-      res.status(404).json({
-        error: `No contract document ids found for client "${matchedClientName}".`,
-      });
-      return;
-    }
-
-    let resolvedText = null;
-    const probeDiagnostics = debugMode ? [] : null;
-    for (const candidate of candidatesToProbe) {
-      const candidateTrace = debugMode ? {} : null;
-      const textResult = await resolveGhlContractTextByCandidateId(
-        candidate.candidateId,
-        {
-          contactId: candidate.contactId || requestedContactId || sanitizeTextValue(lookupRow?.contactId, 160),
-          contactName: candidate.contactName || sanitizeTextValue(lookupRow?.contactName, 300) || matchedClientName,
-          clientName: matchedClientName,
-        },
-        candidateTrace,
-      );
-
-      if (probeDiagnostics instanceof Array) {
-        probeDiagnostics.push({
-          candidateId: candidate.candidateId,
-          source: candidate.source || "",
-          score: Number.isFinite(candidate?.score) ? candidate.score : 0,
-          foundText: Boolean(textResult?.text),
-          textLength: Number.isFinite(textResult?.textLength) ? textResult.textLength : 0,
-          trace: candidateTrace,
-        });
-      }
-
-      if (textResult?.text) {
-        resolvedText = {
-          ...candidate,
-          ...textResult,
-        };
-        break;
-      }
-    }
-
+    let resolvedText = await resolveGhlContractTextForDownloadFallback(matchedClientName, lookupRow, {
+      preferredContactId: requestedContactId,
+      candidateId: requestedCandidateId,
+    });
     if (!resolvedText?.text) {
-      res.status(404).json({
-        error: `Contract text was not found for client "${matchedClientName}".`,
-      });
-      return;
+      const diagnosticText = buildGhlContractDownloadDiagnosticFallbackText(matchedClientName, lookupRow, "");
+      resolvedText = {
+        clientName: matchedClientName,
+        contactId: sanitizeTextValue(lookupRow?.contactId, 160),
+        contactName: sanitizeTextValue(lookupRow?.contactName, 300) || matchedClientName,
+        candidateId: "",
+        source: "diagnostic.fallback",
+        text: diagnosticText,
+        textLength: diagnosticText.length,
+        lookupStatus,
+        lookupRow,
+        fallbackMode: "diagnostic",
+      };
     }
 
     res.setHeader("Cache-Control", "no-store, private");
@@ -30081,14 +30040,14 @@ app.get("/api/ghl/client-contracts/text", requireWebPermission(WEB_AUTH_PERMISSI
       fragmentsCount: Number.isFinite(resolvedText.fragmentsCount) ? resolvedText.fragmentsCount : 0,
       truncated: Boolean(resolvedText.truncated),
       lookupStatus,
-      candidatesTried: candidatesToProbe.length,
+      fallbackMode: sanitizeTextValue(resolvedText.fallbackMode, 80) || "",
       updatedAt: state.updatedAt || null,
       debugMode,
       ...(debugMode
         ? {
             diagnostics: {
               lookup: lookupRow?.diagnostics || null,
-              candidates: probeDiagnostics,
+              candidateId: sanitizeTextValue(requestedCandidateId, 220),
             },
           }
         : {}),
