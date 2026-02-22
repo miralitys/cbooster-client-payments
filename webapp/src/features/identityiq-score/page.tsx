@@ -92,6 +92,8 @@ export default function IdentityIqScorePage() {
         key: "client",
         label: "Client",
         align: "left",
+        className: "identityiq-history-col-client",
+        headerClassName: "identityiq-history-col-client",
         cell: (row) => (
           <div>
             <strong>{row.clientName || "Unnamed client"}</strong>
@@ -102,7 +104,9 @@ export default function IdentityIqScorePage() {
       {
         key: "bureaus",
         label: "Bureaus",
-        align: "center",
+        align: "left",
+        className: "identityiq-history-col-bureaus",
+        headerClassName: "identityiq-history-col-bureaus",
         cell: (row) => {
           const orderedScores = resolveOrderedBureauScores(row.bureauScores);
           return (
@@ -119,7 +123,9 @@ export default function IdentityIqScorePage() {
       {
         key: "fetchedAt",
         label: "Checked At",
-        align: "center",
+        align: "right",
+        className: "identityiq-history-col-time",
+        headerClassName: "identityiq-history-col-time",
         cell: (row) => formatDateTime(row.fetchedAt),
       },
     ];
@@ -392,6 +398,7 @@ export default function IdentityIqScorePage() {
           rows={historyRows}
           rowKey={(row) => row.id}
           className="identityiq-score-table-wrap"
+          tableClassName="identityiq-history-table"
           emptyState="No checks run in this browser session yet."
           density="compact"
           onRowActivate={(row) => {
