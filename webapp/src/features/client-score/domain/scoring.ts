@@ -28,6 +28,15 @@ const RECOVERY_POINTS = 5;
 const LATE_GRACE_DAYS = 3;
 const EPSILON = 0.0001;
 
+const LEGACY_BASELINE_Z = -2.45;
+const LEGACY_SCORE_DEFAULT = 50;
+const LEGACY_SCORE_FACTOR_MAX = 1.1;
+const LEGACY_PAID_RATIO_MAX = 1.5;
+const LEGACY_PAYMENT_PACE_MAX = 2;
+const LEGACY_OVERDUE_MAX_DAYS = 120;
+const LEGACY_MONTH_2_DISCOUNT = 0.9;
+const LEGACY_MONTH_3_DISCOUNT = 0.8;
+
 interface PaymentEvent {
   amount: number;
   dateUtc: number;
@@ -57,6 +66,90 @@ export interface ClientScoreResult {
   maxDelayDays: number;
   openMilestones: number;
   explanation: string;
+}
+
+export interface PaymentFeatures {
+  contractTotal: number;
+  paidTotal: number;
+  paidRatio: number;
+  paymentPace: number;
+  displayScore: number | null;
+  overdueDays: number;
+  openMilestones: number;
+  futurePayments?: number | null;
+  writtenOff?: boolean;
+  balance: number;
+  [key: string]: number | boolean | null | undefined;
+}
+
+export interface PaymentProbabilities {
+  p1: number;
+  p2: number;
+  p3: number;
+}
+
+export function computePaymentFeatures(input: {
+  contractTotal: number;
+  totalPayments?: number | null;
+  payments?: number[];
+  monthlyPayment: number;
+  displayScore?: number | null;
+  overdueDays: number;
+  openMilestones: number;
+  futurePayments?: number | null;
+  writtenOff?: boolean;
+}): PaymentFeatures {
+  const contractTotal = Math.max(0, toFiniteNumber(input.contractTotal));
+  const paidTotal = resolvePaidTotal(input.totalPayments, input.payments);
+  const futurePayments = toFiniteNullableNumber(input.futurePayments);
+
+  const fallbackBalance = contractTotal - paidTotal;
+  const balance = Math.max(0, futurePayments ?? fallbackBalance);
+  const paidRatio = contractTotal > 0 ? clampNumber(paidTotal / contractTotal, 0, LEGACY_PAID_RATIO_MAX) : 0;
+  const paymentPace = clampNumber(toFiniteNumber(input.monthlyPayment) / Math.max(balance, 1), 0, LEGACY_PAYMENT_PACE_MAX);
+
+  return {
+    contractTotal,
+    paidTotal,
+    paidRatio,
+    paymentPace,
+    displayScore: toFiniteNullableNumber(input.displayScore),
+    overdueDays: Math.max(0, toFiniteNumber(input.overdueDays)),
+    openMilestones: Math.max(0, toFiniteNumber(input.openMilestones)),
+    futurePayments,
+    writtenOff: input.writtenOff === true,
+    balance,
+  };
+}
+
+export function computeLegacyPaymentProbabilities(features: PaymentFeatures): PaymentProbabilities {
+  if (features.writtenOff === true || features.balance <= 0) {
+    return { p1: 0, p2: 0, p3: 0 };
+  }
+
+  const scoreFactor = clampNumber(
+    (toFiniteNullableNumber(features.displayScore) ?? LEGACY_SCORE_DEFAULT) / 100,
+    0,
+    LEGACY_SCORE_FACTOR_MAX,
+  );
+  const overduePenalty = clampNumber(toFiniteNumber(features.overdueDays), 0, LEGACY_OVERDUE_MAX_DAYS);
+  const paidRatio = clampNumber(toFiniteNumber(features.paidRatio), 0, LEGACY_PAID_RATIO_MAX);
+  const paymentPace = clampNumber(toFiniteNumber(features.paymentPace), 0, LEGACY_PAYMENT_PACE_MAX);
+  const openMilestones = Math.max(0, toFiniteNumber(features.openMilestones));
+
+  const z =
+    LEGACY_BASELINE_Z +
+    scoreFactor * 3.2 +
+    paidRatio * 1.15 +
+    paymentPace * 0.4 -
+    overduePenalty * 0.02 -
+    openMilestones * 0.35;
+
+  const p1 = clampNumber(sigmoid(z), 0.05, 0.95);
+  const p2 = clampNumber(p1 * LEGACY_MONTH_2_DISCOUNT, 0.03, 0.9);
+  const p3 = clampNumber(p1 * LEGACY_MONTH_3_DISCOUNT, 0.02, 0.85);
+
+  return { p1, p2, p3 };
 }
 
 export function evaluateClientScore(record: ClientRecord, asOfDate = new Date()): ClientScoreResult {
@@ -96,7 +189,8 @@ export function evaluateClientScore(record: ClientRecord, asOfDate = new Date())
 
   const recentWindowStartUtc = asOfUtc - RECENT_WINDOW_DAYS * DAY_IN_MS;
   const recentMilestones = milestones.filter((item) => item.dueUtc <= asOfUtc && item.dueUtc >= recentWindowStartUtc);
-  const recentMilestonesOnTime = recentMilestones.length > 0 && recentMilestones.every((item) => item.delayDays <= LATE_GRACE_DAYS);
+  const recentMilestonesOnTime =
+    recentMilestones.length > 0 && recentMilestones.every((item) => item.delayDays <= LATE_GRACE_DAYS);
   const hasOlderDelay = milestones.some(
     (item) => item.dueUtc < recentWindowStartUtc && item.delayDays > LATE_GRACE_DAYS,
   );
@@ -343,6 +437,40 @@ function shiftUtcMonths(baseUtc: number, deltaMonths: number, pinnedDay?: number
   const safeDay = Math.min(day, daysInTargetMonth);
 
   return Date.UTC(targetMonthDate.getUTCFullYear(), targetMonthDate.getUTCMonth(), safeDay);
+}
+
+function resolvePaidTotal(totalPayments?: number | null, payments?: number[]): number {
+  const parsedTotalPayments = toFiniteNullableNumber(totalPayments);
+  if (parsedTotalPayments !== null) {
+    return parsedTotalPayments;
+  }
+
+  if (!Array.isArray(payments) || payments.length === 0) {
+    return 0;
+  }
+
+  let total = 0;
+  for (const amount of payments) {
+    if (typeof amount !== "number" || !Number.isFinite(amount)) {
+      continue;
+    }
+
+    total += amount;
+  }
+
+  return total;
+}
+
+function sigmoid(value: number): number {
+  return 1 / (1 + Math.exp(-value));
+}
+
+function toFiniteNumber(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function toFiniteNullableNumber(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function clampNumber(value: number, minValue: number, maxValue: number): number {
