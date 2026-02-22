@@ -18,10 +18,25 @@ import {
 } from "@/features/client-score/domain/scoring";
 import { getRecords } from "@/shared/api";
 import type { ClientRecord } from "@/shared/types/records";
-import { Badge, Button, EmptyState, ErrorState, LoadingSkeleton, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  LoadingSkeleton,
+  PageHeader,
+  PageShell,
+  Panel,
+  SegmentedControl,
+  Table,
+} from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const MAX_CLIENTS = 20;
+const VERSION_OPTIONS = [
+  { key: "v1", label: "Версия 1" },
+  { key: "v2", label: "Версия 2" },
+] as const;
 
 const PAYMENT_AMOUNT_KEYS: Array<keyof ClientRecord> = [
   "payment1",
@@ -63,6 +78,7 @@ export default function ClientScorePage() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [asOfDate, setAsOfDate] = useState(() => new Date());
+  const [activeVersion, setActiveVersion] = useState<"v1" | "v2">("v2");
   const [version2Rows, setVersion2Rows] = useState<ClientProbabilityRow[]>([]);
   const [isVersion2Loading, setIsVersion2Loading] = useState(false);
 
@@ -217,6 +233,11 @@ export default function ClientScorePage() {
     return `Showing first ${version2Rows.length} clients. As of ${formatScoreAsOfDate(asOfDate)}.`;
   }, [asOfDate, isLoading, isVersion2Loading, loadError, version2Rows.length]);
 
+  const activeStatusText = activeVersion === "v1" ? statusText : version2StatusText;
+  const activeRows = activeVersion === "v1" ? legacyRows : version2Rows;
+  const activeLoading = activeVersion === "v1" ? isLoading : isLoading || isVersion2Loading;
+  const activeTitle = activeVersion === "v1" ? "Версия 1" : "Версия 2";
+
   return (
     <PageShell className="client-score-react-page">
       <PageHeader
@@ -227,7 +248,7 @@ export default function ClientScorePage() {
         }
         meta={
           <>
-            <p className={`dashboard-message ${loadError ? "error" : ""}`.trim()}>{statusText}</p>
+            <p className={`dashboard-message ${loadError ? "error" : ""}`.trim()}>{activeStatusText}</p>
             <p className="react-user-footnote">
               Version 1: deterministic model (score + overdue + paid ratio + payment pace).
             </p>
@@ -238,9 +259,19 @@ export default function ClientScorePage() {
         }
       />
 
-      <Panel className="table-panel" title="Версия 1">
-        {isLoading ? <LoadingSkeleton rows={8} /> : null}
-        {!isLoading && loadError ? (
+      <Panel
+        className="table-panel"
+        title={activeTitle}
+        actions={
+          <SegmentedControl
+            value={activeVersion}
+            options={VERSION_OPTIONS.map((option) => ({ key: option.key, label: option.label }))}
+            onChange={(value) => setActiveVersion(value === "v1" ? "v1" : "v2")}
+          />
+        }
+      >
+        {activeLoading ? <LoadingSkeleton rows={8} /> : null}
+        {!activeLoading && loadError ? (
           <ErrorState
             title="Failed to load payment probability table"
             description={loadError}
@@ -248,37 +279,12 @@ export default function ClientScorePage() {
             onAction={() => void loadProbabilityTable()}
           />
         ) : null}
-        {!isLoading && !loadError && !legacyRows.length ? <EmptyState title="No client records found." /> : null}
-        {!isLoading && !loadError && legacyRows.length ? (
+        {!activeLoading && !loadError && !activeRows.length ? <EmptyState title="No client records found." /> : null}
+        {!activeLoading && !loadError && activeRows.length ? (
           <Table
             className="client-managers-react-table-wrap"
             columns={columns}
-            rows={legacyRows}
-            rowKey={(row) => row.id}
-            density="compact"
-          />
-        ) : null}
-      </Panel>
-
-      <Panel className="table-panel" title="Версия 2">
-        <p className="react-user-footnote">{version2StatusText}</p>
-        {isLoading || isVersion2Loading ? <LoadingSkeleton rows={8} /> : null}
-        {!isLoading && loadError ? (
-          <ErrorState
-            title="Failed to load payment probability table"
-            description={loadError}
-            actionLabel="Retry"
-            onAction={() => void loadProbabilityTable()}
-          />
-        ) : null}
-        {!isLoading && !loadError && !isVersion2Loading && !version2Rows.length ? (
-          <EmptyState title="No client records found." />
-        ) : null}
-        {!isLoading && !loadError && !isVersion2Loading && version2Rows.length ? (
-          <Table
-            className="client-managers-react-table-wrap"
-            columns={columns}
-            rows={version2Rows}
+            rows={activeRows}
             rowKey={(row) => row.id}
             density="compact"
           />
