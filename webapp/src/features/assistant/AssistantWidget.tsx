@@ -1097,6 +1097,15 @@ export function AssistantWidget() {
             </button>
             <button
               type="button"
+              className={cx("assistant-widget__mode-btn", mode === "gpt" && "is-active")}
+              role="tab"
+              aria-selected={mode === "gpt"}
+              onClick={() => setMode("gpt")}
+            >
+              GPT
+            </button>
+            <button
+              type="button"
               className={cx("assistant-widget__mode-btn", mode === "voice" && "is-active")}
               role="tab"
               aria-selected={mode === "voice"}

@@ -72,7 +72,7 @@ export interface AssistantReviewItem {
   askedAt: string | null;
   askedByUsername: string;
   askedByDisplayName: string;
-  mode: "text" | "voice";
+  mode: "text" | "voice" | "gpt";
   question: string;
   assistantReply: string;
   provider: string;

@@ -1,4 +1,4 @@
-export type AssistantMode = "text" | "voice";
+export type AssistantMode = "text" | "voice" | "gpt";
 export type AssistantScopeSource = "explicit" | "mention" | "none";
 export type AssistantScopeEphemeralSource = "mention" | "none";
 export type AssistantContextResetFailureStage = "keepalive_retry_exhausted" | "beacon_failed";
