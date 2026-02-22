@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { getGhlClientBasicNote } from "@/shared/api";
+import { getGhlClientBasicNote, getGhlClientCommunications } from "@/shared/api";
 import { evaluateClientScore } from "@/features/client-score/domain/scoring";
 import type { GhlClientBasicNotePayload } from "@/shared/types/ghlNotes";
+import type {
+  GhlClientCommunicationDirection,
+  GhlClientCommunicationsPayload,
+} from "@/shared/types/ghlCommunications";
 import type { ClientRecord } from "@/shared/types/records";
 import { FIELD_DEFINITIONS, PAYMENT_PAIRS } from "@/features/client-payments/domain/constants";
 import { formatDate, formatMoney, getRecordStatusFlags, parseMoneyValue } from "@/features/client-payments/domain/calculations";
@@ -46,11 +50,15 @@ interface BadgeMeta {
 
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
+const MAX_RENDERED_COMMUNICATION_ITEMS = 120;
 
 export function RecordDetails({ record }: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
   const [isLoadingGhlBasicNote, setIsLoadingGhlBasicNote] = useState(false);
   const [ghlBasicNoteError, setGhlBasicNoteError] = useState("");
+  const [ghlCommunications, setGhlCommunications] = useState<GhlClientCommunicationsPayload | null>(null);
+  const [isLoadingGhlCommunications, setIsLoadingGhlCommunications] = useState(false);
+  const [ghlCommunicationsError, setGhlCommunicationsError] = useState("");
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
   const contractDisplay = useMemo(() => formatMoneyCell(record.contractTotals), [record.contractTotals]);
@@ -118,7 +126,56 @@ export function RecordDetails({ record }: RecordDetailsProps) {
     };
   }, [normalizedClientName, record]);
 
+  useEffect(() => {
+    if (!normalizedClientName) {
+      setGhlCommunications(null);
+      setGhlCommunicationsError("");
+      setIsLoadingGhlCommunications(false);
+      return;
+    }
+
+    const abortController = new AbortController();
+    let isActive = true;
+
+    async function loadCommunications() {
+      setIsLoadingGhlCommunications(true);
+      setGhlCommunicationsError("");
+
+      try {
+        const payload = await getGhlClientCommunications(normalizedClientName, {
+          signal: abortController.signal,
+        });
+        if (!isActive) {
+          return;
+        }
+        setGhlCommunications(payload);
+      } catch (error) {
+        if (!isActive) {
+          return;
+        }
+        setGhlCommunications(null);
+        setGhlCommunicationsError(error instanceof Error ? error.message : "Failed to load client communication history.");
+      } finally {
+        if (isActive) {
+          setIsLoadingGhlCommunications(false);
+        }
+      }
+    }
+
+    void loadCommunications();
+
+    return () => {
+      isActive = false;
+      abortController.abort();
+    };
+  }, [normalizedClientName]);
+
   const contactInfo = useMemo(() => resolveContactInfo(record, ghlBasicNote), [ghlBasicNote, record]);
+  const communicationItems = useMemo(
+    () => (ghlCommunications?.items || []).slice(0, MAX_RENDERED_COMMUNICATION_ITEMS),
+    [ghlCommunications?.items],
+  );
+  const hiddenCommunicationCount = Math.max(0, (ghlCommunications?.items?.length || 0) - communicationItems.length);
   const requestedClientFields = useMemo<RequestedClientField[]>(
     () =>
       [
@@ -323,6 +380,76 @@ export function RecordDetails({ record }: RecordDetailsProps) {
               </>
             ) : null}
           </section>
+
+          <section className="record-details-ghl-note" aria-live="polite">
+            <div className="record-details-ghl-note__header">
+              <h4 className="record-details-ghl-note__title">SMS & Calls</h4>
+              {ghlCommunications?.contactName ? (
+                <p className="react-user-footnote">
+                  Contact: {ghlCommunications.contactName}
+                  {ghlCommunications.contactId ? ` (${ghlCommunications.contactId})` : ""}
+                </p>
+              ) : null}
+            </div>
+
+            {isLoadingGhlCommunications ? <p className="react-user-footnote">Loading communications...</p> : null}
+            {!isLoadingGhlCommunications && ghlCommunicationsError ? (
+              <p className="record-details-ghl-note__error">{ghlCommunicationsError}</p>
+            ) : null}
+            {!isLoadingGhlCommunications &&
+            !ghlCommunicationsError &&
+            (!ghlCommunications || ghlCommunications.status !== "found") ? (
+              <p className="react-user-footnote">Client was not found in GoHighLevel communications.</p>
+            ) : null}
+            {!isLoadingGhlCommunications &&
+            !ghlCommunicationsError &&
+            ghlCommunications?.status === "found" &&
+            communicationItems.length === 0 ? (
+              <p className="react-user-footnote">No SMS or call history found for this client.</p>
+            ) : null}
+            {!isLoadingGhlCommunications &&
+            !ghlCommunicationsError &&
+            ghlCommunications?.status === "found" &&
+            communicationItems.length > 0 ? (
+              <>
+                <p className="react-user-footnote">
+                  SMS: {ghlCommunications.smsCount || 0} · Calls: {ghlCommunications.callCount || 0}
+                </p>
+                <div className="record-details-communications__list" role="list">
+                  {communicationItems.map((item) => (
+                    <article key={item.id} className="record-details-communications__item" role="listitem">
+                      <div className="record-details-communications__meta">
+                        <span className={`record-details-communications__kind record-details-communications__kind--${normalizeCommunicationKind(item.kind)}`}>
+                          {formatCommunicationKind(item.kind)}
+                        </span>
+                        <span className="record-details-communications__direction">{formatCommunicationDirection(item.direction)}</span>
+                        <span className="record-details-communications__date">{formatOptionalDateTime(item.createdAt)}</span>
+                      </div>
+                      <p className="record-details-communications__body">{item.body || "No text body."}</p>
+                      {item.recordingUrls && item.recordingUrls.length > 0 ? (
+                        <div className="record-details-communications__recordings">
+                          {item.recordingUrls.map((recordingUrl, index) => (
+                            <a
+                              key={`${item.id}:${recordingUrl}:${index}`}
+                              href={recordingUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="record-details-communications__recording-link"
+                            >
+                              Recording {index + 1}
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+                {hiddenCommunicationCount > 0 ? (
+                  <p className="react-user-footnote">Showing latest {communicationItems.length} items. Hidden: {hiddenCommunicationCount}.</p>
+                ) : null}
+              </>
+            ) : null}
+          </section>
         </aside>
       </div>
     </div>
@@ -342,6 +469,49 @@ function formatOptionalDate(rawValue: string): string {
     return "";
   }
   return formatDate(rawValue);
+}
+
+function formatOptionalDateTime(rawValue: string): string {
+  const date = (rawValue || "").toString().trim();
+  if (!date) {
+    return "-";
+  }
+  const timestamp = Date.parse(date);
+  if (!Number.isFinite(timestamp)) {
+    return "-";
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp));
+}
+
+function normalizeCommunicationKind(rawKind: string): "sms" | "call" {
+  const kind = (rawKind || "").toString().trim().toLowerCase();
+  if (kind.includes("call") || kind.includes("voice") || kind.includes("voicemail")) {
+    return "call";
+  }
+  return "sms";
+}
+
+function formatCommunicationKind(rawKind: string): string {
+  return normalizeCommunicationKind(rawKind) === "call" ? "Call" : "SMS";
+}
+
+function formatCommunicationDirection(rawDirection: GhlClientCommunicationDirection): string {
+  const direction = (rawDirection || "").toString().trim().toLowerCase();
+  if (direction === "inbound" || direction === "in") {
+    return "Inbound";
+  }
+  if (direction === "outbound" || direction === "out") {
+    return "Outbound";
+  }
+  return "Unknown";
 }
 
 function resolveStatusBadge(record: ClientRecord): BadgeMeta {

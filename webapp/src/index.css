@@ -1507,6 +1507,87 @@ a {
   font-size: var(--font-size-xs);
 }
 
+.record-details-communications__list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.record-details-communications__item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.record-details-communications__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.record-details-communications__kind {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.record-details-communications__kind--sms {
+  color: #0f766e;
+  background: rgba(20, 184, 166, 0.16);
+}
+
+.record-details-communications__kind--call {
+  color: #1d4ed8;
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.record-details-communications__direction {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.record-details-communications__date {
+  margin-left: auto;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.record-details-communications__body {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.record-details-communications__recordings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.record-details-communications__recording-link {
+  color: var(--color-primary);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.record-details-communications__recording-link:hover,
+.record-details-communications__recording-link:focus-visible {
+  text-decoration: underline;
+}
+
 .record-editor-form {
   display: grid;
   gap: var(--space-3);
