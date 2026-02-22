@@ -521,6 +521,14 @@ const GHL_APP_MAX_CANDIDATES_TO_PROBE = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_APP_MAX_CANDIDATES_TO_PROBE, 8), 1),
   20,
 );
+const GHL_APP_MFA_SESSION_TTL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_APP_MFA_SESSION_TTL_MS, 8 * 60 * 1000), 60 * 1000),
+  30 * 60 * 1000,
+);
+const GHL_APP_MFA_MAX_ACTIVE_SESSIONS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_APP_MFA_MAX_ACTIVE_SESSIONS, 12), 1),
+  100,
+);
 const GHL_API_KEY = (process.env.GHL_API_KEY || process.env.GOHIGHLEVEL_API_KEY || "").toString().trim();
 const GHL_LOCATION_ID = (process.env.GHL_LOCATION_ID || "").toString().trim();
 const GHL_API_BASE_URL = (
@@ -1668,6 +1676,7 @@ let identityIqPlaywrightChromiumPromise = null;
 let identityIqPlaywrightInstallPromise = null;
 let ghlPlaywrightChromiumPromise = null;
 let ghlPlaywrightInstallPromise = null;
+const ghlContractTextMfaSessionsById = new Map();
 let ghlLocationDocumentCandidatesCache = {
   expiresAt: 0,
   items: [],
@@ -27727,6 +27736,10 @@ function toGhlContractTextOperationError(message, options = {}) {
   const error = new Error(sanitizeTextValue(message, 360) || "GoHighLevel contract text request failed.");
   error.code = sanitizeTextValue(options.code, 80) || "ghl_contract_text_request_failed";
   error.httpStatus = Number.isFinite(options.httpStatus) ? options.httpStatus : 502;
+  const mfaSessionId = sanitizeTextValue(options.mfaSessionId, 160);
+  if (mfaSessionId) {
+    error.mfaSessionId = mfaSessionId;
+  }
   return error;
 }
 
@@ -30117,12 +30130,447 @@ async function resolveGhlContractTextByCandidateIdWithSession(candidateId, conte
   return bestResult.value || null;
 }
 
+async function closeGhlContractTextMfaSessionEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return;
+  }
+  await entry.context?.close?.().catch(() => {});
+  await entry.browser?.close?.().catch(() => {});
+}
+
+async function destroyGhlContractTextMfaSession(rawSessionId) {
+  const sessionId = sanitizeTextValue(rawSessionId, 160);
+  if (!sessionId) {
+    return;
+  }
+  const entry = ghlContractTextMfaSessionsById.get(sessionId);
+  if (!entry) {
+    return;
+  }
+  ghlContractTextMfaSessionsById.delete(sessionId);
+  await closeGhlContractTextMfaSessionEntry(entry);
+}
+
+function touchGhlContractTextMfaSession(entry, nowMs = Date.now()) {
+  if (!entry || typeof entry !== "object") {
+    return;
+  }
+  entry.expiresAt = nowMs + GHL_APP_MFA_SESSION_TTL_MS;
+}
+
+function sweepExpiredGhlContractTextMfaSessions(nowMs = Date.now()) {
+  for (const [sessionId, entry] of ghlContractTextMfaSessionsById.entries()) {
+    if (!entry || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= nowMs) {
+      void destroyGhlContractTextMfaSession(sessionId);
+    }
+  }
+}
+
+function createGhlContractTextMfaSession(entry) {
+  const nowMs = Date.now();
+  sweepExpiredGhlContractTextMfaSessions(nowMs);
+
+  while (ghlContractTextMfaSessionsById.size >= GHL_APP_MFA_MAX_ACTIVE_SESSIONS) {
+    let oldestSessionId = "";
+    let oldestCreatedAt = Number.POSITIVE_INFINITY;
+    for (const [sessionId, candidate] of ghlContractTextMfaSessionsById.entries()) {
+      const createdAt = Number.isFinite(candidate?.createdAt) ? candidate.createdAt : nowMs;
+      if (createdAt < oldestCreatedAt) {
+        oldestCreatedAt = createdAt;
+        oldestSessionId = sessionId;
+      }
+    }
+    if (!oldestSessionId) {
+      break;
+    }
+    void destroyGhlContractTextMfaSession(oldestSessionId);
+  }
+
+  const sessionId = createRandomUrlSafeToken(18);
+  ghlContractTextMfaSessionsById.set(sessionId, {
+    sessionId,
+    browser: entry?.browser || null,
+    context: entry?.context || null,
+    page: entry?.page || null,
+    clientName: sanitizeTextValue(entry?.clientName, 300),
+    requestedLocationId: sanitizeTextValue(entry?.requestedLocationId, 160),
+    startedAt: Number.isFinite(entry?.startedAt) ? entry.startedAt : nowMs,
+    createdAt: nowMs,
+    expiresAt: nowMs + GHL_APP_MFA_SESSION_TTL_MS,
+    inFlight: false,
+  });
+  return sessionId;
+}
+
+function reserveGhlContractTextMfaSession(rawSessionId) {
+  const sessionId = sanitizeTextValue(rawSessionId, 160);
+  if (!sessionId) {
+    return {
+      status: "missing",
+      sessionId: "",
+      entry: null,
+    };
+  }
+
+  sweepExpiredGhlContractTextMfaSessions();
+  const entry = ghlContractTextMfaSessionsById.get(sessionId);
+  if (!entry) {
+    return {
+      status: "missing",
+      sessionId,
+      entry: null,
+    };
+  }
+  if (entry.inFlight) {
+    return {
+      status: "busy",
+      sessionId,
+      entry: null,
+    };
+  }
+
+  entry.inFlight = true;
+  touchGhlContractTextMfaSession(entry);
+  return {
+    status: "ok",
+    sessionId,
+    entry,
+  };
+}
+
+function releaseGhlContractTextMfaSession(rawSessionId) {
+  const sessionId = sanitizeTextValue(rawSessionId, 160);
+  if (!sessionId) {
+    return;
+  }
+  const entry = ghlContractTextMfaSessionsById.get(sessionId);
+  if (!entry) {
+    return;
+  }
+  entry.inFlight = false;
+  touchGhlContractTextMfaSession(entry);
+}
+
+async function submitGhlMfaAndWaitForCompletion(page, mfaCode, mfaSessionId = "") {
+  const normalizedSessionId = sanitizeTextValue(mfaSessionId, 160);
+  const mfaFilled = await fillGhlMfaCode(page, mfaCode);
+  if (!mfaFilled) {
+    throw toGhlContractTextOperationError(
+      "GoHighLevel requested MFA, but verification code field was not detected automatically.",
+      {
+        code: "ghl_mfa_field_not_found",
+        httpStatus: 409,
+        mfaSessionId: normalizedSessionId,
+      },
+    );
+  }
+
+  const mfaSubmitted = await submitGhlMfaChallenge(page);
+  if (!mfaSubmitted) {
+    throw toGhlContractTextOperationError(
+      "GoHighLevel requested MFA, but verification submit action was not detected automatically.",
+      {
+        code: "ghl_mfa_submit_unavailable",
+        httpStatus: 409,
+        mfaSessionId: normalizedSessionId,
+      },
+    );
+  }
+
+  await page.waitForLoadState("networkidle", {
+    timeout: GHL_APP_NAVIGATION_TIMEOUT_MS,
+  }).catch(() => {});
+  await page.waitForTimeout(GHL_APP_POST_LOGIN_SETTLE_MS);
+
+  const storageSnapshot = await readGhlBrowserStorageSnapshot(page);
+  const normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
+  if (isGhlMfaChallengeText(normalizedBody)) {
+    throw toGhlContractTextOperationError(
+      "GoHighLevel MFA code was rejected or expired. Enter a fresh code and retry.",
+      {
+        code: "ghl_mfa_invalid_code",
+        httpStatus: 409,
+        mfaSessionId: normalizedSessionId,
+      },
+    );
+  }
+}
+
+async function extractGhlContractTextFromAuthenticatedPage(page, options = {}) {
+  const clientName = sanitizeTextValue(options?.clientName, 300);
+  const requestedLocationId = sanitizeTextValue(options?.requestedLocationId, 160);
+  const startedAt = Number.isFinite(options?.startedAt) ? options.startedAt : Date.now();
+  const mfaSessionId = sanitizeTextValue(options?.mfaSessionId, 160);
+
+  if (!clientName) {
+    throw toGhlContractTextOperationError("clientName is required.", {
+      code: "ghl_contract_text_invalid_payload",
+      httpStatus: 400,
+      mfaSessionId,
+    });
+  }
+
+  const storageSnapshot = await readGhlBrowserStorageSnapshot(page);
+  const normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
+  if (/\b(captcha|recaptcha|i am not a robot|human verification)\b/i.test(normalizedBody)) {
+    throw toGhlContractTextOperationError(
+      "GoHighLevel requested CAPTCHA/human verification. Complete login manually, then retry.",
+      {
+        code: "ghl_captcha_required",
+        httpStatus: 409,
+        mfaSessionId,
+      },
+    );
+  }
+  if (isGhlMfaChallengeText(normalizedBody)) {
+    throw toGhlContractTextOperationError(
+      mfaSessionId
+        ? "GoHighLevel MFA code was rejected or expired. Enter a fresh code and retry."
+        : "GoHighLevel requested MFA/verification code. Enter MFA code in the form and retry.",
+      {
+        code: mfaSessionId ? "ghl_mfa_invalid_code" : "ghl_mfa_required",
+        httpStatus: 409,
+        mfaSessionId,
+      },
+    );
+  }
+  if (/\b(invalid|incorrect|wrong|does not match|try again)\b/i.test(normalizedBody) && /\b(email|password|credential|login)\b/i.test(normalizedBody)) {
+    throw toGhlContractTextOperationError("GoHighLevel rejected the credentials. Check login and password.", {
+      code: "ghl_invalid_credentials",
+      httpStatus: 401,
+      mfaSessionId,
+    });
+  }
+
+  const artifacts = resolveGhlBrowserSessionArtifacts(storageSnapshot, requestedLocationId);
+  if (!artifacts.sessionToken) {
+    throw toGhlContractTextOperationError("GoHighLevel session token was not found after login.", {
+      code: "ghl_session_token_not_found",
+      httpStatus: 502,
+      mfaSessionId,
+    });
+  }
+  if (!artifacts.locationId) {
+    throw toGhlContractTextOperationError(
+      "GoHighLevel locationId was not detected. Set GHL_LOCATION_ID or pass locationId in request.",
+      {
+        code: "ghl_location_id_not_found",
+        httpStatus: 400,
+        mfaSessionId,
+      },
+    );
+  }
+
+  const contacts = await searchGhlContactsByClientNameWithSession(clientName, artifacts.sessionToken, artifacts.locationId);
+  const bestContact = contacts[0] || null;
+  const contactId = sanitizeTextValue(bestContact?.id || bestContact?._id || bestContact?.contactId, 160);
+  const contactName = sanitizeTextValue(buildContactCandidateName(bestContact), 300) || clientName;
+
+  const candidatesResult = await listGhlContractCandidatesForContactWithSession({
+    clientName,
+    contactName,
+    contactId,
+    sessionToken: artifacts.sessionToken,
+    locationId: artifacts.locationId,
+  });
+  const rankedCandidates = rankGhlContractDownloadCandidates(candidatesResult.candidates, {
+    contactName,
+    contactId,
+  });
+
+  const bestTextResult = {
+    score: -1,
+    textLength: 0,
+    value: null,
+  };
+
+  function registerTextCandidate(entry, metadata = {}) {
+    const text = normalizeGhlContractTextFragment(entry?.text);
+    if (!text) {
+      return;
+    }
+    const score = computeGhlContractTextQualityScore(text);
+    const textLength = text.length;
+    if (score < bestTextResult.score) {
+      return;
+    }
+    if (score === bestTextResult.score && textLength <= bestTextResult.textLength) {
+      return;
+    }
+
+    bestTextResult.score = score;
+    bestTextResult.textLength = textLength;
+    bestTextResult.value = {
+      source: sanitizeTextValue(entry?.source, 220) || "unknown",
+      candidateId: extractLikelyGhlEntityId(entry?.candidateId),
+      contractTitle: sanitizeTextValue(metadata?.contractTitle || entry?.title, 320),
+      text,
+      textLength,
+      qualityScore: score,
+      fallbackMode: sanitizeTextValue(entry?.fallbackMode, 80) || "",
+    };
+  }
+
+  if (candidatesResult.bestSearchText?.text) {
+    registerTextCandidate(candidatesResult.bestSearchText, {
+      contractTitle: "",
+    });
+  }
+
+  for (const candidate of rankedCandidates.slice(0, GHL_APP_MAX_CANDIDATES_TO_PROBE)) {
+    const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
+    if (!candidateId) {
+      continue;
+    }
+    const resolvedText = await resolveGhlContractTextByCandidateIdWithSession(candidateId, {
+      sessionToken: artifacts.sessionToken,
+      locationId: artifacts.locationId,
+      contactId: sanitizeTextValue(candidate?.contactId, 160) || contactId,
+    });
+    if (!resolvedText?.text) {
+      continue;
+    }
+
+    registerTextCandidate(
+      {
+        ...resolvedText,
+        fallbackMode: resolvedText.fallbackMode || "session_api",
+      },
+      {
+        contractTitle: sanitizeTextValue(candidate?.title, 320),
+      },
+    );
+    if (bestTextResult.score >= 5 || bestTextResult.textLength >= 450) {
+      break;
+    }
+  }
+
+  if (!bestTextResult.value) {
+    try {
+      const legacyFallback = await resolveGhlContractTextForDownloadFallback(clientName, null, {
+        preferredContactId: contactId,
+      });
+      if (legacyFallback?.text) {
+        registerTextCandidate(
+          {
+            text: legacyFallback.text,
+            source: sanitizeTextValue(legacyFallback.source, 220) || "legacy_fallback",
+            candidateId: extractLikelyGhlEntityId(legacyFallback.candidateId),
+            fallbackMode: sanitizeTextValue(legacyFallback.fallbackMode, 80) || "legacy_fallback",
+          },
+          {
+            contractTitle: "",
+          },
+        );
+      }
+    } catch {
+      // Legacy fallback is optional for this browser-session flow.
+    }
+  }
+
+  if (!bestTextResult.value) {
+    throw toGhlContractTextOperationError(
+      "Contract text was not found for this client after browser login and candidate probing.",
+      {
+        code: "ghl_contract_text_not_found",
+        httpStatus: 404,
+        mfaSessionId,
+      },
+    );
+  }
+
+  return {
+    provider: "gohighlevel",
+    status: bestTextResult.score >= 5 ? "ok" : "partial",
+    clientName,
+    contactName,
+    contactId,
+    contractTitle: bestTextResult.value.contractTitle || "-",
+    candidateId: bestTextResult.value.candidateId || "",
+    source: bestTextResult.value.source,
+    fallbackMode: bestTextResult.value.fallbackMode || "none",
+    contractText: bestTextResult.value.text,
+    textLength: bestTextResult.value.textLength,
+    dashboardUrl: sanitizeTextValue(storageSnapshot.url || page.url(), 2000),
+    fetchedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+    note:
+      bestTextResult.value.fallbackMode && bestTextResult.value.fallbackMode !== "none"
+        ? "Contract text extracted with fallback strategy."
+        : "Contract text extracted from GoHighLevel browser session.",
+  };
+}
+
 async function fetchGhlContractTextViaBrowserSession(payload) {
   const clientName = sanitizeTextValue(payload?.clientName, 300);
   const login = normalizeGhlAppLogin(payload?.login);
   const password = sanitizeTextValue(payload?.password, 260);
   const mfaCode = normalizeGhlMfaCode(payload?.mfaCode);
+  const mfaSessionId = sanitizeTextValue(payload?.mfaSessionId, 160);
   const requestedLocationId = sanitizeTextValue(payload?.locationId, 160);
+
+  if (mfaSessionId) {
+    const reservation = reserveGhlContractTextMfaSession(mfaSessionId);
+    if (reservation.status === "missing") {
+      throw toGhlContractTextOperationError(
+        "GoHighLevel MFA session expired. Start extraction again to request a new verification code.",
+        {
+          code: "ghl_mfa_session_expired",
+          httpStatus: 409,
+          mfaSessionId,
+        },
+      );
+    }
+    if (reservation.status === "busy") {
+      throw toGhlContractTextOperationError(
+        "GoHighLevel MFA session is already in progress. Wait a few seconds and retry.",
+        {
+          code: "ghl_mfa_session_busy",
+          httpStatus: 409,
+          mfaSessionId,
+        },
+      );
+    }
+    if (!mfaCode) {
+      releaseGhlContractTextMfaSession(mfaSessionId);
+      throw toGhlContractTextOperationError("MFA code is required to continue GoHighLevel verification.", {
+        code: "ghl_mfa_code_required",
+        httpStatus: 400,
+        mfaSessionId,
+      });
+    }
+
+    const sessionEntry = reservation.entry;
+    let shouldDestroySession = false;
+    try {
+      await submitGhlMfaAndWaitForCompletion(sessionEntry.page, mfaCode, mfaSessionId);
+      const result = await extractGhlContractTextFromAuthenticatedPage(sessionEntry.page, {
+        clientName: sessionEntry.clientName || clientName,
+        requestedLocationId: requestedLocationId || sessionEntry.requestedLocationId,
+        startedAt: sessionEntry.startedAt,
+        mfaSessionId,
+      });
+      shouldDestroySession = true;
+      return result;
+    } catch (error) {
+      const errorCode = sanitizeTextValue(error?.code, 80);
+      const shouldKeepSession =
+        errorCode === "ghl_mfa_invalid_code" ||
+        errorCode === "ghl_mfa_field_not_found" ||
+        errorCode === "ghl_mfa_submit_unavailable" ||
+        errorCode === "ghl_mfa_code_required";
+      if (!shouldKeepSession) {
+        shouldDestroySession = true;
+      }
+      throw error;
+    } finally {
+      if (shouldDestroySession) {
+        await destroyGhlContractTextMfaSession(mfaSessionId);
+      } else {
+        releaseGhlContractTextMfaSession(mfaSessionId);
+      }
+    }
+  }
 
   if (!clientName || !login || !password) {
     throw toGhlContractTextOperationError("clientName, login, and password are required.", {
@@ -30153,6 +30601,7 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
   });
   const page = await context.newPage();
   const startedAt = Date.now();
+  let keepSessionOpen = false;
   page.setDefaultTimeout(GHL_APP_NAVIGATION_TIMEOUT_MS);
 
   try {
@@ -30198,8 +30647,8 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
     }).catch(() => {});
     await page.waitForTimeout(GHL_APP_POST_LOGIN_SETTLE_MS);
 
-    let storageSnapshot = await readGhlBrowserStorageSnapshot(page);
-    let normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
+    const storageSnapshot = await readGhlBrowserStorageSnapshot(page);
+    const normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
     if (/\b(captcha|recaptcha|i am not a robot|human verification)\b/i.test(normalizedBody)) {
       throw toGhlContractTextOperationError(
         "GoHighLevel requested CAPTCHA/human verification. Complete login manually, then retry.",
@@ -30211,218 +30660,38 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
     }
     if (isGhlMfaChallengeText(normalizedBody)) {
       if (!mfaCode) {
+        const createdMfaSessionId = createGhlContractTextMfaSession({
+          browser,
+          context,
+          page,
+          clientName,
+          requestedLocationId,
+          startedAt,
+        });
+        keepSessionOpen = true;
         throw toGhlContractTextOperationError(
-          "GoHighLevel requested MFA/verification code. Enter MFA code in the form and retry.",
+          "GoHighLevel requested MFA/verification code. Enter MFA code in the verification window.",
           {
             code: "ghl_mfa_required",
             httpStatus: 409,
+            mfaSessionId: createdMfaSessionId,
           },
         );
       }
 
-      const mfaFilled = await fillGhlMfaCode(page, mfaCode);
-      if (!mfaFilled) {
-        throw toGhlContractTextOperationError(
-          "GoHighLevel requested MFA, but verification code field was not detected automatically.",
-          {
-            code: "ghl_mfa_field_not_found",
-            httpStatus: 409,
-          },
-        );
-      }
-
-      const mfaSubmitted = await submitGhlMfaChallenge(page);
-      if (!mfaSubmitted) {
-        throw toGhlContractTextOperationError(
-          "GoHighLevel requested MFA, but verification submit action was not detected automatically.",
-          {
-            code: "ghl_mfa_submit_unavailable",
-            httpStatus: 409,
-          },
-        );
-      }
-
-      await page.waitForLoadState("networkidle", {
-        timeout: GHL_APP_NAVIGATION_TIMEOUT_MS,
-      }).catch(() => {});
-      await page.waitForTimeout(GHL_APP_POST_LOGIN_SETTLE_MS);
-
-      storageSnapshot = await readGhlBrowserStorageSnapshot(page);
-      normalizedBody = normalizeGhlContractComparableText(storageSnapshot.bodyText);
-      if (isGhlMfaChallengeText(normalizedBody)) {
-        throw toGhlContractTextOperationError(
-          "GoHighLevel MFA code was rejected or expired. Enter a fresh code and retry.",
-          {
-            code: "ghl_mfa_invalid_code",
-            httpStatus: 409,
-          },
-        );
-      }
-    }
-    if (/\b(invalid|incorrect|wrong|does not match|try again)\b/i.test(normalizedBody) && /\b(email|password|credential|login)\b/i.test(normalizedBody)) {
-      throw toGhlContractTextOperationError("GoHighLevel rejected the credentials. Check login and password.", {
-        code: "ghl_invalid_credentials",
-        httpStatus: 401,
-      });
+      await submitGhlMfaAndWaitForCompletion(page, mfaCode);
     }
 
-    const artifacts = resolveGhlBrowserSessionArtifacts(storageSnapshot, requestedLocationId);
-    if (!artifacts.sessionToken) {
-      throw toGhlContractTextOperationError("GoHighLevel session token was not found after login.", {
-        code: "ghl_session_token_not_found",
-        httpStatus: 502,
-      });
-    }
-    if (!artifacts.locationId) {
-      throw toGhlContractTextOperationError(
-        "GoHighLevel locationId was not detected. Set GHL_LOCATION_ID or pass locationId in request.",
-        {
-          code: "ghl_location_id_not_found",
-          httpStatus: 400,
-        },
-      );
-    }
-
-    const contacts = await searchGhlContactsByClientNameWithSession(clientName, artifacts.sessionToken, artifacts.locationId);
-    const bestContact = contacts[0] || null;
-    const contactId = sanitizeTextValue(bestContact?.id || bestContact?._id || bestContact?.contactId, 160);
-    const contactName = sanitizeTextValue(buildContactCandidateName(bestContact), 300) || clientName;
-
-    const candidatesResult = await listGhlContractCandidatesForContactWithSession({
+    return await extractGhlContractTextFromAuthenticatedPage(page, {
       clientName,
-      contactName,
-      contactId,
-      sessionToken: artifacts.sessionToken,
-      locationId: artifacts.locationId,
+      requestedLocationId,
+      startedAt,
     });
-    const rankedCandidates = rankGhlContractDownloadCandidates(candidatesResult.candidates, {
-      contactName,
-      contactId,
-    });
-
-    const bestTextResult = {
-      score: -1,
-      textLength: 0,
-      value: null,
-    };
-
-    function registerTextCandidate(entry, metadata = {}) {
-      const text = normalizeGhlContractTextFragment(entry?.text);
-      if (!text) {
-        return;
-      }
-      const score = computeGhlContractTextQualityScore(text);
-      const textLength = text.length;
-      if (score < bestTextResult.score) {
-        return;
-      }
-      if (score === bestTextResult.score && textLength <= bestTextResult.textLength) {
-        return;
-      }
-
-      bestTextResult.score = score;
-      bestTextResult.textLength = textLength;
-      bestTextResult.value = {
-        source: sanitizeTextValue(entry?.source, 220) || "unknown",
-        candidateId: extractLikelyGhlEntityId(entry?.candidateId),
-        contractTitle: sanitizeTextValue(metadata?.contractTitle || entry?.title, 320),
-        text,
-        textLength,
-        qualityScore: score,
-        fallbackMode: sanitizeTextValue(entry?.fallbackMode, 80) || "",
-      };
-    }
-
-    if (candidatesResult.bestSearchText?.text) {
-      registerTextCandidate(candidatesResult.bestSearchText, {
-        contractTitle: "",
-      });
-    }
-
-    for (const candidate of rankedCandidates.slice(0, GHL_APP_MAX_CANDIDATES_TO_PROBE)) {
-      const candidateId = extractLikelyGhlEntityId(candidate?.candidateId);
-      if (!candidateId) {
-        continue;
-      }
-      const resolvedText = await resolveGhlContractTextByCandidateIdWithSession(candidateId, {
-        sessionToken: artifacts.sessionToken,
-        locationId: artifacts.locationId,
-        contactId: sanitizeTextValue(candidate?.contactId, 160) || contactId,
-      });
-      if (!resolvedText?.text) {
-        continue;
-      }
-
-      registerTextCandidate(
-        {
-          ...resolvedText,
-          fallbackMode: resolvedText.fallbackMode || "session_api",
-        },
-        {
-          contractTitle: sanitizeTextValue(candidate?.title, 320),
-        },
-      );
-      if (bestTextResult.score >= 5 || bestTextResult.textLength >= 450) {
-        break;
-      }
-    }
-
-    if (!bestTextResult.value) {
-      try {
-        const legacyFallback = await resolveGhlContractTextForDownloadFallback(clientName, null, {
-          preferredContactId: contactId,
-        });
-        if (legacyFallback?.text) {
-          registerTextCandidate(
-            {
-              text: legacyFallback.text,
-              source: sanitizeTextValue(legacyFallback.source, 220) || "legacy_fallback",
-              candidateId: extractLikelyGhlEntityId(legacyFallback.candidateId),
-              fallbackMode: sanitizeTextValue(legacyFallback.fallbackMode, 80) || "legacy_fallback",
-            },
-            {
-              contractTitle: "",
-            },
-          );
-        }
-      } catch {
-        // Legacy fallback is optional for this browser-session flow.
-      }
-    }
-
-    if (!bestTextResult.value) {
-      throw toGhlContractTextOperationError(
-        "Contract text was not found for this client after browser login and candidate probing.",
-        {
-          code: "ghl_contract_text_not_found",
-          httpStatus: 404,
-        },
-      );
-    }
-
-    return {
-      provider: "gohighlevel",
-      status: bestTextResult.score >= 5 ? "ok" : "partial",
-      clientName,
-      contactName,
-      contactId,
-      contractTitle: bestTextResult.value.contractTitle || "-",
-      candidateId: bestTextResult.value.candidateId || "",
-      source: bestTextResult.value.source,
-      fallbackMode: bestTextResult.value.fallbackMode || "none",
-      contractText: bestTextResult.value.text,
-      textLength: bestTextResult.value.textLength,
-      dashboardUrl: sanitizeTextValue(storageSnapshot.url || page.url(), 2000),
-      fetchedAt: new Date().toISOString(),
-      elapsedMs: Date.now() - startedAt,
-      note:
-        bestTextResult.value.fallbackMode && bestTextResult.value.fallbackMode !== "none"
-          ? "Contract text extracted with fallback strategy."
-          : "Contract text extracted from GoHighLevel browser session.",
-    };
   } finally {
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
+    if (!keepSessionOpen) {
+      await context.close().catch(() => {});
+      await browser.close().catch(() => {});
+    }
   }
 }
 
@@ -30453,17 +30722,18 @@ app.post("/api/ghl/contract-text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW
   const mfaCode = normalizeGhlMfaCode(
     req.body?.mfaCode || req.body?.verificationCode || req.body?.otp || process.env.GHL_ADMIN_MFA_CODE,
   );
+  const mfaSessionId = sanitizeTextValue(req.body?.mfaSessionId, 160);
   const locationId = sanitizeTextValue(req.body?.locationId || process.env.GHL_LOCATION_ID, 160);
 
-  if (!clientName) {
+  if (!clientName && !mfaSessionId) {
     res.status(400).json({
-      error: "clientName is required.",
+      error: "clientName is required for a new extraction request.",
       code: "ghl_contract_text_invalid_payload",
     });
     return;
   }
 
-  if (!login || !password) {
+  if (!mfaSessionId && (!login || !password)) {
     res.status(400).json({
       error: "GoHighLevel admin login and password are required (payload or env GHL_ADMIN_LOGIN/GHL_ADMIN_PASSWORD).",
       code: "ghl_contract_text_missing_credentials",
@@ -30477,6 +30747,7 @@ app.post("/api/ghl/contract-text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW
       login,
       password,
       mfaCode,
+      mfaSessionId,
       locationId,
     });
 
@@ -30492,11 +30763,14 @@ app.post("/api/ghl/contract-text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW
       user: sanitizeTextValue(req.webAuthUser, 160),
       clientName,
       loginMasked: maskGhlAppLogin(login),
+      mfaSessionId: sanitizeTextValue(error?.mfaSessionId, 160) || mfaSessionId,
     });
-    res.status(error?.httpStatus || 502).json({
+    const responsePayload = {
       error: sanitizeTextValue(error?.message, 400) || "Failed to load GoHighLevel contract text.",
       code: sanitizeTextValue(error?.code, 80) || "ghl_contract_text_request_failed",
-    });
+      ...(sanitizeTextValue(error?.mfaSessionId, 160) ? { mfaSessionId: sanitizeTextValue(error?.mfaSessionId, 160) } : {}),
+    };
+    res.status(error?.httpStatus || 502).json(responsePayload);
   }
 });
 

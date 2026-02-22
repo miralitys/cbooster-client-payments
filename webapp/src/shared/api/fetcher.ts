@@ -1,12 +1,14 @@
 export class ApiError extends Error {
   public readonly status: number;
   public readonly code: string;
+  public readonly payload: unknown;
 
-  public constructor(message: string, status = 0, code = "api_error") {
+  public constructor(message: string, status = 0, code = "api_error", payload: unknown = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.payload = payload;
   }
 }
 
@@ -89,7 +91,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     const errorCode =
       typeof payload?.code === "string" && payload.code.trim() ? payload.code.trim() : "http_error";
 
-    throw new ApiError(errorText, response.status, errorCode);
+    throw new ApiError(errorText, response.status, errorCode, payload);
   }
 
   return payload as T;

@@ -3,6 +3,7 @@ export interface GhlContractTextRequest {
   login?: string;
   password?: string;
   mfaCode?: string;
+  mfaSessionId?: string;
   locationId?: string;
 }
 
