@@ -3167,6 +3167,19 @@ a {
   justify-content: flex-end;
 }
 
+.access-control-form-actions-react--split {
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.access-control-form-actions-group-react {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
 .access-control-users-table-wrap-react {
   min-height: 280px;
   height: auto;

@@ -213,6 +213,22 @@ function buildCookieHeaderFromSetCookie(response) {
     .join("; ");
 }
 
+function getCookieValueFromSetCookie(response, cookieName) {
+  const name = (cookieName || "").toString().trim();
+  if (!name) {
+    return "";
+  }
+  const prefix = `${name}=`;
+  for (const cookie of getSetCookieHeaders(response)) {
+    const normalizedCookie = (cookie || "").toString().trim();
+    if (!normalizedCookie.startsWith(prefix)) {
+      continue;
+    }
+    return normalizedCookie.slice(prefix.length).split(";")[0]?.trim() || "";
+  }
+  return "";
+}
+
 test("POST /api/auth/login enforces TOTP for configured users", async () => {
   const users = [
     {
@@ -443,6 +459,132 @@ test("first login bypasses TOTP and first-password page includes QR setup", asyn
       assert.equal(secondApiLoginWithCodeBody.ok, true);
       assert.equal(secondApiLoginWithCodeBody.mustChangePassword, false);
       assert.equal(secondApiLoginWithCodeBody.user?.totpEnabled, true);
+    },
+  );
+});
+
+test("DELETE /api/auth/users allows owner and blocks manager", async () => {
+  const users = [
+    {
+      username: "manager.user",
+      password: "ManagerPass123!",
+      displayName: "Manager User",
+      department: "sales",
+      role: "manager",
+    },
+    {
+      username: "victim.user",
+      password: "VictimPass123!",
+      displayName: "Victim User",
+      department: "sales",
+      role: "manager",
+    },
+    {
+      username: "target.user",
+      password: "TargetPass123!",
+      displayName: "Target User",
+      department: "sales",
+      role: "manager",
+    },
+  ];
+
+  await withServer(
+    {
+      WEB_AUTH_USERNAME: "owner",
+      WEB_AUTH_PASSWORD: "OwnerPass123!",
+      WEB_AUTH_OWNER_USERNAME: "owner",
+      WEB_AUTH_USERS_JSON: JSON.stringify(users),
+    },
+    async ({ baseUrl }) => {
+      const ownerLoginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: "owner",
+          password: "OwnerPass123!",
+        }),
+      });
+      const ownerLoginBody = await ownerLoginResponse.json();
+      assert.equal(ownerLoginResponse.status, 200);
+      assert.equal(ownerLoginBody.ok, true);
+
+      const ownerCookieHeader = buildCookieHeaderFromSetCookie(ownerLoginResponse);
+      const ownerCsrfToken = getCookieValueFromSetCookie(ownerLoginResponse, WEB_AUTH_CSRF_COOKIE_NAME);
+      assert.match(ownerCookieHeader, /cbooster_auth_session=/);
+      assert.ok(ownerCsrfToken);
+
+      const ownerDeleteResponse = await fetch(`${baseUrl}/api/auth/users/${encodeURIComponent("victim.user")}`, {
+        method: "DELETE",
+        headers: {
+          Accept: "application/json",
+          Cookie: ownerCookieHeader,
+          "x-csrf-token": ownerCsrfToken,
+        },
+      });
+      const ownerDeleteBody = await ownerDeleteResponse.json();
+      assert.equal(ownerDeleteResponse.status, 200);
+      assert.equal(ownerDeleteBody.ok, true);
+      assert.equal(ownerDeleteBody.item?.username, "victim.user");
+
+      const deletedUserLoginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: "victim.user",
+          password: "VictimPass123!",
+        }),
+      });
+      assert.equal(deletedUserLoginResponse.status, 401);
+
+      const managerLoginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: "manager.user",
+          password: "ManagerPass123!",
+        }),
+      });
+      const managerLoginBody = await managerLoginResponse.json();
+      assert.equal(managerLoginResponse.status, 200);
+      assert.equal(managerLoginBody.ok, true);
+
+      const managerCookieHeader = buildCookieHeaderFromSetCookie(managerLoginResponse);
+      const managerCsrfToken = getCookieValueFromSetCookie(managerLoginResponse, WEB_AUTH_CSRF_COOKIE_NAME);
+      assert.match(managerCookieHeader, /cbooster_auth_session=/);
+      assert.ok(managerCsrfToken);
+
+      const managerDeleteResponse = await fetch(`${baseUrl}/api/auth/users/${encodeURIComponent("target.user")}`, {
+        method: "DELETE",
+        headers: {
+          Accept: "application/json",
+          Cookie: managerCookieHeader,
+          "x-csrf-token": managerCsrfToken,
+        },
+      });
+      const managerDeleteBody = await managerDeleteResponse.json();
+      assert.equal(managerDeleteResponse.status, 403);
+      assert.equal(managerDeleteBody.error, "Owner or admin access is required.");
+
+      const ownerDeleteOwnerResponse = await fetch(`${baseUrl}/api/auth/users/${encodeURIComponent("owner")}`, {
+        method: "DELETE",
+        headers: {
+          Accept: "application/json",
+          Cookie: ownerCookieHeader,
+          "x-csrf-token": ownerCsrfToken,
+        },
+      });
+      const ownerDeleteOwnerBody = await ownerDeleteOwnerResponse.json();
+      assert.equal(ownerDeleteOwnerResponse.status, 403);
+      assert.equal(ownerDeleteOwnerBody.error, "Owner account cannot be deleted from this page.");
     },
   );
 });

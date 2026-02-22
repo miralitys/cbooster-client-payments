@@ -37,6 +37,12 @@ export async function updateAccessUser(username: string, payload: UpsertUserPayl
   });
 }
 
+export async function deleteAccessUser(username: string): Promise<UpsertUserResponse> {
+  return apiRequest<UpsertUserResponse>(`/api/auth/users/${encodeURIComponent(username)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function listAssistantReviews(limit = 60, offset = 0): Promise<AssistantReviewListPayload> {
   const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 200)) : 60;
   const normalizedOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;

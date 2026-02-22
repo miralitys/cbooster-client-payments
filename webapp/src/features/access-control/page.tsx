@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import QRCode from "qrcode";
 
-import { createAccessUser, getAccessModel, listAssistantReviews, updateAccessUser, updateAssistantReview } from "@/shared/api";
+import { createAccessUser, deleteAccessUser, getAccessModel, listAssistantReviews, updateAccessUser, updateAssistantReview } from "@/shared/api";
 import type {
   AssistantReviewItem,
   AccessControlDepartment,
@@ -69,6 +69,7 @@ export default function AccessControlPage() {
   const [editStatusText, setEditStatusText] = useState("Update user data and click Save Changes.");
   const [editStatusError, setEditStatusError] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const [assistantReviews, setAssistantReviews] = useState<AssistantReviewItem[]>([]);
   const [assistantReviewsTotal, setAssistantReviewsTotal] = useState(0);
@@ -307,6 +308,7 @@ export default function AccessControlPage() {
     setEditStatusText("Update user data and click Save Changes.");
     setEditStatusError(false);
     setIsUpdating(false);
+    setIsDeleting(false);
   }
 
   function onCreateDepartmentChange(departmentId: string) {
@@ -444,11 +446,48 @@ export default function AccessControlPage() {
     }
   }
 
+  async function submitDeleteUser() {
+    if (!canDeleteEditingUser || !editingOriginalUsername || !editingUser) {
+      return;
+    }
+
+    const targetDisplayName = editingUser.displayName || editingUser.username || editingOriginalUsername;
+    const shouldDelete = window.confirm(`Delete user "${targetDisplayName}"? This action cannot be undone.`);
+    if (!shouldDelete) {
+      return;
+    }
+
+    setIsDeleting(true);
+    setEditStatusText(`Deleting "${targetDisplayName}"...`);
+    setEditStatusError(false);
+
+    try {
+      const response = await deleteAccessUser(editingOriginalUsername);
+      const deletedName = response?.item?.displayName || response?.item?.username || targetDisplayName;
+      closeEditModal();
+      setStatusText(`User "${deletedName}" deleted.`);
+      await loadAccessModel();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to delete user.";
+      setEditStatusText(message);
+      setEditStatusError(true);
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   const enabledPermissionsCount = useMemo(() => {
     return Object.values(permissions || {}).filter(Boolean).length;
   }, [permissions]);
 
   const isOwnerUser = Boolean(currentUser?.isOwner);
+  const isAdminUser = Boolean(permissions?.manage_access_control) && !isOwnerUser;
+  const canDeleteUsers = isOwnerUser || isAdminUser;
+  const isEditingCurrentUser =
+    Boolean(editingOriginalUsername) &&
+    normalizeUsername(editingOriginalUsername) === normalizeUsername(currentUser?.username || "");
+  const canDeleteEditingUser = Boolean(canDeleteUsers && editingUser && !editingUser.isOwner && !isEditingCurrentUser);
+  const isEditBusy = isUpdating || isDeleting;
 
   const getAssistantReviewDraft = useCallback(
     (item: AssistantReviewItem): AssistantReviewDraft => {
@@ -909,13 +948,28 @@ export default function AccessControlPage() {
         title="Edit User"
         onClose={closeEditModal}
         footer={
-          <div className="access-control-form-actions-react access-control-form-actions-react--end">
-            <Button type="button" variant="secondary" onClick={closeEditModal} disabled={isUpdating}>
-              Cancel
-            </Button>
-            <Button type="submit" form="access-control-edit-user-form" isLoading={isUpdating} disabled={isUpdating}>
-              Save Changes
-            </Button>
+          <div className="access-control-form-actions-react access-control-form-actions-react--split">
+            {canDeleteEditingUser ? (
+              <Button
+                type="button"
+                variant="danger"
+                onClick={() => void submitDeleteUser()}
+                isLoading={isDeleting}
+                disabled={isEditBusy}
+              >
+                Delete User
+              </Button>
+            ) : (
+              <span />
+            )}
+            <div className="access-control-form-actions-group-react">
+              <Button type="button" variant="secondary" onClick={closeEditModal} disabled={isEditBusy}>
+                Cancel
+              </Button>
+              <Button type="submit" form="access-control-edit-user-form" isLoading={isUpdating} disabled={isEditBusy}>
+                Save Changes
+              </Button>
+            </div>
           </div>
         }
       >
@@ -928,7 +982,7 @@ export default function AccessControlPage() {
               value={editForm.username}
               onChange={(event) => setEditForm((previous) => ({ ...previous, username: event.target.value }))}
               placeholder="Optional: user email or login"
-              disabled={isUpdating}
+              disabled={isEditBusy}
             />
           </Field>
 
@@ -939,7 +993,7 @@ export default function AccessControlPage() {
               value={editForm.password}
               onChange={(event) => setEditForm((previous) => ({ ...previous, password: event.target.value }))}
               placeholder="Leave empty to keep current password"
-              disabled={isUpdating}
+              disabled={isEditBusy}
             />
           </Field>
 
@@ -949,18 +1003,18 @@ export default function AccessControlPage() {
               value={editForm.totpEnabled ? "enabled" : "disabled"}
               onChange={(event) => {
                 const enabled = event.target.value === "enabled";
-                setEditForm((previous) => ({
-                  ...previous,
-                  totpEnabled: enabled,
-                  totpSecret: enabled ? previous.totpSecret : "",
-                }));
-              }}
-              disabled={isUpdating}
-            >
-              <option value="disabled">Off</option>
-              <option value="enabled">Enabled</option>
-            </Select>
-          </Field>
+                  setEditForm((previous) => ({
+                    ...previous,
+                    totpEnabled: enabled,
+                    totpSecret: enabled ? previous.totpSecret : "",
+                  }));
+                }}
+                disabled={isEditBusy}
+              >
+                <option value="disabled">Off</option>
+                <option value="enabled">Enabled</option>
+              </Select>
+            </Field>
 
           {editForm.totpEnabled ? (
             <>
@@ -978,7 +1032,7 @@ export default function AccessControlPage() {
                   value={editForm.totpSecret}
                   onChange={(event) => setEditForm((previous) => ({ ...previous, totpSecret: event.target.value }))}
                   placeholder="Example: JBSWY3DPEHPK3PXP"
-                  disabled={isUpdating}
+                  disabled={isEditBusy}
                 />
               </Field>
               <div className="access-control-totp-actions-react">
@@ -992,7 +1046,7 @@ export default function AccessControlPage() {
                       totpSecret: generateTotpSecretValue(),
                     }))
                   }
-                  disabled={isUpdating}
+                  disabled={isEditBusy}
                 >
                   Generate Secret
                 </Button>
@@ -1014,7 +1068,7 @@ export default function AccessControlPage() {
               value={editForm.displayName}
               onChange={(event) => setEditForm((previous) => ({ ...previous, displayName: event.target.value }))}
               required
-              disabled={isUpdating}
+              disabled={isEditBusy}
             />
           </Field>
 
@@ -1023,7 +1077,7 @@ export default function AccessControlPage() {
               id="access-edit-department"
               value={editForm.departmentId}
               onChange={(event) => onEditDepartmentChange(event.target.value)}
-              disabled={isUpdating}
+              disabled={isEditBusy}
             >
               {departments.map((department) => (
                 <option key={department.id} value={department.id}>
@@ -1039,14 +1093,14 @@ export default function AccessControlPage() {
               value={editForm.roleId}
               onChange={(event) => {
                 const nextRole = event.target.value;
-                setEditForm((previous) => ({
-                  ...previous,
-                  roleId: nextRole,
-                  teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : "",
-                }));
-              }}
-              disabled={isUpdating}
-            >
+                  setEditForm((previous) => ({
+                    ...previous,
+                    roleId: nextRole,
+                    teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : "",
+                  }));
+                }}
+                disabled={isEditBusy}
+              >
               {editRoleOptions.map((role) => (
                 <option key={role.id} value={role.id}>
                   {role.name}
@@ -1061,7 +1115,7 @@ export default function AccessControlPage() {
                 id="access-edit-team"
                 value={editForm.teamUsernames}
                 onChange={(event) => setEditForm((previous) => ({ ...previous, teamUsernames: event.target.value }))}
-                disabled={isUpdating}
+                disabled={isEditBusy}
               />
             </Field>
           ) : null}
@@ -1248,6 +1302,10 @@ function formatDateTime(rawValue: string | null): string {
   }
 
   return new Date(parsed).toLocaleString();
+}
+
+function normalizeUsername(value: string): string {
+  return value.toString().trim().toLowerCase();
 }
 
 function ensureFormDefaults(form: UserFormState, departments: AccessControlDepartment[]): UserFormState {

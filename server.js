@@ -11774,6 +11774,30 @@ function updateWebAuthUserInDirectory(existingUsername, rawBody) {
   }
 }
 
+function deleteWebAuthUserFromDirectory(existingUsername, options = {}) {
+  const normalizedExistingUsername = normalizeWebAuthUsername(existingUsername);
+  if (!normalizedExistingUsername) {
+    throw createHttpError("Username is required.", 400);
+  }
+
+  const existingUser = getWebAuthUserByUsername(normalizedExistingUsername);
+  if (!existingUser) {
+    throw createHttpError("User not found.", 404);
+  }
+
+  if (existingUser.isOwner || normalizedExistingUsername === WEB_AUTH_OWNER_USERNAME) {
+    throw createHttpError("Owner account cannot be deleted from this page.", 403);
+  }
+
+  const actorUsername = normalizeWebAuthUsername(options.actorUsername);
+  if (actorUsername && actorUsername === normalizedExistingUsername) {
+    throw createHttpError("You cannot delete your own account.", 403);
+  }
+
+  WEB_AUTH_USERS_BY_USERNAME.delete(normalizedExistingUsername);
+  return existingUser;
+}
+
 function isWebAuthPasswordChangeRequired(userProfile) {
   if (!userProfile || typeof userProfile !== "object") {
     return false;
@@ -26250,6 +26274,32 @@ app.put("/api/auth/users/:username", requireWebPermission(WEB_AUTH_PERMISSION_MA
   } catch (error) {
     res.status(error.httpStatus || 400).json({
       error: sanitizeTextValue(error?.message, 260) || "Failed to update user.",
+    });
+  }
+});
+
+app.delete("/api/auth/users/:username", requireOwnerOrAdminAccess(), (req, res) => {
+  const targetUsername = normalizeWebAuthUsername(req.params.username);
+  if (!targetUsername) {
+    res.status(400).json({
+      error: "Username is required.",
+    });
+    return;
+  }
+
+  try {
+    const deletedUser = deleteWebAuthUserFromDirectory(targetUsername, {
+      actorUsername: req.webAuthUser || req.webAuthProfile?.username || "",
+    });
+    revokeWebAuthMobileSessionsForUser(deletedUser.username);
+
+    res.json({
+      ok: true,
+      item: buildWebAuthPublicUser(deletedUser),
+    });
+  } catch (error) {
+    res.status(error.httpStatus || 400).json({
+      error: sanitizeTextValue(error?.message, 260) || "Failed to delete user.",
     });
   }
 });
