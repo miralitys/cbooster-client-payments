@@ -2700,13 +2700,47 @@ a {
 
 .identityiq-score-result {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
-.identityiq-score-summary {
+.identityiq-latest-hero {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  align-items: stretch;
+}
+
+.identityiq-latest-hero__main {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, #fbfdff 0%, #f2f7ff 100%);
+  padding: 14px 16px;
+  display: grid;
   gap: var(--space-2);
+}
+
+.identityiq-latest-hero__score {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: linear-gradient(165deg, #102a56 0%, #1d4a89 100%);
+  color: #eff6ff;
+  padding: 16px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.identityiq-latest-hero__score .react-user-footnote {
+  color: #c8dbff;
+}
+
+.identityiq-overall-score__value {
+  margin: 2px 0 6px;
+  font-size: clamp(2rem, 2.4vw, 2.8rem);
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
 
 .identityiq-score-summary__value {
@@ -2730,8 +2764,90 @@ a {
   text-decoration: underline;
 }
 
-.identityiq-score-bureaus {
-  max-width: 520px;
+.identityiq-bureau-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3);
+}
+
+.identityiq-bureau-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  gap: 6px;
+}
+
+.identityiq-bureau-card__name {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.identityiq-bureau-card__score {
+  margin: 2px 0;
+  font-size: clamp(1.6rem, 2vw, 2rem);
+  font-weight: 800;
+  line-height: 1;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.identityiq-bureau-card__tier {
+  margin: 0;
+  font-size: var(--font-size-xxs);
+  font-weight: 700;
+  color: #334155;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.identityiq-bureau-card__bar {
+  position: relative;
+  height: 8px;
+  width: 100%;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.identityiq-bureau-card__bar::after {
+  content: "";
+  display: block;
+  width: var(--identityiq-score-ratio, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: var(--identityiq-bar-color, #22c55e);
+}
+
+.identityiq-bureau-card.tone-empty {
+  background: #f8fafc;
+}
+
+.identityiq-bureau-card.tone-empty .identityiq-bureau-card__bar::after {
+  background: #94a3b8;
+}
+
+.identityiq-bureau-card.tone-poor {
+  --identityiq-bar-color: #ef4444;
+}
+
+.identityiq-bureau-card.tone-fair {
+  --identityiq-bar-color: #f97316;
+}
+
+.identityiq-bureau-card.tone-good {
+  --identityiq-bar-color: #22c55e;
+}
+
+.identityiq-bureau-card.tone-very-good {
+  --identityiq-bar-color: #10b981;
+}
+
+.identityiq-bureau-card.tone-excellent {
+  --identityiq-bar-color: #0ea5e9;
 }
 
 .identityiq-score-table-wrap.cb-table-wrap {
@@ -2741,35 +2857,27 @@ a {
   resize: none;
 }
 
-.identityiq-score-table-wrap .cb-table {
-  min-width: 0;
-}
-
-.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table {
-  width: 100%;
-}
-
-.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table th,
-.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table td {
-  white-space: normal;
-}
-
-.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table th:last-child,
-.identityiq-score-bureaus .identityiq-score-table-wrap .cb-table td:last-child {
-  width: 140px;
-  min-width: 120px;
-}
-
 .identityiq-score-snippets {
-  display: grid;
-  gap: var(--space-2);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: #fcfdff;
+}
+
+.identityiq-score-snippets summary {
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  color: var(--color-text-muted);
 }
 
 .identityiq-score-snippets ul {
-  margin: 0;
+  margin: 8px 0 0;
   padding-left: 18px;
   display: grid;
   gap: 6px;
+  max-height: 180px;
+  overflow: auto;
 }
 
 .identityiq-score-snippets li {
@@ -2786,6 +2894,10 @@ a {
 @media (max-width: 1080px) {
   .identityiq-score-form__fields {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .identityiq-latest-hero {
+    grid-template-columns: 1fr;
   }
 }
 

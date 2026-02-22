@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, type FormEvent, useEffect, useMemo, useState } from "react";
 
 import { getIdentityIqCreditScore } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
@@ -89,23 +89,6 @@ export default function IdentityIqScorePage() {
     () => bureauRows.some((row) => !Number.isFinite(row.score)),
     [bureauRows],
   );
-
-  const bureauColumns = useMemo<TableColumn<BureauRow>[]>(() => {
-    return [
-      {
-        key: "bureau",
-        label: "Credit Bureau",
-        align: "left",
-        cell: (row) => row.bureau,
-      },
-      {
-        key: "score",
-        label: "Score",
-        align: "center",
-        cell: (row) => <Badge tone={Number.isFinite(row.score) ? "info" : "warning"}>{formatScore(row.score)}</Badge>,
-      },
-    ];
-  }, []);
 
   const historyColumns = useMemo<TableColumn<IdentityIqHistoryRow>[]>(() => {
     return [
@@ -288,61 +271,69 @@ export default function IdentityIqScorePage() {
           <EmptyState title="No score loaded yet." description="Run a client check to see score details here." />
         ) : (
           <div className="identityiq-score-result">
-            <div className="identityiq-score-summary">
-              <div>
-                <p className="react-user-footnote">Client</p>
-                <p className="identityiq-score-summary__value">{latestResult.clientName || "Unnamed client"}</p>
+            <div className="identityiq-latest-hero">
+              <div className="identityiq-latest-hero__main">
+                <div>
+                  <p className="react-user-footnote">Client</p>
+                  <p className="identityiq-score-summary__value">{latestResult.clientName || "Unnamed client"}</p>
+                </div>
+
+                <div className="identityiq-score-meta">
+                  <p className="react-user-footnote">
+                    Checked at: {formatDateTime(latestResult.fetchedAt)} ({latestResult.elapsedMs} ms)
+                  </p>
+                  {latestResult.dashboardUrl ? (
+                    <p className="react-user-footnote">
+                      Dashboard URL:
+                      {" "}
+                      <a href={latestResult.dashboardUrl} target="_blank" rel="noreferrer">
+                        {latestResult.dashboardUrl}
+                      </a>
+                    </p>
+                  ) : null}
+                  {latestResult.note ? <p className="react-user-footnote">{latestResult.note}</p> : null}
+                </div>
               </div>
-              <div>
+
+              <div className="identityiq-latest-hero__score">
                 <p className="react-user-footnote">Overall Score</p>
-                <p className="identityiq-score-summary__value">{formatScore(latestResult.score)}</p>
-              </div>
-              <div>
-                <p className="react-user-footnote">Status</p>
-                <Badge tone={latestResult.status === "ok" ? "success" : "warning"}>{latestResult.status}</Badge>
+                <p className="identityiq-overall-score__value">{formatScore(latestResult.score)}</p>
+                <Badge tone={latestResult.status === "ok" ? "success" : "warning"}>{formatResultStatus(latestResult.status)}</Badge>
               </div>
             </div>
 
-            <div className="identityiq-score-meta">
+            <div className="identityiq-bureau-grid">
+              {bureauRows.map((row) => {
+                const visual = getScoreVisual(row.score);
+                const barStyle = {
+                  "--identityiq-score-ratio": `${visual.progress}%`,
+                } as CSSProperties;
+                return (
+                  <article key={row.id} className={`identityiq-bureau-card tone-${visual.tone}`}>
+                    <p className="identityiq-bureau-card__name">{row.bureau}</p>
+                    <p className="identityiq-bureau-card__score">{formatScore(row.score)}</p>
+                    <p className="identityiq-bureau-card__tier">{visual.label}</p>
+                    <div className="identityiq-bureau-card__bar" style={barStyle} />
+                  </article>
+                );
+              })}
+            </div>
+
+            {hasMissingBureauScores ? (
               <p className="react-user-footnote">
-                Checked at: {formatDateTime(latestResult.fetchedAt)} ({latestResult.elapsedMs} ms)
+                One or more bureau scores were not found in the IdentityIQ response for this check.
               </p>
-              {latestResult.dashboardUrl ? (
-                <p className="react-user-footnote">
-                  Dashboard URL:
-                  {" "}
-                  <a href={latestResult.dashboardUrl} target="_blank" rel="noreferrer">
-                    {latestResult.dashboardUrl}
-                  </a>
-                </p>
-              ) : null}
-              {latestResult.note ? <p className="react-user-footnote">{latestResult.note}</p> : null}
-            </div>
-
-            <div className="identityiq-score-bureaus">
-              <Table
-                columns={bureauColumns}
-                rows={bureauRows}
-                rowKey={(row) => row.id}
-                className="identityiq-score-table-wrap"
-                density="compact"
-              />
-              {hasMissingBureauScores ? (
-                <p className="react-user-footnote">
-                  One or more bureau scores were not found in the IdentityIQ response for this check.
-                </p>
-              ) : null}
-            </div>
+            ) : null}
 
             {latestResult.snippets.length ? (
-              <div className="identityiq-score-snippets">
-                <p className="react-user-footnote">Matched score snippets:</p>
+              <details className="identityiq-score-snippets">
+                <summary>Matched score snippets ({latestResult.snippets.length})</summary>
                 <ul>
                   {latestResult.snippets.map((snippet, index) => (
                     <li key={`${snippet}-${index}`}>{snippet}</li>
                   ))}
                 </ul>
-              </div>
+              </details>
             ) : null}
           </div>
         )}
@@ -360,12 +351,6 @@ export default function IdentityIqScorePage() {
       </Panel>
     </PageShell>
   );
-}
-
-interface BureauRow {
-  id: string;
-  bureau: string;
-  score: number | null;
 }
 
 function validateIdentityIqForm(form: IdentityIqFormState): string {
@@ -402,4 +387,44 @@ function formatDateTime(rawValue: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatResultStatus(status: string): string {
+  const normalized = (status || "").toString().trim().toLowerCase();
+  if (!normalized) {
+    return "Unknown";
+  }
+  if (normalized === "ok") {
+    return "Complete";
+  }
+  if (normalized === "partial") {
+    return "Partial";
+  }
+  return normalized[0].toUpperCase() + normalized.slice(1);
+}
+
+function getScoreVisual(score: number | null): { label: string; tone: "empty" | "poor" | "fair" | "good" | "very-good" | "excellent"; progress: number } {
+  if (!Number.isFinite(score)) {
+    return {
+      label: "Not found",
+      tone: "empty",
+      progress: 0,
+    };
+  }
+
+  const boundedScore = Math.min(850, Math.max(300, Number(score)));
+  const progress = Math.round(((boundedScore - 300) / (850 - 300)) * 100);
+  if (boundedScore < 580) {
+    return { label: "Poor", tone: "poor", progress };
+  }
+  if (boundedScore < 670) {
+    return { label: "Fair", tone: "fair", progress };
+  }
+  if (boundedScore < 740) {
+    return { label: "Good", tone: "good", progress };
+  }
+  if (boundedScore < 800) {
+    return { label: "Very good", tone: "very-good", progress };
+  }
+  return { label: "Excellent", tone: "excellent", progress };
 }
