@@ -2100,6 +2100,21 @@ a {
   white-space: nowrap;
 }
 
+.quickbooks-expense-summary__total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border);
+  font-weight: 700;
+}
+
+.quickbooks-expense-summary__total strong {
+  white-space: nowrap;
+}
+
 .quickbooks-expense-category-input {
   min-width: 220px;
 }

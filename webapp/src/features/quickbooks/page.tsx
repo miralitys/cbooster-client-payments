@@ -236,6 +236,10 @@ export default function QuickBooksPage() {
     () => buildQuickBooksExpenseCategorySummaryRows(outgoingTransactions, expenseCategoryMap, expenseCategoryOptions),
     [expenseCategoryMap, expenseCategoryOptions, outgoingTransactions],
   );
+  const expenseCategoryTotalAmount = useMemo(
+    () => expenseCategorySummaryRows.reduce((total, summaryRow) => total + (Number(summaryRow.totalAmount) || 0), 0),
+    [expenseCategorySummaryRows],
+  );
 
   useEffect(() => {
     if (!monthOptions.length) {
@@ -1195,6 +1199,10 @@ export default function QuickBooksPage() {
                       <strong>{CURRENCY_FORMATTER.format(summaryRow.totalAmount)}</strong>
                     </div>
                   ))}
+                </div>
+                <div className="quickbooks-expense-summary__total">
+                  <span>Total</span>
+                  <strong>{CURRENCY_FORMATTER.format(expenseCategoryTotalAmount)}</strong>
                 </div>
               </div>
             </aside>
