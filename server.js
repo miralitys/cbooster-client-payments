@@ -651,6 +651,11 @@ const GHL_BASIC_NOTE_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_BASIC_NOTE_CACHE_TABLE_NAME,
   DEFAULT_GHL_BASIC_NOTE_CACHE_TABLE_NAME,
 );
+const DEFAULT_GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME = "ghl_call_transcript_cache";
+const GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME = resolveTableName(
+  process.env.DB_GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME,
+  DEFAULT_GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME,
+);
 const DEFAULT_GHL_LEADS_CACHE_TABLE_NAME = "ghl_leads_cache";
 const GHL_LEADS_CACHE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_LEADS_CACHE_TABLE_NAME,
@@ -687,6 +692,7 @@ const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_
 const QUICKBOOKS_AUTH_STATE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_AUTH_STATE_TABLE_NAME);
 const GHL_CLIENT_MANAGER_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CLIENT_MANAGER_CACHE_TABLE_NAME);
 const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CACHE_TABLE_NAME);
+const GHL_CALL_TRANSCRIPT_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME);
 const GHL_LEADS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_LEADS_CACHE_TABLE_NAME);
 const GHL_CONTRACT_ARCHIVE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CONTRACT_ARCHIVE_TABLE_NAME);
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
@@ -15380,6 +15386,215 @@ async function transcribeAudioBufferViaOpenAi(audioPayload, options = {}) {
   return transcript;
 }
 
+function mapGhlCallTranscriptCacheRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  const audioSizeBytes = Number.parseInt(row?.audio_size_bytes, 10);
+  return {
+    clientName: sanitizeTextValue(row?.client_name, 300),
+    messageId: sanitizeTextValue(row?.message_id, 220),
+    contactId: sanitizeTextValue(row?.contact_id, 200),
+    transcript: sanitizeTextValue(row?.transcript, 120000),
+    source: sanitizeTextValue(row?.source, 160) || "openai.audio.transcriptions",
+    audioContentType: sanitizeTextValue(row?.audio_content_type, 200),
+    audioSizeBytes: Number.isFinite(audioSizeBytes) && audioSizeBytes >= 0 ? audioSizeBytes : 0,
+    generatedAt: row?.generated_at ? new Date(row.generated_at).toISOString() : null,
+    updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
+  };
+}
+
+async function getCachedGhlCallTranscriptByClientAndMessageId(clientName, messageId) {
+  if (!pool) {
+    return null;
+  }
+
+  await ensureDatabaseReady();
+
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  const normalizedMessageId = sanitizeTextValue(messageId, 220);
+  if (!normalizedClientName || !normalizedMessageId) {
+    return null;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT
+        client_name,
+        message_id,
+        contact_id,
+        transcript,
+        source,
+        audio_content_type,
+        audio_size_bytes,
+        generated_at,
+        updated_at
+      FROM ${GHL_CALL_TRANSCRIPT_CACHE_TABLE}
+      WHERE client_name = $1
+        AND message_id = $2
+      LIMIT 1
+    `,
+    [normalizedClientName, normalizedMessageId],
+  );
+
+  if (!result.rows.length) {
+    return null;
+  }
+
+  return mapGhlCallTranscriptCacheRow(result.rows[0]);
+}
+
+async function listCachedGhlCallTranscriptsByMessageIds(clientName, messageIds) {
+  if (!pool) {
+    return new Map();
+  }
+
+  await ensureDatabaseReady();
+
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  const normalizedMessageIds = [...new Set((Array.isArray(messageIds) ? messageIds : [])
+    .map((value) => sanitizeTextValue(value, 220))
+    .filter(Boolean))];
+  if (!normalizedClientName || !normalizedMessageIds.length) {
+    return new Map();
+  }
+
+  const result = await pool.query(
+    `
+      SELECT
+        client_name,
+        message_id,
+        contact_id,
+        transcript,
+        source,
+        audio_content_type,
+        audio_size_bytes,
+        generated_at,
+        updated_at
+      FROM ${GHL_CALL_TRANSCRIPT_CACHE_TABLE}
+      WHERE client_name = $1
+        AND message_id = ANY($2::text[])
+    `,
+    [normalizedClientName, normalizedMessageIds],
+  );
+
+  const byMessageId = new Map();
+  for (const row of result.rows || []) {
+    const mapped = mapGhlCallTranscriptCacheRow(row);
+    if (!mapped?.messageId || !mapped?.transcript) {
+      continue;
+    }
+    byMessageId.set(mapped.messageId, mapped);
+  }
+  return byMessageId;
+}
+
+async function upsertGhlCallTranscriptCacheRow(row) {
+  if (!pool) {
+    return null;
+  }
+
+  await ensureDatabaseReady();
+
+  const normalizedRow = row && typeof row === "object" ? row : null;
+  const clientName = sanitizeTextValue(normalizedRow?.clientName, 300);
+  const messageId = sanitizeTextValue(normalizedRow?.messageId, 220);
+  const transcript = sanitizeTextValue(normalizedRow?.transcript, 120000);
+  if (!clientName || !messageId || !transcript) {
+    return null;
+  }
+
+  const audioSizeBytes = Number.parseInt(sanitizeTextValue(normalizedRow?.audioSizeBytes, 20), 10);
+  await pool.query(
+    `
+      INSERT INTO ${GHL_CALL_TRANSCRIPT_CACHE_TABLE}
+        (
+          client_name,
+          message_id,
+          contact_id,
+          transcript,
+          source,
+          audio_content_type,
+          audio_size_bytes,
+          generated_at,
+          updated_at
+        )
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::timestamptz, NOW()), NOW())
+      ON CONFLICT (client_name, message_id)
+      DO UPDATE SET
+        contact_id = EXCLUDED.contact_id,
+        transcript = EXCLUDED.transcript,
+        source = EXCLUDED.source,
+        audio_content_type = EXCLUDED.audio_content_type,
+        audio_size_bytes = EXCLUDED.audio_size_bytes,
+        generated_at = EXCLUDED.generated_at,
+        updated_at = NOW()
+    `,
+    [
+      clientName,
+      messageId,
+      sanitizeTextValue(normalizedRow?.contactId, 200),
+      transcript,
+      sanitizeTextValue(normalizedRow?.source, 160) || "openai.audio.transcriptions",
+      sanitizeTextValue(normalizedRow?.audioContentType, 200),
+      Number.isFinite(audioSizeBytes) && audioSizeBytes >= 0 ? audioSizeBytes : 0,
+      normalizeIsoTimestampOrNull(normalizedRow?.generatedAt),
+    ],
+  );
+
+  return getCachedGhlCallTranscriptByClientAndMessageId(clientName, messageId);
+}
+
+async function applyCachedTranscriptsToGhlCommunicationItems(clientName, items) {
+  const source = Array.isArray(items) ? items : [];
+  if (!source.length) {
+    return source;
+  }
+
+  const messageIds = source
+    .map((item) => sanitizeTextValue(item?.messageId || item?.id, 220))
+    .filter(Boolean);
+  if (!messageIds.length) {
+    return source;
+  }
+
+  let transcriptsByMessageId = new Map();
+  try {
+    transcriptsByMessageId = await listCachedGhlCallTranscriptsByMessageIds(clientName, messageIds);
+  } catch (error) {
+    console.warn("[ghl communications] transcript cache lookup failed:", sanitizeTextValue(error?.message, 300) || "unknown");
+    return source;
+  }
+
+  if (!transcriptsByMessageId.size) {
+    return source;
+  }
+
+  return source.map((item) => {
+    if (sanitizeTextValue(item?.kind, 40).toLowerCase() !== "call") {
+      return item;
+    }
+
+    const messageId = sanitizeTextValue(item?.messageId || item?.id, 220);
+    const cached = messageId ? transcriptsByMessageId.get(messageId) : null;
+    if (!cached?.transcript) {
+      return item;
+    }
+
+    if (sanitizeTextValue(item?.transcript, 120000)) {
+      return item;
+    }
+
+    return {
+      ...item,
+      transcript: cached.transcript,
+      source: sanitizeTextValue(item?.source, 120) || "gohighlevel.conversations",
+    };
+  });
+}
+
 function shouldAddProxyRecordingForCall(item) {
   if (!item || typeof item !== "object") {
     return false;
@@ -15477,7 +15692,7 @@ async function findGhlClientCommunicationsByClientName(clientName, options = {})
     throw lastLookupError;
   }
 
-  const sortedItems = dedupeAndSortGhlCommunicationRecords(allItems)
+  let sortedItems = dedupeAndSortGhlCommunicationRecords(allItems)
     .slice(0, GHL_CLIENT_COMMUNICATION_MAX_ITEMS)
     .map((item) => {
       const normalizedMessageId = sanitizeTextValue(item?.messageId || item?.id, 220);
@@ -15498,6 +15713,9 @@ async function findGhlClientCommunicationsByClientName(clientName, options = {})
         messageId: normalizedMessageId || sanitizeTextValue(item?.id, 220),
       };
     });
+
+  sortedItems = await applyCachedTranscriptsToGhlCommunicationItems(normalizedClientName, sortedItems);
+
   let smsCount = 0;
   let callCount = 0;
   for (const item of sortedItems) {
@@ -21400,6 +21618,31 @@ async function ensureDatabaseReady() {
       await pool.query(`
         CREATE INDEX IF NOT EXISTS ${GHL_BASIC_NOTE_CACHE_TABLE_NAME}_updated_at_idx
         ON ${GHL_BASIC_NOTE_CACHE_TABLE} (updated_at DESC)
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ${GHL_CALL_TRANSCRIPT_CACHE_TABLE} (
+          client_name TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          contact_id TEXT NOT NULL DEFAULT '',
+          transcript TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'openai.audio.transcriptions',
+          audio_content_type TEXT NOT NULL DEFAULT '',
+          audio_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (audio_size_bytes >= 0),
+          generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (client_name, message_id)
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME}_updated_at_idx
+        ON ${GHL_CALL_TRANSCRIPT_CACHE_TABLE} (updated_at DESC)
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME}_client_name_idx
+        ON ${GHL_CALL_TRANSCRIPT_CACHE_TABLE} (client_name, updated_at DESC)
       `);
 
       await pool.query(`
@@ -35773,10 +36016,46 @@ app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_A
       throw createHttpError("Access denied. This client is outside your visible scope.", 403);
     }
 
+    const cachedTranscript = await getCachedGhlCallTranscriptByClientAndMessageId(context.clientName, messageId).catch((error) => {
+      console.warn(
+        "POST /api/ghl/client-communications/transcript cache read failed:",
+        sanitizeTextValue(error?.message, 300) || "unknown",
+      );
+      return null;
+    });
+    if (cachedTranscript?.transcript) {
+      res.json({
+        ok: true,
+        clientName: context.clientName,
+        messageId: cachedTranscript.messageId || sanitizeTextValue(messageId, 220),
+        transcript: cachedTranscript.transcript,
+        generatedAt: cachedTranscript.generatedAt || cachedTranscript.updatedAt || new Date().toISOString(),
+        source: sanitizeTextValue(cachedTranscript.source, 160) || "cache.openai.audio.transcriptions",
+        cached: true,
+      });
+      return;
+    }
+
     const recording = await fetchGhlCallRecordingByMessageId(messageId);
     const transcript = await transcribeAudioBufferViaOpenAi(recording.payload, {
       contentType: recording.contentType,
       messageId: recording.messageId,
+    });
+    const generatedAt = new Date().toISOString();
+    void upsertGhlCallTranscriptCacheRow({
+      clientName: context.clientName,
+      messageId: recording.messageId,
+      contactId: "",
+      transcript,
+      source: "openai.audio.transcriptions",
+      audioContentType: recording.contentType,
+      audioSizeBytes: recording.payload.length,
+      generatedAt,
+    }).catch((error) => {
+      console.warn(
+        "POST /api/ghl/client-communications/transcript cache write failed:",
+        sanitizeTextValue(error?.message, 300) || "unknown",
+      );
     });
 
     res.json({
@@ -35784,8 +36063,9 @@ app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_A
       clientName: context.clientName,
       messageId: recording.messageId,
       transcript,
-      generatedAt: new Date().toISOString(),
+      generatedAt,
       source: "openai.audio.transcriptions",
+      cached: false,
     });
   } catch (error) {
     console.error("POST /api/ghl/client-communications/transcript failed:", error);
