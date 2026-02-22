@@ -2608,16 +2608,16 @@ a {
 
 .identityiq-score-form {
   display: grid;
-  gap: var(--space-3);
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
-  align-items: end;
+  gap: var(--space-4);
+  grid-template-columns: 1fr;
+  align-items: start;
 }
 
 .identityiq-score-form__fields {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-3);
-  align-items: end;
+  align-items: start;
 }
 
 .identityiq-score-form__fields .cb-field {
@@ -2625,13 +2625,20 @@ a {
 }
 
 .identityiq-score-actions {
-  display: grid;
-  gap: var(--space-2);
-  align-content: end;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
-  padding: var(--space-3);
+  background: #f8fbff;
+  padding: 12px 14px;
+}
+
+.identityiq-score-actions__copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
 }
 
 .identityiq-score-actions__title {
@@ -2649,7 +2656,7 @@ a {
 }
 
 .identityiq-score-actions .cb-button {
-  width: 100%;
+  min-width: 200px;
   justify-content: center;
 }
 
@@ -2733,12 +2740,8 @@ a {
 }
 
 @media (max-width: 1400px) {
-  .identityiq-score-form {
-    grid-template-columns: 1fr;
-  }
-
-  .identityiq-score-actions {
-    max-width: 360px;
+  .identityiq-score-form__fields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -2754,7 +2757,12 @@ a {
   }
 
   .identityiq-score-actions {
-    max-width: none;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .identityiq-score-actions .cb-button {
+    min-width: 0;
   }
 }
 
