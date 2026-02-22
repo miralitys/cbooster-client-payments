@@ -1597,6 +1597,12 @@ a {
   justify-content: flex-start;
 }
 
+.record-details-communications__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .record-details-communications__recording-link {
   color: var(--color-primary);
   font-size: var(--font-size-xs);
@@ -1607,6 +1613,26 @@ a {
 .record-details-communications__recording-link:hover,
 .record-details-communications__recording-link:focus-visible {
   text-decoration: underline;
+}
+
+.record-details-communications__transcript-modal {
+  display: grid;
+  gap: 10px;
+}
+
+.record-details-communications__transcript {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  padding: var(--space-3);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .record-editor-form {
