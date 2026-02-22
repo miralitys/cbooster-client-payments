@@ -25590,6 +25590,52 @@ async function clickIdentityIqPrimaryAction(page) {
   return false;
 }
 
+async function fillIdentityIqSecurityQuestionAnswer(page, ssnLast4) {
+  const normalizedSsn4 = normalizeIdentityIqSsnLast4(ssnLast4);
+  if (!normalizedSsn4) {
+    return false;
+  }
+
+  const strictFill = await fillIdentityIqInput(page, IDENTITYIQ_SSN4_INPUT_SELECTORS, normalizedSsn4);
+  if (strictFill) {
+    return true;
+  }
+
+  const genericSelectors = [
+    "input[name*='answer' i]",
+    "input[id*='answer' i]",
+    "input[inputmode='numeric']",
+    "input[type='tel']",
+    "input[type='text']",
+    "input:not([type])",
+  ];
+
+  for (const selector of genericSelectors) {
+    const locator = page.locator(selector).first();
+    try {
+      const count = await locator.count();
+      if (!count) {
+        continue;
+      }
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const type = sanitizeTextValue(await locator.getAttribute("type"), 32).toLowerCase();
+      if (type && ["hidden", "password", "email", "checkbox", "radio", "search"].includes(type)) {
+        continue;
+      }
+      await locator.click({ timeout: 2600 });
+      await locator.fill(normalizedSsn4, { timeout: 2600 });
+      return true;
+    } catch {
+      // Continue with the next selector.
+    }
+  }
+
+  return false;
+}
+
 function normalizeIdentityIqPageText(value) {
   return sanitizeTextValue((value || "").toString().replace(/\s+/g, " "), 60000);
 }
@@ -25652,6 +25698,30 @@ function isIdentityIqInvalidCredentialsText(text) {
   return /\b(invalid|incorrect|unable to sign in|could not sign in|credentials|try again)\b/i.test(text);
 }
 
+function isIdentityIqSecurityQuestionPrompt(text, url = "") {
+  const normalizedText = normalizeIdentityIqPageText(text).toLowerCase();
+  const normalizedUrl = sanitizeTextValue(url, 600).toLowerCase();
+  if (!normalizedText && !normalizedUrl) {
+    return false;
+  }
+  if (normalizedUrl.includes("/security-question")) {
+    return true;
+  }
+  return (
+    /\bsecurity question\b/.test(normalizedText) ||
+    /\blast\s*four\s*digits\b/.test(normalizedText) ||
+    /\blast\s*4\s*digits\b/.test(normalizedText)
+  );
+}
+
+function isIdentityIqLoginScreenLike(url, bodyText) {
+  const normalizedUrl = sanitizeTextValue(url, 600).toLowerCase();
+  const normalizedBody = normalizeIdentityIqPageText(bodyText).toLowerCase();
+  const loginPath = /member\.identityiq\.com\/?(?:\?|$)/.test(normalizedUrl) || /\/login\b/.test(normalizedUrl);
+  const loginText = /\bmember login\b|\bforgot username\b|\bforgot password\b/.test(normalizedBody);
+  return loginPath && loginText;
+}
+
 function parseIdentityIqScoreNumber(value) {
   const numeric = Number.parseInt(sanitizeTextValue(value, 12), 10);
   if (!Number.isFinite(numeric) || numeric < 250 || numeric > 900) {
@@ -25676,31 +25746,63 @@ function dedupeIdentityIqBureauScores(items) {
   return Array.from(byBureau.values());
 }
 
+function collectIdentityIqScoreCandidates(text) {
+  const normalizedText = normalizeIdentityIqPageText(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const values = [];
+  const compactMatches = normalizedText.match(/\b([2-9]\d{2})\b/g) || [];
+  for (const match of compactMatches) {
+    const score = parseIdentityIqScoreNumber(match);
+    if (score !== null) {
+      values.push(score);
+    }
+  }
+
+  const splitDigitMatches = normalizedText.match(/\b([2-9]\d)\s+(\d)\b/g) || [];
+  for (const match of splitDigitMatches) {
+    const compactScore = sanitizeTextValue(match, 12).replace(/\s+/g, "");
+    const score = parseIdentityIqScoreNumber(compactScore);
+    if (score !== null) {
+      values.push(score);
+    }
+  }
+
+  return Array.from(new Set(values));
+}
+
 function parseIdentityIqBureauScores(text) {
   const normalizedText = normalizeIdentityIqPageText(text);
   if (!normalizedText) {
     return [];
   }
 
+  const loweredText = normalizedText.toLowerCase();
   const matches = [];
+
   for (const entry of IDENTITYIQ_BUREAU_SCORE_PATTERNS) {
-    entry.pattern.lastIndex = 0;
-    let match;
-    while ((match = entry.pattern.exec(normalizedText)) !== null) {
-      const score = parseIdentityIqScoreNumber(match[1]);
-      if (score === null) {
-        continue;
-      }
-      matches.push({
-        bureau: entry.bureau,
-        score,
-      });
-      if (matches.length >= 12) {
+    const needle = entry.bureau.toLowerCase();
+    let cursor = 0;
+
+    while (cursor < loweredText.length) {
+      const foundAt = loweredText.indexOf(needle, cursor);
+      if (foundAt < 0) {
         break;
       }
-    }
-    if (matches.length >= 12) {
-      break;
+
+      const snippet = normalizedText.slice(foundAt, Math.min(foundAt + 220, normalizedText.length));
+      const candidates = collectIdentityIqScoreCandidates(snippet);
+      if (candidates.length) {
+        matches.push({
+          bureau: entry.bureau,
+          score: candidates[0],
+        });
+        break;
+      }
+
+      cursor = foundAt + needle.length;
     }
   }
 
@@ -25846,59 +25948,97 @@ async function fetchIdentityIqCreditScore(payload) {
     }
 
     await page.waitForTimeout(1200);
+    let pageSignals = null;
+    for (let challengeAttempt = 0; challengeAttempt < 3; challengeAttempt += 1) {
+      await page.waitForLoadState("networkidle", {
+        timeout: IDENTITYIQ_NAVIGATION_TIMEOUT_MS,
+      }).catch(() => {});
+      await page.waitForTimeout(Math.min(IDENTITYIQ_POST_LOGIN_SETTLE_MS, 1200));
 
-    const ssnRequested = await waitForIdentityIqAnySelector(page, IDENTITYIQ_SSN4_INPUT_SELECTORS, 8000);
-    if (ssnRequested) {
-      const ssnFilled = await fillIdentityIqInput(page, IDENTITYIQ_SSN4_INPUT_SELECTORS, payload.ssnLast4);
-      if (!ssnFilled) {
-        throw toIdentityIqOperationError("IdentityIQ requested SSN, but SSN field could not be completed.", {
-          code: "identityiq_ssn_step_failed",
-          httpStatus: 502,
+      pageSignals = await readIdentityIqPageSignals(page);
+      if (isIdentityIqCaptchaChallenge(pageSignals.compositeText)) {
+        throw toIdentityIqOperationError(
+          "IdentityIQ requested CAPTCHA/human verification. Complete login manually, then retry.",
+          {
+            code: "identityiq_captcha_required",
+            httpStatus: 409,
+          },
+        );
+      }
+      if (isIdentityIqMfaChallenge(pageSignals.compositeText)) {
+        throw toIdentityIqOperationError(
+          "IdentityIQ requested additional verification code (MFA). This flow currently needs manual confirmation.",
+          {
+            code: "identityiq_mfa_required",
+            httpStatus: 409,
+          },
+        );
+      }
+      if (isIdentityIqInvalidCredentialsText(pageSignals.compositeText)) {
+        throw toIdentityIqOperationError("IdentityIQ rejected the credentials. Check login, password, and SSN4.", {
+          code: "identityiq_invalid_credentials",
+          httpStatus: 401,
         });
+      }
+
+      const ssnPromptBySelector = await waitForIdentityIqAnySelector(page, IDENTITYIQ_SSN4_INPUT_SELECTORS, 600);
+      const ssnPromptByText = isIdentityIqSecurityQuestionPrompt(pageSignals.compositeText, page.url());
+      if (!ssnPromptBySelector && !ssnPromptByText) {
+        break;
+      }
+
+      const ssnFilled = await fillIdentityIqSecurityQuestionAnswer(page, payload.ssnLast4);
+      if (!ssnFilled) {
+        throw toIdentityIqOperationError(
+          "IdentityIQ requested a security question, but SSN answer field could not be completed.",
+          {
+            code: "identityiq_security_question_unresolved",
+            httpStatus: 409,
+          },
+        );
       }
 
       const ssnSubmitted = await clickIdentityIqPrimaryAction(page);
       if (!ssnSubmitted) {
-        throw toIdentityIqOperationError("Unable to submit SSN verification step in IdentityIQ.", {
-          code: "identityiq_ssn_submit_unavailable",
-          httpStatus: 502,
-        });
+        const enterSubmitted = await page.keyboard
+          .press("Enter")
+          .then(() => true)
+          .catch(() => false);
+        if (!enterSubmitted) {
+          throw toIdentityIqOperationError("Unable to submit SSN verification step in IdentityIQ.", {
+            code: "identityiq_ssn_submit_unavailable",
+            httpStatus: 502,
+          });
+        }
       }
+      await page.waitForTimeout(900);
     }
 
-    await page.waitForLoadState("networkidle", {
-      timeout: IDENTITYIQ_NAVIGATION_TIMEOUT_MS,
-    }).catch(() => {});
-    await page.waitForTimeout(IDENTITYIQ_POST_LOGIN_SETTLE_MS);
-
-    const pageSignals = await readIdentityIqPageSignals(page);
-    if (isIdentityIqCaptchaChallenge(pageSignals.compositeText)) {
-      throw toIdentityIqOperationError(
-        "IdentityIQ requested CAPTCHA/human verification. Complete login manually, then retry.",
-        {
-          code: "identityiq_captcha_required",
-          httpStatus: 409,
-        },
-      );
-    }
-    if (isIdentityIqMfaChallenge(pageSignals.compositeText)) {
-      throw toIdentityIqOperationError(
-        "IdentityIQ requested additional verification code (MFA). This flow currently needs manual confirmation.",
-        {
-          code: "identityiq_mfa_required",
-          httpStatus: 409,
-        },
-      );
-    }
-    if (isIdentityIqInvalidCredentialsText(pageSignals.compositeText)) {
-      throw toIdentityIqOperationError("IdentityIQ rejected the credentials. Check login, password, and SSN4.", {
-        code: "identityiq_invalid_credentials",
-        httpStatus: 401,
-      });
+    if (!pageSignals) {
+      pageSignals = await readIdentityIqPageSignals(page);
     }
 
     const scorePayload = parseIdentityIqScoreFromText(pageSignals.compositeText);
     const authenticated = isIdentityIqLikelyAuthenticated(page.url(), pageSignals.bodyText, scorePayload);
+
+    if (!authenticated && isIdentityIqLoginScreenLike(page.url(), pageSignals.bodyText)) {
+      throw toIdentityIqOperationError(
+        "IdentityIQ sign-in was not completed. Verify login credentials and security challenge details.",
+        {
+          code: "identityiq_login_not_completed",
+          httpStatus: 401,
+        },
+      );
+    }
+    if (!authenticated && isIdentityIqSecurityQuestionPrompt(pageSignals.compositeText, page.url())) {
+      throw toIdentityIqOperationError(
+        "IdentityIQ remained on the security question page. Verify SSN last 4 and retry.",
+        {
+          code: "identityiq_security_question_unresolved",
+          httpStatus: 409,
+        },
+      );
+    }
 
     if (!authenticated && scorePayload.score === null && scorePayload.bureauScores.length === 0) {
       throw toIdentityIqOperationError("IdentityIQ login did not expose any score data on the resulting page.", {
