@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: starter
     buildCommand: npm install --ignore-scripts && PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install chromium && npm --prefix webapp install && npm run quality:gate
-    startCommand: npm start
+    startCommand: PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install chromium && PLAYWRIGHT_BROWSERS_PATH=0 npm start
     healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
