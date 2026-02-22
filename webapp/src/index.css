@@ -2161,6 +2161,80 @@ a {
   grid-row: auto;
 }
 
+.identityiq-score-react-page .table-panel {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+.identityiq-score-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+  align-items: end;
+}
+
+.identityiq-score-actions {
+  display: inline-flex;
+  align-items: flex-end;
+}
+
+.identityiq-score-result {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.identityiq-score-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-2);
+}
+
+.identityiq-score-summary__value {
+  margin: 4px 0 0;
+  font-size: var(--font-size-lg);
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.identityiq-score-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.identityiq-score-meta p {
+  margin: 0;
+}
+
+.identityiq-score-meta a {
+  color: var(--color-info);
+  text-decoration: underline;
+}
+
+.identityiq-score-bureaus {
+  max-width: 520px;
+}
+
+.identityiq-score-table-wrap {
+  min-height: 120px;
+}
+
+.identityiq-score-snippets {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.identityiq-score-snippets ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.identityiq-score-snippets li {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
 .client-managers-toolbar-react {
   display: inline-flex;
   flex-wrap: wrap;

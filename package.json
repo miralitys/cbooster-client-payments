@@ -31,7 +31,8 @@
     "express": "^4.21.2",
     "helmet": "^8.1.0",
     "multer": "^2.0.2",
-    "pg": "^8.13.3"
+    "pg": "^8.13.3",
+    "playwright": "^1.58.2"
   },
   "devDependencies": {
     "c8": "^10.1.3"
