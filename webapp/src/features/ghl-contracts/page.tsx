@@ -1,16 +1,16 @@
 import { type FormEvent, useMemo, useState } from "react";
 
 import { getGhlContractText } from "@/shared/api";
+import { ApiError } from "@/shared/api/fetcher";
 import { showToast } from "@/shared/lib/toast";
-import type { GhlContractTextResult } from "@/shared/types/ghlContractText";
-import { Badge, Button, EmptyState, Field, Input, PageHeader, PageShell, Panel, Table, Textarea } from "@/shared/ui";
+import type { GhlContractTextRequest, GhlContractTextResult } from "@/shared/types/ghlContractText";
+import { Badge, Button, EmptyState, Field, Input, Modal, PageHeader, PageShell, Panel, Table, Textarea } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 interface GhlContractTextFormState {
   clientName: string;
   login: string;
   password: string;
-  mfaCode: string;
   locationId: string;
 }
 
@@ -19,13 +19,18 @@ interface GhlContractTextHistoryRow extends GhlContractTextResult {
 }
 
 const HISTORY_MAX_ROWS = 20;
+const GHL_MFA_ERROR_CODES = new Set([
+  "ghl_mfa_required",
+  "ghl_mfa_invalid_code",
+  "ghl_mfa_field_not_found",
+  "ghl_mfa_submit_unavailable",
+]);
 
 export default function GhlContractsPage() {
   const [form, setForm] = useState<GhlContractTextFormState>({
     clientName: "",
     login: "",
     password: "",
-    mfaCode: "",
     locationId: "",
   });
   const [isLoading, setIsLoading] = useState(false);
@@ -33,6 +38,10 @@ export default function GhlContractsPage() {
   const [statusMessage, setStatusMessage] = useState("Ready to extract contract text from GoHighLevel.");
   const [latestResult, setLatestResult] = useState<GhlContractTextResult | null>(null);
   const [historyRows, setHistoryRows] = useState<GhlContractTextHistoryRow[]>([]);
+  const [isMfaDialogOpen, setIsMfaDialogOpen] = useState(false);
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaError, setMfaError] = useState("");
+  const [pendingMfaRequest, setPendingMfaRequest] = useState<GhlContractTextRequest | null>(null);
 
   const historyColumns = useMemo<TableColumn<GhlContractTextHistoryRow>[]>(() => {
     return [
@@ -68,27 +77,15 @@ export default function GhlContractsPage() {
     ];
   }, []);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSubmitError("");
-
-    const validationError = validateGhlContractTextForm(form);
-    if (validationError) {
-      setSubmitError(validationError);
-      return;
-    }
-
+  async function executeContractTextRequest(request: GhlContractTextRequest, mode: "initial" | "mfa" = "initial") {
     setIsLoading(true);
-    setStatusMessage("Logging in to GoHighLevel and extracting contract text...");
-
+    setStatusMessage(
+      mode === "mfa"
+        ? "Verifying MFA code and extracting contract text..."
+        : "Logging in to GoHighLevel and extracting contract text...",
+    );
     try {
-      const payload = await getGhlContractText({
-        clientName: form.clientName.trim(),
-        login: form.login.trim() || undefined,
-        password: form.password || undefined,
-        mfaCode: form.mfaCode.trim() || undefined,
-        locationId: form.locationId.trim() || undefined,
-      });
+      const payload = await getGhlContractText(request);
 
       const result = payload?.result;
       if (!result?.contractText) {
@@ -107,8 +104,11 @@ export default function GhlContractsPage() {
       setForm((previous) => ({
         ...previous,
         password: "",
-        mfaCode: "",
       }));
+      setMfaCode("");
+      setMfaError("");
+      setIsMfaDialogOpen(false);
+      setPendingMfaRequest(null);
       showToast({
         type: "success",
         message: "Contract text extracted.",
@@ -116,8 +116,32 @@ export default function GhlContractsPage() {
         cooldownMs: 2200,
       });
     } catch (error) {
+      if (error instanceof ApiError && error.status === 409 && GHL_MFA_ERROR_CODES.has(error.code)) {
+        setPendingMfaRequest({
+          clientName: request.clientName,
+          login: request.login,
+          password: request.password,
+          locationId: request.locationId,
+        });
+        setSubmitError("");
+        setIsMfaDialogOpen(true);
+        setStatusMessage("GoHighLevel requested MFA code. Enter it in the verification window.");
+        setMfaError(error.code === "ghl_mfa_invalid_code" ? "The code is invalid or expired. Enter a fresh code." : "");
+        showToast({
+          type: "info",
+          message: "Enter the one-time code from email in the MFA window.",
+          dedupeKey: "ghl-contract-text-mfa-required",
+          cooldownMs: 1800,
+        });
+        return;
+      }
+
       const message = error instanceof Error ? error.message : "Failed to extract GoHighLevel contract text.";
-      setSubmitError(message);
+      if (mode === "mfa") {
+        setMfaError(message);
+      } else {
+        setSubmitError(message);
+      }
       setStatusMessage("GoHighLevel contract text request failed.");
       showToast({
         type: "error",
@@ -130,6 +154,56 @@ export default function GhlContractsPage() {
     }
   }
 
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitError("");
+    setMfaError("");
+
+    const validationError = validateGhlContractTextForm(form);
+    if (validationError) {
+      setSubmitError(validationError);
+      return;
+    }
+
+    const request: GhlContractTextRequest = {
+      clientName: form.clientName.trim(),
+      login: form.login.trim() || undefined,
+      password: form.password || undefined,
+      locationId: form.locationId.trim() || undefined,
+    };
+    setPendingMfaRequest(request);
+    await executeContractTextRequest(request, "initial");
+  }
+
+  async function handleMfaSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitError("");
+    const normalizedCode = mfaCode.trim();
+    if (!normalizedCode) {
+      setMfaError("MFA code is required.");
+      return;
+    }
+    if (!pendingMfaRequest) {
+      setMfaError("Login session for MFA verification has expired. Run request again.");
+      return;
+    }
+
+    setMfaError("");
+    await executeContractTextRequest(
+      {
+        ...pendingMfaRequest,
+        mfaCode: normalizedCode,
+      },
+      "mfa",
+    );
+  }
+
+  function closeMfaDialog() {
+    setIsMfaDialogOpen(false);
+    setMfaError("");
+    setMfaCode("");
+  }
+
   return (
     <PageShell className="ghl-contracts-react-page">
       <PageHeader
@@ -140,7 +214,6 @@ export default function GhlContractsPage() {
             <p className={`dashboard-message ${submitError ? "error" : ""}`.trim()}>{submitError || statusMessage}</p>
             <p className="react-user-footnote">
               You can leave login/password empty to use server env vars: `GHL_ADMIN_LOGIN` and `GHL_ADMIN_PASSWORD`.
-              Use `GHL_ADMIN_MFA_CODE` only if you rotate it per request.
             </p>
           </>
         }
@@ -177,17 +250,6 @@ export default function GhlContractsPage() {
               value={form.password}
               onChange={(event) => setForm((previous) => ({ ...previous, password: event.target.value }))}
               placeholder="********"
-            />
-          </Field>
-
-          <Field label="MFA Code (optional)" htmlFor="ghl-contract-mfa-code">
-            <Input
-              id="ghl-contract-mfa-code"
-              autoComplete="one-time-code"
-              inputMode="numeric"
-              value={form.mfaCode}
-              onChange={(event) => setForm((previous) => ({ ...previous, mfaCode: event.target.value }))}
-              placeholder="123456"
             />
           </Field>
 
@@ -271,6 +333,40 @@ export default function GhlContractsPage() {
           density="compact"
         />
       </Panel>
+
+      <Modal
+        open={isMfaDialogOpen}
+        title="GoHighLevel Verification Code"
+        onClose={closeMfaDialog}
+        footer={
+          <>
+            <Button type="button" variant="secondary" onClick={closeMfaDialog}>
+              Cancel
+            </Button>
+            <Button type="submit" form="ghl-contract-mfa-form" size="sm" isLoading={isLoading}>
+              Verify and Continue
+            </Button>
+          </>
+        }
+      >
+        <form id="ghl-contract-mfa-form" onSubmit={handleMfaSubmit}>
+          <p className="react-user-footnote">
+            Enter the one-time code sent to your GoHighLevel admin email, then continue extraction.
+          </p>
+          <Field label="MFA Code" htmlFor="ghl-contract-mfa-dialog-code">
+            <Input
+              id="ghl-contract-mfa-dialog-code"
+              autoComplete="one-time-code"
+              inputMode="numeric"
+              value={mfaCode}
+              onChange={(event) => setMfaCode(event.target.value)}
+              placeholder="123456"
+              hasError={Boolean(mfaError)}
+            />
+          </Field>
+          {mfaError ? <p className="dashboard-message error">{mfaError}</p> : null}
+        </form>
+      </Modal>
     </PageShell>
   );
 }
