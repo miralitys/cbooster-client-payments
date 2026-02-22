@@ -441,6 +441,21 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                           ))}
                         </div>
                       ) : null}
+                      {item.attachmentUrls && item.attachmentUrls.length > 0 ? (
+                        <div className="record-details-communications__recordings">
+                          {item.attachmentUrls.map((attachmentUrl, index) => (
+                            <a
+                              key={`${item.id}:${attachmentUrl}:${index}`}
+                              href={attachmentUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="record-details-communications__recording-link"
+                            >
+                              Attachment {index + 1}
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
                     </article>
                   ))}
                 </div>

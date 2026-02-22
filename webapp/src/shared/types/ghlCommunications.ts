@@ -12,6 +12,7 @@ export interface GhlClientCommunicationItem {
   createdAt: string;
   source: string;
   recordingUrls: string[];
+  attachmentUrls: string[];
 }
 
 export interface GhlClientCommunicationsPayload {
