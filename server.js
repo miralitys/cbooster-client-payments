@@ -26489,6 +26489,19 @@ function extractIdentityIqKeywordWindows(text, maxItems = 18) {
 function createIdentityIqResponseCollector(page) {
   const snippets = [];
   const seen = new Set();
+
+  function pushSnippet(value) {
+    const snippet = sanitizeTextValue(value, 420);
+    if (!snippet || seen.has(snippet)) {
+      return;
+    }
+    seen.add(snippet);
+    snippets.push(snippet);
+    while (snippets.length > 54) {
+      snippets.shift();
+    }
+  }
+
   const onResponse = async (response) => {
     const status = Number.isFinite(response?.status?.()) ? response.status() : 0;
     if (status >= 400) {
@@ -26516,16 +26529,17 @@ function createIdentityIqResponseCollector(page) {
       return;
     }
 
+    const structuredBureauScores = dedupeIdentityIqBureauScores([
+      ...extractIdentityIqBureauScoresFromScoresArrays(text),
+      ...extractIdentityIqBureauScoresFromNamedScorePairs(text),
+    ]);
+    for (const bureauScore of structuredBureauScores) {
+      pushSnippet(`${bureauScore.bureau} ${bureauScore.score}`);
+    }
+
     const windows = extractIdentityIqKeywordWindows(text, 8);
     for (const snippet of windows) {
-      if (!snippet || seen.has(snippet)) {
-        continue;
-      }
-      seen.add(snippet);
-      snippets.push(snippet);
-      while (snippets.length > 42) {
-        snippets.shift();
-      }
+      pushSnippet(snippet);
     }
   };
 
@@ -26640,6 +26654,110 @@ function dedupeIdentityIqBureauScores(items) {
   return orderedScores;
 }
 
+function findIdentityIqJsonArrayEnd(sourceText, openBracketIndex) {
+  if (!sourceText || !Number.isInteger(openBracketIndex) || openBracketIndex < 0 || sourceText[openBracketIndex] !== "[") {
+    return -1;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = openBracketIndex; index < sourceText.length; index += 1) {
+    const char = sourceText[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function extractIdentityIqBureauScoresFromScoresArrays(text) {
+  const normalizedText = normalizeIdentityIqPageText(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const searchTexts = Array.from(
+    new Set([
+      normalizedText,
+      normalizedText.replace(/\\"/g, '"'),
+      normalizedText.replace(/\\u0022/gi, '"'),
+    ]),
+  );
+  const matches = [];
+
+  for (const candidateText of searchTexts) {
+    const scoresKeyPattern = /"scores"\s*:/gi;
+    let keyMatch;
+    while ((keyMatch = scoresKeyPattern.exec(candidateText)) !== null) {
+      const arrayStart = candidateText.indexOf("[", keyMatch.index + keyMatch[0].length);
+      if (arrayStart < 0) {
+        continue;
+      }
+      const arrayEnd = findIdentityIqJsonArrayEnd(candidateText, arrayStart);
+      if (arrayEnd < 0) {
+        continue;
+      }
+
+      const arrayLiteral = candidateText.slice(arrayStart, arrayEnd + 1);
+      let parsedArray = null;
+      try {
+        parsedArray = JSON.parse(arrayLiteral);
+      } catch {
+        parsedArray = null;
+      }
+      if (!Array.isArray(parsedArray)) {
+        continue;
+      }
+
+      for (const item of parsedArray.slice(0, 24)) {
+        const bureau = resolveIdentityIqBureauName(item?.name || item?.bureau || item?.label);
+        const score = parseIdentityIqScoreNumber(item?.score ?? item?.value ?? item?.creditScore);
+        if (!bureau || score === null) {
+          continue;
+        }
+        matches.push({
+          bureau,
+          score,
+        });
+      }
+
+      scoresKeyPattern.lastIndex = arrayEnd + 1;
+    }
+  }
+
+  return matches;
+}
+
 function extractIdentityIqBureauScoresFromNamedScorePairs(text) {
   const normalizedText = normalizeIdentityIqPageText(text);
   if (!normalizedText) {
@@ -26656,7 +26774,7 @@ function extractIdentityIqBureauScoresFromNamedScorePairs(text) {
   const matches = [];
 
   for (const candidateText of searchTexts) {
-    const scoreThenNamePattern = /"score"\s*:\s*"?([2-9]\d{2})"?[^{}]{0,420}?"name"\s*:\s*"([^"]+)"/gi;
+    const scoreThenNamePattern = /"score"\s*:\s*"?([2-9]\d{2})"?[\s\S]{0,420}?"name"\s*:\s*"([^"]+)"/gi;
     let scoreThenNameMatch;
     while ((scoreThenNameMatch = scoreThenNamePattern.exec(candidateText)) !== null) {
       const score = parseIdentityIqScoreNumber(scoreThenNameMatch[1]);
@@ -26670,7 +26788,7 @@ function extractIdentityIqBureauScoresFromNamedScorePairs(text) {
       });
     }
 
-    const nameThenScorePattern = /"name"\s*:\s*"([^"]+)"[^{}]{0,420}?"score"\s*:\s*"?([2-9]\d{2})"?/gi;
+    const nameThenScorePattern = /"name"\s*:\s*"([^"]+)"[\s\S]{0,420}?"score"\s*:\s*"?([2-9]\d{2})"?/gi;
     let nameThenScoreMatch;
     while ((nameThenScoreMatch = nameThenScorePattern.exec(candidateText)) !== null) {
       const bureau = resolveIdentityIqBureauName(nameThenScoreMatch[1]);
@@ -26746,7 +26864,12 @@ function parseIdentityIqBureauScores(text) {
     return [];
   }
 
-  const matches = [...extractIdentityIqBureauScoresFromNamedScorePairs(normalizedText)];
+  const structuredMatches = dedupeIdentityIqBureauScores([
+    ...extractIdentityIqBureauScoresFromScoresArrays(normalizedText),
+    ...extractIdentityIqBureauScoresFromNamedScorePairs(normalizedText),
+  ]);
+  const matches = [...structuredMatches];
+  const allowLooseMentionHeuristic = structuredMatches.length < 2;
 
   for (const entry of IDENTITYIQ_BUREAU_SCORE_PATTERNS) {
     const hasBureauScore = matches.some((item) => item.bureau === entry.bureau);
@@ -26784,6 +26907,10 @@ function parseIdentityIqBureauScores(text) {
     }
 
     if (matches.some((item) => item.bureau === entry.bureau)) {
+      continue;
+    }
+
+    if (!allowLooseMentionHeuristic) {
       continue;
     }
 
