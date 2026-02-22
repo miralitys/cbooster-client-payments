@@ -14263,22 +14263,32 @@ function normalizeGhlCommunicationDirection(rawValue, item = null) {
   return "unknown";
 }
 
-function normalizeGhlCommunicationKind(typeValue, hasRecording = false) {
+function normalizeGhlCommunicationKind(typeValue, messageTypeValue = "", numericTypeValue = null, hasRecording = false) {
   const normalizedType = sanitizeTextValue(typeValue, 120).toLowerCase();
+  const normalizedMessageType = sanitizeTextValue(messageTypeValue, 120).toLowerCase();
+  const numericType = Number.parseInt(sanitizeTextValue(numericTypeValue, 20), 10);
+
   if (
+    normalizedMessageType.includes("sms") ||
+    normalizedMessageType.includes("mms") ||
+    normalizedType.includes("sms") ||
+    normalizedType.includes("mms") ||
+    normalizedType.includes("text") ||
+    normalizedType.includes("message") ||
+    (Number.isFinite(numericType) && numericType === 2)
+  ) {
+    return "sms";
+  }
+
+  if (
+    normalizedMessageType.includes("call") ||
+    normalizedMessageType.includes("voice") ||
+    normalizedMessageType.includes("voicemail") ||
     normalizedType.includes("call") ||
     normalizedType.includes("voice") ||
     normalizedType.includes("voicemail")
   ) {
     return "call";
-  }
-
-  if (
-    normalizedType.includes("sms") ||
-    normalizedType.includes("text") ||
-    normalizedType.includes("message")
-  ) {
-    return "sms";
   }
 
   if (hasRecording) {
@@ -14310,14 +14320,45 @@ function extractValidUrl(rawValue) {
   return "";
 }
 
-function collectGhlRecordingUrlsFromValue(value, urls) {
+function extractLowercasePathnameFromUrl(rawUrl) {
+  const value = sanitizeTextValue(rawUrl, 2000);
+  if (!value) {
+    return "";
+  }
+  try {
+    const parsed = new URL(value);
+    return sanitizeTextValue(parsed.pathname, 2000).toLowerCase();
+  } catch {
+    return value.toLowerCase();
+  }
+}
+
+function isLikelyRecordingUrl(rawUrl) {
+  const pathname = extractLowercasePathnameFromUrl(rawUrl);
+  if (!pathname) {
+    return false;
+  }
+
+  if (
+    pathname.includes("recording") ||
+    pathname.includes("voicemail") ||
+    pathname.includes("/calls/") ||
+    pathname.includes("/voice/")
+  ) {
+    return true;
+  }
+
+  return /\.(mp3|wav|m4a|aac|ogg|oga|flac|opus|mp4|m4v|mov|webm)(?:$|\?)/i.test(pathname);
+}
+
+function collectGhlUrlsFromValue(value, urls) {
   if (!urls || !(urls instanceof Set) || value === null || value === undefined) {
     return;
   }
 
   if (Array.isArray(value)) {
     for (const item of value) {
-      collectGhlRecordingUrlsFromValue(item, urls);
+      collectGhlUrlsFromValue(item, urls);
     }
     return;
   }
@@ -14337,7 +14378,7 @@ function collectGhlRecordingUrlsFromValue(value, urls) {
       value.src,
     ];
     for (const candidate of candidates) {
-      collectGhlRecordingUrlsFromValue(candidate, urls);
+      collectGhlUrlsFromValue(candidate, urls);
     }
     return;
   }
@@ -14349,8 +14390,8 @@ function collectGhlRecordingUrlsFromValue(value, urls) {
 }
 
 function extractGhlRecordingUrls(message) {
-  const urls = new Set();
-  const candidates = [
+  const recordingUrls = new Set();
+  const directCandidates = [
     message?.recordingUrl,
     message?.recording_url,
     message?.callRecordingUrl,
@@ -14359,21 +14400,70 @@ function extractGhlRecordingUrls(message) {
     message?.voicemail_url,
     message?.audioUrl,
     message?.audio_url,
-    message?.mediaUrl,
-    message?.media_url,
-    message?.url,
-    message?.link,
+  ];
+
+  for (const candidate of directCandidates) {
+    const temp = new Set();
+    collectGhlUrlsFromValue(candidate, temp);
+    for (const url of temp) {
+      recordingUrls.add(url);
+    }
+  }
+
+  const attachmentCandidates = [
     message?.attachments,
     message?.attachment,
     message?.files,
     message?.media,
+    message?.mediaUrl,
+    message?.media_url,
+    message?.url,
+    message?.link,
+  ];
+  for (const candidate of attachmentCandidates) {
+    const temp = new Set();
+    collectGhlUrlsFromValue(candidate, temp);
+    for (const url of temp) {
+      if (isLikelyRecordingUrl(url)) {
+        recordingUrls.add(url);
+      }
+    }
+  }
+
+  return [...recordingUrls];
+}
+
+function extractGhlAttachmentUrls(message, recordingUrls = []) {
+  const attachmentUrls = new Set();
+  const recordingSet = new Set((Array.isArray(recordingUrls) ? recordingUrls : []).map((url) => sanitizeTextValue(url, 2000)));
+  const candidates = [
+    message?.attachments,
+    message?.attachment,
+    message?.files,
+    message?.media,
+    message?.mediaUrl,
+    message?.media_url,
+    message?.fileUrl,
+    message?.file_url,
+    message?.publicUrl,
+    message?.public_url,
+    message?.url,
+    message?.link,
   ];
 
   for (const candidate of candidates) {
-    collectGhlRecordingUrlsFromValue(candidate, urls);
+    const temp = new Set();
+    collectGhlUrlsFromValue(candidate, temp);
+    for (const url of temp) {
+      const normalizedUrl = sanitizeTextValue(url, 2000);
+      if (!normalizedUrl || recordingSet.has(normalizedUrl)) {
+        continue;
+      }
+      attachmentUrls.add(normalizedUrl);
+    }
   }
 
-  return [...urls];
+  return [...attachmentUrls];
 }
 
 function buildGhlCommunicationRecord(message, conversation) {
@@ -14392,11 +14482,13 @@ function buildGhlCommunicationRecord(message, conversation) {
   );
 
   const recordingUrls = extractGhlRecordingUrls(message);
+  const attachmentUrls = extractGhlAttachmentUrls(message, recordingUrls);
+  const messageType = sanitizeTextValue(message.messageType || message.message_type || "", 120);
   const rawType = sanitizeTextValue(
     message.type || message.messageType || message.message_type || message.channel || conversation?.type,
     120,
   );
-  const kind = normalizeGhlCommunicationKind(rawType, recordingUrls.length > 0);
+  const kind = normalizeGhlCommunicationKind(rawType, messageType, message.type, recordingUrls.length > 0);
   const body = normalizeGhlNoteBody(
     message.body ||
       message.message ||
@@ -14437,6 +14529,7 @@ function buildGhlCommunicationRecord(message, conversation) {
     createdAt,
     timestamp,
     recordingUrls,
+    attachmentUrls,
     source: sanitizeTextValue(rawType || conversation?.source, 120) || "gohighlevel.conversations",
   };
 }
@@ -14456,7 +14549,10 @@ function dedupeAndSortGhlCommunicationRecords(items) {
 
     if (byId.has(key)) {
       const existing = byId.get(key);
-      if ((existing?.recordingUrls || []).length < (item?.recordingUrls || []).length) {
+      if (
+        (existing?.recordingUrls || []).length < (item?.recordingUrls || []).length ||
+        (existing?.attachmentUrls || []).length < (item?.attachmentUrls || []).length
+      ) {
         byId.set(key, item);
       }
       continue;
