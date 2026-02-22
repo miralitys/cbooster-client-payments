@@ -567,6 +567,8 @@ export default function QuickBooksPage() {
           key: "expenseCategory",
           label: "Expense Category",
           align: "left",
+          className: "quickbooks-expense-category-column",
+          headerClassName: "quickbooks-expense-category-column",
           cell: (item) => {
             const confirmedCategory = resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap);
             const suggestedCategory = resolveQuickBooksSuggestedExpenseCategoryForRow(
