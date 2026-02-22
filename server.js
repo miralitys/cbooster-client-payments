@@ -28289,6 +28289,42 @@ function isGhlMfaChallengeText(rawText) {
   return /\b(two factor|2fa|verification code|authenticator|otp|one-time code)\b/i.test(text);
 }
 
+function hasStrongGhlMfaPromptText(rawText) {
+  const text = normalizeGhlContractComparableText(rawText);
+  if (!text) {
+    return false;
+  }
+
+  if (/\b(enter|input|type|paste)\b.{0,50}\b(verification|security|one[- ]?time|otp|passcode|auth|code)\b/i.test(text)) {
+    return true;
+  }
+
+  if (/\b(verification|security|one[- ]?time|otp|passcode|login)\s*code\b.{0,70}\b(sent|emailed|email|inbox)\b/i.test(text)) {
+    return true;
+  }
+
+  if (/\b(we have sent|we've sent|code sent|send code|resend code)\b.{0,70}\b(code|otp|email)\b/i.test(text)) {
+    return true;
+  }
+
+  if (/\bverify\b.{0,35}\b(you|identity|login)\b/i.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
+function hasGhlAuthenticatedPageSignals(rawText) {
+  const text = normalizeGhlContractComparableText(rawText);
+  if (!text) {
+    return false;
+  }
+
+  return /\b(dashboard|conversations|opportunities|pipelines|contacts|automation|marketing|payments|reporting|settings)\b/i.test(
+    text,
+  );
+}
+
 async function hasVisibleGhlMfaInput(page) {
   for (const selector of GHL_APP_MFA_INPUT_SELECTORS) {
     const locator = page.locator(selector).first();
@@ -28324,6 +28360,22 @@ async function isGhlMfaChallengeActive(page, rawText = "") {
 
   const currentUrl = sanitizeTextValue(page?.url?.(), 2000).toLowerCase();
   if (/\b(verify|verification|otp|two-factor|2fa|auth)\b/.test(currentUrl)) {
+    return true;
+  }
+
+  const pageTitle = await page
+    .title()
+    .then((value) => sanitizeTextValue(value, 300).toLowerCase())
+    .catch(() => "");
+  if (/\b(verify|verification|two[- ]?factor|2fa|security code|otp|authentication)\b/.test(pageTitle)) {
+    return true;
+  }
+
+  if (hasStrongGhlMfaPromptText(rawText)) {
+    return true;
+  }
+
+  if (!hasGhlAuthenticatedPageSignals(rawText)) {
     return true;
   }
 
@@ -31136,6 +31188,157 @@ app.post("/api/ghl/contract-text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW
       ...(sanitizeTextValue(error?.mfaSessionId, 160) ? { mfaSessionId: sanitizeTextValue(error?.mfaSessionId, 160) } : {}),
     };
     res.status(error?.httpStatus || 502).json(responsePayload);
+  }
+});
+
+const PAYMENT_PROBABILITY_MODEL_VERSION =
+  sanitizeTextValue(process.env.PAYMENT_PROBABILITY_MODEL_VERSION, 120) || "v2-local-2026-02-22";
+
+function clampPaymentProbabilityValue(value, minValue, maxValue) {
+  if (!Number.isFinite(value)) {
+    return minValue;
+  }
+  return Math.min(maxValue, Math.max(minValue, value));
+}
+
+function normalizePaymentProbabilityNumber(rawValue, fallback = 0, minValue = 0, maxValue = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number(rawValue);
+  const value = Number.isFinite(parsed) ? parsed : fallback;
+  return clampPaymentProbabilityValue(value, minValue, maxValue);
+}
+
+function normalizePaymentProbabilityNullableNumber(rawValue, minValue = 0, maxValue = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return clampPaymentProbabilityValue(parsed, minValue, maxValue);
+}
+
+function normalizePaymentProbabilityFeatures(rawFeatures) {
+  if (!rawFeatures || typeof rawFeatures !== "object" || Array.isArray(rawFeatures)) {
+    throw createHttpError("Payload must include a `features` object.", 400, "payment_probability_invalid_payload");
+  }
+
+  const contractTotal = normalizePaymentProbabilityNumber(rawFeatures.contractTotal, 0, 0, 500000);
+  const paidTotal = normalizePaymentProbabilityNumber(rawFeatures.paidTotal, 0, 0, 500000);
+  const fallbackBalance = Math.max(0, contractTotal - paidTotal);
+  const balance = normalizePaymentProbabilityNumber(rawFeatures.balance, fallbackBalance, 0, 500000);
+  const paidRatio = normalizePaymentProbabilityNumber(
+    rawFeatures.paidRatio,
+    contractTotal > 0 ? paidTotal / contractTotal : 0,
+    0,
+    2.5,
+  );
+  const paymentPace = normalizePaymentProbabilityNumber(rawFeatures.paymentPace, 0, 0, 4);
+  const displayScore = normalizePaymentProbabilityNullableNumber(rawFeatures.displayScore, 0, 120);
+  const overdueDays = normalizePaymentProbabilityNumber(rawFeatures.overdueDays, 0, 0, 365);
+  const openMilestones = normalizePaymentProbabilityNumber(rawFeatures.openMilestones, 0, 0, 24);
+  const writtenOff = rawFeatures.writtenOff === true;
+
+  return {
+    contractTotal,
+    paidTotal,
+    balance,
+    paidRatio,
+    paymentPace,
+    displayScore,
+    overdueDays,
+    openMilestones,
+    writtenOff,
+  };
+}
+
+function sigmoidPaymentProbability(value) {
+  return 1 / (1 + Math.exp(-value));
+}
+
+function computePaymentProbabilityFromLocalModel(features) {
+  if (features.writtenOff || features.balance <= 0) {
+    return {
+      p1: 0,
+      p2: 0,
+      p3: 0,
+      modelVersion: PAYMENT_PROBABILITY_MODEL_VERSION,
+      featureImportances: {
+        writtenOffOrNoBalance: 1,
+      },
+    };
+  }
+
+  const scoreNorm = clampPaymentProbabilityValue((features.displayScore ?? 50) / 100, 0, 1.2);
+  const paidNorm = clampPaymentProbabilityValue(features.paidRatio / 1.5, 0, 1.5);
+  const paceNorm = clampPaymentProbabilityValue(features.paymentPace / 2, 0, 2);
+  const overdueNorm = clampPaymentProbabilityValue(features.overdueDays / 120, 0, 2);
+  const openNorm = clampPaymentProbabilityValue(features.openMilestones / 6, 0, 2);
+  const balanceShare = clampPaymentProbabilityValue(features.balance / Math.max(features.contractTotal, 1), 0, 1.5);
+
+  // V2 local model: independent horizon logits with monotonic cumulative probabilities.
+  const z1 = -1.85 + scoreNorm * 2.85 + paidNorm * 1.45 + paceNorm * 1.2 - overdueNorm * 1.65 - openNorm * 0.95 - balanceShare * 0.75;
+  const z2 = -1.38 + scoreNorm * 2.35 + paidNorm * 1.55 + paceNorm * 1.0 - overdueNorm * 1.35 - openNorm * 0.8 - balanceShare * 0.55;
+  const z3 = -1.02 + scoreNorm * 1.95 + paidNorm * 1.65 + paceNorm * 0.85 - overdueNorm * 1.1 - openNorm * 0.65 - balanceShare * 0.35;
+
+  const rawP1 = sigmoidPaymentProbability(z1);
+  const rawP2 = sigmoidPaymentProbability(z2);
+  const rawP3 = sigmoidPaymentProbability(z3);
+
+  const p1 = clampPaymentProbabilityValue(rawP1, 0.02, 0.95);
+  const p2 = clampPaymentProbabilityValue(Math.max(rawP2, p1 + 0.03), 0.05, 0.98);
+  const p3 = clampPaymentProbabilityValue(Math.max(rawP3, p2 + 0.03), 0.08, 0.995);
+
+  return {
+    p1,
+    p2,
+    p3,
+    modelVersion: PAYMENT_PROBABILITY_MODEL_VERSION,
+    featureImportances: {
+      score: Number(Math.abs(scoreNorm * 2.85).toFixed(4)),
+      paidRatio: Number(Math.abs(paidNorm * 1.45).toFixed(4)),
+      paymentPace: Number(Math.abs(paceNorm * 1.2).toFixed(4)),
+      overdueDays: Number(Math.abs(overdueNorm * 1.65).toFixed(4)),
+      openMilestones: Number(Math.abs(openNorm * 0.95).toFixed(4)),
+      balance: Number(Math.abs(balanceShare * 0.75).toFixed(4)),
+    },
+  };
+}
+
+app.post("/api/payment-probability", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.payment_probability.read",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "Payment probability request limit reached. Please wait before retrying.",
+      code: "payment_probability_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  try {
+    const features = normalizePaymentProbabilityFeatures(req.body?.features);
+    const responsePayload = computePaymentProbabilityFromLocalModel(features);
+    res.json(responsePayload);
+  } catch (error) {
+    console.error("POST /api/payment-probability failed:", {
+      code: sanitizeTextValue(error?.code, 80),
+      status: Number.isFinite(error?.httpStatus) ? error.httpStatus : "",
+      message: sanitizeTextValue(error?.message, 320),
+      user: sanitizeTextValue(req.webAuthUser, 160),
+    });
+
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 400) || "Failed to compute payment probability.",
+      code: sanitizeTextValue(error?.code, 80) || "payment_probability_request_failed",
+    });
   }
 });
 
