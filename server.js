@@ -29446,6 +29446,10 @@ async function readGhlBrowserStorageSnapshot(page) {
       sessionStorageEntries: readStorageEntries(window.sessionStorage),
     };
   });
+  const contextCookies = await page
+    .context()
+    .cookies()
+    .catch(() => []);
 
   return {
     url: sanitizeTextValue(snapshot?.url, 2000),
@@ -29453,6 +29457,124 @@ async function readGhlBrowserStorageSnapshot(page) {
     bodyText: sanitizeTextValue(snapshot?.bodyText, 50000),
     localStorageEntries: Array.isArray(snapshot?.localStorageEntries) ? snapshot.localStorageEntries : [],
     sessionStorageEntries: Array.isArray(snapshot?.sessionStorageEntries) ? snapshot.sessionStorageEntries : [],
+    cookies: Array.isArray(contextCookies)
+      ? contextCookies
+          .slice(0, 260)
+          .map((entry) => ({
+            name: sanitizeTextValue(entry?.name, 220),
+            value: sanitizeTextValue(entry?.value, 320000),
+            domain: sanitizeTextValue(entry?.domain, 260),
+            path: sanitizeTextValue(entry?.path, 260),
+          }))
+      : [],
+  };
+}
+
+function createGhlNetworkHintCollector(page) {
+  const tokenCandidates = [];
+  const locationCandidates = [];
+
+  function pushTokenCandidate(rawToken, rawPath, rawScore = 180) {
+    const token = sanitizeTextValue(rawToken, 8000).replace(/^bearer\s+/i, "").trim();
+    if (!token || token.length < 20) {
+      return;
+    }
+    const path = sanitizeTextValue(rawPath, 260).toLowerCase() || "network";
+    const score = Number.parseInt(sanitizeTextValue(rawScore, 20), 10) || 180;
+    tokenCandidates.push({
+      token,
+      path,
+      score,
+    });
+  }
+
+  function pushLocationCandidate(rawLocationId, rawPath, rawScore = 150) {
+    const locationId = sanitizeTextValue(rawLocationId, 160);
+    if (!locationId || isLikelyJwtToken(locationId) || !/^[A-Za-z0-9_-]{6,200}$/.test(locationId)) {
+      return;
+    }
+    const path = sanitizeTextValue(rawPath, 260).toLowerCase() || "network";
+    const score = Number.parseInt(sanitizeTextValue(rawScore, 20), 10) || 150;
+    locationCandidates.push({
+      locationId,
+      path,
+      score,
+    });
+  }
+
+  const onRequest = (request) => {
+    try {
+      const rawUrl = sanitizeTextValue(request?.url?.(), 2200);
+      if (!rawUrl) {
+        return;
+      }
+      let parsedUrl = null;
+      try {
+        parsedUrl = new URL(rawUrl);
+      } catch {
+        parsedUrl = null;
+      }
+
+      const hostname = sanitizeTextValue(parsedUrl?.hostname, 220).toLowerCase();
+      if (hostname && !/(leadconnectorhq\.com|gohighlevel\.com)/i.test(hostname)) {
+        return;
+      }
+
+      const headers = request?.headers?.() || {};
+      const normalizedPath = sanitizeTextValue(parsedUrl?.pathname, 300).toLowerCase() || "/";
+      const queryLocationId = sanitizeTextValue(parsedUrl?.searchParams?.get("locationId"), 160);
+      if (queryLocationId) {
+        pushLocationCandidate(queryLocationId, `network.url.${normalizedPath}`, 165);
+      }
+      const urlLocationId = extractGhlLocationIdFromUrl(rawUrl);
+      if (urlLocationId) {
+        pushLocationCandidate(urlLocationId, `network.url.${normalizedPath}.location`, 165);
+      }
+
+      for (const [rawHeaderName, rawHeaderValue] of Object.entries(headers).slice(0, 120)) {
+        const headerName = sanitizeTextValue(rawHeaderName, 120).toLowerCase();
+        const headerValue = sanitizeTextValue(rawHeaderValue, 12000);
+        if (!headerName || !headerValue) {
+          continue;
+        }
+
+        if (headerName === "authorization") {
+          const bearerMatch = headerValue.match(/^bearer\s+(.+)$/i);
+          if (bearerMatch?.[1]) {
+            pushTokenCandidate(bearerMatch[1], `network.header.authorization.${normalizedPath}`, 245);
+          }
+          continue;
+        }
+
+        if (/token|auth|jwt|bearer|access[_-]?token|id[_-]?token|session/i.test(headerName)) {
+          pushTokenCandidate(headerValue, `network.header.${headerName}.${normalizedPath}`, 210);
+        }
+
+        if (/location[-_]?id|subaccount|tenant|company/i.test(headerName)) {
+          pushLocationCandidate(headerValue, `network.header.${headerName}.${normalizedPath}`, 160);
+        }
+      }
+    } catch {
+      // Ignore network hint collection failures.
+    }
+  };
+
+  page.on("request", onRequest);
+
+  return {
+    getHints() {
+      return {
+        tokenCandidates: [...tokenCandidates],
+        locationCandidates: [...locationCandidates],
+      };
+    },
+    dispose() {
+      try {
+        page.off("request", onRequest);
+      } catch {
+        // no-op
+      }
+    },
   };
 }
 
@@ -29530,13 +29652,14 @@ function collectGhlSessionCandidatesFromNode(node, pathLabel, tokenCandidates, l
   }
 }
 
-function resolveGhlBrowserSessionArtifacts(snapshot, requestedLocationId) {
+function resolveGhlBrowserSessionArtifacts(snapshot, requestedLocationId, hintPayload = null) {
   const tokenCandidates = [];
   const locationCandidates = [];
   const storageEntries = [
     ...(Array.isArray(snapshot?.localStorageEntries) ? snapshot.localStorageEntries : []),
     ...(Array.isArray(snapshot?.sessionStorageEntries) ? snapshot.sessionStorageEntries : []),
   ];
+  const cookieEntries = Array.isArray(snapshot?.cookies) ? snapshot.cookies : [];
 
   for (const entry of storageEntries) {
     const key = sanitizeTextValue(entry?.key, 220);
@@ -29553,6 +29676,66 @@ function resolveGhlBrowserSessionArtifacts(snapshot, requestedLocationId) {
     } catch {
       // Not JSON.
     }
+  }
+
+  for (const cookie of cookieEntries.slice(0, 260)) {
+    const cookieName = sanitizeTextValue(cookie?.name, 220).toLowerCase();
+    const cookieValue = sanitizeTextValue(cookie?.value, 320000);
+    if (!cookieName || !cookieValue) {
+      continue;
+    }
+    const cookiePath = `cookie.${cookieName}`;
+    collectGhlSessionCandidatesFromNode(cookieValue, cookiePath, tokenCandidates, locationCandidates, 0);
+    const tokenHint = /token|auth|jwt|bearer|access[_-]?token|id[_-]?token|session/i.test(cookieName);
+    if (tokenHint && cookieValue.length >= 20) {
+      tokenCandidates.push({
+        token: cookieValue.replace(/^bearer\s+/i, "").trim(),
+        score: isLikelyJwtToken(cookieValue) ? 210 : 170,
+        path: cookiePath,
+      });
+    }
+    if (/location|subaccount|tenant|company/i.test(cookieName)) {
+      const locationId = sanitizeTextValue(cookieValue, 160);
+      if (locationId && !isLikelyJwtToken(locationId) && /^[A-Za-z0-9_-]{6,200}$/.test(locationId)) {
+        locationCandidates.push({
+          locationId,
+          score: 150,
+          path: cookiePath,
+        });
+      }
+      const urlLocationId = extractGhlLocationIdFromUrl(cookieValue);
+      if (urlLocationId) {
+        locationCandidates.push({
+          locationId: urlLocationId,
+          score: 160,
+          path: `${cookiePath}.url`,
+        });
+      }
+    }
+  }
+
+  for (const candidate of Array.isArray(hintPayload?.tokenCandidates) ? hintPayload.tokenCandidates : []) {
+    const token = sanitizeTextValue(candidate?.token, 8000).replace(/^bearer\s+/i, "").trim();
+    if (!token || token.length < 20) {
+      continue;
+    }
+    tokenCandidates.push({
+      token,
+      score: Number.parseInt(sanitizeTextValue(candidate?.score, 20), 10) || 200,
+      path: sanitizeTextValue(candidate?.path, 220) || "network",
+    });
+  }
+
+  for (const candidate of Array.isArray(hintPayload?.locationCandidates) ? hintPayload.locationCandidates : []) {
+    const locationId = sanitizeTextValue(candidate?.locationId, 160);
+    if (!locationId || isLikelyJwtToken(locationId) || !/^[A-Za-z0-9_-]{6,200}$/.test(locationId)) {
+      continue;
+    }
+    locationCandidates.push({
+      locationId,
+      score: Number.parseInt(sanitizeTextValue(candidate?.score, 20), 10) || 150,
+      path: sanitizeTextValue(candidate?.path, 220) || "network",
+    });
   }
 
   const dedupedTokens = new Map();
@@ -30342,6 +30525,7 @@ async function extractGhlContractTextFromAuthenticatedPage(page, options = {}) {
   const requestedLocationId = sanitizeTextValue(options?.requestedLocationId, 160);
   const startedAt = Number.isFinite(options?.startedAt) ? options.startedAt : Date.now();
   const mfaSessionId = sanitizeTextValue(options?.mfaSessionId, 160);
+  const networkHints = options?.networkHints && typeof options.networkHints === "object" ? options.networkHints : null;
 
   if (!clientName) {
     throw toGhlContractTextOperationError("clientName is required.", {
@@ -30383,7 +30567,7 @@ async function extractGhlContractTextFromAuthenticatedPage(page, options = {}) {
     });
   }
 
-  const artifacts = resolveGhlBrowserSessionArtifacts(storageSnapshot, requestedLocationId);
+  const artifacts = resolveGhlBrowserSessionArtifacts(storageSnapshot, requestedLocationId, networkHints);
   if (!artifacts.sessionToken) {
     throw toGhlContractTextOperationError("GoHighLevel session token was not found after login.", {
       code: "ghl_session_token_not_found",
@@ -30582,6 +30766,7 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
     }
 
     const sessionEntry = reservation.entry;
+    const networkHintCollector = createGhlNetworkHintCollector(sessionEntry.page);
     let shouldDestroySession = false;
     try {
       await submitGhlMfaAndWaitForCompletion(sessionEntry.page, mfaCode, mfaSessionId);
@@ -30590,6 +30775,7 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
         requestedLocationId: requestedLocationId || sessionEntry.requestedLocationId,
         startedAt: sessionEntry.startedAt,
         mfaSessionId,
+        networkHints: networkHintCollector.getHints(),
       });
       shouldDestroySession = true;
       return result;
@@ -30605,6 +30791,7 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
       }
       throw error;
     } finally {
+      networkHintCollector.dispose();
       if (shouldDestroySession) {
         await destroyGhlContractTextMfaSession(mfaSessionId);
       } else {
@@ -30641,6 +30828,7 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
     },
   });
   const page = await context.newPage();
+  const networkHintCollector = createGhlNetworkHintCollector(page);
   const startedAt = Date.now();
   let keepSessionOpen = false;
   page.setDefaultTimeout(GHL_APP_NAVIGATION_TIMEOUT_MS);
@@ -30727,8 +30915,10 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
       clientName,
       requestedLocationId,
       startedAt,
+      networkHints: networkHintCollector.getHints(),
     });
   } finally {
+    networkHintCollector.dispose();
     if (!keepSessionOpen) {
       await context.close().catch(() => {});
       await browser.close().catch(() => {});
