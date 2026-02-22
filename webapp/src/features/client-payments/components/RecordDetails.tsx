@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { getGhlClientBasicNote, getGhlClientCommunications } from "@/shared/api";
+import { getGhlClientBasicNote, getGhlClientCommunications, postGhlClientCommunicationTranscript } from "@/shared/api";
 import { evaluateClientScore } from "@/features/client-score/domain/scoring";
 import type { GhlClientBasicNotePayload } from "@/shared/types/ghlNotes";
 import type {
@@ -64,6 +64,9 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const [ghlCommunicationsError, setGhlCommunicationsError] = useState("");
   const [visibleCommunicationCount, setVisibleCommunicationCount] = useState(COMMUNICATIONS_PAGE_SIZE);
   const [selectedCommunicationTranscript, setSelectedCommunicationTranscript] = useState<GhlClientCommunicationItem | null>(null);
+  const [generatedTranscriptsByMessageId, setGeneratedTranscriptsByMessageId] = useState<Record<string, string>>({});
+  const [isGeneratingTranscript, setIsGeneratingTranscript] = useState(false);
+  const [transcriptGenerationError, setTranscriptGenerationError] = useState("");
   const [activeCommunicationFilter, setActiveCommunicationFilter] = useState<CommunicationFilter>("all");
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
@@ -154,12 +157,18 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       setIsLoadingGhlCommunications(false);
       setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
       setSelectedCommunicationTranscript(null);
+      setGeneratedTranscriptsByMessageId({});
+      setIsGeneratingTranscript(false);
+      setTranscriptGenerationError("");
       setActiveCommunicationFilter("all");
       return;
     }
 
     setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
     setSelectedCommunicationTranscript(null);
+    setGeneratedTranscriptsByMessageId({});
+    setIsGeneratingTranscript(false);
+    setTranscriptGenerationError("");
     setActiveCommunicationFilter("all");
 
     const abortController = new AbortController();
@@ -238,6 +247,55 @@ export function RecordDetails({ record }: RecordDetailsProps) {
     }
     return "No SMS or call history found for this client.";
   }, [activeCommunicationFilter]);
+  const selectedCommunicationTranscriptText = useMemo(
+    () => resolveCommunicationTranscript(selectedCommunicationTranscript, generatedTranscriptsByMessageId),
+    [generatedTranscriptsByMessageId, selectedCommunicationTranscript],
+  );
+  const canTranscribeSelectedCommunication = useMemo(() => {
+    if (!selectedCommunicationTranscript || normalizeCommunicationKind(selectedCommunicationTranscript.kind) !== "call") {
+      return false;
+    }
+    if (selectedCommunicationTranscriptText) {
+      return false;
+    }
+    return Boolean(normalizedClientName && getCommunicationTranscriptCacheKey(selectedCommunicationTranscript));
+  }, [normalizedClientName, selectedCommunicationTranscript, selectedCommunicationTranscriptText]);
+
+  async function handleGenerateTranscript() {
+    if (!canTranscribeSelectedCommunication || !selectedCommunicationTranscript) {
+      return;
+    }
+
+    const transcriptKey = getCommunicationTranscriptCacheKey(selectedCommunicationTranscript);
+    if (!transcriptKey) {
+      return;
+    }
+
+    setIsGeneratingTranscript(true);
+    setTranscriptGenerationError("");
+    try {
+      const payload = await postGhlClientCommunicationTranscript(normalizedClientName, transcriptKey);
+      const generatedTranscript = (payload.transcript || "").toString().trim();
+      if (!generatedTranscript) {
+        throw new Error("Transcription returned empty text.");
+      }
+
+      setGeneratedTranscriptsByMessageId((previous) => ({
+        ...previous,
+        [transcriptKey]: generatedTranscript,
+      }));
+      setSelectedCommunicationTranscript((previous) =>
+        previous && getCommunicationTranscriptCacheKey(previous) === transcriptKey
+          ? { ...previous, transcript: generatedTranscript }
+          : previous,
+      );
+    } catch (error) {
+      setTranscriptGenerationError(error instanceof Error ? error.message : "Failed to generate transcript.");
+    } finally {
+      setIsGeneratingTranscript(false);
+    }
+  }
+
   const requestedClientFields = useMemo<RequestedClientField[]>(
     () =>
       [
@@ -523,7 +581,7 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                     <div className="record-details-communications__list" role="list">
                       {communicationItemsVisible.map((item) => {
                         const normalizedKind = normalizeCommunicationKind(item.kind);
-                        const transcriptText = resolveCommunicationTranscript(item);
+                        const transcriptText = resolveCommunicationTranscript(item, generatedTranscriptsByMessageId);
                         return (
                           <article key={item.id} className="record-details-communications__item" role="listitem">
                             <div className="record-details-communications__meta">
@@ -536,7 +594,15 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                             <p className="record-details-communications__body">{item.body || "No text body."}</p>
                             {normalizedKind === "call" ? (
                               <div className="record-details-communications__actions">
-                                <Button variant="secondary" size="sm" type="button" onClick={() => setSelectedCommunicationTranscript(item)}>
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  type="button"
+                                  onClick={() => {
+                                    setTranscriptGenerationError("");
+                                    setSelectedCommunicationTranscript(item);
+                                  }}
+                                >
                                   {transcriptText ? "Transcript" : "Transcript (not available)"}
                                 </Button>
                               </div>
@@ -612,11 +678,30 @@ export function RecordDetails({ record }: RecordDetailsProps) {
       <Modal
         open={Boolean(selectedCommunicationTranscript)}
         title="Call Transcript"
-        onClose={() => setSelectedCommunicationTranscript(null)}
+        onClose={() => {
+          setSelectedCommunicationTranscript(null);
+          setTranscriptGenerationError("");
+          setIsGeneratingTranscript(false);
+        }}
         footer={
-          <Button type="button" variant="secondary" onClick={() => setSelectedCommunicationTranscript(null)}>
-            Close
-          </Button>
+          <>
+            {canTranscribeSelectedCommunication ? (
+              <Button type="button" onClick={() => void handleGenerateTranscript()} isLoading={isGeneratingTranscript}>
+                Transcribe
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                setSelectedCommunicationTranscript(null);
+                setTranscriptGenerationError("");
+                setIsGeneratingTranscript(false);
+              }}
+            >
+              Close
+            </Button>
+          </>
         }
       >
         {selectedCommunicationTranscript ? (
@@ -625,11 +710,18 @@ export function RecordDetails({ record }: RecordDetailsProps) {
               {formatCommunicationDirection(selectedCommunicationTranscript.direction)} ·{" "}
               {formatOptionalDateTime(selectedCommunicationTranscript.createdAt)}
             </p>
-            {resolveCommunicationTranscript(selectedCommunicationTranscript) ? (
-              <pre className="record-details-communications__transcript">{resolveCommunicationTranscript(selectedCommunicationTranscript)}</pre>
+            {selectedCommunicationTranscriptText ? (
+              <pre className="record-details-communications__transcript">{selectedCommunicationTranscriptText}</pre>
             ) : (
-              <p className="react-user-footnote">Transcript is not available for this call yet.</p>
+              <p className="react-user-footnote">
+                {isGeneratingTranscript
+                  ? "Transcribing call recording..."
+                  : "Transcript is not available for this call yet. Press Transcribe to generate it now."}
+              </p>
             )}
+            {!isGeneratingTranscript && transcriptGenerationError ? (
+              <p className="record-details-ghl-note__error">{transcriptGenerationError}</p>
+            ) : null}
           </div>
         ) : null}
       </Modal>
@@ -695,7 +787,22 @@ function formatCommunicationDirection(rawDirection: GhlClientCommunicationDirect
   return "Unknown";
 }
 
-function resolveCommunicationTranscript(item: GhlClientCommunicationItem): string {
+function getCommunicationTranscriptCacheKey(item: Pick<GhlClientCommunicationItem, "id" | "messageId"> | null): string {
+  return ((item?.messageId || item?.id || "").toString().trim());
+}
+
+function resolveCommunicationTranscript(
+  item: GhlClientCommunicationItem | null,
+  generatedTranscriptsByMessageId: Record<string, string> = {},
+): string {
+  const transcriptKey = getCommunicationTranscriptCacheKey(item);
+  if (transcriptKey) {
+    const generatedTranscript = (generatedTranscriptsByMessageId?.[transcriptKey] || "").toString().trim();
+    if (generatedTranscript) {
+      return generatedTranscript;
+    }
+  }
+
   const transcript = (item?.transcript || "").toString().trim();
   if (transcript) {
     return transcript;
