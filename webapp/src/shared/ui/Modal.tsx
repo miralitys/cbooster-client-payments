@@ -9,9 +9,23 @@ interface ModalProps {
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  dialogClassName?: string;
+  headerClassName?: string;
+  contentClassName?: string;
+  footerClassName?: string;
 }
 
-export function Modal({ open, title, onClose, children, footer }: ModalProps) {
+export function Modal({
+  open,
+  title,
+  onClose,
+  children,
+  footer,
+  dialogClassName = "",
+  headerClassName = "",
+  contentClassName = "",
+  footerClassName = "",
+}: ModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const modalIdRef = useRef<symbol>(Symbol("cb-modal"));
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -106,15 +120,15 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
   return (
     <div className="cb-modal" role="dialog" aria-modal="true" aria-label={title}>
       <button className="cb-modal__backdrop" onClick={requestClose} aria-label="Close modal" />
-      <div ref={dialogRef} className="cb-modal__dialog" tabIndex={-1}>
-        <header className="cb-modal__header">
+      <div ref={dialogRef} className={["cb-modal__dialog", dialogClassName].filter(Boolean).join(" ")} tabIndex={-1}>
+        <header className={["cb-modal__header", headerClassName].filter(Boolean).join(" ")}>
           <h3>{title}</h3>
           <button className="cb-modal__close" onClick={requestClose} aria-label="Close">
             ×
           </button>
         </header>
-        <div className="cb-modal__content">{children}</div>
-        {footer ? <footer className="cb-modal__footer">{footer}</footer> : null}
+        <div className={["cb-modal__content", contentClassName].filter(Boolean).join(" ")}>{children}</div>
+        {footer ? <footer className={["cb-modal__footer", footerClassName].filter(Boolean).join(" ")}>{footer}</footer> : null}
       </div>
     </div>
   );

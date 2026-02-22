@@ -3107,6 +3107,95 @@ a {
   gap: var(--space-3);
 }
 
+.access-control-form-react--edit-modal {
+  grid-template-columns: 1fr;
+  gap: var(--space-4);
+}
+
+.access-control-edit-modal-react {
+  width: min(1120px, calc(100vw - 24px));
+  border-radius: 16px;
+  border-color: color-mix(in srgb, var(--color-primary) 24%, var(--color-border) 76%);
+  box-shadow: 0 30px 70px -30px rgba(15, 23, 42, 0.5);
+}
+
+.access-control-edit-modal-header-react {
+  padding: 18px 22px;
+  background: linear-gradient(135deg, #f8fbff 0%, #eef3fb 60%, #f5f8fd 100%);
+}
+
+.access-control-edit-modal-header-react h3 {
+  font-size: clamp(1.25rem, 2vw, 1.55rem);
+  font-family: var(--font-family-heading);
+  letter-spacing: 0.01em;
+}
+
+.access-control-edit-modal-content-react {
+  padding: 16px 22px;
+  background: linear-gradient(180deg, #f7faff 0%, #f2f6fc 100%);
+}
+
+.access-control-edit-modal-footer-react {
+  padding: 14px 22px 18px;
+  background: color-mix(in srgb, var(--color-surface) 96%, #dbeafe 4%);
+}
+
+.access-control-edit-intro-react {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.access-control-edit-status-react {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  padding: 10px 12px;
+}
+
+.access-control-edit-status-react.error {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.access-control-edit-subtitle-react {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.access-control-edit-section-react {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+}
+
+.access-control-edit-section-title-react {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.access-control-edit-section-grid-react {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  align-items: start;
+}
+
+.access-control-edit-span-2-react {
+  grid-column: 1 / -1;
+}
+
+.access-control-edit-section-react .access-control-totp-preview-react {
+  background: color-mix(in srgb, var(--color-primary) 2%, var(--color-surface) 98%);
+}
+
 .access-control-form-actions-react {
   grid-column: 1 / -1;
   display: inline-flex;
@@ -3171,6 +3260,7 @@ a {
   width: 100%;
   justify-content: space-between;
   align-items: center;
+  row-gap: var(--space-2);
 }
 
 .access-control-form-actions-group-react {
@@ -3178,6 +3268,12 @@ a {
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-left: auto;
+}
+
+.access-control-edit-footer-note-react {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
 }
 
 .access-control-users-table-wrap-react {
@@ -3861,6 +3957,39 @@ a {
 
   .access-control-form-react {
     grid-template-columns: 1fr;
+  }
+
+  .access-control-edit-modal-react {
+    width: min(1120px, calc(100vw - 12px));
+  }
+
+  .access-control-edit-modal-header-react,
+  .access-control-edit-modal-content-react,
+  .access-control-edit-modal-footer-react {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .access-control-edit-section-grid-react {
+    grid-template-columns: 1fr;
+  }
+
+  .access-control-edit-modal-footer-react .access-control-form-actions-react--split {
+    align-items: stretch;
+  }
+
+  .access-control-edit-footer-note-react {
+    width: 100%;
+  }
+
+  .access-control-form-actions-group-react {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .access-control-form-actions-group-react .cb-button {
+    flex: 1 1 auto;
+    justify-content: center;
   }
 
   .custom-dashboard-header-actions,
