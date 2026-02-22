@@ -38,6 +38,9 @@ npm start
    - `WEB_AUTH_SESSION_SECRET` = длинный случайный секрет для подписи cookie-сессии;
    - `WEB_AUTH_SESSION_TTL_SEC` = TTL сессии в секундах (по умолчанию `43200` = 12 часов);
    - `WEB_AUTH_COOKIE_SECURE` = `true`/`false` (опционально, принудительный secure-флаг cookie);
+   - `WEB_AUTH_TOTP_ISSUER` = issuer-имя для Authenticator-приложений (по умолчанию `Credit Booster`);
+   - `WEB_AUTH_TOTP_PERIOD_SEC` = шаг TOTP в секундах (по умолчанию `30`);
+   - `WEB_AUTH_TOTP_WINDOW_STEPS` = допустимое окно шагов TOTP (по умолчанию `1`, т.е. ±1 шаг);
    - `RATE_LIMIT_ENABLED` = `true`/`false` (по умолчанию `true`, защита от brute-force и burst-запросов);
    - `RATE_LIMIT_STORE_MAX_KEYS` = лимит in-memory ключей rate-limit (по умолчанию `60000`);
    - `QUICKBOOKS_CLIENT_ID` = QuickBooks OAuth Client ID;
@@ -111,6 +114,7 @@ npm start
 ## Доступ к страницам
 
 - Весь веб-интерфейс защищен авторизацией через `/login`.
+- Для пользователей с включенным 2FA на `/login` дополнительно требуется 6-значный код из Authenticator-приложения (TOTP).
 - После входа доступны:
   - главная страница `/` (Dashboard: overview + таблица заявок на модерацию);
   - страница полной таблицы клиентов `/Client_Payments`;
@@ -127,8 +131,15 @@ npm start
   - `department` (`accounting`, `client_service`, `sales`, `collection`),
   - `role` (`department_head`, `middle_manager`, `manager`),
   - `teamUsernames` (опционально, массив или строка через запятую; для `middle_manager` в `client_service`),
-  - `isOwner` (`true/false`, опционально).
+  - `isOwner` (`true/false`, опционально),
+  - `totpSecret` (опционально, Base32-секрет для Authenticator/TOTP),
+  - `totpEnabled` (`true/false`, опционально; при `true` вход требует код TOTP).
 - В production plaintext-пароли в конфиге (`WEB_AUTH_PASSWORD`, `WEB_AUTH_USERS_JSON[].password`) запрещены: используйте только bcrypt-хеши.
+- Для генерации TOTP-секрета и `otpauth://` URI:
+  ```bash
+  cd "/Users/ramisyaparov/Desktop/Project/CBooster Client Payments"
+  npm run auth:totp-generate -- --username owner
+  ```
 - Быстрая миграция `WEB_AUTH_USERS_JSON` (чтобы заменить все `password` на `passwordHash`):
   1. Скопируйте текущее значение `WEB_AUTH_USERS_JSON` из Render.
   2. Выполните:
@@ -149,6 +160,7 @@ npm start
 - Страница `/access-control` показывает текущую модель доступа, роли и назначенных пользователей.
 - На странице `/access-control` (Owner only) доступна кнопка `Add New User` для создания нового пользователя и назначения департамента/роли.
 - В блоке `Current Users` на `/access-control` можно нажать на имя пользователя и открыть окно редактирования (username, пароль, роль, департамент, команда).
+- В формах создания/редактирования пользователя на `/access-control` доступно включение `2FA (Authenticator)`, генерация `TOTP Secret` и QR-preview для сканирования в приложении Authenticator.
 - В форме создания пользователя на `/access-control` поля `Username` и `Password` необязательны: можно завести сотрудника только по `Display Name + Department + Role`.
 - Если `Username/Password` не переданы, система создаст временные технические credentials автоматически (только для внутренней записи пользователя).
 - Для текущей структуры также автоматически добавляются пользователи без обязательного email/password:

@@ -24,8 +24,15 @@ export interface AccessControlDepartment {
   roles: AccessControlDepartmentRole[];
 }
 
+export interface AccessControlTotpSettings {
+  issuer: string;
+  periodSec: number;
+  digits: number;
+}
+
 export interface AccessControlModel {
   ownerUsername: string;
+  totp?: AccessControlTotpSettings;
   roles: AccessControlRoleOption[];
   departments: AccessControlDepartment[];
   users: AuthUser[];
@@ -51,6 +58,8 @@ export interface UpsertUserPayload {
   departmentId: string;
   roleId: string;
   teamUsernames?: string[];
+  totpSecret?: string;
+  totpEnabled?: boolean;
 }
 
 export interface UpsertUserResponse {

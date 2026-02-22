@@ -1,6 +1,7 @@
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const zlib = require("zlib");
 const { spawn } = require("child_process");
 const bcrypt = require("bcryptjs");
 const fs = require("fs");
@@ -197,6 +198,18 @@ const LOGIN_FAILURE_IP_ACCOUNT_POLICY = Object.freeze({
   lockMs: 20 * 60 * 1000,
 });
 const WEB_AUTH_BCRYPT_COST = Math.min(Math.max(parsePositiveInteger(process.env.WEB_AUTH_BCRYPT_COST, 12), 10), 15);
+const WEB_AUTH_TOTP_ISSUER =
+  sanitizeTextValue(process.env.WEB_AUTH_TOTP_ISSUER, 140) || "Credit Booster";
+const WEB_AUTH_TOTP_PERIOD_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_TOTP_PERIOD_SEC, 30), 15),
+  120,
+);
+const WEB_AUTH_TOTP_WINDOW_STEPS = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_TOTP_WINDOW_STEPS, 1), 0),
+  3,
+);
+const WEB_AUTH_TOTP_DIGITS = 6;
+const WEB_AUTH_TOTP_BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const PERF_OBSERVABILITY_ENABLED = resolveOptionalBoolean(process.env.PERF_OBSERVABILITY_ENABLED) !== false;
 const PERF_HTTP_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.PERF_HTTP_SAMPLE_SIZE, 512), 64), 5000);
 const PERF_HTTP_MAX_ROUTES = Math.min(Math.max(parsePositiveInteger(process.env.PERF_HTTP_MAX_ROUTES, 250), 50), 2000);
@@ -678,6 +691,10 @@ const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_TIMEOUT_MS = Math.min(
 const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_MAX_CANDIDATES = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_MAX_CANDIDATES, 2), 1),
   8,
+);
+const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_CANDIDATES = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_CANDIDATES, 6), 1),
+  20,
 );
 const GHL_CLIENT_CONTRACT_TEXT_FALLBACK_REQUEST_TIMEOUT_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_CONTRACT_TEXT_FALLBACK_REQUEST_TIMEOUT_MS, 2500), 1000),
@@ -2811,6 +2828,186 @@ function doesWebAuthPasswordMatchUser(userProfile, rawPassword) {
   }
 
   return false;
+}
+
+function resolveOptionalBooleanLoose(rawValue) {
+  if (typeof rawValue === "boolean") {
+    return rawValue;
+  }
+
+  if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+    if (rawValue === 1) {
+      return true;
+    }
+    if (rawValue === 0) {
+      return false;
+    }
+  }
+
+  return resolveOptionalBoolean(rawValue);
+}
+
+function normalizeWebAuthTotpSecret(rawValue) {
+  const value = sanitizeTextValue(rawValue, 260).toUpperCase();
+  if (!value) {
+    return "";
+  }
+
+  const normalized = value.replace(/[\s-]+/g, "").replace(/=+$/g, "");
+  if (normalized.length < 16 || normalized.length > 200) {
+    return "";
+  }
+  if (!/^[A-Z2-7]+$/.test(normalized)) {
+    return "";
+  }
+
+  return normalized;
+}
+
+function normalizeWebAuthTotpCode(rawValue) {
+  const value = sanitizeTextValue(rawValue, 40).replace(/\s+/g, "");
+  if (!/^\d{6}$/.test(value)) {
+    return "";
+  }
+  return value;
+}
+
+function decodeWebAuthTotpSecret(secret) {
+  const normalizedSecret = normalizeWebAuthTotpSecret(secret);
+  if (!normalizedSecret) {
+    return null;
+  }
+
+  let bits = 0;
+  let value = 0;
+  const bytes = [];
+
+  for (const char of normalizedSecret) {
+    const index = WEB_AUTH_TOTP_BASE32_ALPHABET.indexOf(char);
+    if (index < 0) {
+      return null;
+    }
+
+    value = (value << 5) | index;
+    bits += 5;
+
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+
+  if (!bytes.length) {
+    return null;
+  }
+
+  return Buffer.from(bytes);
+}
+
+function buildWebAuthTotpCode(secretBytes, counter) {
+  if (!Buffer.isBuffer(secretBytes) || !secretBytes.length) {
+    return "";
+  }
+
+  const normalizedCounter = Number.parseInt(counter, 10);
+  if (!Number.isFinite(normalizedCounter) || normalizedCounter < 0) {
+    return "";
+  }
+
+  const counterBuffer = Buffer.alloc(8);
+  counterBuffer.writeBigUInt64BE(BigInt(normalizedCounter), 0);
+
+  const digest = crypto.createHmac("sha1", secretBytes).update(counterBuffer).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binaryCode =
+    (((digest[offset] & 0x7f) << 24) |
+      ((digest[offset + 1] & 0xff) << 16) |
+      ((digest[offset + 2] & 0xff) << 8) |
+      (digest[offset + 3] & 0xff)) >>>
+    0;
+
+  const modulo = 10 ** WEB_AUTH_TOTP_DIGITS;
+  return String(binaryCode % modulo).padStart(WEB_AUTH_TOTP_DIGITS, "0");
+}
+
+function isWebAuthTotpCodeValid(secret, rawCode, nowMs = Date.now()) {
+  const code = normalizeWebAuthTotpCode(rawCode);
+  if (!code) {
+    return false;
+  }
+
+  const secretBytes = decodeWebAuthTotpSecret(secret);
+  if (!secretBytes) {
+    return false;
+  }
+
+  const normalizedNowMs = Number.parseInt(nowMs, 10);
+  const currentTimeMs = Number.isFinite(normalizedNowMs) ? normalizedNowMs : Date.now();
+  const stepMs = WEB_AUTH_TOTP_PERIOD_SEC * 1000;
+  const baseCounter = Math.floor(currentTimeMs / stepMs);
+
+  for (let offset = -WEB_AUTH_TOTP_WINDOW_STEPS; offset <= WEB_AUTH_TOTP_WINDOW_STEPS; offset += 1) {
+    const nextCounter = baseCounter + offset;
+    if (nextCounter < 0) {
+      continue;
+    }
+    const expected = buildWebAuthTotpCode(secretBytes, nextCounter);
+    if (expected && safeEqual(code, expected)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isWebAuthTwoFactorEnabled(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return false;
+  }
+
+  const secret = normalizeWebAuthTotpSecret(userProfile.totpSecret);
+  if (!secret) {
+    return false;
+  }
+
+  return resolveOptionalBooleanLoose(userProfile.totpEnabled) !== false;
+}
+
+function validateWebAuthTwoFactorCode(userProfile, rawCode) {
+  if (!isWebAuthTwoFactorEnabled(userProfile)) {
+    return {
+      ok: true,
+      required: false,
+      code: "",
+      error: "",
+    };
+  }
+
+  const code = normalizeWebAuthTotpCode(rawCode);
+  if (!code) {
+    return {
+      ok: false,
+      required: true,
+      code: "two_factor_required",
+      error: "Enter the 6-digit code from your Authenticator app.",
+    };
+  }
+
+  if (!isWebAuthTotpCodeValid(userProfile.totpSecret, code)) {
+    return {
+      ok: false,
+      required: true,
+      code: "two_factor_invalid",
+      error: "Invalid verification code.",
+    };
+  }
+
+  return {
+    ok: true,
+    required: true,
+    code: "",
+    error: "",
+  };
 }
 
 function resolveOptionalBoolean(rawValue) {
@@ -10896,6 +11093,16 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   let departmentId = normalizeWebAuthDepartmentId(rawUser.departmentId || rawUser.department);
   let roleId = normalizeWebAuthRoleId(rawUser.roleId || rawUser.role, departmentId);
   const teamUsernames = normalizeWebAuthTeamUsernames(rawUser.teamUsernames || rawUser.team);
+  const totpSecret = normalizeWebAuthTotpSecret(
+    rawUser.totpSecret || rawUser.totp_secret || rawUser.twoFactorSecret || rawUser.otpSecret,
+  );
+  const twoFactorSettingRaw =
+    rawUser.totpEnabled ??
+    rawUser.totp_enabled ??
+    rawUser.twoFactorEnabled ??
+    rawUser.requireTotp;
+  const twoFactorSetting = resolveOptionalBooleanLoose(twoFactorSettingRaw);
+  const totpEnabled = Boolean(totpSecret) && twoFactorSetting !== false;
   const isOwner = explicitOwner || roleId === WEB_AUTH_ROLE_OWNER || username === ownerUsername;
   const mustChangePassword = !isOwner && resolveOptionalBoolean(rawUser.mustChangePassword) === true;
 
@@ -10924,6 +11131,8 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     roleId,
     teamUsernames,
     mustChangePassword,
+    totpSecret,
+    totpEnabled,
     passwordConfiguredAsPlaintext: Boolean(password),
     invalidPasswordHashConfigured: Boolean(passwordHash) && !isPasswordHashValid,
   };
@@ -10940,6 +11149,16 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   let roleId = isOwner ? WEB_AUTH_ROLE_OWNER : normalizeWebAuthRoleId(rawUser?.roleId, departmentId);
   const teamUsernames = normalizeWebAuthTeamUsernames(rawUser?.teamUsernames || rawUser?.team)
     .filter((teamUsername) => teamUsername !== username);
+  const totpSecret = normalizeWebAuthTotpSecret(
+    rawUser?.totpSecret || rawUser?.totp_secret || rawUser?.twoFactorSecret || rawUser?.otpSecret,
+  );
+  const twoFactorSettingRaw =
+    rawUser?.totpEnabled ??
+    rawUser?.totp_enabled ??
+    rawUser?.twoFactorEnabled ??
+    rawUser?.requireTotp;
+  const twoFactorSetting = resolveOptionalBooleanLoose(twoFactorSettingRaw);
+  const totpEnabled = Boolean(totpSecret) && twoFactorSetting !== false;
   const mustChangePassword = !isOwner && resolveOptionalBoolean(rawUser?.mustChangePassword) === true;
 
   if (!isOwner) {
@@ -10974,6 +11193,8 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     roleName: getWebAuthRoleName(roleId),
     teamUsernames: isOwner ? [] : teamUsernames,
     mustChangePassword,
+    totpEnabled,
+    totpSecret,
     passwordConfiguredAsPlaintext: resolveOptionalBoolean(rawUser?.passwordConfiguredAsPlaintext) === true,
     invalidPasswordHashConfigured: resolveOptionalBoolean(rawUser?.invalidPasswordHashConfigured) === true,
   };
@@ -11173,6 +11394,7 @@ function buildWebAuthPublicUser(userProfile) {
       isOwner: false,
       teamUsernames: [],
       mustChangePassword: false,
+      totpEnabled: false,
     };
   }
 
@@ -11186,6 +11408,7 @@ function buildWebAuthPublicUser(userProfile) {
     isOwner: Boolean(userProfile.isOwner),
     teamUsernames: normalizeWebAuthTeamUsernames(userProfile.teamUsernames),
     mustChangePassword: !userProfile.isOwner && resolveOptionalBoolean(userProfile.mustChangePassword) === true,
+    totpEnabled: isWebAuthTwoFactorEnabled(userProfile),
   };
 }
 
@@ -11227,6 +11450,19 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
   }
 
   const teamUsernames = normalizeWebAuthTeamUsernames(payload.teamUsernames || payload.team);
+  const totpSecret = normalizeWebAuthTotpSecret(
+    payload.totpSecret || payload.totp_secret || payload.twoFactorSecret || payload.otpSecret,
+  );
+  const totpEnabledRaw =
+    payload.totpEnabled ??
+    payload.totp_enabled ??
+    payload.twoFactorEnabled ??
+    payload.requireTotp;
+  const totpEnabledRequested = resolveOptionalBooleanLoose(totpEnabledRaw);
+  if (totpEnabledRequested === true && !totpSecret) {
+    throw createHttpError("TOTP secret is required when two-factor authentication is enabled.", 400);
+  }
+  const totpEnabled = Boolean(totpSecret) && totpEnabledRequested !== false;
   const normalizedDisplayName = displayName || username;
   return {
     username,
@@ -11237,6 +11473,8 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     roleId,
     teamUsernames,
     mustChangePassword: true,
+    totpSecret,
+    totpEnabled,
   };
 }
 
@@ -11285,6 +11523,16 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
   const hasRoleInPayload = Object.prototype.hasOwnProperty.call(payload, "roleId") || Object.prototype.hasOwnProperty.call(payload, "role");
   const hasTeamInPayload = Object.prototype.hasOwnProperty.call(payload, "teamUsernames") || Object.prototype.hasOwnProperty.call(payload, "team");
   const hasMustChangePasswordInPayload = Object.prototype.hasOwnProperty.call(payload, "mustChangePassword");
+  const hasTotpSecretInPayload =
+    Object.prototype.hasOwnProperty.call(payload, "totpSecret") ||
+    Object.prototype.hasOwnProperty.call(payload, "totp_secret") ||
+    Object.prototype.hasOwnProperty.call(payload, "twoFactorSecret") ||
+    Object.prototype.hasOwnProperty.call(payload, "otpSecret");
+  const hasTotpEnabledInPayload =
+    Object.prototype.hasOwnProperty.call(payload, "totpEnabled") ||
+    Object.prototype.hasOwnProperty.call(payload, "totp_enabled") ||
+    Object.prototype.hasOwnProperty.call(payload, "twoFactorEnabled") ||
+    Object.prototype.hasOwnProperty.call(payload, "requireTotp");
 
   const departmentId = hasDepartmentInPayload
     ? normalizeWebAuthDepartmentId(payload.departmentId || payload.department)
@@ -11314,6 +11562,21 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
     mustChangePassword = true;
   }
 
+  const existingTotpSecret = normalizeWebAuthTotpSecret(existing.totpSecret);
+  const totpSecret = hasTotpSecretInPayload
+    ? normalizeWebAuthTotpSecret(
+      payload.totpSecret || payload.totp_secret || payload.twoFactorSecret || payload.otpSecret,
+    )
+    : existingTotpSecret;
+  const totpEnabledRaw = hasTotpEnabledInPayload
+    ? payload.totpEnabled ?? payload.totp_enabled ?? payload.twoFactorEnabled ?? payload.requireTotp
+    : existing.totpEnabled;
+  const totpEnabledRequested = resolveOptionalBooleanLoose(totpEnabledRaw);
+  if (totpEnabledRequested === true && !totpSecret) {
+    throw createHttpError("TOTP secret is required when two-factor authentication is enabled.", 400);
+  }
+  const totpEnabled = Boolean(totpSecret) && totpEnabledRequested !== false;
+
   return {
     username,
     password,
@@ -11324,6 +11587,8 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
     roleId,
     teamUsernames: roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER ? teamUsernames : [],
     mustChangePassword,
+    totpSecret,
+    totpEnabled,
     passwordConfiguredAsPlaintext: false,
     invalidPasswordHashConfigured: false,
   };
@@ -11478,6 +11743,11 @@ function buildWebAuthAccessModel() {
 
   return {
     ownerUsername: WEB_AUTH_OWNER_USERNAME,
+    totp: {
+      issuer: sanitizeTextValue(WEB_AUTH_TOTP_ISSUER, 120) || "Credit Booster",
+      periodSec: WEB_AUTH_TOTP_PERIOD_SEC,
+      digits: WEB_AUTH_TOTP_DIGITS,
+    },
     roles: WEB_AUTH_ROLE_DEFINITIONS.map((role) => ({ ...role })),
     departments,
     users,
@@ -12159,12 +12429,30 @@ function isWebAuthPasswordChangeAllowedPath(pathname) {
   );
 }
 
+function resolveWebLoginErrorMessage(rawCode) {
+  const code = sanitizeTextValue(rawCode, 80).toLowerCase();
+  if (!code) {
+    return "";
+  }
+
+  if (code === "invalid_credentials" || code === "1") {
+    return "Invalid login or password.";
+  }
+  if (code === "two_factor_required") {
+    return "Enter the 6-digit code from your Authenticator app.";
+  }
+  if (code === "two_factor_invalid") {
+    return "Invalid verification code.";
+  }
+  return "";
+}
+
 function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
   const safeNextPath = resolveSafeNextPath(nextPath);
   const safeError = sanitizeTextValue(errorMessage, 200);
   const errorBlock = safeError
     ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
-    : `<p class="auth-help">Use your account credentials to access the dashboard.</p>`;
+    : `<p class="auth-help">Use your account credentials. If 2FA is enabled, enter your Authenticator code.</p>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -12323,6 +12611,17 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
         <label>
           Password
           <input type="password" name="password" autocomplete="current-password" required />
+        </label>
+        <label>
+          Authenticator Code (if enabled)
+          <input
+            type="text"
+            name="totpCode"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            placeholder="6-digit code"
+            pattern="[0-9]{6}"
+          />
         </label>
         <button type="submit">Log In</button>
       </form>
@@ -24205,7 +24504,7 @@ app.get("/login", (req, res) => {
     return;
   }
 
-  const hasError = Boolean(sanitizeTextValue(req.query.error, 20));
+  const errorCode = sanitizeTextValue(req.query.error, 80);
   res.setHeader("Cache-Control", "no-store, private");
   res
     .status(200)
@@ -24213,7 +24512,7 @@ app.get("/login", (req, res) => {
     .send(
       buildWebLoginPageHtml({
         nextPath,
-        errorMessage: hasError ? "Invalid login or password." : "",
+        errorMessage: resolveWebLoginErrorMessage(errorCode),
       }),
     );
 });
@@ -24221,6 +24520,7 @@ app.get("/login", (req, res) => {
 app.post("/login", (req, res) => {
   const username = req.body?.username;
   const password = req.body?.password;
+  const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
   const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
   if (!ensureLoginAttemptAllowed(req, res, username, nextPath)) {
     return;
@@ -24231,7 +24531,15 @@ app.post("/login", (req, res) => {
   if (!authUser) {
     registerFailedLoginAttempt(req, username);
     clearWebAuthSessionCookie(req, res);
-    res.redirect(302, `/login?error=1&next=${encodeURIComponent(nextPath)}`);
+    res.redirect(302, `/login?error=invalid_credentials&next=${encodeURIComponent(nextPath)}`);
+    return;
+  }
+
+  const twoFactorResult = validateWebAuthTwoFactorCode(authUser, totpCode);
+  if (!twoFactorResult.ok) {
+    registerFailedLoginAttempt(req, authUser.username);
+    clearWebAuthSessionCookie(req, res);
+    res.redirect(302, `/login?error=${encodeURIComponent(twoFactorResult.code)}&next=${encodeURIComponent(nextPath)}`);
     return;
   }
 
@@ -24247,6 +24555,7 @@ app.post("/login", (req, res) => {
 function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
   const password = req.body?.password;
+  const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
   if (!ensureLoginAttemptAllowed(req, res, username, "/")) {
     return;
   }
@@ -24258,6 +24567,18 @@ function handleApiAuthLogin(req, res) {
     clearWebAuthSessionCookie(req, res);
     res.status(401).json({
       error: "Invalid login or password.",
+    });
+    return;
+  }
+
+  const twoFactorResult = validateWebAuthTwoFactorCode(authUser, totpCode);
+  if (!twoFactorResult.ok) {
+    registerFailedLoginAttempt(req, authUser.username);
+    clearWebAuthSessionCookie(req, res);
+    res.status(401).json({
+      error: twoFactorResult.error,
+      code: twoFactorResult.code,
+      twoFactorRequired: true,
     });
     return;
   }
@@ -26839,6 +27160,235 @@ function buildGhlContractDownloadDiagnosticFallbackText(clientName, lookupRow, d
   return lines.join("\n");
 }
 
+function decodePdfLiteralString(rawValue) {
+  const value = sanitizeTextValue(rawValue, 400000);
+  if (!value) {
+    return "";
+  }
+
+  let result = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value[index];
+    if (current !== "\\") {
+      result += current;
+      continue;
+    }
+
+    const next = value[index + 1];
+    if (!next) {
+      break;
+    }
+    index += 1;
+
+    if (next === "n") {
+      result += "\n";
+      continue;
+    }
+    if (next === "r") {
+      result += "\r";
+      continue;
+    }
+    if (next === "t") {
+      result += "\t";
+      continue;
+    }
+    if (next === "b") {
+      result += "\b";
+      continue;
+    }
+    if (next === "f") {
+      result += "\f";
+      continue;
+    }
+    if (next === "(" || next === ")" || next === "\\") {
+      result += next;
+      continue;
+    }
+    if (/[0-7]/.test(next)) {
+      const octalDigits = [next];
+      for (let lookahead = 0; lookahead < 2; lookahead += 1) {
+        const octalChar = value[index + 1];
+        if (!octalChar || !/[0-7]/.test(octalChar)) {
+          break;
+        }
+        octalDigits.push(octalChar);
+        index += 1;
+      }
+      const code = Number.parseInt(octalDigits.join(""), 8);
+      if (Number.isFinite(code) && code >= 0) {
+        result += String.fromCharCode(code);
+      }
+      continue;
+    }
+
+    // Unknown escape sequence: keep escaped char as-is.
+    result += next;
+  }
+
+  return result;
+}
+
+function decodePdfHexText(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 400000).replace(/[^0-9a-f]/gi, "");
+  if (!normalized) {
+    return "";
+  }
+
+  const evenHex = normalized.length % 2 === 0 ? normalized : `${normalized}0`;
+  const buffer = Buffer.from(evenHex, "hex");
+  if (!buffer.length) {
+    return "";
+  }
+
+  // UTF-16BE BOM.
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    let output = "";
+    for (let index = 2; index + 1 < buffer.length; index += 2) {
+      const code = buffer.readUInt16BE(index);
+      if (code === 0) {
+        continue;
+      }
+      output += String.fromCharCode(code);
+    }
+    return output;
+  }
+
+  return buffer.toString("latin1");
+}
+
+function collectPdfTextFragmentsFromContent(content, onFragment) {
+  const text = sanitizeTextValue(content, 2000000);
+  if (!text || typeof onFragment !== "function") {
+    return;
+  }
+
+  const literalTokenPattern = /\((?:\\.|[^\\()])*\)\s*(?:Tj|')/g;
+  for (const match of text.matchAll(literalTokenPattern)) {
+    const token = sanitizeTextValue(match[0], 500000);
+    if (!token) {
+      continue;
+    }
+    const openIndex = token.indexOf("(");
+    const closeIndex = token.lastIndexOf(")");
+    if (openIndex < 0 || closeIndex <= openIndex) {
+      continue;
+    }
+    const literal = token.slice(openIndex + 1, closeIndex);
+    onFragment(decodePdfLiteralString(literal));
+  }
+
+  const hexTokenPattern = /<([0-9a-fA-F\s]+)>\s*(?:Tj|')/g;
+  for (const match of text.matchAll(hexTokenPattern)) {
+    onFragment(decodePdfHexText(match[1]));
+  }
+
+  const arrayPattern = /\[(.*?)\]\s*TJ/gs;
+  for (const arrayMatch of text.matchAll(arrayPattern)) {
+    const arrayBody = sanitizeTextValue(arrayMatch[1], 1000000);
+    if (!arrayBody) {
+      continue;
+    }
+
+    for (const literalMatch of arrayBody.matchAll(/\((?:\\.|[^\\()])*\)/g)) {
+      const literalToken = sanitizeTextValue(literalMatch[0], 500000);
+      if (!literalToken || literalToken.length < 2) {
+        continue;
+      }
+      onFragment(decodePdfLiteralString(literalToken.slice(1, -1)));
+    }
+    for (const hexMatch of arrayBody.matchAll(/<([0-9a-fA-F\s]+)>/g)) {
+      onFragment(decodePdfHexText(hexMatch[1]));
+    }
+  }
+}
+
+function extractGhlTextFromPdfBuffer(pdfBuffer) {
+  if (!Buffer.isBuffer(pdfBuffer) || !pdfBuffer.length) {
+    return "";
+  }
+
+  const fragments = [];
+  const seen = new Set();
+  const pushFragment = (rawFragment) => {
+    const normalized = normalizeGhlContractTextFragment(rawFragment);
+    if (!normalized || normalized.length < 4) {
+      return;
+    }
+    const dedupeKey = normalizeGhlContractComparableText(normalized).slice(0, 500);
+    if (!dedupeKey || seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+    fragments.push(normalized);
+  };
+
+  const pdfText = pdfBuffer.toString("latin1");
+  collectPdfTextFragmentsFromContent(pdfText, pushFragment);
+
+  const objectPattern = /(\d+\s+\d+\s+obj[\s\S]*?endobj)/g;
+  for (const objectMatch of pdfText.matchAll(objectPattern)) {
+    const objectBody = objectMatch[1];
+    if (!objectBody || !/stream[\r\n]/i.test(objectBody) || !/endstream/i.test(objectBody)) {
+      continue;
+    }
+
+    const streamMarkerIndex = objectBody.indexOf("stream");
+    const endStreamIndex = objectBody.lastIndexOf("endstream");
+    if (streamMarkerIndex < 0 || endStreamIndex <= streamMarkerIndex + 6) {
+      continue;
+    }
+
+    let streamStartWithinObject = streamMarkerIndex + 6;
+    const firstAfterMarker = objectBody[streamStartWithinObject];
+    const secondAfterMarker = objectBody[streamStartWithinObject + 1];
+    if (firstAfterMarker === "\r" && secondAfterMarker === "\n") {
+      streamStartWithinObject += 2;
+    } else if (firstAfterMarker === "\r" || firstAfterMarker === "\n") {
+      streamStartWithinObject += 1;
+    }
+
+    const objectStart = objectMatch.index || 0;
+    const absoluteStart = objectStart + streamStartWithinObject;
+    const absoluteEnd = objectStart + endStreamIndex;
+    if (absoluteEnd <= absoluteStart || absoluteStart < 0 || absoluteEnd > pdfBuffer.length) {
+      continue;
+    }
+
+    let streamBuffer = pdfBuffer.subarray(absoluteStart, absoluteEnd);
+    if (!streamBuffer.length) {
+      continue;
+    }
+
+    const isFlate = /\/FlateDecode\b/.test(objectBody);
+    if (isFlate) {
+      try {
+        streamBuffer = zlib.inflateSync(streamBuffer);
+      } catch {
+        try {
+          streamBuffer = zlib.inflateRawSync(streamBuffer);
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    collectPdfTextFragmentsFromContent(streamBuffer.toString("latin1"), pushFragment);
+  }
+
+  if (!fragments.length) {
+    return "";
+  }
+
+  const joined = fragments.join("\n\n").trim();
+  if (!joined) {
+    return "";
+  }
+  if (joined.length <= GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS) {
+    return joined;
+  }
+  return `${joined.slice(0, GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS).trim()}\n…`;
+}
+
 const GHL_CONTRACT_TEXT_KEY_HINT_PATTERN =
   /\b(contract|agreement|terms?|clause|section|body|content|html|message|description|template|document)\b/i;
 
@@ -28087,6 +28637,183 @@ function collectGhlContractTextLookupCandidates(lookupRow) {
     .slice(0, GHL_CLIENT_CONTRACT_TEXT_MAX_CANDIDATES);
 }
 
+function collectGhlContractTextPdfCandidates(lookupRow) {
+  const diagnostics = lookupRow?.diagnostics && typeof lookupRow.diagnostics === "object" ? lookupRow.diagnostics : null;
+  const fallbackContactId = sanitizeTextValue(lookupRow?.contactId, 160);
+  const fallbackContactName = sanitizeTextValue(lookupRow?.contactName, 300);
+  const byUrl = new Map();
+
+  function pushCandidate(rawCandidate, fallback = {}) {
+    if (!rawCandidate || typeof rawCandidate !== "object") {
+      return;
+    }
+
+    const urls = extractGhlResolvableUrls(
+      rawCandidate?.url ||
+        rawCandidate?.contractUrl ||
+        rawCandidate?.downloadUrl ||
+        rawCandidate?.fileUrl ||
+        rawCandidate?.href ||
+        rawCandidate?.link,
+    );
+    if (!urls.length) {
+      return;
+    }
+
+    const candidateId = extractLikelyGhlEntityId(rawCandidate?.candidateId || rawCandidate?.id || rawCandidate?.documentId);
+    const source = sanitizeTextValue(rawCandidate?.source || fallback?.source, 200);
+    const score = Number.isFinite(rawCandidate?.score) ? rawCandidate.score : Number.isFinite(fallback?.score) ? fallback.score : 0;
+    const contactId = sanitizeTextValue(rawCandidate?.contactId || fallback?.contactId, 160) || fallbackContactId;
+    const contactName = sanitizeTextValue(rawCandidate?.contactName || fallback?.contactName, 300) || fallbackContactName;
+
+    for (const rawUrl of urls) {
+      const url = sanitizeTextValue(rawUrl, 2000);
+      if (!url || !isAllowedGhlContractDownloadUrl(url)) {
+        continue;
+      }
+
+      const key = url.toLowerCase();
+      const next = {
+        url,
+        candidateId,
+        source,
+        score,
+        contactId,
+        contactName,
+      };
+      const prev = byUrl.get(key);
+      if (!prev) {
+        byUrl.set(key, next);
+        continue;
+      }
+
+      const preferNext =
+        next.score > prev.score ||
+        (!prev.candidateId && Boolean(next.candidateId)) ||
+        (!prev.contactId && Boolean(next.contactId)) ||
+        (!prev.contactName && Boolean(next.contactName));
+      if (preferNext) {
+        byUrl.set(key, {
+          ...prev,
+          ...next,
+        });
+        continue;
+      }
+
+      if (!prev.source && next.source) {
+        prev.source = next.source;
+      }
+    }
+  }
+
+  if (lookupRow?.contractUrl) {
+    pushCandidate(
+      {
+        url: lookupRow.contractUrl,
+      },
+      {
+        source: "lookup.contract_url",
+        score: 5000,
+      },
+    );
+  }
+
+  if (diagnostics?.selectedCandidate) {
+    pushCandidate(diagnostics.selectedCandidate, {
+      source: "lookup.selected",
+      score: 2500,
+      contactId: fallbackContactId,
+      contactName: fallbackContactName,
+    });
+  }
+
+  const diagnosticsContacts = Array.isArray(diagnostics?.contacts) ? diagnostics.contacts : [];
+  for (const contact of diagnosticsContacts) {
+    const contactId = sanitizeTextValue(contact?.contactId, 160) || fallbackContactId;
+    const contactName = sanitizeTextValue(contact?.contactName, 300) || fallbackContactName;
+    if (contact?.selectedCandidate) {
+      pushCandidate(contact.selectedCandidate, {
+        source: "lookup.contact.selected",
+        score: 2000,
+        contactId,
+        contactName,
+      });
+    }
+    if (Array.isArray(contact?.topCandidates)) {
+      for (const topCandidate of contact.topCandidates) {
+        pushCandidate(topCandidate, {
+          source: "lookup.contact.top",
+          score: 800,
+          contactId,
+          contactName,
+        });
+      }
+    }
+  }
+
+  if (diagnostics?.byNameFallback?.selectedCandidate) {
+    pushCandidate(diagnostics.byNameFallback.selectedCandidate, {
+      source: "lookup.by_name.selected",
+      score: 1200,
+      contactId: fallbackContactId,
+      contactName: fallbackContactName,
+    });
+  }
+  if (Array.isArray(diagnostics?.byNameFallback?.topCandidates)) {
+    for (const topCandidate of diagnostics.byNameFallback.topCandidates) {
+      pushCandidate(topCandidate, {
+        source: "lookup.by_name.top",
+        score: 600,
+        contactId: fallbackContactId,
+        contactName: fallbackContactName,
+      });
+    }
+  }
+
+  return [...byUrl.values()]
+    .sort((left, right) => {
+      const scoreDiff = Number(right?.score || 0) - Number(left?.score || 0);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return (left?.url || "").localeCompare(right?.url || "", "en", { sensitivity: "base" });
+    })
+    .slice(0, GHL_CLIENT_CONTRACT_TEXT_FALLBACK_PDF_MAX_CANDIDATES);
+}
+
+function computeGhlContractTextQualityScore(rawText) {
+  const text = normalizeGhlContractTextFragment(rawText);
+  if (!text) {
+    return 0;
+  }
+
+  const normalized = normalizeGhlContractComparableText(text);
+  const words = normalized ? normalized.split(" ").filter(Boolean).length : 0;
+  let score = 0;
+  if (text.length >= 80) {
+    score += 1;
+  }
+  if (text.length >= 180) {
+    score += 1;
+  }
+  if (text.length >= 400) {
+    score += 1;
+  }
+  if (words >= 18) {
+    score += 1;
+  }
+  if (words >= 50) {
+    score += 1;
+  }
+  if (/\n/.test(text)) {
+    score += 1;
+  }
+  if (/\b(contract|agreement|credit|payment|terms?|service|client|balance)\b/.test(normalized)) {
+    score += 1;
+  }
+  return score;
+}
+
 async function resolveGhlContractTextByCandidateId(candidateId, context = {}, debugTrace = null, options = {}) {
   const normalizedCandidateId = extractLikelyGhlEntityId(candidateId);
   if (!normalizedCandidateId) {
@@ -28427,6 +29154,83 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
 
   const resolvedContactId = sanitizeTextValue(normalizedLookupRow?.contactId, 160) || normalizedPreferredContactId;
   const resolvedContactName = sanitizeTextValue(normalizedLookupRow?.contactName, 300) || normalizedClientName;
+  const deadlineAtMs = Date.now() + GHL_CLIENT_CONTRACT_TEXT_FALLBACK_TIMEOUT_MS;
+  const bestResult = {
+    score: -1,
+    textLength: 0,
+    value: null,
+  };
+
+  function registerCandidateResult(rawResult) {
+    const text = normalizeGhlContractTextFragment(rawResult?.text);
+    if (!text) {
+      return false;
+    }
+    const score = computeGhlContractTextQualityScore(text);
+    const textLength = text.length;
+    if (score < bestResult.score) {
+      return false;
+    }
+    if (score === bestResult.score && textLength <= bestResult.textLength) {
+      return false;
+    }
+
+    bestResult.score = score;
+    bestResult.textLength = textLength;
+    bestResult.value = {
+      ...rawResult,
+      text,
+      textLength,
+      lookupStatus,
+      lookupRow: normalizedLookupRow,
+    };
+    return true;
+  }
+
+  const pdfCandidatesToProbe = collectGhlContractTextPdfCandidates(normalizedLookupRow);
+  for (const pdfCandidate of pdfCandidatesToProbe) {
+    if (Date.now() >= deadlineAtMs) {
+      break;
+    }
+
+    const remainingMs = Math.max(0, deadlineAtMs - Date.now());
+    const requestTimeoutMs = Math.max(
+      500,
+      Math.min(remainingMs, GHL_CLIENT_CONTRACT_TEXT_FALLBACK_REQUEST_TIMEOUT_MS),
+    );
+    if (requestTimeoutMs < 500) {
+      break;
+    }
+
+    let downloadedPdf;
+    try {
+      downloadedPdf = await fetchGhlContractFileForDownload(pdfCandidate.url, {
+        timeoutMs: requestTimeoutMs,
+      });
+    } catch {
+      continue;
+    }
+
+    const extractedPdfText = extractGhlTextFromPdfBuffer(downloadedPdf?.buffer);
+    if (!extractedPdfText) {
+      continue;
+    }
+
+    registerCandidateResult({
+      clientName: normalizedClientName,
+      contactId: pdfCandidate.contactId || resolvedContactId,
+      contactName: pdfCandidate.contactName || resolvedContactName,
+      candidateId: pdfCandidate.candidateId || "",
+      source: sanitizeTextValue(pdfCandidate.source, 220) || "contract_text.pdf_download",
+      text: extractedPdfText,
+      fragmentsCount: 0,
+      truncated: extractedPdfText.length > GHL_CLIENT_CONTRACT_TEXT_MAX_CHARS,
+      fallbackMode: "pdf",
+    });
+    if (bestResult.score >= 5 || bestResult.textLength >= 450) {
+      return bestResult.value;
+    }
+  }
 
   const candidatesById = new Map();
   function pushCandidate(rawCandidate, fallback = {}) {
@@ -28490,11 +29294,6 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
   const candidatesToProbe = [...candidatesById.values()]
     .sort((left, right) => Number(right?.score || 0) - Number(left?.score || 0))
     .slice(0, GHL_CLIENT_CONTRACT_TEXT_FALLBACK_MAX_CANDIDATES);
-  if (!candidatesToProbe.length) {
-    return null;
-  }
-
-  const deadlineAtMs = Date.now() + GHL_CLIENT_CONTRACT_TEXT_FALLBACK_TIMEOUT_MS;
   for (const candidate of candidatesToProbe) {
     if (Date.now() >= deadlineAtMs) {
       break;
@@ -28514,20 +29313,24 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
       continue;
     }
 
-    return {
+    registerCandidateResult({
       clientName: normalizedClientName,
       contactId: candidate.contactId || resolvedContactId,
       contactName: candidate.contactName || resolvedContactName,
       candidateId: candidate.candidateId,
       source: sanitizeTextValue(textResult.source, 220) || sanitizeTextValue(candidate.source, 220),
       text: textResult.text,
-      textLength: Number.isFinite(textResult.textLength) ? textResult.textLength : textResult.text.length,
-      lookupStatus,
-      lookupRow: normalizedLookupRow,
-    };
+      fragmentsCount: Number.isFinite(textResult.fragmentsCount) ? textResult.fragmentsCount : 0,
+      truncated: Boolean(textResult.truncated),
+      sourceNodeCount: Number.isFinite(textResult.sourceNodeCount) ? textResult.sourceNodeCount : 0,
+      fallbackMode: "candidate_text",
+    });
+    if (bestResult.score >= 5 || bestResult.textLength >= 450) {
+      return bestResult.value;
+    }
   }
 
-  return null;
+  return bestResult.value || null;
 }
 
 async function listGhlContractDownloadCandidatesForContact(contactId, options = {}) {
@@ -29343,7 +30146,7 @@ async function buildGhlClientContractDownloadRows(clientNames, options = {}) {
   return rows.filter(Boolean);
 }
 
-async function fetchGhlContractFileForDownload(contractUrl) {
+async function fetchGhlContractFileForDownload(contractUrl, options = {}) {
   const resolvedUrl = resolveAbsoluteGhlContractDownloadUrl(contractUrl);
   if (!resolvedUrl) {
     throw createHttpError("Contract file URL is invalid.", 400);
@@ -29351,6 +30154,11 @@ async function fetchGhlContractFileForDownload(contractUrl) {
   if (!isAllowedGhlContractDownloadUrl(resolvedUrl.toString())) {
     throw createHttpError("Contract file URL is not allowed for secure download.", 400);
   }
+
+  const requestTimeoutMs = Math.min(
+    Math.max(parsePositiveInteger(options?.timeoutMs, GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS), 500),
+    GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS,
+  );
 
   const attempts = [
     {
@@ -29371,7 +30179,7 @@ async function fetchGhlContractFileForDownload(contractUrl) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
-    }, GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS);
+    }, requestTimeoutMs);
 
     let response;
     try {
@@ -29383,7 +30191,7 @@ async function fetchGhlContractFileForDownload(contractUrl) {
     } catch (error) {
       clearTimeout(timeoutId);
       if (error?.name === "AbortError") {
-        lastErrorMessage = `Download request timed out after ${GHL_CLIENT_CONTRACT_DOWNLOAD_TIMEOUT_MS}ms.`;
+        lastErrorMessage = `Download request timed out after ${requestTimeoutMs}ms.`;
       } else {
         lastErrorMessage = sanitizeTextValue(error?.message, 300) || "network error";
       }

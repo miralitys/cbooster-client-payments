@@ -15,6 +15,7 @@
     "lint": "npm --prefix webapp run lint",
     "quality:gate": "npm --prefix webapp run lint -- --max-warnings=0 && npm --prefix webapp run test && npm --prefix webapp run build",
     "auth:hash-users-json": "node scripts/hash-web-auth-users-json.js",
+    "auth:totp-generate": "node scripts/generate-web-auth-totp.js",
     "records:v2:backfill": "node scripts/backfill-client-records-v2.js",
     "records:v2:verify": "node scripts/verify-client-records-v2.js",
     "postinstall": "npm --prefix webapp install && npm --prefix webapp run build",

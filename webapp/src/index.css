@@ -2404,6 +2404,54 @@ a {
   gap: var(--space-2);
 }
 
+.access-control-totp-actions-react {
+  grid-column: 1 / -1;
+  display: inline-flex;
+  gap: var(--space-2);
+}
+
+.access-control-totp-preview-react {
+  grid-column: 1 / -1;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.access-control-totp-preview-title-react {
+  margin: 0;
+  color: var(--color-text);
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+}
+
+.access-control-totp-preview-hint-react {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.access-control-totp-preview-image-react {
+  width: min(220px, 100%);
+  aspect-ratio: 1 / 1;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: #fff;
+}
+
+.access-control-totp-uri-label-react {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.access-control-totp-uri-input-react {
+  font-size: 0.75rem;
+}
+
 .access-control-form-actions-react--end {
   width: 100%;
   justify-content: flex-end;

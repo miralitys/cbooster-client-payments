@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 
 import { createAccessUser, getAccessModel, listAssistantReviews, updateAccessUser, updateAssistantReview } from "@/shared/api";
 import type {
@@ -19,6 +20,8 @@ interface UserFormState {
   departmentId: string;
   roleId: string;
   teamUsernames: string;
+  totpSecret: string;
+  totpEnabled: boolean;
 }
 
 const EMPTY_FORM: UserFormState = {
@@ -28,6 +31,8 @@ const EMPTY_FORM: UserFormState = {
   departmentId: "",
   roleId: "",
   teamUsernames: "",
+  totpSecret: "",
+  totpEnabled: false,
 };
 
 interface AssistantReviewDraft {
@@ -36,6 +41,9 @@ interface AssistantReviewDraft {
 }
 
 const ASSISTANT_REVIEW_LIMIT = 80;
+const DEFAULT_TOTP_ISSUER = "Credit Booster";
+const DEFAULT_TOTP_PERIOD_SEC = 30;
+const DEFAULT_TOTP_DIGITS = 6;
 
 export default function AccessControlPage() {
   const [isLoading, setIsLoading] = useState(true);
@@ -87,6 +95,18 @@ export default function AccessControlPage() {
   const editRoleOptions = useMemo(
     () => rolesByDepartment.get(editForm.departmentId) || [],
     [editForm.departmentId, rolesByDepartment],
+  );
+  const totpIssuer = useMemo(
+    () => sanitizeTotpIssuer(model?.totp?.issuer) || DEFAULT_TOTP_ISSUER,
+    [model?.totp?.issuer],
+  );
+  const totpPeriodSec = useMemo(
+    () => normalizeTotpPeriodSeconds(model?.totp?.periodSec),
+    [model?.totp?.periodSec],
+  );
+  const totpDigits = useMemo(
+    () => normalizeTotpDigits(model?.totp?.digits),
+    [model?.totp?.digits],
   );
 
   const editingUser = useMemo(() => {
@@ -208,6 +228,8 @@ export default function AccessControlPage() {
           departmentId: user.departmentId || "",
           roleId: user.roleId || "",
           teamUsernames: (user.teamUsernames || []).join(", "),
+          totpSecret: "",
+          totpEnabled: Boolean(user.totpEnabled),
         },
         departments,
       );
@@ -269,6 +291,12 @@ export default function AccessControlPage() {
         align: "center",
         cell: (item) => (item.isOwner ? "Yes" : "No"),
       },
+      {
+        key: "totpEnabled",
+        label: "2FA",
+        align: "center",
+        cell: (item) => (item.totpEnabled ? "Enabled" : "Off"),
+      },
     ];
   }, [canManageAccess, openEditModal]);
 
@@ -308,6 +336,11 @@ export default function AccessControlPage() {
 
     if (!createForm.displayName.trim()) {
       setCreateStatusText("Display Name is required.");
+      setCreateStatusError(true);
+      return;
+    }
+    if (createForm.totpEnabled && !normalizeTotpSecretValue(createForm.totpSecret)) {
+      setCreateStatusText("TOTP secret is required when 2FA is enabled.");
       setCreateStatusError(true);
       return;
     }
@@ -351,6 +384,11 @@ export default function AccessControlPage() {
 
     if (!editForm.displayName.trim()) {
       setEditStatusText("Display Name is required.");
+      setEditStatusError(true);
+      return;
+    }
+    if (editForm.totpEnabled && !normalizeTotpSecretValue(editForm.totpSecret)) {
+      setEditStatusText("TOTP secret is required when 2FA is enabled.");
       setEditStatusError(true);
       return;
     }
@@ -500,6 +538,7 @@ export default function AccessControlPage() {
               label="Access Level"
               value={currentUser?.isOwner ? "Owner (full access)" : "Department access"}
             />
+            <CurrentAccessLine label="2FA (Authenticator)" value={currentUser?.totpEnabled ? "Enabled" : "Off"} />
             <CurrentAccessLine label="Enabled Permissions" value={String(enabledPermissionsCount)} />
           </div>
         ) : null}
@@ -530,6 +569,67 @@ export default function AccessControlPage() {
                 disabled={isCreating}
               />
             </Field>
+
+            <Field label="2FA (Authenticator)" htmlFor="access-create-totp-enabled">
+              <Select
+                id="access-create-totp-enabled"
+                value={createForm.totpEnabled ? "enabled" : "disabled"}
+                onChange={(event) => {
+                  const enabled = event.target.value === "enabled";
+                  setCreateForm((previous) => ({
+                    ...previous,
+                    totpEnabled: enabled,
+                    totpSecret: enabled ? previous.totpSecret : "",
+                  }));
+                }}
+                disabled={isCreating}
+              >
+                <option value="disabled">Off</option>
+                <option value="enabled">Enabled</option>
+              </Select>
+            </Field>
+
+            {createForm.totpEnabled ? (
+              <>
+                <Field
+                  label="TOTP Secret (Base32)"
+                  htmlFor="access-create-totp-secret"
+                  hint="Scan the QR below or paste your own secret."
+                >
+                  <Input
+                    id="access-create-totp-secret"
+                    value={createForm.totpSecret}
+                    onChange={(event) => setCreateForm((previous) => ({ ...previous, totpSecret: event.target.value }))}
+                    placeholder="Example: JBSWY3DPEHPK3PXP"
+                    disabled={isCreating}
+                  />
+                </Field>
+                <div className="access-control-totp-actions-react">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() =>
+                      setCreateForm((previous) => ({
+                        ...previous,
+                        totpSecret: generateTotpSecretValue(),
+                      }))
+                    }
+                    disabled={isCreating}
+                  >
+                    Generate Secret
+                  </Button>
+                </div>
+                <TotpQrPreview
+                  title="Authenticator QR Preview"
+                  username={createForm.username.trim() || createForm.displayName.trim() || "new-user"}
+                  secret={createForm.totpSecret}
+                  issuer={totpIssuer}
+                  periodSec={totpPeriodSec}
+                  digits={totpDigits}
+                />
+              </>
+            ) : null}
 
             <Field label="Display Name" htmlFor="access-create-display-name">
               <Input
@@ -796,6 +896,71 @@ export default function AccessControlPage() {
             />
           </Field>
 
+          <Field label="2FA (Authenticator)" htmlFor="access-edit-totp-enabled">
+            <Select
+              id="access-edit-totp-enabled"
+              value={editForm.totpEnabled ? "enabled" : "disabled"}
+              onChange={(event) => {
+                const enabled = event.target.value === "enabled";
+                setEditForm((previous) => ({
+                  ...previous,
+                  totpEnabled: enabled,
+                  totpSecret: enabled ? previous.totpSecret : "",
+                }));
+              }}
+              disabled={isUpdating}
+            >
+              <option value="disabled">Off</option>
+              <option value="enabled">Enabled</option>
+            </Select>
+          </Field>
+
+          {editForm.totpEnabled ? (
+            <>
+              <Field
+                label="TOTP Secret (Base32)"
+                htmlFor="access-edit-totp-secret"
+                hint={
+                  editingUser?.totpEnabled
+                    ? "Current secret is hidden. Generate and save a new secret to rotate this user 2FA key."
+                    : "Scan the QR below or paste your own secret."
+                }
+              >
+                <Input
+                  id="access-edit-totp-secret"
+                  value={editForm.totpSecret}
+                  onChange={(event) => setEditForm((previous) => ({ ...previous, totpSecret: event.target.value }))}
+                  placeholder="Example: JBSWY3DPEHPK3PXP"
+                  disabled={isUpdating}
+                />
+              </Field>
+              <div className="access-control-totp-actions-react">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() =>
+                    setEditForm((previous) => ({
+                      ...previous,
+                      totpSecret: generateTotpSecretValue(),
+                    }))
+                  }
+                  disabled={isUpdating}
+                >
+                  Generate Secret
+                </Button>
+              </div>
+              <TotpQrPreview
+                title="Authenticator QR Preview"
+                username={editForm.username.trim() || editingOriginalUsername || editForm.displayName.trim() || "user"}
+                secret={editForm.totpSecret}
+                issuer={totpIssuer}
+                periodSec={totpPeriodSec}
+                digits={totpDigits}
+              />
+            </>
+          ) : null}
+
           <Field label="Display Name" htmlFor="access-edit-display-name">
             <Input
               id="access-edit-display-name"
@@ -907,6 +1072,124 @@ function CurrentAccessLine({ label, value }: { label: string; value: string }) {
   );
 }
 
+function TotpQrPreview({
+  title,
+  username,
+  secret,
+  issuer,
+  periodSec,
+  digits,
+}: {
+  title: string;
+  username: string;
+  secret: string;
+  issuer: string;
+  periodSec: number;
+  digits: number;
+}) {
+  const [qrState, setQrState] = useState({
+    uri: "",
+    dataUrl: "",
+    error: "",
+  });
+  const normalizedSecret = useMemo(() => normalizeTotpSecretValue(secret), [secret]);
+  const normalizedUsername = useMemo(() => sanitizeTotpLabelText(username), [username]);
+  const normalizedIssuer = useMemo(() => sanitizeTotpIssuer(issuer), [issuer]);
+  const normalizedPeriodSec = useMemo(() => normalizeTotpPeriodSeconds(periodSec), [periodSec]);
+  const normalizedDigits = useMemo(() => normalizeTotpDigits(digits), [digits]);
+  const otpauthUri = useMemo(() => {
+    if (!normalizedSecret) {
+      return "";
+    }
+
+    return buildTotpSetupUri({
+      username: normalizedUsername || "user",
+      secret: normalizedSecret,
+      issuer: normalizedIssuer || DEFAULT_TOTP_ISSUER,
+      periodSec: normalizedPeriodSec,
+      digits: normalizedDigits,
+    });
+  }, [normalizedSecret, normalizedUsername, normalizedIssuer, normalizedPeriodSec, normalizedDigits]);
+
+  useEffect(() => {
+    let canceled = false;
+
+    if (!otpauthUri) {
+      return;
+    }
+
+    void QRCode.toDataURL(otpauthUri, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 220,
+    })
+      .then((dataUrl: string) => {
+        if (canceled) {
+          return;
+        }
+        setQrState({
+          uri: otpauthUri,
+          dataUrl,
+          error: "",
+        });
+      })
+      .catch(() => {
+        if (canceled) {
+          return;
+        }
+        setQrState({
+          uri: otpauthUri,
+          dataUrl: "",
+          error: "Failed to generate QR code.",
+        });
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [otpauthUri]);
+  const qrDataUrl = qrState.uri === otpauthUri ? qrState.dataUrl : "";
+  const qrError = qrState.uri === otpauthUri ? qrState.error : "";
+
+  return (
+    <div className="access-control-totp-preview-react">
+      <p className="access-control-totp-preview-title-react">{title}</p>
+      {!normalizedSecret ? (
+        <p className="access-control-totp-preview-hint-react">
+          Enter or generate a secret to render QR.
+        </p>
+      ) : (
+        <>
+          {qrDataUrl ? (
+            <img
+              className="access-control-totp-preview-image-react"
+              src={qrDataUrl}
+              alt="Authenticator setup QR"
+            />
+          ) : null}
+          {qrError ? (
+            <p className="dashboard-message error">{qrError}</p>
+          ) : null}
+          {normalizedUsername ? (
+            <p className="access-control-totp-preview-hint-react">
+              Account label: {normalizedUsername}
+            </p>
+          ) : null}
+          <p className="access-control-totp-uri-label-react">otpauth URI</p>
+          <Input
+            className="access-control-totp-uri-input-react"
+            value={otpauthUri}
+            readOnly
+            onFocus={(event) => {
+              event.currentTarget.select();
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 function formatDateTime(rawValue: string | null): string {
   if (!rawValue) {
     return "-";
@@ -952,6 +1235,7 @@ function buildUpsertPayload(form: UserFormState): UpsertUserPayload {
     departmentId: form.departmentId,
     roleId: form.roleId,
     teamUsernames: form.roleId === "middle_manager" ? parseTeamUsernames(form.teamUsernames) : [],
+    totpEnabled: Boolean(form.totpEnabled),
   };
 
   const username = form.username.trim();
@@ -964,6 +1248,15 @@ function buildUpsertPayload(form: UserFormState): UpsertUserPayload {
     payload.password = password;
   }
 
+  const totpSecret = normalizeTotpSecretValue(form.totpSecret);
+  if (form.totpEnabled) {
+    if (totpSecret) {
+      payload.totpSecret = totpSecret;
+    }
+  } else {
+    payload.totpSecret = "";
+  }
+
   return payload;
 }
 
@@ -972,4 +1265,110 @@ function parseTeamUsernames(rawValue: string): string[] {
     .split(/[\n,;]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function normalizeTotpSecretValue(rawValue: string): string {
+  return String(rawValue || "")
+    .toUpperCase()
+    .replace(/[\s-]+/g, "")
+    .replace(/=+$/g, "")
+    .replace(/[^A-Z2-7]/g, "")
+    .slice(0, 200);
+}
+
+function sanitizeTotpLabelText(rawValue: string): string {
+  return String(rawValue || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 180);
+}
+
+function sanitizeTotpIssuer(rawValue: string | undefined): string {
+  return String(rawValue || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 120);
+}
+
+function normalizeTotpPeriodSeconds(rawValue: number | undefined): number {
+  const parsed = Number.parseInt(String(rawValue || ""), 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_TOTP_PERIOD_SEC;
+  }
+  return Math.min(Math.max(parsed, 15), 120);
+}
+
+function normalizeTotpDigits(rawValue: number | undefined): number {
+  const parsed = Number.parseInt(String(rawValue || ""), 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_TOTP_DIGITS;
+  }
+  return Math.min(Math.max(parsed, 6), 8);
+}
+
+function buildTotpSetupUri({
+  username,
+  secret,
+  issuer,
+  periodSec,
+  digits,
+}: {
+  username: string;
+  secret: string;
+  issuer: string;
+  periodSec: number;
+  digits: number;
+}): string {
+  const label = `${issuer}:${username}`;
+  const query = new URLSearchParams({
+    secret,
+    issuer,
+    algorithm: "SHA1",
+    digits: String(digits),
+    period: String(periodSec),
+  });
+  return `otpauth://totp/${encodeURIComponent(label)}?${query.toString()}`;
+}
+
+function generateTotpSecretValue(sizeBytes = 20): string {
+  const bytes = createRandomByteArray(sizeBytes);
+  if (!bytes.length) {
+    return "";
+  }
+
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let value = 0;
+  let output = "";
+
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+
+  if (bits > 0) {
+    output += alphabet[(value << (5 - bits)) & 31];
+  }
+
+  return output.slice(0, 80);
+}
+
+function createRandomByteArray(sizeBytes: number): Uint8Array {
+  const length = Math.min(Math.max(Number.parseInt(String(sizeBytes), 10) || 20, 10), 64);
+  const bytes = new Uint8Array(length);
+
+  if (typeof window !== "undefined" && window.crypto && typeof window.crypto.getRandomValues === "function") {
+    window.crypto.getRandomValues(bytes);
+    return bytes;
+  }
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Math.floor(Math.random() * 256);
+  }
+
+  return bytes;
 }
