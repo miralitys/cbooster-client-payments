@@ -27478,6 +27478,7 @@ async function probeGhlContractDownloadUrlByCandidateId(candidateId, context = {
   if (!normalizedCandidateId) {
     return null;
   }
+  const fastMode = Boolean(context?.fastMode);
 
   const encodedCandidateId = encodeURIComponent(normalizedCandidateId);
   const normalizedContactId = sanitizeTextValue(context?.contactId, 160);
@@ -29593,7 +29594,7 @@ app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VI
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt || null,
-      matcherVersion: "ghl-contract-download-v2026-02-21-14",
+      matcherVersion: "ghl-contract-download-v2026-02-21-15",
       debugMode,
     });
   } catch (error) {
