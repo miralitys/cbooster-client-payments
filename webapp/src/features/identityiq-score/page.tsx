@@ -59,11 +59,11 @@ export default function IdentityIqScorePage() {
   }, [isLoading]);
 
   const visibleStatusMessage = useMemo(() => {
-    if (submitError) {
-      return submitError;
-    }
     if (isLoading) {
       return LOADING_STATUS_MESSAGES[loadingStatusIndex] || LOADING_STATUS_MESSAGES[0];
+    }
+    if (submitError) {
+      return submitError;
     }
     return statusMessage;
   }, [isLoading, loadingStatusIndex, statusMessage, submitError]);
@@ -203,9 +203,7 @@ export default function IdentityIqScorePage() {
         subtitle="Secure login-based score read for each client"
         meta={
           <>
-            <p className={`dashboard-message ${submitError ? "error" : ""} ${isLoading ? "is-live" : ""}`.trim()}>
-              {visibleStatusMessage}
-            </p>
+            <p className={`dashboard-message ${submitError ? "error" : ""}`.trim()}>{submitError || statusMessage}</p>
             <p className="react-user-footnote">
               Credentials are used only for the live request. Password and SSN4 are cleared from the form after successful check.
             </p>
@@ -273,9 +271,14 @@ export default function IdentityIqScorePage() {
               <p className="identityiq-score-actions__title">Run live check</p>
               <p className="identityiq-score-actions__hint">Credentials are used for one request only.</p>
             </div>
-            <Button type="submit" size="md" isLoading={isLoading}>
-              Get Credit Score
-            </Button>
+            <div className="identityiq-score-actions__controls">
+              <p className={`identityiq-score-actions__status ${isLoading ? "is-live" : ""} ${submitError ? "error" : ""}`.trim()}>
+                {visibleStatusMessage}
+              </p>
+              <Button type="submit" size="md" isLoading={isLoading}>
+                Get Credit Score
+              </Button>
+            </div>
           </div>
         </form>
       </Panel>
