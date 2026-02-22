@@ -440,15 +440,20 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                       {item.recordingUrls && item.recordingUrls.length > 0 ? (
                         <div className="record-details-communications__recordings">
                           {item.recordingUrls.map((recordingUrl, index) => (
-                            <a
-                              key={`${item.id}:${recordingUrl}:${index}`}
-                              href={recordingUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="record-details-communications__recording-link"
-                            >
-                              Recording {index + 1}
-                            </a>
+                            <div key={`${item.id}:${recordingUrl}:${index}`} className="record-details-communications__recording-item">
+                              <span className="record-details-communications__recording-label">Recording {index + 1}</span>
+                              <audio className="record-details-communications__audio" controls preload="none" src={recordingUrl}>
+                                Your browser does not support audio playback.
+                              </audio>
+                              <a
+                                href={recordingUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="record-details-communications__recording-link"
+                              >
+                                Open in new tab
+                              </a>
+                            </div>
                           ))}
                         </div>
                       ) : null}

@@ -1571,9 +1571,25 @@ a {
 }
 
 .record-details-communications__recordings {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 8px;
+}
+
+.record-details-communications__recording-item {
+  display: grid;
+  gap: 6px;
+}
+
+.record-details-communications__recording-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.record-details-communications__audio {
+  width: 100%;
+  max-width: 360px;
+  height: 34px;
 }
 
 .record-details-communications__footer {
