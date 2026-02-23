@@ -434,13 +434,13 @@ export default function ClientsPage() {
       },
       {
         key: "startedInWork",
-        label: "Запуск",
+        label: "In Work",
         align: "center",
         cell: (record) => {
           const startedInWork = resolveStartedInWork(record);
           return (
             <Badge tone={startedInWork ? "success" : "warning"}>
-              {startedInWork ? "Запущен в работу" : "Не запущен в работу"}
+              {startedInWork ? "In Work" : "Not In Work"}
             </Badge>
           );
         },
@@ -705,7 +705,7 @@ export default function ClientsPage() {
                   })
                 }
               />
-              Контракт подписан
+              Contract Signed
             </label>
 
             <label className="cb-checkbox-row" htmlFor="clients-started-in-work-checkbox">
@@ -721,7 +721,7 @@ export default function ClientsPage() {
                   })
                 }
               />
-              {selectedStartedInWork ? "Запущен" : "Не запущен в работу"}
+              {selectedStartedInWork ? "In Work" : "Not In Work"}
             </label>
 
             {saveClientFlagsError ? <p className="dashboard-message error">{saveClientFlagsError}</p> : null}
