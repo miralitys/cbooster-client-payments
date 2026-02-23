@@ -20,6 +20,7 @@ import { Badge, Button, Modal } from "@/shared/ui";
 
 interface RecordDetailsProps {
   record: ClientRecord;
+  clientManagerLabel?: string;
 }
 
 const HEADER_FIELD_KEYS = new Set<keyof ClientRecord>([
@@ -69,7 +70,7 @@ interface SpeakerTranscriptTurn {
   text: string;
 }
 
-export function RecordDetails({ record }: RecordDetailsProps) {
+export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
   const [isLoadingGhlBasicNote, setIsLoadingGhlBasicNote] = useState(false);
   const [ghlBasicNoteError, setGhlBasicNoteError] = useState("");
@@ -90,12 +91,11 @@ export function RecordDetails({ record }: RecordDetailsProps) {
   const contractDisplay = useMemo(() => formatMoneyCell(record.contractTotals), [record.contractTotals]);
   const paidDisplay = useMemo(() => formatMoneyCell(record.totalPayments), [record.totalPayments]);
   const debtDisplay = useMemo(() => formatMoneyCell(record.futurePayments), [record.futurePayments]);
-  const managerDisplay = useMemo(() => {
+  const salesManagerDisplay = useMemo(() => {
     const candidates = [
       (record.closedBy || "").toString().trim(),
       getOptionalRecordText(record, "manager"),
       getOptionalRecordText(record, "assignedManager"),
-      getOptionalRecordText(record, "clientManager"),
       getOptionalRecordText(record, "managerName"),
     ];
     for (const candidate of candidates) {
@@ -105,6 +105,13 @@ export function RecordDetails({ record }: RecordDetailsProps) {
     }
     return "-";
   }, [record]);
+  const clientManagerDisplay = useMemo(() => {
+    const fromProp = (clientManagerLabel || "").toString().trim();
+    if (fromProp) {
+      return fromProp;
+    }
+    return getOptionalRecordText(record, "clientManager") || "-";
+  }, [clientManagerLabel, record]);
   const companyDisplay = useMemo(() => (record.companyName || "").trim() || "-", [record.companyName]);
   const avatarSource = useMemo(() => resolveAvatarSource(record, ghlBasicNote), [ghlBasicNote, record]);
   const avatarInitials = useMemo(() => buildAvatarInitials(normalizedClientName), [normalizedClientName]);
@@ -545,8 +552,14 @@ export function RecordDetails({ record }: RecordDetailsProps) {
                   </span>
                 </p>
                 <p className="record-profile-header__manager-line">
-                  <span className="record-profile-header__manager-label">Manager:</span>
-                  <strong>{managerDisplay}</strong>
+                  <span className="record-profile-header__manager-entry">
+                    <span className="record-profile-header__manager-label">Sales Manager:</span>
+                    <strong>{salesManagerDisplay}</strong>
+                  </span>
+                  <span className="record-profile-header__manager-entry">
+                    <span className="record-profile-header__manager-label">Client Manager:</span>
+                    <strong>{clientManagerDisplay}</strong>
+                  </span>
                 </p>
               </div>
             </div>

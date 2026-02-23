@@ -262,6 +262,12 @@ export default function ClientPaymentsPage() {
   }, [clientManagersState.refreshed, clientManagersState.total, isManagersLoading, managersError, managersRefreshMode]);
 
   const isViewMode = modalState.mode === "view";
+  const activeRecordClientManagerLabel = useMemo(() => {
+    if (!activeRecord) {
+      return "";
+    }
+    return resolveClientManagerNames(activeRecord.clientName, clientManagersState.byClientName).join(", ");
+  }, [activeRecord, clientManagersState.byClientName]);
 
   const loadClientManagers = useCallback(
     async (mode: ClientManagersRefreshMode = "none") => {
@@ -874,7 +880,9 @@ export default function ClientPaymentsPage() {
           </div>
         }
       >
-        {isViewMode && activeRecord ? <RecordDetails record={activeRecord} /> : null}
+        {isViewMode && activeRecord ? (
+          <RecordDetails record={activeRecord} clientManagerLabel={activeRecordClientManagerLabel} />
+        ) : null}
         {!isViewMode ? <RecordEditorForm draft={modalState.draft} onChange={updateDraftField} /> : null}
       </Modal>
 

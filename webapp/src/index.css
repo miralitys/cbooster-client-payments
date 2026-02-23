@@ -1379,10 +1379,17 @@ a {
 .record-profile-header__manager-line {
   margin: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px;
+  gap: 10px 16px;
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
+}
+
+.record-profile-header__manager-entry {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
 }
 
 .record-profile-header__manager-label {
