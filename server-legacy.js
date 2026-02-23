@@ -34,6 +34,7 @@ const { normalizeAuthUsernameForScopeKey } = require("./assistant-session-scope-
 const { registerCustomDashboardModule } = require("./custom-dashboard-module");
 const { registerAuthPublicRoutes, registerAuthProtectedRoutes } = require("./server/routes/auth.routes");
 const { registerRecordsRoutes } = require("./server/routes/records.routes");
+const { registerAssistantRoutes } = require("./server/routes/assistant.routes");
 const { registerGhlRoutes } = require("./server/routes/ghl.routes");
 const { registerQuickBooksRoutes } = require("./server/routes/quickbooks.routes");
 const { registerModerationRoutes } = require("./server/routes/moderation.routes");
@@ -45,6 +46,7 @@ const { createGhlCommunicationsController } = require("./server/domains/ghl-comm
 const { createQuickBooksController } = require("./server/domains/quickbooks");
 const { createModerationController } = require("./server/domains/moderation");
 const { createMiniController } = require("./server/domains/mini");
+const { createAssistantService, createAssistantController } = require("./server/domains/assistant");
 const { createRecordsValidation } = require("./server/domains/records/records.validation");
 const { createRecordsService } = require("./server/domains/records/records.service");
 const { createRecordsController } = require("./server/domains/records/records.controller");
@@ -27063,8 +27065,6 @@ registerAuthProtectedRoutes({
     handleApiAuthFirstPassword,
     handleApiAuthSession,
     handleApiAuthAccessModel,
-    handleAssistantReviewsList,
-    handleAssistantReviewUpdate,
     handleApiAuthUsersList,
     handleApiAuthUsersCreate,
     handleApiAuthUsersUpdate,
@@ -31126,6 +31126,38 @@ const handleAssistantTtsPost = async (req, res) => {
   }
 };
 
+const assistantService = createAssistantService({
+  handlers: {
+    handleAssistantContextResetPost,
+    handleAssistantContextResetTelemetryPost,
+    handleAssistantChatPost,
+    handleAssistantReviewsList,
+    handleAssistantReviewUpdate,
+    handleAssistantTtsPost,
+  },
+});
+
+const assistantController = createAssistantController({
+  assistantService,
+});
+
+registerAssistantRoutes({
+  app,
+  requireWebPermission,
+  permissionKeys: {
+    WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS,
+    WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL,
+  },
+  handlers: {
+    handleAssistantContextResetPost: assistantController.handleAssistantContextResetPost,
+    handleAssistantContextResetTelemetryPost: assistantController.handleAssistantContextResetTelemetryPost,
+    handleAssistantChatPost: assistantController.handleAssistantChatPost,
+    handleAssistantReviewsList: assistantController.handleAssistantReviewsList,
+    handleAssistantReviewUpdate: assistantController.handleAssistantReviewUpdate,
+    handleAssistantTtsPost: assistantController.handleAssistantTtsPost,
+  },
+});
+
 const recordsValidation = createRecordsValidation({
   recordsPutMaxCount: RECORDS_PUT_MAX_COUNT,
   recordsPutMaxRecordKeys: RECORDS_PUT_MAX_RECORD_KEYS,
@@ -31187,10 +31219,6 @@ registerRecordsRoutes({
     handleHealthGet,
     handlePerformanceDiagnosticsGet,
     handleRecordsGet: recordsController.handleRecordsGet,
-    handleAssistantContextResetPost,
-    handleAssistantContextResetTelemetryPost,
-    handleAssistantChatPost,
-    handleAssistantTtsPost,
     handleRecordsPut: recordsController.handleRecordsPut,
     handleRecordsPatch: recordsController.handleRecordsPatch,
   },
