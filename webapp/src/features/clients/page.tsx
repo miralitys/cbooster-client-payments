@@ -8,20 +8,24 @@ import {
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { FIELD_DEFINITIONS } from "@/features/client-payments/domain/constants";
-import { getRecords } from "@/shared/api";
+import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
+import { getClientManagers, getRecords } from "@/shared/api";
+import type { ClientManagerRow } from "@/shared/types/clientManagers";
 import type { ClientRecord } from "@/shared/types/records";
-import { Button, EmptyState, ErrorState, Input, LoadingSkeleton, Modal, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
+import { Badge, Button, EmptyState, ErrorState, Input, LoadingSkeleton, Modal, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const TEXT_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
+const NO_MANAGER_LABEL = "No manager";
 
 const SEARCH_FIELDS: Array<keyof ClientRecord> = [
   "clientName",
+  "closedBy",
+  "notes",
   "clientPhoneNumber",
   "clientEmailAddress",
   "companyName",
   "serviceType",
-  "closedBy",
 ];
 
 const MONEY_FIELDS = new Set<keyof ClientRecord>([
@@ -50,6 +54,7 @@ export default function ClientsPage() {
   const [loadError, setLoadError] = useState("");
   const [search, setSearch] = useState("");
   const [selectedRecordId, setSelectedRecordId] = useState("");
+  const [clientManagersByClientName, setClientManagersByClientName] = useState<Map<string, string>>(new Map());
 
   const loadClients = useCallback(async () => {
     setIsLoading(true);
@@ -67,16 +72,44 @@ export default function ClientsPage() {
     }
   }, []);
 
+  const loadClientManagers = useCallback(async () => {
+    try {
+      const payload = await getClientManagers("none");
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      setClientManagersByClientName(buildClientManagersLookup(items));
+    } catch {
+      setClientManagersByClientName(new Map());
+    }
+  }, []);
+
   useEffect(() => {
     void loadClients();
   }, [loadClients]);
 
+  useEffect(() => {
+    void loadClientManagers();
+  }, [loadClientManagers]);
+
+  const scoreByRecordId = useMemo(() => {
+    const asOfDate = new Date();
+    const scores = new Map<string, ClientScoreResult>();
+    for (const record of records) {
+      scores.set(record.id, evaluateClientScore(record, asOfDate));
+    }
+    return scores;
+  }, [records]);
+
   const filteredRecords = useMemo(() => {
     const query = normalizeSearchTerm(search);
     const scopedRecords = query
-      ? records.filter((record) =>
-          SEARCH_FIELDS.some((field) => normalizeSearchTerm(record[field]).includes(query)),
-        )
+      ? records.filter((record) => {
+          const managerLabel = resolveClientManagerLabel(record, clientManagersByClientName);
+          const searchable = [
+            ...SEARCH_FIELDS.map((field) => (record[field] || "").toString()),
+            managerLabel,
+          ].join(" ");
+          return normalizeSearchTerm(searchable).includes(query);
+        })
       : records;
 
     return [...scopedRecords].sort((left, right) => {
@@ -87,7 +120,7 @@ export default function ClientsPage() {
 
       return resolveCreatedAtTimestamp(right) - resolveCreatedAtTimestamp(left);
     });
-  }, [records, search]);
+  }, [clientManagersByClientName, records, search]);
 
   const selectedRecord = useMemo(
     () => records.find((record) => record.id === selectedRecordId) || null,
@@ -152,37 +185,25 @@ export default function ClientsPage() {
   const columns = useMemo<TableColumn<ClientRecord>[]>(() => {
     return [
       {
-        key: "client",
-        label: "Client",
+        key: "clientName",
+        label: "Client (Last Name, First Name)",
         align: "left",
         className: "clients-column-client",
         headerClassName: "clients-column-client",
         cell: (record) => (
           <div className="client-name-cell">
             <strong>{record.clientName || "Unnamed client"}</strong>
-            <div className="react-user-footnote">{record.serviceType || "No service type"}</div>
-            <StatusBadges record={record} />
           </div>
         ),
       },
       {
-        key: "contact",
-        label: "Contact",
-        align: "left",
-        className: "clients-column-contact",
-        headerClassName: "clients-column-contact",
-        cell: (record) => (
-          <div className="clients-contact-cell">
-            <span>{record.clientPhoneNumber || "-"}</span>
-            <span className="react-user-footnote">{record.clientEmailAddress || "-"}</span>
-          </div>
-        ),
-      },
-      {
-        key: "company",
-        label: "Company",
-        align: "left",
-        cell: (record) => record.companyName || "-",
+        key: "score",
+        label: "Score",
+        align: "center",
+        cell: (record) => {
+          const scoreMeta = resolveScoreDisplay(scoreByRecordId.get(record.id));
+          return <Badge tone={scoreMeta.tone}>{scoreMeta.value}</Badge>;
+        },
       },
       {
         key: "closedBy",
@@ -191,10 +212,37 @@ export default function ClientsPage() {
         cell: (record) => record.closedBy || "-",
       },
       {
+        key: "clientManager",
+        label: "Client Manager",
+        align: "left",
+        cell: (record) => resolveClientManagerLabel(record, clientManagersByClientName),
+      },
+      {
+        key: "status",
+        label: "Status",
+        align: "left",
+        cell: (record) => <StatusBadges record={record} />,
+      },
+      {
+        key: "contractSigned",
+        label: "Contract Signed",
+        align: "center",
+        cell: (record) => {
+          const isSigned = resolveContractSigned(record);
+          return <Badge tone={isSigned ? "success" : "warning"}>{isSigned ? "Yes" : "No"}</Badge>;
+        },
+      },
+      {
         key: "contractTotals",
-        label: "Contract",
+        label: "Total Contract",
         align: "right",
         cell: (record) => formatMoneyCell(record.contractTotals),
+      },
+      {
+        key: "futurePayments",
+        label: "Remaining",
+        align: "right",
+        cell: (record) => formatMoneyCell(record.futurePayments),
       },
       {
         key: "totalPayments",
@@ -203,29 +251,13 @@ export default function ClientsPage() {
         cell: (record) => formatMoneyCell(record.totalPayments),
       },
       {
-        key: "futurePayments",
-        label: "Balance",
-        align: "right",
-        cell: (record) => formatMoneyCell(record.futurePayments),
-      },
-      {
-        key: "createdAt",
-        label: "Created",
+        key: "notes",
+        label: "Notes",
         align: "left",
-        cell: (record) => formatDate(record.createdAt),
-      },
-      {
-        key: "details",
-        label: "",
-        align: "right",
-        cell: (record) => (
-          <Button type="button" variant="ghost" size="sm" onClick={() => setSelectedRecordId(record.id)}>
-            Open
-          </Button>
-        ),
+        cell: (record) => (record.notes || "").trim() || "-",
       },
     ];
-  }, []);
+  }, [clientManagersByClientName, scoreByRecordId]);
 
   return (
     <PageShell className="clients-react-page">
@@ -266,7 +298,7 @@ export default function ClientsPage() {
           <div className="search-row">
             <Input
               id="clients-search-input"
-              placeholder="Name, phone, email, company, service, or closer"
+              placeholder="Client, manager, phone, email, notes, company"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               autoComplete="off"
@@ -366,4 +398,168 @@ function formatMoneyCell(rawValue: string): string {
 function isTruthyField(rawValue: string): boolean {
   const normalized = (rawValue || "").toString().trim().toLowerCase();
   return normalized === "true" || normalized === "yes" || normalized === "1" || normalized === "on";
+}
+
+function buildClientManagersLookup(rows: ClientManagerRow[]): Map<string, string> {
+  const map = new Map<string, string>();
+
+  for (const row of rows) {
+    const key = normalizeComparableClientName((row?.clientName || "").toString());
+    if (!key) {
+      continue;
+    }
+
+    const nextLabel = resolveManagersLabel(row);
+    if (!nextLabel) {
+      continue;
+    }
+
+    const current = map.get(key);
+    if (!current || current === NO_MANAGER_LABEL) {
+      map.set(key, nextLabel);
+      continue;
+    }
+
+    if (nextLabel === NO_MANAGER_LABEL) {
+      continue;
+    }
+
+    const merged = [...new Set([...splitClientManagerLabel(current), ...splitClientManagerLabel(nextLabel)])]
+      .filter((name) => name !== NO_MANAGER_LABEL)
+      .join(", ");
+    map.set(key, merged || NO_MANAGER_LABEL);
+  }
+
+  return map;
+}
+
+function resolveManagersLabel(row: ClientManagerRow): string {
+  const managers = Array.isArray(row?.managers)
+    ? row.managers.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  if (managers.length) {
+    return [...new Set(managers)].join(", ");
+  }
+
+  const managersLabel = (row?.managersLabel || "").toString().trim();
+  if (!managersLabel || managersLabel === "-" || managersLabel.toLowerCase() === "unassigned") {
+    return NO_MANAGER_LABEL;
+  }
+
+  return managersLabel;
+}
+
+function splitClientManagerLabel(rawLabel: string): string[] {
+  const names = rawLabel
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!names.length) {
+    return [NO_MANAGER_LABEL];
+  }
+
+  return [...new Set(names)];
+}
+
+function resolveClientManagerLabel(record: ClientRecord, lookup: Map<string, string>): string {
+  const key = normalizeComparableClientName(record.clientName);
+  if (key) {
+    const label = lookup.get(key);
+    if (label) {
+      return label;
+    }
+  }
+
+  const fallbackCandidates = [
+    getOptionalRecordText(record, "manager"),
+    getOptionalRecordText(record, "assignedManager"),
+    getOptionalRecordText(record, "clientManager"),
+    getOptionalRecordText(record, "managerName"),
+  ];
+
+  for (const candidate of fallbackCandidates) {
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return NO_MANAGER_LABEL;
+}
+
+function normalizeComparableClientName(rawValue: string): string {
+  return (rawValue || "")
+    .toString()
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getOptionalRecordText(record: ClientRecord, key: string): string {
+  const rawValue = (record as unknown as Record<string, unknown>)[key];
+  if (typeof rawValue !== "string") {
+    return "";
+  }
+  return rawValue.trim();
+}
+
+function resolveScoreDisplay(score: ClientScoreResult | undefined): {
+  value: string;
+  tone: "neutral" | "success" | "info" | "warning" | "danger";
+} {
+  if (!score || score.displayScore === null) {
+    return { value: "N/A", tone: "neutral" };
+  }
+
+  return {
+    value: String(score.displayScore),
+    tone: score.tone,
+  };
+}
+
+function resolveContractSigned(record: ClientRecord): boolean {
+  const rawContractSignedValues: unknown[] = [
+    getOptionalUnknownRecordValue(record, "contractSigned"),
+    getOptionalUnknownRecordValue(record, "isContractSigned"),
+    getOptionalUnknownRecordValue(record, "signedContract"),
+    getOptionalUnknownRecordValue(record, "contractIsSigned"),
+    getOptionalUnknownRecordValue(record, "contract_sign"),
+    getOptionalUnknownRecordValue(record, "contractStatus"),
+  ];
+
+  for (const rawValue of rawContractSignedValues) {
+    const parsed = parseOptionalBoolean(rawValue);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  const totalContract = parseMoneyValue(record.contractTotals);
+  return totalContract !== null && totalContract > 0;
+}
+
+function getOptionalUnknownRecordValue(record: ClientRecord, key: string): unknown {
+  return (record as unknown as Record<string, unknown>)[key];
+}
+
+function parseOptionalBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  const normalized = (value || "").toString().trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (["true", "yes", "1", "on", "signed", "active", "completed"].includes(normalized)) {
+    return true;
+  }
+
+  if (["false", "no", "0", "off", "unsigned", "not signed", "pending"].includes(normalized)) {
+    return false;
+  }
+
+  return null;
 }
