@@ -38,6 +38,9 @@ const { registerGhlRoutes } = require("./server/routes/ghl.routes");
 const { registerQuickBooksRoutes } = require("./server/routes/quickbooks.routes");
 const { registerModerationRoutes } = require("./server/routes/moderation.routes");
 const { registerMiniRoutes } = require("./server/routes/mini.routes");
+const { createRecordsValidation } = require("./server/domains/records/records.validation");
+const { createRecordsService } = require("./server/domains/records/records.service");
+const { createRecordsController } = require("./server/domains/records/records.controller");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
@@ -24522,353 +24525,6 @@ function startGhlBasicNoteAutoRefreshScheduler() {
   return true;
 }
 
-function buildInvalidRecordsPayloadResult(message, code = "invalid_records_payload", httpStatus = 400) {
-  return {
-    ok: false,
-    message,
-    code,
-    httpStatus,
-  };
-}
-
-function normalizeRecordFieldValue(rawValue, options = {}) {
-  const { allowBoolean = false } = options;
-
-  if (rawValue === null || rawValue === undefined) {
-    return "";
-  }
-
-  if (typeof rawValue === "string") {
-    return rawValue.trim();
-  }
-
-  if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
-    return String(rawValue);
-  }
-
-  if (allowBoolean && typeof rawValue === "boolean") {
-    return rawValue ? "Yes" : "";
-  }
-
-  return null;
-}
-
-function isValidCheckboxInput(rawValue) {
-  if (rawValue === null || rawValue === undefined || rawValue === "" || rawValue === false || rawValue === 0) {
-    return true;
-  }
-
-  if (rawValue === true || rawValue === 1) {
-    return true;
-  }
-
-  if (typeof rawValue === "boolean") {
-    return true;
-  }
-
-  if (typeof rawValue === "number") {
-    return rawValue === 0 || rawValue === 1;
-  }
-
-  if (typeof rawValue === "string") {
-    const normalized = rawValue.trim().toLowerCase();
-    return (
-      normalized === "" ||
-      normalized === "yes" ||
-      normalized === "true" ||
-      normalized === "1" ||
-      normalized === "no" ||
-      normalized === "false" ||
-      normalized === "0"
-    );
-  }
-
-  return false;
-}
-
-function validateRecordsPayload(value) {
-  if (!Array.isArray(value)) {
-    return buildInvalidRecordsPayloadResult("Payload must include `records` as an array.");
-  }
-
-  if (value.length > RECORDS_PUT_MAX_COUNT) {
-    return buildInvalidRecordsPayloadResult(
-      `Records payload is too large. Maximum allowed records: ${RECORDS_PUT_MAX_COUNT}.`,
-      "records_payload_too_many_items",
-      413,
-    );
-  }
-
-  let totalChars = 0;
-  const normalizedRecords = [];
-
-  for (let recordIndex = 0; recordIndex < value.length; recordIndex += 1) {
-    const record = value[recordIndex];
-    if (!record || typeof record !== "object" || Array.isArray(record)) {
-      return buildInvalidRecordsPayloadResult(
-        `Record at index ${recordIndex} must be an object.`,
-        "records_payload_invalid_record",
-      );
-    }
-
-    const entries = Object.entries(record);
-    if (entries.length > RECORDS_PUT_MAX_RECORD_KEYS) {
-      return buildInvalidRecordsPayloadResult(
-        `Record at index ${recordIndex} contains too many fields.`,
-        "records_payload_record_too_wide",
-        413,
-      );
-    }
-
-    const normalizedRecord = {};
-    let recordChars = 0;
-
-    for (const [fieldName, rawFieldValue] of entries) {
-      if (!RECORDS_ALLOWED_FIELDS_SET.has(fieldName)) {
-        return buildInvalidRecordsPayloadResult(
-          `Record at index ${recordIndex} contains unsupported field "${fieldName}".`,
-          "records_payload_unknown_field",
-        );
-      }
-
-      let normalizedValue = "";
-      if (RECORD_CHECKBOX_FIELD_SET.has(fieldName)) {
-        if (!isValidCheckboxInput(rawFieldValue)) {
-          return buildInvalidRecordsPayloadResult(
-            `Record at index ${recordIndex} has invalid checkbox value for "${fieldName}".`,
-            "records_payload_invalid_checkbox",
-          );
-        }
-        normalizedValue = toCheckboxValue(rawFieldValue);
-      } else {
-        normalizedValue = normalizeRecordFieldValue(rawFieldValue);
-        if (normalizedValue === null) {
-          return buildInvalidRecordsPayloadResult(
-            `Record at index ${recordIndex} has invalid type for "${fieldName}".`,
-            "records_payload_invalid_field_type",
-          );
-        }
-      }
-
-      const fieldLimit =
-        Object.prototype.hasOwnProperty.call(RECORDS_PUT_FIELD_MAX_LENGTH, fieldName)
-          ? RECORDS_PUT_FIELD_MAX_LENGTH[fieldName]
-          : RECORDS_PUT_DEFAULT_FIELD_MAX_LENGTH;
-      if (normalizedValue.length > fieldLimit) {
-        return buildInvalidRecordsPayloadResult(
-          `Record at index ${recordIndex} exceeds allowed length for "${fieldName}".`,
-          "records_payload_field_too_long",
-          413,
-        );
-      }
-
-      if (fieldName === "createdAt" && normalizedValue) {
-        const createdAtTimestamp = Date.parse(normalizedValue);
-        if (!Number.isFinite(createdAtTimestamp)) {
-          return buildInvalidRecordsPayloadResult(
-            `Record at index ${recordIndex} has invalid createdAt value.`,
-            "records_payload_invalid_created_at",
-          );
-        }
-        normalizedValue = new Date(createdAtTimestamp).toISOString();
-      }
-
-      if (RECORDS_DATE_VALIDATION_FIELD_SET.has(fieldName) && normalizedValue) {
-        const normalizedDate = normalizeDateForStorage(normalizedValue);
-        if (normalizedDate === null) {
-          return buildInvalidRecordsPayloadResult(
-            `Record at index ${recordIndex} has invalid date in "${fieldName}". Use MM/DD/YYYY.`,
-            "records_payload_invalid_date",
-          );
-        }
-        normalizedValue = normalizedDate;
-      }
-
-      recordChars += normalizedValue.length + fieldName.length;
-      if (recordChars > RECORDS_PUT_MAX_RECORD_CHARS) {
-        return buildInvalidRecordsPayloadResult(
-          `Record at index ${recordIndex} is too large.`,
-          "records_payload_record_too_large",
-          413,
-        );
-      }
-
-      totalChars += normalizedValue.length + fieldName.length;
-      if (totalChars > RECORDS_PUT_MAX_TOTAL_CHARS) {
-        return buildInvalidRecordsPayloadResult(
-          "Records payload is too large.",
-          "records_payload_too_large",
-          413,
-        );
-      }
-
-      normalizedRecord[fieldName] = normalizedValue;
-    }
-
-    normalizedRecords.push(normalizedRecord);
-  }
-
-  return {
-    ok: true,
-    records: normalizedRecords,
-  };
-}
-
-function buildInvalidRecordsPatchPayloadResult(message, code = "invalid_records_patch_payload", httpStatus = 400) {
-  return {
-    ok: false,
-    message,
-    code,
-    httpStatus,
-  };
-}
-
-function normalizeRecordsPatchOperationType(rawValue) {
-  const normalized = sanitizeTextValue(rawValue, 40).toLowerCase();
-  if (normalized === PATCH_OPERATION_UPSERT || normalized === PATCH_OPERATION_DELETE) {
-    return normalized;
-  }
-  return "";
-}
-
-function validateRecordsPatchPayload(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return buildInvalidRecordsPatchPayloadResult("Payload must be an object.");
-  }
-
-  const operations = payload.operations;
-  if (!Array.isArray(operations)) {
-    return buildInvalidRecordsPatchPayloadResult("Payload must include `operations` as an array.");
-  }
-
-  if (operations.length > RECORDS_PATCH_MAX_OPERATIONS) {
-    return buildInvalidRecordsPatchPayloadResult(
-      `Patch payload is too large. Maximum allowed operations: ${RECORDS_PATCH_MAX_OPERATIONS}.`,
-      "records_patch_too_many_operations",
-      413,
-    );
-  }
-
-  const normalizedOperations = [];
-
-  for (let operationIndex = 0; operationIndex < operations.length; operationIndex += 1) {
-    const operation = operations[operationIndex];
-    if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
-      return buildInvalidRecordsPatchPayloadResult(
-        `Operation at index ${operationIndex} must be an object.`,
-        "records_patch_invalid_operation",
-      );
-    }
-
-    const operationType = normalizeRecordsPatchOperationType(operation.type || operation.op);
-    if (!operationType) {
-      return buildInvalidRecordsPatchPayloadResult(
-        `Operation at index ${operationIndex} has invalid type. Allowed values: upsert, delete.`,
-        "records_patch_invalid_operation_type",
-      );
-    }
-
-    const operationId = sanitizeTextValue(operation.id, 180);
-    if (!operationId) {
-      return buildInvalidRecordsPatchPayloadResult(
-        `Operation at index ${operationIndex} must include \`id\`.`,
-        "records_patch_missing_id",
-      );
-    }
-
-    if (operationType === PATCH_OPERATION_DELETE) {
-      normalizedOperations.push({
-        type: PATCH_OPERATION_DELETE,
-        id: operationId,
-      });
-      continue;
-    }
-
-    const rawRecord = operation.record;
-    if (!rawRecord || typeof rawRecord !== "object" || Array.isArray(rawRecord)) {
-      return buildInvalidRecordsPatchPayloadResult(
-        `Operation at index ${operationIndex} must include \`record\` object for upsert.`,
-        "records_patch_invalid_record",
-      );
-    }
-
-    const recordValidation = validateRecordsPayload([rawRecord]);
-    if (!recordValidation.ok) {
-      return buildInvalidRecordsPatchPayloadResult(
-        `Operation at index ${operationIndex}: ${recordValidation.message}`,
-        recordValidation.code || "records_patch_invalid_record",
-        recordValidation.httpStatus || 400,
-      );
-    }
-
-    const normalizedRecord = recordValidation.records[0] || {};
-    const recordId = sanitizeTextValue(normalizedRecord.id, 180);
-    if (recordId && recordId !== operationId) {
-      return buildInvalidRecordsPatchPayloadResult(
-        `Operation at index ${operationIndex} has mismatched record id.`,
-        "records_patch_id_mismatch",
-      );
-    }
-
-    normalizedRecord.id = operationId;
-    normalizedOperations.push({
-      type: PATCH_OPERATION_UPSERT,
-      id: operationId,
-      record: normalizedRecord,
-    });
-  }
-
-  return {
-    ok: true,
-    operations: normalizedOperations,
-  };
-}
-
-function normalizeExpectedUpdatedAtFromRequest(body = {}) {
-  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(body || {}, "expectedUpdatedAt");
-  if (!hasExpectedUpdatedAt) {
-    return {
-      ok: false,
-      status: 428,
-      error: "Payload must include `expectedUpdatedAt` from GET /api/records.",
-      code: "records_precondition_required",
-    };
-  }
-
-  const rawExpectedUpdatedAt = body?.expectedUpdatedAt;
-  if (!(rawExpectedUpdatedAt === null || rawExpectedUpdatedAt === "" || typeof rawExpectedUpdatedAt === "string")) {
-    return {
-      ok: false,
-      status: 400,
-      error: "`expectedUpdatedAt` must be an ISO datetime string or null.",
-      code: "invalid_expected_updated_at",
-    };
-  }
-
-  if (typeof rawExpectedUpdatedAt === "string" && rawExpectedUpdatedAt.trim()) {
-    const normalizedExpectedUpdatedAt = sanitizeTextValue(rawExpectedUpdatedAt, 120);
-    const expectedTimestamp = Date.parse(normalizedExpectedUpdatedAt);
-    if (!normalizedExpectedUpdatedAt || Number.isNaN(expectedTimestamp)) {
-      return {
-        ok: false,
-        status: 400,
-        error: "`expectedUpdatedAt` must be an ISO datetime string or null.",
-        code: "invalid_expected_updated_at",
-      };
-    }
-
-    return {
-      ok: true,
-      expectedUpdatedAt: new Date(expectedTimestamp).toISOString(),
-    };
-  }
-
-  return {
-    ok: true,
-    expectedUpdatedAt: null,
-  };
-}
-
 function mapModerationRow(row) {
   return {
     id: (row.id || "").toString(),
@@ -31476,47 +31132,6 @@ const handlePerformanceDiagnosticsGet = (req, res) => {
   res.json(buildPerformanceDiagnosticsPayload(performanceObservability));
 };
 
-const handleRecordsGet = async (req, res) => {
-  if (SIMULATE_SLOW_RECORDS) {
-    await delayMs(SIMULATE_SLOW_RECORDS_DELAY_MS);
-    res.json({
-      records: [],
-      updatedAt: new Date().toISOString(),
-    });
-    return;
-  }
-
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  try {
-    const state = await getStoredRecordsForApiRecordsRoute();
-    if (!READ_V2_ENABLED && state.source === "legacy") {
-      scheduleDualReadCompareForLegacyRecords(state.records, {
-        source: "GET /api/records",
-        requestedBy: req.webAuthUser,
-      });
-    }
-    if (READ_V2_ENABLED && state.fallbackFromV2) {
-      console.warn(
-        `[records] READ_V2 served legacy fallback for user=${sanitizeTextValue(req.webAuthUser, 160) || "unknown"}`,
-      );
-    }
-    const filteredRecords = filterClientRecordsForWebAuthUser(state.records, req.webAuthProfile);
-    res.json({
-      records: filteredRecords,
-      updatedAt: state.updatedAt,
-    });
-  } catch (error) {
-    console.error("GET /api/records failed:", error);
-    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load records"));
-  }
-};
-
 const handleAssistantContextResetPost = async (req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -31830,6 +31445,53 @@ const handleAssistantTtsPost = async (req, res) => {
   }
 };
 
+const recordsValidation = createRecordsValidation({
+  recordsPutMaxCount: RECORDS_PUT_MAX_COUNT,
+  recordsPutMaxRecordKeys: RECORDS_PUT_MAX_RECORD_KEYS,
+  recordsPutMaxRecordChars: RECORDS_PUT_MAX_RECORD_CHARS,
+  recordsPutMaxTotalChars: RECORDS_PUT_MAX_TOTAL_CHARS,
+  recordsPutFieldMaxLength: RECORDS_PUT_FIELD_MAX_LENGTH,
+  recordsPutDefaultFieldMaxLength: RECORDS_PUT_DEFAULT_FIELD_MAX_LENGTH,
+  recordsAllowedFieldsSet: RECORDS_ALLOWED_FIELDS_SET,
+  recordCheckboxFieldSet: RECORD_CHECKBOX_FIELD_SET,
+  recordsDateValidationFieldSet: RECORDS_DATE_VALIDATION_FIELD_SET,
+  recordsPatchMaxOperations: RECORDS_PATCH_MAX_OPERATIONS,
+  patchOperationUpsert: PATCH_OPERATION_UPSERT,
+  patchOperationDelete: PATCH_OPERATION_DELETE,
+  sanitizeTextValue,
+  toCheckboxValue,
+  normalizeDateForStorage,
+});
+
+const recordsService = createRecordsService({
+  simulateSlowRecords: SIMULATE_SLOW_RECORDS,
+  simulateSlowRecordsDelayMs: SIMULATE_SLOW_RECORDS_DELAY_MS,
+  delayMs,
+  hasDatabase: () => Boolean(pool),
+  getStoredRecordsForApiRecordsRoute,
+  readV2Enabled: READ_V2_ENABLED,
+  scheduleDualReadCompareForLegacyRecords,
+  filterClientRecordsForWebAuthUser,
+  sanitizeTextValue,
+  saveStoredRecords,
+  saveStoredRecordsPatch,
+  logWarn: (message) => {
+    console.warn(message);
+  },
+});
+
+const recordsController = createRecordsController({
+  enforceRateLimit,
+  rateLimitProfileApiRecordsWrite: RATE_LIMIT_PROFILE_API_RECORDS_WRITE,
+  recordsPatchEnabled: RECORDS_PATCH_ENABLED,
+  validateRecordsPayload: recordsValidation.validateRecordsPayload,
+  validateRecordsPatchPayload: recordsValidation.validateRecordsPatchPayload,
+  normalizeExpectedUpdatedAtFromRequest: recordsValidation.normalizeExpectedUpdatedAtFromRequest,
+  recordsService,
+  buildPublicErrorPayload,
+  resolveDbHttpStatus,
+});
+
 registerRecordsRoutes({
   app,
   requireWebPermission,
@@ -31843,13 +31505,13 @@ registerRecordsRoutes({
     handleIdentityIqCreditScorePost,
     handleHealthGet,
     handlePerformanceDiagnosticsGet,
-    handleRecordsGet,
+    handleRecordsGet: recordsController.handleRecordsGet,
     handleAssistantContextResetPost,
     handleAssistantContextResetTelemetryPost,
     handleAssistantChatPost,
     handleAssistantTtsPost,
-    handleRecordsPut,
-    handleRecordsPatch,
+    handleRecordsPut: recordsController.handleRecordsPut,
+    handleRecordsPatch: recordsController.handleRecordsPatch,
   },
 });
 
@@ -37262,165 +36924,6 @@ registerGhlRoutes({
     handleGhlClientCommunicationsNormalizeTranscriptsPost,
   },
 });
-
-async function handleRecordsPut(req, res) {
-  if (
-    !enforceRateLimit(req, res, {
-      scope: "api.records.write",
-      ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.blockMs,
-      },
-      userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.blockMs,
-      },
-      message: "Save request limit reached. Please wait before retrying.",
-      code: "records_write_rate_limited",
-    })
-  ) {
-    return;
-  }
-
-  const nextRecords = req.body?.records;
-  const validationResult = validateRecordsPayload(nextRecords);
-  if (!validationResult.ok) {
-    res.status(validationResult.httpStatus || 400).json({
-      error: validationResult.message,
-      code: validationResult.code,
-    });
-    return;
-  }
-
-  const expectedUpdatedAtResult = normalizeExpectedUpdatedAtFromRequest(req.body || {});
-  if (!expectedUpdatedAtResult.ok) {
-    res.status(expectedUpdatedAtResult.status || 400).json({
-      error: expectedUpdatedAtResult.error || "Invalid expectedUpdatedAt.",
-      code: expectedUpdatedAtResult.code || "invalid_expected_updated_at",
-    });
-    return;
-  }
-  const expectedUpdatedAt = expectedUpdatedAtResult.expectedUpdatedAt;
-
-  if (SIMULATE_SLOW_RECORDS) {
-    await delayMs(SIMULATE_SLOW_RECORDS_DELAY_MS);
-    res.json({
-      ok: true,
-      updatedAt: new Date().toISOString(),
-    });
-    return;
-  }
-
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  try {
-    const updatedAt = await saveStoredRecords(validationResult.records, {
-      expectedUpdatedAt,
-    });
-    res.json({
-      ok: true,
-      updatedAt,
-    });
-  } catch (error) {
-    console.error("PUT /api/records failed:", error);
-    const payload = buildPublicErrorPayload(error, "Failed to save records");
-    if (Object.prototype.hasOwnProperty.call(error || {}, "currentUpdatedAt")) {
-      payload.updatedAt = error.currentUpdatedAt || null;
-    }
-    res.status(error.httpStatus || resolveDbHttpStatus(error)).json(payload);
-  }
-}
-
-async function handleRecordsPatch(req, res) {
-  if (!RECORDS_PATCH_ENABLED) {
-    res.status(404).json({
-      error: "API route not found",
-      code: "records_patch_disabled",
-    });
-    return;
-  }
-
-  if (
-    !enforceRateLimit(req, res, {
-      scope: "api.records.write",
-      ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.blockMs,
-      },
-      userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_RECORDS_WRITE.blockMs,
-      },
-      message: "Save request limit reached. Please wait before retrying.",
-      code: "records_write_rate_limited",
-    })
-  ) {
-    return;
-  }
-
-  const expectedUpdatedAtResult = normalizeExpectedUpdatedAtFromRequest(req.body || {});
-  if (!expectedUpdatedAtResult.ok) {
-    res.status(expectedUpdatedAtResult.status || 400).json({
-      error: expectedUpdatedAtResult.error || "Invalid expectedUpdatedAt.",
-      code: expectedUpdatedAtResult.code || "invalid_expected_updated_at",
-    });
-    return;
-  }
-  const expectedUpdatedAt = expectedUpdatedAtResult.expectedUpdatedAt;
-
-  const validationResult = validateRecordsPatchPayload(req.body || {});
-  if (!validationResult.ok) {
-    res.status(validationResult.httpStatus || 400).json({
-      error: validationResult.message,
-      code: validationResult.code,
-    });
-    return;
-  }
-
-  if (SIMULATE_SLOW_RECORDS) {
-    await delayMs(SIMULATE_SLOW_RECORDS_DELAY_MS);
-    res.json({
-      ok: true,
-      updatedAt: new Date().toISOString(),
-      appliedOperations: validationResult.operations.length,
-    });
-    return;
-  }
-
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  try {
-    const result = await saveStoredRecordsPatch(validationResult.operations, {
-      expectedUpdatedAt,
-    });
-    res.json({
-      ok: true,
-      updatedAt: result.updatedAt,
-      appliedOperations: validationResult.operations.length,
-    });
-  } catch (error) {
-    console.error("PATCH /api/records failed:", error);
-    const payload = buildPublicErrorPayload(error, "Failed to patch records");
-    if (Object.prototype.hasOwnProperty.call(error || {}, "currentUpdatedAt")) {
-      payload.updatedAt = error.currentUpdatedAt || null;
-    }
-    res.status(error.httpStatus || resolveDbHttpStatus(error)).json(payload);
-  }
-}
 
 const handleMiniAccessPost = async (req, res) => {
   if (
