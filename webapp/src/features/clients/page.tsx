@@ -39,6 +39,7 @@ const MANAGER_FILTER_UNASSIGNED = "__unassigned_managers__";
 
 type ClientsStatusFilter = "all" | "new" | "active" | "overdue" | "written-off" | "fully-paid" | "after-result";
 type ContractSignedFilter = "all" | "signed" | "unsigned";
+type InWorkFilter = "all" | "in-work" | "not-in-work";
 
 const STATUS_FILTER_OPTIONS: Array<{ key: ClientsStatusFilter; label: string }> = [
   { key: "all", label: "All Statuses" },
@@ -81,6 +82,7 @@ export default function ClientsPage() {
   const [clientManagerFilter, setClientManagerFilter] = useState(MANAGER_FILTER_ALL);
   const [statusFilter, setStatusFilter] = useState<ClientsStatusFilter>("all");
   const [contractSignedFilter, setContractSignedFilter] = useState<ContractSignedFilter>("all");
+  const [inWorkFilter, setInWorkFilter] = useState<InWorkFilter>("all");
   const [contractDateFrom, setContractDateFrom] = useState("");
   const [contractDateTo, setContractDateTo] = useState("");
   const [selectedRecordId, setSelectedRecordId] = useState("");
@@ -237,6 +239,7 @@ export default function ClientsPage() {
       const managerNames = splitClientManagerLabel(managerLabel);
       const contractDateTimestamp = parseDateValue(record.payment1Date);
       const isContractSigned = resolveContractSigned(record);
+      const isInWork = resolveStartedInWork(record);
 
       if (query) {
         const searchable = [...SEARCH_FIELDS.map((field) => (record[field] || "").toString()), managerLabel].join(" ");
@@ -280,6 +283,13 @@ export default function ClientsPage() {
         return false;
       }
 
+      if (inWorkFilter === "in-work" && !isInWork) {
+        return false;
+      }
+      if (inWorkFilter === "not-in-work" && isInWork) {
+        return false;
+      }
+
       if (hasContractDateFilter) {
         if (contractDateTimestamp === null) {
           return false;
@@ -312,6 +322,7 @@ export default function ClientsPage() {
     contractDateTo,
     contractSignedFilter,
     hideWrittenOffByDefault,
+    inWorkFilter,
     records,
     salesFilter,
     search,
@@ -382,17 +393,27 @@ export default function ClientsPage() {
       clientManagerFilter !== MANAGER_FILTER_ALL ||
       statusFilter !== "all" ||
       contractSignedFilter !== "all" ||
+      inWorkFilter !== "all" ||
       !hideWrittenOffByDefault ||
       Boolean(contractDateFrom.trim()) ||
       Boolean(contractDateTo.trim())
     );
-  }, [clientManagerFilter, contractDateFrom, contractDateTo, contractSignedFilter, hideWrittenOffByDefault, salesFilter, statusFilter]);
+  }, [
+    clientManagerFilter,
+    contractDateFrom,
+    contractDateTo,
+    contractSignedFilter,
+    hideWrittenOffByDefault,
+    inWorkFilter,
+    salesFilter,
+    statusFilter,
+  ]);
 
   const columns = useMemo<TableColumn<ClientRecord>[]>(() => {
     return [
       {
         key: "clientName",
-        label: "Client (Last Name, First Name)",
+        label: "Client",
         align: "left",
         className: "clients-column-client",
         headerClassName: "clients-column-client",
@@ -634,6 +655,19 @@ export default function ClientsPage() {
                   <option value="unsigned">Not Signed</option>
                 </Select>
               </div>
+
+              <div className="filter-field">
+                <label htmlFor="clients-in-work-filter-select">In Work</label>
+                <Select
+                  id="clients-in-work-filter-select"
+                  value={inWorkFilter}
+                  onChange={(event) => setInWorkFilter(event.target.value as InWorkFilter)}
+                >
+                  <option value="all">All</option>
+                  <option value="in-work">In Work</option>
+                  <option value="not-in-work">Not In Work</option>
+                </Select>
+              </div>
             </div>
 
             <div className="cb-page-header-toolbar">
@@ -646,6 +680,7 @@ export default function ClientsPage() {
                   setClientManagerFilter(MANAGER_FILTER_ALL);
                   setStatusFilter("all");
                   setContractSignedFilter("all");
+                  setInWorkFilter("all");
                   setHideWrittenOffByDefault(true);
                   setContractDateFrom("");
                   setContractDateTo("");
