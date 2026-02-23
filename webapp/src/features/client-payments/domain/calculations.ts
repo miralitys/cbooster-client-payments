@@ -217,6 +217,8 @@ export function createEmptyRecord(): ClientRecord {
     futurePayments: "",
     afterResult: "",
     writtenOff: "",
+    contractSigned: "",
+    startedInWork: "",
     notes: "",
     collection: "",
     dateOfCollection: "",

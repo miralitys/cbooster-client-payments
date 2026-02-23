@@ -35,6 +35,8 @@ export interface ClientRecord {
   futurePayments: string;
   afterResult: string;
   writtenOff: string;
+  contractSigned: string;
+  startedInWork: string;
   notes: string;
   collection: string;
   dateOfCollection: string;

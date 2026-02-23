@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { StatusBadges } from "@/features/client-payments/components/StatusBadges";
 import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
 import {
   formatDate,
@@ -11,7 +10,7 @@ import {
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
-import { getClientManagers, getRecords } from "@/shared/api";
+import { patchRecords, getClientManagers, getRecords } from "@/shared/api";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
 import type { ClientRecord } from "@/shared/types/records";
 import {
@@ -38,11 +37,12 @@ const SALES_FILTER_UNASSIGNED = "__unassigned_sales__";
 const MANAGER_FILTER_ALL = "__all_managers__";
 const MANAGER_FILTER_UNASSIGNED = "__unassigned_managers__";
 
-type ClientsStatusFilter = "all" | "active" | "overdue" | "written-off" | "fully-paid" | "after-result";
+type ClientsStatusFilter = "all" | "new" | "active" | "overdue" | "written-off" | "fully-paid" | "after-result";
 type ContractSignedFilter = "all" | "signed" | "unsigned";
 
 const STATUS_FILTER_OPTIONS: Array<{ key: ClientsStatusFilter; label: string }> = [
   { key: "all", label: "All Statuses" },
+  { key: "new", label: "New" },
   { key: "active", label: "Active" },
   { key: "overdue", label: "Overdue" },
   { key: "written-off", label: "Written Off" },
@@ -76,6 +76,7 @@ export default function ClientsPage() {
   const [loadError, setLoadError] = useState("");
   const [search, setSearch] = useState("");
   const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
+  const [hideWrittenOffByDefault, setHideWrittenOffByDefault] = useState(true);
   const [salesFilter, setSalesFilter] = useState(SALES_FILTER_ALL);
   const [clientManagerFilter, setClientManagerFilter] = useState(MANAGER_FILTER_ALL);
   const [statusFilter, setStatusFilter] = useState<ClientsStatusFilter>("all");
@@ -83,16 +84,21 @@ export default function ClientsPage() {
   const [contractDateFrom, setContractDateFrom] = useState("");
   const [contractDateTo, setContractDateTo] = useState("");
   const [selectedRecordId, setSelectedRecordId] = useState("");
+  const [recordsUpdatedAt, setRecordsUpdatedAt] = useState<string | null>(null);
+  const [isSavingClientFlags, setIsSavingClientFlags] = useState(false);
+  const [saveClientFlagsError, setSaveClientFlagsError] = useState("");
   const [clientManagersByClientName, setClientManagersByClientName] = useState<Map<string, string>>(new Map());
 
   const loadClients = useCallback(async () => {
     setIsLoading(true);
     setLoadError("");
+    setSaveClientFlagsError("");
 
     try {
       const payload = await getRecords();
       const normalizedRecords = normalizeRecords(Array.isArray(payload.records) ? payload.records : []);
       setRecords(normalizedRecords);
+      setRecordsUpdatedAt(normalizeRevisionTimestamp(payload.updatedAt));
     } catch (error) {
       setRecords([]);
       setLoadError(error instanceof Error ? error.message : "Failed to load clients from Client Payments.");
@@ -230,6 +236,7 @@ export default function ClientsPage() {
       const managerLabel = resolveClientManagerLabel(record, clientManagersByClientName);
       const managerNames = splitClientManagerLabel(managerLabel);
       const contractDateTimestamp = parseDateValue(record.payment1Date);
+      const isContractSigned = resolveContractSigned(record);
 
       if (query) {
         const searchable = [...SEARCH_FIELDS.map((field) => (record[field] || "").toString()), managerLabel].join(" ");
@@ -258,11 +265,14 @@ export default function ClientsPage() {
         }
       }
 
-      if (!matchesStatusFilter(record, statusFilter)) {
+      if (hideWrittenOffByDefault && getRecordStatusFlags(record).isWrittenOff) {
         return false;
       }
 
-      const isContractSigned = resolveContractSigned(record);
+      if (!matchesStatusFilter(record, statusFilter, isContractSigned)) {
+        return false;
+      }
+
       if (contractSignedFilter === "signed" && !isContractSigned) {
         return false;
       }
@@ -301,6 +311,7 @@ export default function ClientsPage() {
     contractDateFrom,
     contractDateTo,
     contractSignedFilter,
+    hideWrittenOffByDefault,
     records,
     salesFilter,
     search,
@@ -310,6 +321,49 @@ export default function ClientsPage() {
   const selectedRecord = useMemo(
     () => records.find((record) => record.id === selectedRecordId) || null,
     [records, selectedRecordId],
+  );
+
+  const selectedContractSigned = selectedRecord ? resolveContractSigned(selectedRecord) : false;
+  const selectedStartedInWork = selectedRecord ? resolveStartedInWork(selectedRecord) : false;
+
+  useEffect(() => {
+    setSaveClientFlagsError("");
+  }, [selectedRecordId]);
+
+  const updateSelectedRecordFlags = useCallback(
+    async (changes: Pick<ClientRecord, "contractSigned" | "startedInWork">) => {
+      if (!selectedRecord) {
+        return;
+      }
+
+      setIsSavingClientFlags(true);
+      setSaveClientFlagsError("");
+
+      try {
+        const payload = await patchRecords(
+          [
+            {
+              type: "upsert",
+              id: selectedRecord.id,
+              record: changes,
+            },
+          ],
+          recordsUpdatedAt,
+        );
+
+        setRecords((previous) =>
+          previous.map((record) => (record.id === selectedRecord.id ? { ...record, ...changes } : record)),
+        );
+        setRecordsUpdatedAt(normalizeRevisionTimestamp(payload.updatedAt) || recordsUpdatedAt);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to update client status.";
+        setSaveClientFlagsError(message);
+        await loadClients();
+      } finally {
+        setIsSavingClientFlags(false);
+      }
+    },
+    [loadClients, recordsUpdatedAt, selectedRecord],
   );
 
   const totalContractAmount = useMemo(
@@ -328,10 +382,11 @@ export default function ClientsPage() {
       clientManagerFilter !== MANAGER_FILTER_ALL ||
       statusFilter !== "all" ||
       contractSignedFilter !== "all" ||
+      !hideWrittenOffByDefault ||
       Boolean(contractDateFrom.trim()) ||
       Boolean(contractDateTo.trim())
     );
-  }, [clientManagerFilter, contractDateFrom, contractDateTo, contractSignedFilter, salesFilter, statusFilter]);
+  }, [clientManagerFilter, contractDateFrom, contractDateTo, contractSignedFilter, hideWrittenOffByDefault, salesFilter, statusFilter]);
 
   const columns = useMemo<TableColumn<ClientRecord>[]>(() => {
     return [
@@ -372,7 +427,23 @@ export default function ClientsPage() {
         key: "status",
         label: "Status",
         align: "left",
-        cell: (record) => <StatusBadges record={record} />,
+        cell: (record) => {
+          const statusBadge = resolvePrimaryStatusBadge(record);
+          return <Badge tone={statusBadge.tone}>{statusBadge.label}</Badge>;
+        },
+      },
+      {
+        key: "startedInWork",
+        label: "Запуск",
+        align: "center",
+        cell: (record) => {
+          const startedInWork = resolveStartedInWork(record);
+          return (
+            <Badge tone={startedInWork ? "success" : "warning"}>
+              {startedInWork ? "Запущен в работу" : "Не запущен в работу"}
+            </Badge>
+          );
+        },
       },
       {
         key: "contractSigned",
@@ -470,6 +541,18 @@ export default function ClientsPage() {
         {isMoreFiltersOpen ? (
           <div id="clients-advanced-filters">
             <div className="filters-grid-react">
+              <div className="filter-field filter-field--full">
+                <label className="cb-checkbox-row" htmlFor="clients-hide-writeoff-checkbox">
+                  <input
+                    id="clients-hide-writeoff-checkbox"
+                    type="checkbox"
+                    checked={hideWrittenOffByDefault}
+                    onChange={(event) => setHideWrittenOffByDefault(event.target.checked)}
+                  />
+                  Show all clients except write-off
+                </label>
+              </div>
+
               <div className="filter-field">
                 <label htmlFor="clients-contract-date-from-input">Contract Date From</label>
                 <DateInput
@@ -563,6 +646,7 @@ export default function ClientsPage() {
                   setClientManagerFilter(MANAGER_FILTER_ALL);
                   setStatusFilter("all");
                   setContractSignedFilter("all");
+                  setHideWrittenOffByDefault(true);
                   setContractDateFrom("");
                   setContractDateTo("");
                 }}
@@ -606,6 +690,43 @@ export default function ClientsPage() {
           </Button>
         }
       >
+        {selectedRecord ? (
+          <div className="clients-record-flags">
+            <label className="cb-checkbox-row" htmlFor="clients-contract-signed-checkbox">
+              <input
+                id="clients-contract-signed-checkbox"
+                type="checkbox"
+                checked={selectedContractSigned}
+                disabled={isSavingClientFlags}
+                onChange={(event) =>
+                  void updateSelectedRecordFlags({
+                    contractSigned: toStatusCheckboxValue(event.target.checked),
+                    startedInWork: toStatusCheckboxValue(selectedStartedInWork),
+                  })
+                }
+              />
+              Контракт подписан
+            </label>
+
+            <label className="cb-checkbox-row" htmlFor="clients-started-in-work-checkbox">
+              <input
+                id="clients-started-in-work-checkbox"
+                type="checkbox"
+                checked={selectedStartedInWork}
+                disabled={isSavingClientFlags}
+                onChange={(event) =>
+                  void updateSelectedRecordFlags({
+                    contractSigned: toStatusCheckboxValue(selectedContractSigned),
+                    startedInWork: toStatusCheckboxValue(event.target.checked),
+                  })
+                }
+              />
+              {selectedStartedInWork ? "Запущен" : "Не запущен в работу"}
+            </label>
+
+            {saveClientFlagsError ? <p className="dashboard-message error">{saveClientFlagsError}</p> : null}
+          </div>
+        ) : null}
         {selectedRecord ? <RecordDetails record={selectedRecord} /> : null}
       </Modal>
     </PageShell>
@@ -750,9 +871,17 @@ function resolveScoreDisplay(score: ClientScoreResult | undefined): {
   };
 }
 
-function matchesStatusFilter(record: ClientRecord, statusFilter: ClientsStatusFilter): boolean {
+function matchesStatusFilter(record: ClientRecord, statusFilter: ClientsStatusFilter, isContractSigned: boolean): boolean {
   if (statusFilter === "all") {
     return true;
+  }
+
+  if (statusFilter === "new") {
+    return !isContractSigned;
+  }
+
+  if (!isContractSigned) {
+    return false;
   }
 
   const status = getRecordStatusFlags(record);
@@ -772,9 +901,57 @@ function matchesStatusFilter(record: ClientRecord, statusFilter: ClientsStatusFi
   return !status.isAfterResult && !status.isWrittenOff && !status.isFullyPaid && !status.isOverdue;
 }
 
+function resolvePrimaryStatusBadge(record: ClientRecord): {
+  label: string;
+  tone: "neutral" | "success" | "info" | "warning" | "danger";
+} {
+  const isContractSigned = resolveContractSigned(record);
+  if (!isContractSigned) {
+    return {
+      label: "New",
+      tone: "info",
+    };
+  }
+
+  const status = getRecordStatusFlags(record);
+  if (status.isWrittenOff) {
+    return {
+      label: "Written Off",
+      tone: "danger",
+    };
+  }
+  if (status.isFullyPaid) {
+    return {
+      label: "Fully Paid",
+      tone: "success",
+    };
+  }
+  if (status.isOverdue) {
+    return {
+      label: `Overdue ${status.overdueRange}`,
+      tone: "warning",
+    };
+  }
+  if (status.isAfterResult) {
+    return {
+      label: "After Result",
+      tone: "info",
+    };
+  }
+
+  return {
+    label: "Active",
+    tone: "neutral",
+  };
+}
+
 function resolveContractSigned(record: ClientRecord): boolean {
+  const directFieldValue = parseOptionalBoolean(record.contractSigned);
+  if (directFieldValue !== null) {
+    return directFieldValue;
+  }
+
   const rawContractSignedValues: unknown[] = [
-    getOptionalUnknownRecordValue(record, "contractSigned"),
     getOptionalUnknownRecordValue(record, "isContractSigned"),
     getOptionalUnknownRecordValue(record, "signedContract"),
     getOptionalUnknownRecordValue(record, "contractIsSigned"),
@@ -791,6 +968,30 @@ function resolveContractSigned(record: ClientRecord): boolean {
 
   const totalContract = parseMoneyValue(record.contractTotals);
   return totalContract !== null && totalContract > 0;
+}
+
+function resolveStartedInWork(record: ClientRecord): boolean {
+  const directFieldValue = parseOptionalBoolean(record.startedInWork);
+  if (directFieldValue !== null) {
+    return directFieldValue;
+  }
+
+  const rawStartedInWorkValues: unknown[] = [
+    getOptionalUnknownRecordValue(record, "inWork"),
+    getOptionalUnknownRecordValue(record, "isInWork"),
+    getOptionalUnknownRecordValue(record, "startedWork"),
+    getOptionalUnknownRecordValue(record, "workStarted"),
+    getOptionalUnknownRecordValue(record, "launchedInWork"),
+  ];
+
+  for (const rawValue of rawStartedInWorkValues) {
+    const parsed = parseOptionalBoolean(rawValue);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  return false;
 }
 
 function getOptionalUnknownRecordValue(record: ClientRecord, key: string): unknown {
@@ -816,4 +1017,21 @@ function parseOptionalBoolean(value: unknown): boolean | null {
   }
 
   return null;
+}
+
+function toStatusCheckboxValue(value: boolean): string {
+  return value ? "Yes" : "No";
+}
+
+function normalizeRevisionTimestamp(rawValue: string | null | undefined): string | null {
+  if (!rawValue) {
+    return null;
+  }
+
+  const timestamp = Date.parse(rawValue);
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+
+  return new Date(timestamp).toISOString();
 }
