@@ -42,6 +42,9 @@ const { createGhlReadOnlyGuard } = require("./server/integrations/ghl/client");
 const { createGhlNotesController } = require("./server/domains/ghl-notes");
 const { createGhlLeadsController } = require("./server/domains/ghl-leads");
 const { createGhlCommunicationsController } = require("./server/domains/ghl-communications");
+const { createQuickBooksController } = require("./server/domains/quickbooks");
+const { createModerationController } = require("./server/domains/moderation");
+const { createMiniController } = require("./server/domains/mini");
 const { createRecordsValidation } = require("./server/domains/records/records.validation");
 const { createRecordsService } = require("./server/domains/records/records.service");
 const { createRecordsController } = require("./server/domains/records/records.controller");
@@ -27071,379 +27074,26 @@ registerAuthProtectedRoutes({
   },
 });
 
-const handleQuickbooksReadonlyGuard = (req, res, next) => {
-  const pathname = sanitizeTextValue(req.path, 260);
-  const isAllowedSyncPost =
-    req.method === "POST" &&
-    (pathname === "/api/quickbooks/payments/recent/sync" || pathname === "/payments/recent/sync");
-  const isAllowedInsightPost =
-    req.method === "POST" &&
-    (pathname === "/api/quickbooks/transaction-insight" || pathname === "/transaction-insight");
-  if (req.method === "GET" || isAllowedSyncPost || isAllowedInsightPost) {
-    next();
-    return;
-  }
-
-  res.status(405).json({
-    error:
-      "QuickBooks integration is read-only toward QuickBooks. Use GET for reads and POST /api/quickbooks/payments/recent/sync (sync) or POST /api/quickbooks/transaction-insight (Ask GPT).",
-  });
-};
-
-function resolveQuickBooksDateRangeFromRequest(req, source = "query") {
-  const payload = source === "body" ? req.body : req.query;
-  return getQuickBooksDateRange(payload?.from, payload?.to);
-}
-
-async function respondQuickBooksRecentPayments(req, res, options = {}) {
-  const range = options.range;
-  const routeLabel = sanitizeTextValue(options.routeLabel, 120) || "api/quickbooks/payments/recent";
-  const quickBooksRateProfile = RATE_LIMIT_PROFILE_API_EXPENSIVE;
-
-  if (
-    !enforceRateLimit(req, res, {
-      scope: "api.quickbooks.read",
-      ipProfile: {
-        windowMs: quickBooksRateProfile.windowMs,
-        maxHits: quickBooksRateProfile.maxHitsIp,
-        blockMs: quickBooksRateProfile.blockMs,
-      },
-      userProfile: {
-        windowMs: quickBooksRateProfile.windowMs,
-        maxHits: quickBooksRateProfile.maxHitsUser,
-        blockMs: quickBooksRateProfile.blockMs,
-      },
-      message: "QuickBooks request limit reached. Please wait before retrying.",
-      code: "quickbooks_rate_limited",
-    })
-  ) {
-    return;
-  }
-
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  try {
-    const syncMeta = buildQuickBooksSyncMeta({
-      requested: false,
-      syncMode: "incremental",
-    });
-
-    const items = await listCachedQuickBooksTransactionsInRange(range.from, range.to);
-
-    res.json({
-      ok: true,
-      range: {
-        from: range.from,
-        to: range.to,
-      },
-      count: items.length,
-      items,
-      source: "cache",
-      sync: syncMeta,
-    });
-  } catch (error) {
-    console.error(`${routeLabel} failed:`, error);
-    res.status(error.httpStatus || 502).json({
-      error: sanitizeTextValue(error?.message, 600) || "Failed to load QuickBooks payments.",
-    });
-  }
-}
-
-async function respondQuickBooksOutgoingPayments(req, res, options = {}) {
-  const range = options.range;
-  const routeLabel = sanitizeTextValue(options.routeLabel, 120) || "api/quickbooks/payments/outgoing";
-  const quickBooksRateProfile = RATE_LIMIT_PROFILE_API_EXPENSIVE;
-
-  if (
-    !enforceRateLimit(req, res, {
-      scope: "api.quickbooks.read",
-      ipProfile: {
-        windowMs: quickBooksRateProfile.windowMs,
-        maxHits: quickBooksRateProfile.maxHitsIp,
-        blockMs: quickBooksRateProfile.blockMs,
-      },
-      userProfile: {
-        windowMs: quickBooksRateProfile.windowMs,
-        maxHits: quickBooksRateProfile.maxHitsUser,
-        blockMs: quickBooksRateProfile.blockMs,
-      },
-      message: "QuickBooks request limit reached. Please wait before retrying.",
-      code: "quickbooks_rate_limited",
-    })
-  ) {
-    return;
-  }
-
-  if (!isQuickBooksConfigured()) {
-    res.status(503).json({
-      error:
-        "QuickBooks is not configured. Set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN, and QUICKBOOKS_REALM_ID.",
-    });
-    return;
-  }
-
-  try {
-    const syncMeta = buildQuickBooksSyncMeta({
-      requested: false,
-      syncMode: "incremental",
-    });
-    const items = await listQuickBooksOutgoingTransactionsInRange(range.from, range.to);
-
-    res.json({
-      ok: true,
-      range: {
-        from: range.from,
-        to: range.to,
-      },
-      count: items.length,
-      items,
-      source: "quickbooks_live",
-      sync: syncMeta,
-    });
-  } catch (error) {
-    console.error(`${routeLabel} failed:`, error);
-    res.status(error.httpStatus || 502).json({
-      error: sanitizeTextValue(error?.message, 600) || "Failed to load QuickBooks outgoing transactions.",
-    });
-  }
-}
-
-const handleQuickBooksRecentPaymentsGet = async (req, res) => {
-  const syncRequestedOnGet =
-    parseQuickBooksSyncFlag(req.query.sync) ||
-    parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
-  if (syncRequestedOnGet) {
-    res.status(405).json({
-      error: "State-changing sync is not allowed via GET. Use POST /api/quickbooks/payments/recent/sync.",
-      code: "method_not_allowed_for_sync",
-    });
-    return;
-  }
-
-  let range;
-  try {
-    range = resolveQuickBooksDateRangeFromRequest(req, "query");
-  } catch (error) {
-    res.status(error.httpStatus || 400).json({
-      error: sanitizeTextValue(error?.message, 300) || "Invalid date range.",
-    });
-    return;
-  }
-
-  await respondQuickBooksRecentPayments(req, res, {
-    range,
-    routeLabel: "GET /api/quickbooks/payments/recent",
-  });
-};
-
-const handleQuickBooksOutgoingPaymentsGet = async (req, res) => {
-  const syncRequestedOnGet =
-    parseQuickBooksSyncFlag(req.query.sync) ||
-    parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
-  if (syncRequestedOnGet) {
-    res.status(405).json({
-      error: "State-changing sync is not allowed via GET. Use POST /api/quickbooks/payments/recent/sync.",
-      code: "method_not_allowed_for_sync",
-    });
-    return;
-  }
-
-  let range;
-  try {
-    range = resolveQuickBooksDateRangeFromRequest(req, "query");
-  } catch (error) {
-    res.status(error.httpStatus || 400).json({
-      error: sanitizeTextValue(error?.message, 300) || "Invalid date range.",
-    });
-    return;
-  }
-
-  await respondQuickBooksOutgoingPayments(req, res, {
-    range,
-    routeLabel: "GET /api/quickbooks/payments/outgoing",
-  });
-};
-
-const handleQuickBooksRecentPaymentsSyncPost = async (req, res) => {
-  const shouldTotalRefresh = parseQuickBooksTotalRefreshFlag(req.body?.fullSync || req.body?.totalRefresh);
-  let range;
-  try {
-    range = resolveQuickBooksDateRangeFromRequest(req, "body");
-  } catch (error) {
-    res.status(error.httpStatus || 400).json({
-      error: sanitizeTextValue(error?.message, 300) || "Invalid date range.",
-    });
-    return;
-  }
-
-  if (
-    !enforceRateLimit(req, res, {
-      scope: "api.quickbooks.sync",
-      ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
-      },
-      userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
-      },
-      message: "QuickBooks request limit reached. Please wait before retrying.",
-      code: "quickbooks_rate_limited",
-    })
-  ) {
-    return;
-  }
-
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  if (!hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS)) {
-    res.status(403).json({
-      error: "Access denied. You do not have permission to refresh QuickBooks data.",
-    });
-    return;
-  }
-
-  if (!isQuickBooksConfigured()) {
-    res.status(503).json({
-      error:
-        "QuickBooks is not configured. Set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN, and QUICKBOOKS_REALM_ID.",
-    });
-    return;
-  }
-
-  let enqueueResult;
-  try {
-    enqueueResult = enqueueQuickBooksSyncJob(range, {
-      fullSync: shouldTotalRefresh,
-      requestedBy: req.webAuthUser,
-    });
-  } catch (error) {
-    res.status(error?.httpStatus || 429).json({
-      error: sanitizeTextValue(error?.message, 400) || "QuickBooks sync queue is unavailable.",
-      code: sanitizeTextValue(error?.code, 60) || "quickbooks_sync_queue_error",
-    });
-    return;
-  }
-
-  const { job, reused } = enqueueResult;
-  res.status(202).json({
-    ok: true,
-    queued: true,
-    reused,
-    job: buildQuickBooksSyncJobPayload(job),
-  });
-};
-
-const handleQuickBooksSyncJobGet = (req, res) => {
-  if (
-    !enforceRateLimit(req, res, {
-      scope: "api.quickbooks.read",
-      ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
-      },
-      userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
-      },
-      message: "QuickBooks request limit reached. Please wait before retrying.",
-      code: "quickbooks_rate_limited",
-    })
-  ) {
-    return;
-  }
-
-  const job = getQuickBooksSyncJobById(req.params.jobId);
-  if (!job) {
-    res.status(404).json({
-      error: "QuickBooks sync job not found.",
-      code: "quickbooks_sync_job_not_found",
-    });
-    return;
-  }
-
-  res.json({
-    ok: true,
-    job: buildQuickBooksSyncJobPayload(job),
-  });
-};
-
-const handleQuickBooksTransactionInsightPost = async (req, res) => {
-  if (
-    !enforceRateLimit(req, res, {
-      scope: "api.quickbooks.read",
-      ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
-      },
-      userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
-      },
-      message: "QuickBooks request limit reached. Please wait before retrying.",
-      code: "quickbooks_rate_limited",
-    })
-  ) {
-    return;
-  }
-
-  const companyName = sanitizeTextValue(req.body?.companyName, 300);
-  if (!companyName) {
-    res.status(400).json({
-      error: "companyName is required.",
-      code: "quickbooks_insight_invalid_payload",
-    });
-    return;
-  }
-
-  const amount = Number.parseFloat(req.body?.amount);
-  if (!Number.isFinite(amount)) {
-    res.status(400).json({
-      error: "amount must be a valid number.",
-      code: "quickbooks_insight_invalid_payload",
-    });
-    return;
-  }
-
-  const date = sanitizeTextValue(req.body?.date, 80) || "-";
-  const description = sanitizeTextValue(req.body?.description, 1200) || "-";
-
-  try {
-    const insight = await requestOpenAiQuickBooksInsight({
-      companyName,
-      amount,
-      date,
-      description,
-    });
-
-    res.json({
-      ok: true,
-      insight,
-    });
-  } catch (error) {
-    console.error("POST /api/quickbooks/transaction-insight failed:", error);
-    res.status(error?.httpStatus || 502).json({
-      error: sanitizeTextValue(error?.message, 600) || "Failed to generate transaction insight.",
-      code: sanitizeTextValue(error?.code, 80) || "quickbooks_insight_failed",
-    });
-  }
-};
+const quickBooksController = createQuickBooksController({
+  sanitizeTextValue,
+  enforceRateLimit,
+  rateLimitProfileApiExpensive: RATE_LIMIT_PROFILE_API_EXPENSIVE,
+  rateLimitProfileApiSync: RATE_LIMIT_PROFILE_API_SYNC,
+  hasDatabase: () => Boolean(pool),
+  isQuickBooksConfigured,
+  getQuickBooksDateRange,
+  parseQuickBooksSyncFlag,
+  parseQuickBooksTotalRefreshFlag,
+  listCachedQuickBooksTransactionsInRange,
+  listQuickBooksOutgoingTransactionsInRange,
+  buildQuickBooksSyncMeta,
+  enqueueQuickBooksSyncJob,
+  buildQuickBooksSyncJobPayload,
+  getQuickBooksSyncJobById,
+  hasWebAuthPermission,
+  webAuthPermissionSyncQuickbooks: WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS,
+  requestOpenAiQuickBooksInsight,
+});
 
 registerQuickBooksRoutes({
   app,
@@ -27452,12 +27102,12 @@ registerQuickBooksRoutes({
     WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS,
   },
   handlers: {
-    handleQuickbooksReadonlyGuard,
-    handleQuickBooksRecentPaymentsGet,
-    handleQuickBooksOutgoingPaymentsGet,
-    handleQuickBooksRecentPaymentsSyncPost,
-    handleQuickBooksSyncJobGet,
-    handleQuickBooksTransactionInsightPost,
+    handleQuickbooksReadonlyGuard: quickBooksController.handleQuickbooksReadonlyGuard,
+    handleQuickBooksRecentPaymentsGet: quickBooksController.handleQuickBooksRecentPaymentsGet,
+    handleQuickBooksOutgoingPaymentsGet: quickBooksController.handleQuickBooksOutgoingPaymentsGet,
+    handleQuickBooksRecentPaymentsSyncPost: quickBooksController.handleQuickBooksRecentPaymentsSyncPost,
+    handleQuickBooksSyncJobGet: quickBooksController.handleQuickBooksSyncJobGet,
+    handleQuickBooksTransactionInsightPost: quickBooksController.handleQuickBooksTransactionInsightPost,
   },
 });
 
@@ -36981,473 +36631,69 @@ registerGhlRoutes({
   },
 });
 
-const handleMiniAccessPost = async (req, res) => {
-  if (
-    !(await enforceMiniRateLimit(req, res, {
-      scope: "api.mini.access",
-      ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_MINI_ACCESS.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.blockMs,
-      },
-      message: "Mini App access check limit reached. Please wait before retrying.",
-      code: "mini_access_rate_limited",
-    }))
-  ) {
-    return;
-  }
+const miniController = createMiniController({
+  enforceMiniRateLimit,
+  rateLimitProfileApiMiniAccess: RATE_LIMIT_PROFILE_API_MINI_ACCESS,
+  rateLimitProfileApiMiniWrite: RATE_LIMIT_PROFILE_API_MINI_WRITE,
+  verifyTelegramInitData,
+  sanitizeTextValue,
+  createMiniUploadToken,
+  miniUploadTokenTtlSec: MINI_UPLOAD_TOKEN_TTL_SEC,
+  telegramInitDataWriteTtlSec: TELEGRAM_INIT_DATA_WRITE_TTL_SEC,
+  miniClientAttachmentsConfig: MINI_CLIENT_ATTACHMENTS_CONFIG,
+  resolveMiniIdempotencyKeyFromRequest,
+  isMultipartRequest,
+  resolveMiniUploadTokenFromRequest,
+  parseMiniUploadToken,
+  respondMiniRequestEarlyAndClose,
+  resolveRequestContentLengthBytes,
+  miniMultipartMaxContentLengthBytes: MINI_MULTIPART_MAX_CONTENT_LENGTH_BYTES,
+  hasDatabase: () => Boolean(pool),
+  withMiniUploadParseSlot,
+  parseMiniMultipartRequest,
+  parseMiniClientPayload,
+  createRecordFromMiniPayload,
+  buildMiniSubmissionAttachments,
+  cleanupTemporaryUploadFiles,
+  reserveMiniWriteIdempotency,
+  reserveMiniWriteInitDataReplayKey,
+  buildMiniWriteInitDataReplayKey,
+  resolveMiniWriteInitDataReplayExpiresAtMs,
+  queueClientSubmission,
+  commitMiniWriteIdempotencySuccess,
+  enqueueMiniSubmissionTelegramNotification,
+  resolveDbHttpStatus,
+  buildPublicErrorPayload,
+  releaseMiniWriteIdempotencyReservation,
+  releaseMiniWriteInitDataReplayKeyReservation,
+  cleanupTemporaryAttachmentFiles,
+  miniHtmlPath: path.join(staticRoot, "mini.html"),
+});
 
-  const authResult = await verifyTelegramInitData(req.body?.initData);
-  if (!authResult.ok) {
-    res.status(authResult.status).json({
-      error: authResult.error,
-    });
-    return;
-  }
-
-  if (
-    !(await enforceMiniRateLimit(req, res, {
-      scope: "api.mini.access",
-      userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_MINI_ACCESS.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_MINI_ACCESS.blockMs,
-      },
-      username: sanitizeTextValue(authResult.user?.id, 50),
-      message: "Mini App access check limit reached. Please wait before retrying.",
-      code: "mini_access_rate_limited",
-    }))
-  ) {
-    return;
-  }
-
-  const uploadToken = createMiniUploadToken(authResult.user);
-  res.json({
-    ok: true,
-    user: {
-      id: sanitizeTextValue(authResult.user?.id, 50),
-      username: sanitizeTextValue(authResult.user?.username, 120),
-    },
-    uploadToken: uploadToken.token,
-    uploadTokenExpiresAt: uploadToken.expiresAtMs ? new Date(uploadToken.expiresAtMs).toISOString() : null,
-    uploadTokenTtlSec: MINI_UPLOAD_TOKEN_TTL_SEC,
-    writeInitDataTtlSec: TELEGRAM_INIT_DATA_WRITE_TTL_SEC,
-    miniConfig: {
-      attachments: MINI_CLIENT_ATTACHMENTS_CONFIG,
-    },
-  });
-};
-
-const handleMiniClientsPost = async (req, res) => {
-  const multipartRequest = isMultipartRequest(req);
-  const idempotencyKeyResult = resolveMiniIdempotencyKeyFromRequest(req);
-  if (!idempotencyKeyResult.ok) {
-    res.status(idempotencyKeyResult.status || 400).json({
-      error: idempotencyKeyResult.error || "Invalid Idempotency-Key header.",
-      code: idempotencyKeyResult.code || "mini_idempotency_key_invalid",
-    });
-    return;
-  }
-  const idempotencyKey = idempotencyKeyResult.key;
-  let parsedUploadToken = null;
-  if (
-    !(await enforceMiniRateLimit(req, res, {
-      scope: "api.mini.write",
-      ipProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_MINI_WRITE.maxHitsIp,
-        blockMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.blockMs,
-      },
-      message: "Mini App write limit reached. Please wait before retrying.",
-      code: "mini_write_rate_limited",
-    }))
-  ) {
-    return;
-  }
-
-  if (multipartRequest) {
-    const uploadTokenRaw = resolveMiniUploadTokenFromRequest(req);
-    if (!uploadTokenRaw) {
-      respondMiniRequestEarlyAndClose(req, res, 401, {
-        error: "Missing upload token. Reopen Mini App.",
-        code: "mini_upload_token_missing",
-      });
-      return;
-    }
-
-    parsedUploadToken = parseMiniUploadToken(uploadTokenRaw);
-    if (!parsedUploadToken.ok) {
-      respondMiniRequestEarlyAndClose(req, res, parsedUploadToken.status || 401, {
-        error: parsedUploadToken.error || "Upload token is invalid. Reopen Mini App.",
-        code: parsedUploadToken.code || "mini_upload_token_invalid",
-      });
-      return;
-    }
-
-    if (
-      !(await enforceMiniRateLimit(req, res, {
-        scope: "api.mini.write",
-        userProfile: {
-          windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
-          maxHits: RATE_LIMIT_PROFILE_API_MINI_WRITE.maxHitsUser,
-          blockMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.blockMs,
-        },
-        username: parsedUploadToken.userId,
-        message: "Mini App write limit reached. Please wait before retrying.",
-        code: "mini_write_rate_limited",
-      }))
-    ) {
-      return;
-    }
-
-    const contentLengthBytes = resolveRequestContentLengthBytes(req);
-    if (
-      Number.isFinite(contentLengthBytes) &&
-      contentLengthBytes > MINI_MULTIPART_MAX_CONTENT_LENGTH_BYTES
-    ) {
-      respondMiniRequestEarlyAndClose(req, res, 413, {
-        error: "Attachment payload is too large.",
-        code: "mini_multipart_too_large",
-      });
-      return;
-    }
-  }
-
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  try {
-    if (multipartRequest) {
-      await withMiniUploadParseSlot(() => parseMiniMultipartRequest(req, res));
-    }
-  } catch (error) {
-    res.status(error.httpStatus || 400).json({
-      error: sanitizeTextValue(error?.message, 500) || "Failed to process file uploads.",
-    });
-    return;
-  }
-
-  const parsedPayload = parseMiniClientPayload(req);
-  if (parsedPayload.error) {
-    res.status(parsedPayload.status || 400).json({
-      error: parsedPayload.error,
-    });
-    return;
-  }
-
-  const authResult = await verifyTelegramInitData(parsedPayload.initData, {
-    ttlSec: TELEGRAM_INIT_DATA_WRITE_TTL_SEC,
-  });
-  if (!authResult.ok) {
-    res.status(authResult.status).json({
-      error: authResult.error,
-    });
-    return;
-  }
-
-  const authenticatedUserId = sanitizeTextValue(authResult.user?.id, 50);
-  if (
-    !parsedUploadToken &&
-    !(await enforceMiniRateLimit(req, res, {
-      scope: "api.mini.write",
-      userProfile: {
-        windowMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.windowMs,
-        maxHits: RATE_LIMIT_PROFILE_API_MINI_WRITE.maxHitsUser,
-        blockMs: RATE_LIMIT_PROFILE_API_MINI_WRITE.blockMs,
-      },
-      username: authenticatedUserId,
-      message: "Mini App write limit reached. Please wait before retrying.",
-      code: "mini_write_rate_limited",
-    }))
-  ) {
-    return;
-  }
-
-  if (parsedUploadToken && (!authenticatedUserId || authenticatedUserId !== parsedUploadToken.userId)) {
-    res.status(401).json({
-      error: "Upload token user mismatch. Reopen Mini App.",
-      code: "mini_upload_token_user_mismatch",
-    });
-    return;
-  }
-
-  const creationResult = createRecordFromMiniPayload(parsedPayload.client);
-  if (!creationResult.record) {
-    res.status(400).json({
-      error: creationResult.error || "Invalid client payload.",
-    });
-    return;
-  }
-
-  const attachmentsResult = await buildMiniSubmissionAttachments(req.files);
-  if (attachmentsResult.error) {
-    await cleanupTemporaryUploadFiles(req.files);
-    res.status(attachmentsResult.status || 400).json({
-      error: attachmentsResult.error,
-    });
-    return;
-  }
-
-  let writeReplayReservation = null;
-  let writeReplayReservationShouldPersist = false;
-  let writeIdempotencyReservation = null;
-  try {
-    const idempotencyReservationResult = await reserveMiniWriteIdempotency(authenticatedUserId, idempotencyKey);
-    if (!idempotencyReservationResult.ok) {
-      if (idempotencyReservationResult.replayed) {
-        res.setHeader("Idempotency-Replayed", "true");
-        res.status(idempotencyReservationResult.status || 201).json(
-          idempotencyReservationResult.body && typeof idempotencyReservationResult.body === "object"
-            ? idempotencyReservationResult.body
-            : { ok: true },
-        );
-        return;
-      }
-
-      res.status(idempotencyReservationResult.status || 409).json({
-        error: idempotencyReservationResult.error || "Duplicate request.",
-        code: idempotencyReservationResult.code || "mini_idempotency_conflict",
-      });
-      return;
-    }
-    writeIdempotencyReservation = idempotencyReservationResult.reservation;
-
-    const replayReservationResult = await reserveMiniWriteInitDataReplayKey(
-      buildMiniWriteInitDataReplayKey(authResult),
-      resolveMiniWriteInitDataReplayExpiresAtMs(authResult),
-    );
-    if (!replayReservationResult.ok) {
-      res.status(replayReservationResult.status || 409).json({
-        error: replayReservationResult.error || "Duplicate request.",
-        code: replayReservationResult.code || "mini_init_data_replay",
-      });
-      return;
-    }
-    writeReplayReservation = replayReservationResult.reservation;
-
-    const submission = await queueClientSubmission(
-      creationResult.record,
-      authResult.user,
-      creationResult.miniData,
-      attachmentsResult.attachments,
-    );
-
-    const successResponsePayload = {
-      ok: true,
-      status: submission.status,
-      submissionId: submission.id,
-      submittedAt: submission.submittedAt,
-      attachmentsCount: submission.attachmentsCount || 0,
-    };
-    await commitMiniWriteIdempotencySuccess(writeIdempotencyReservation, 201, successResponsePayload);
-    writeReplayReservationShouldPersist = true;
-    res.status(201).json(successResponsePayload);
-
-    enqueueMiniSubmissionTelegramNotification(
-      creationResult.record,
-      creationResult.miniData,
-      submission,
-      authResult.user,
-      attachmentsResult.attachments,
-    );
-  } catch (error) {
-    console.error("POST /api/mini/clients failed:", error);
-    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to submit client"));
-  } finally {
-    await releaseMiniWriteIdempotencyReservation(writeIdempotencyReservation);
-    await releaseMiniWriteInitDataReplayKeyReservation(
-      writeReplayReservation,
-      writeReplayReservationShouldPersist,
-    );
-    await cleanupTemporaryAttachmentFiles(attachmentsResult.attachments || []);
-    await cleanupTemporaryUploadFiles(req.files);
-  }
-};
-
-const handleModerationSubmissionsGet = async (req, res) => {
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  try {
-    const result = await listModerationSubmissions({
-      status: req.query.status,
-      limit: req.query.limit,
-      cursor: req.query.cursor,
-      paginationV2: PAGINATION_V2_ENABLED,
-    });
-
-    if (result.error) {
-      res.status(400).json({
-        error: result.error,
-      });
-      return;
-    }
-
-    const responsePayload = {
-      status: result.status,
-      items: result.items,
-    };
-
-    if (PAGINATION_V2_ENABLED) {
-      responsePayload.hasMore = Boolean(result.hasMore);
-      responsePayload.nextCursor = result.nextCursor || null;
-    }
-
-    res.json(responsePayload);
-  } catch (error) {
-    console.error("GET /api/moderation/submissions failed:", error);
-    res
-      .status(resolveDbHttpStatus(error))
-      .json(buildPublicErrorPayload(error, "Failed to load moderation submissions"));
-  }
-};
-
-const handleModerationSubmissionFilesGet = async (req, res) => {
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  try {
-    const filesResult = await listPendingSubmissionFiles(req.params.id);
-    if (!filesResult.ok) {
-      res.status(filesResult.status).json({
-        error: filesResult.error,
-      });
-      return;
-    }
-
-    const basePath = `/api/moderation/submissions/${encodeURIComponent(filesResult.submissionId)}/files`;
-    const items = filesResult.items.map((file) => {
-      const canPreview = isPreviewableAttachmentMimeType(file.mimeType);
-      return {
-        ...file,
-        canPreview,
-        previewUrl: canPreview ? `${basePath}/${encodeURIComponent(file.id)}?inline=1` : "",
-        downloadUrl: `${basePath}/${encodeURIComponent(file.id)}`,
-      };
-    });
-
-    res.json({
-      ok: true,
-      items,
-    });
-  } catch (error) {
-    console.error("GET /api/moderation/submissions/:id/files failed:", error);
-    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load submission files"));
-  }
-};
-
-const handleModerationSubmissionFileGet = async (req, res) => {
-  if (!pool) {
-    res.status(503).json({
-      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-    });
-    return;
-  }
-
-  try {
-    const fileResult = await getPendingSubmissionFile(req.params.id, req.params.fileId);
-    if (!fileResult.ok) {
-      res.status(fileResult.status).json({
-        error: fileResult.error,
-      });
-      return;
-    }
-
-    const file = fileResult.file;
-    const mimeType = normalizeAttachmentMimeType(file.mimeType);
-    const inlineRequested = sanitizeTextValue(req.query.inline, 10) === "1";
-    const isInline = inlineRequested && isPreviewableAttachmentMimeType(mimeType);
-    res.setHeader("Content-Type", mimeType);
-    res.setHeader("Content-Length", String(file.content.length));
-    res.setHeader(
-      "Content-Disposition",
-      buildContentDisposition(isInline ? "inline" : "attachment", file.fileName),
-    );
-    setNoStorePrivateApiHeaders(res);
-    setAttachmentResponseSecurityHeaders(res, {
-      isInline,
-    });
-    res.send(file.content);
-  } catch (error) {
-    console.error("GET /api/moderation/submissions/:id/files/:fileId failed:", error);
-    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load file"));
-  }
-};
-
-const handleModerationApprovePost = async (req, res) => {
-  try {
-    const result = await reviewClientSubmission(
-      req.params.id,
-      "approved",
-      getReviewerIdentity(req),
-      req.body?.reviewNote,
-    );
-
-    if (!result.ok) {
-      res.status(result.status).json({
-        error: result.error,
-      });
-      return;
-    }
-
-    res.json({
-      ok: true,
-      item: result.item,
-    });
-  } catch (error) {
-    console.error("POST /api/moderation/submissions/:id/approve failed:", error);
-    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to approve submission"));
-  }
-};
-
-const handleModerationRejectPost = async (req, res) => {
-  try {
-    const result = await reviewClientSubmission(
-      req.params.id,
-      "rejected",
-      getReviewerIdentity(req),
-      req.body?.reviewNote,
-    );
-
-    if (!result.ok) {
-      res.status(result.status).json({
-        error: result.error,
-      });
-      return;
-    }
-
-    res.json({
-      ok: true,
-      item: result.item,
-    });
-  } catch (error) {
-    console.error("POST /api/moderation/submissions/:id/reject failed:", error);
-    res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to reject submission"));
-  }
-};
-
-const handleMiniPageGet = (_req, res) => {
-  res.sendFile(path.join(staticRoot, "mini.html"));
-};
+const moderationController = createModerationController({
+  hasDatabase: () => Boolean(pool),
+  listModerationSubmissions,
+  paginationV2Enabled: PAGINATION_V2_ENABLED,
+  listPendingSubmissionFiles,
+  isPreviewableAttachmentMimeType,
+  getPendingSubmissionFile,
+  normalizeAttachmentMimeType,
+  buildContentDisposition,
+  setNoStorePrivateApiHeaders,
+  setAttachmentResponseSecurityHeaders,
+  sanitizeTextValue,
+  reviewClientSubmission,
+  getReviewerIdentity,
+  resolveDbHttpStatus,
+  buildPublicErrorPayload,
+});
 
 registerMiniRoutes({
   app,
   handlers: {
-    handleMiniAccessPost,
-    handleMiniClientsPost,
-    handleMiniPageGet,
+    handleMiniAccessPost: miniController.handleMiniAccessPost,
+    handleMiniClientsPost: miniController.handleMiniClientsPost,
+    handleMiniPageGet: miniController.handleMiniPageGet,
   },
 });
 
@@ -37459,11 +36705,11 @@ registerModerationRoutes({
     WEB_AUTH_PERMISSION_REVIEW_MODERATION,
   },
   handlers: {
-    handleModerationSubmissionsGet,
-    handleModerationSubmissionFilesGet,
-    handleModerationSubmissionFileGet,
-    handleModerationApprovePost,
-    handleModerationRejectPost,
+    handleModerationSubmissionsGet: moderationController.handleModerationSubmissionsGet,
+    handleModerationSubmissionFilesGet: moderationController.handleModerationSubmissionFilesGet,
+    handleModerationSubmissionFileGet: moderationController.handleModerationSubmissionFileGet,
+    handleModerationApprovePost: moderationController.handleModerationApprovePost,
+    handleModerationRejectPost: moderationController.handleModerationRejectPost,
   },
 });
 
