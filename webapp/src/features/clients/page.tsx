@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { StatusBadges } from "@/features/client-payments/components/StatusBadges";
+import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
 import {
-  formatDate,
   formatMoney,
   normalizeRecords,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
-import { FIELD_DEFINITIONS } from "@/features/client-payments/domain/constants";
 import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
 import { getClientManagers, getRecords } from "@/shared/api";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
@@ -27,26 +26,6 @@ const SEARCH_FIELDS: Array<keyof ClientRecord> = [
   "companyName",
   "serviceType",
 ];
-
-const MONEY_FIELDS = new Set<keyof ClientRecord>([
-  "contractTotals",
-  "totalPayments",
-  "futurePayments",
-  "collection",
-  "payment1",
-  "payment2",
-  "payment3",
-  "payment4",
-  "payment5",
-  "payment6",
-  "payment7",
-]);
-
-interface ClientDetailItem {
-  key: string;
-  label: string;
-  value: string;
-}
 
 export default function ClientsPage() {
   const [records, setRecords] = useState<ClientRecord[]>([]);
@@ -126,27 +105,6 @@ export default function ClientsPage() {
     () => records.find((record) => record.id === selectedRecordId) || null,
     [records, selectedRecordId],
   );
-
-  const detailItems = useMemo<ClientDetailItem[]>(() => {
-    if (!selectedRecord) {
-      return [];
-    }
-
-    const details = FIELD_DEFINITIONS.map((field) => ({
-      key: field.key,
-      label: field.label,
-      value: formatDetailValue(selectedRecord, field.key, field.type),
-    }));
-
-    return [
-      {
-        key: "createdAt",
-        label: "Created At",
-        value: formatDate(selectedRecord.createdAt),
-      },
-      ...details,
-    ];
-  }, [selectedRecord]);
 
   const totalContractAmount = useMemo(
     () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.contractTotals) || 0), 0),
@@ -341,14 +299,7 @@ export default function ClientsPage() {
           </Button>
         }
       >
-        <div className="record-details-grid record-details-grid--requested">
-          {detailItems.map((item) => (
-            <div key={item.key} className="record-details-grid__item">
-              <span className="record-details-grid__label">{item.label}</span>
-              <strong className="record-details-grid__value">{item.value}</strong>
-            </div>
-          ))}
-        </div>
+        {selectedRecord ? <RecordDetails record={selectedRecord} /> : null}
       </Modal>
     </PageShell>
   );
@@ -366,38 +317,12 @@ function resolveCreatedAtTimestamp(record: ClientRecord): number {
   return parsed;
 }
 
-function formatDetailValue(
-  record: ClientRecord,
-  key: keyof ClientRecord,
-  fieldType: "text" | "textarea" | "checkbox" | "date",
-): string {
-  if (fieldType === "checkbox") {
-    return isTruthyField(record[key]) ? "Yes" : "No";
-  }
-
-  if (fieldType === "date") {
-    return formatDate(record[key]);
-  }
-
-  if (MONEY_FIELDS.has(key)) {
-    return formatMoneyCell(record[key]);
-  }
-
-  const value = (record[key] || "").toString().trim();
-  return value || "-";
-}
-
 function formatMoneyCell(rawValue: string): string {
   const amount = parseMoneyValue(rawValue);
   if (amount === null) {
     return "-";
   }
   return formatMoney(amount);
-}
-
-function isTruthyField(rawValue: string): boolean {
-  const normalized = (rawValue || "").toString().trim().toLowerCase();
-  return normalized === "true" || normalized === "yes" || normalized === "1" || normalized === "on";
 }
 
 function buildClientManagersLookup(rows: ClientManagerRow[]): Map<string, string> {
