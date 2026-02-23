@@ -2,6 +2,7 @@
 
 function createQuickBooksController(dependencies = {}) {
   const {
+    quickBooksService,
     sanitizeTextValue,
     enforceRateLimit,
     rateLimitProfileApiExpensive,
@@ -21,6 +22,35 @@ function createQuickBooksController(dependencies = {}) {
     webAuthPermissionSyncQuickbooks,
     requestOpenAiQuickBooksInsight,
   } = dependencies;
+
+  const listCachedTransactions =
+    quickBooksService && typeof quickBooksService.listCachedQuickBooksTransactionsInRange === "function"
+      ? quickBooksService.listCachedQuickBooksTransactionsInRange
+      : listCachedQuickBooksTransactionsInRange;
+  const listOutgoingTransactions =
+    quickBooksService && typeof quickBooksService.listQuickBooksOutgoingTransactionsInRange === "function"
+      ? quickBooksService.listQuickBooksOutgoingTransactionsInRange
+      : listQuickBooksOutgoingTransactionsInRange;
+  const buildSyncMeta =
+    quickBooksService && typeof quickBooksService.buildQuickBooksSyncMeta === "function"
+      ? quickBooksService.buildQuickBooksSyncMeta
+      : buildQuickBooksSyncMeta;
+  const enqueueSyncJob =
+    quickBooksService && typeof quickBooksService.enqueueQuickBooksSyncJob === "function"
+      ? quickBooksService.enqueueQuickBooksSyncJob
+      : enqueueQuickBooksSyncJob;
+  const buildSyncJobPayload =
+    quickBooksService && typeof quickBooksService.buildQuickBooksSyncJobPayload === "function"
+      ? quickBooksService.buildQuickBooksSyncJobPayload
+      : buildQuickBooksSyncJobPayload;
+  const getSyncJobById =
+    quickBooksService && typeof quickBooksService.getQuickBooksSyncJobById === "function"
+      ? quickBooksService.getQuickBooksSyncJobById
+      : getQuickBooksSyncJobById;
+  const requestInsight =
+    quickBooksService && typeof quickBooksService.requestOpenAiQuickBooksInsight === "function"
+      ? quickBooksService.requestOpenAiQuickBooksInsight
+      : requestOpenAiQuickBooksInsight;
 
   function hasDatabaseConfigured() {
     if (typeof hasDatabase === "function") {
@@ -85,12 +115,12 @@ function createQuickBooksController(dependencies = {}) {
     }
 
     try {
-      const syncMeta = buildQuickBooksSyncMeta({
+      const syncMeta = buildSyncMeta({
         requested: false,
         syncMode: "incremental",
       });
 
-      const items = await listCachedQuickBooksTransactionsInRange(range.from, range.to);
+      const items = await listCachedTransactions(range.from, range.to);
 
       res.json({
         ok: true,
@@ -144,11 +174,11 @@ function createQuickBooksController(dependencies = {}) {
     }
 
     try {
-      const syncMeta = buildQuickBooksSyncMeta({
+      const syncMeta = buildSyncMeta({
         requested: false,
         syncMode: "incremental",
       });
-      const items = await listQuickBooksOutgoingTransactionsInRange(range.from, range.to);
+      const items = await listOutgoingTransactions(range.from, range.to);
 
       res.json({
         ok: true,
@@ -281,7 +311,7 @@ function createQuickBooksController(dependencies = {}) {
 
     let enqueueResult;
     try {
-      enqueueResult = enqueueQuickBooksSyncJob(range, {
+      enqueueResult = enqueueSyncJob(range, {
         fullSync: shouldTotalRefresh,
         requestedBy: req.webAuthUser,
       });
@@ -298,7 +328,7 @@ function createQuickBooksController(dependencies = {}) {
       ok: true,
       queued: true,
       reused,
-      job: buildQuickBooksSyncJobPayload(job),
+      job: buildSyncJobPayload(job),
     });
   }
 
@@ -323,7 +353,7 @@ function createQuickBooksController(dependencies = {}) {
       return;
     }
 
-    const job = getQuickBooksSyncJobById(req.params.jobId);
+    const job = getSyncJobById(req.params.jobId);
     if (!job) {
       res.status(404).json({
         error: "QuickBooks sync job not found.",
@@ -334,7 +364,7 @@ function createQuickBooksController(dependencies = {}) {
 
     res.json({
       ok: true,
-      job: buildQuickBooksSyncJobPayload(job),
+      job: buildSyncJobPayload(job),
     });
   }
 
@@ -381,7 +411,7 @@ function createQuickBooksController(dependencies = {}) {
     const description = sanitizeTextValue(req.body?.description, 1200) || "-";
 
     try {
-      const insight = await requestOpenAiQuickBooksInsight({
+      const insight = await requestInsight({
         companyName,
         amount,
         date,

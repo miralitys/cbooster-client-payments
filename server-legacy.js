@@ -11,7 +11,10 @@ const compression = require("compression");
 const helmet = require("helmet");
 const multer = require("multer");
 const QRCode = require("qrcode");
-const { Pool } = require("pg");
+const { createDbPool } = require("./server/shared/db/pool");
+const { createDbQuery } = require("./server/shared/db/query");
+const { createDbTx } = require("./server/shared/db/tx");
+const { resolveDbHttpStatus } = require("./server/shared/db/errors");
 const {
   PATCH_OPERATION_DELETE,
   PATCH_OPERATION_UPSERT,
@@ -43,13 +46,14 @@ const { createGhlReadOnlyGuard } = require("./server/integrations/ghl/client");
 const { createGhlNotesController } = require("./server/domains/ghl-notes");
 const { createGhlLeadsController } = require("./server/domains/ghl-leads");
 const { createGhlCommunicationsController } = require("./server/domains/ghl-communications");
-const { createQuickBooksController } = require("./server/domains/quickbooks");
+const { createQuickBooksController, createQuickBooksService, createQuickBooksRepo } = require("./server/domains/quickbooks");
 const { createModerationController } = require("./server/domains/moderation");
 const { createMiniController } = require("./server/domains/mini");
-const { createAssistantService, createAssistantController } = require("./server/domains/assistant");
+const { createAssistantService, createAssistantController, createAssistantRepo } = require("./server/domains/assistant");
 const { createRecordsValidation } = require("./server/domains/records/records.validation");
 const { createRecordsService } = require("./server/domains/records/records.service");
 const { createRecordsController } = require("./server/domains/records/records.controller");
+const { createRecordsRepo } = require("./server/domains/records/records.repo");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
@@ -242,7 +246,6 @@ const DUAL_READ_COMPARE_ENABLED = resolveOptionalBoolean(process.env.DUAL_READ_C
 const READ_V2_ENABLED = resolveOptionalBoolean(process.env.READ_V2) === true;
 const WRITE_V2_ENABLED = resolveOptionalBoolean(process.env.WRITE_V2) === true;
 const LEGACY_MIRROR_ENABLED = resolveOptionalBoolean(process.env.LEGACY_MIRROR) === true;
-const DB_METRICS_CLIENT_PATCHED_FLAG = Symbol("dbMetricsClientPatched");
 const WEB_AUTH_PERMISSION_VIEW_DASHBOARD = "view_dashboard";
 const WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS = "view_client_payments";
 const WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS = "manage_client_payments";
@@ -1655,15 +1658,12 @@ const WEB_STATIC_ASSET_ALLOWLIST = new Map([
   ["/mini.js", "mini.js"],
 ]);
 
-const pool = DATABASE_URL
-  ? instrumentDbPoolWithMetrics(
-      new Pool({
-        connectionString: DATABASE_URL,
-        ssl: shouldUseSsl() ? { rejectUnauthorized: false } : false,
-      }),
-      performanceObservability,
-    )
-  : null;
+const pool = createDbPool({
+  connectionString: DATABASE_URL,
+  instrumentationState: performanceObservability,
+});
+const sharedDbQuery = pool ? createDbQuery(pool) : null;
+const sharedDbTx = pool ? createDbTx(pool) : null;
 const miniAttachmentsUploadMemoryMiddleware = createMiniAttachmentsUploadMiddleware({
   useDisk: false,
 });
@@ -1752,11 +1752,6 @@ function resolveSchemaName(rawSchemaName, fallbackSchemaName) {
 
 function qualifyTableName(schemaName, tableName) {
   return `"${schemaName}"."${tableName}"`;
-}
-
-function shouldUseSsl() {
-  const mode = (process.env.PGSSLMODE || "").toLowerCase();
-  return mode !== "disable";
 }
 
 function parseTelegramAllowedUserIds(rawValue) {
@@ -2560,164 +2555,6 @@ function recordHttpPerformanceMetric(state, req, statusCode, durationMs) {
   state.http.totalDurationMs += durationMs;
   state.http.maxDurationMs = Math.max(state.http.maxDurationMs, durationMs);
   state.http.lastDurationMs = durationMs;
-}
-
-function resolveDbStatementType(rawQuery) {
-  if (typeof rawQuery === "string") {
-    const match = rawQuery.trim().match(/^([a-zA-Z]+)/);
-    return match ? match[1].toUpperCase() : "UNKNOWN";
-  }
-
-  if (rawQuery && typeof rawQuery === "object" && typeof rawQuery.text === "string") {
-    const match = rawQuery.text.trim().match(/^([a-zA-Z]+)/);
-    return match ? match[1].toUpperCase() : "UNKNOWN";
-  }
-
-  return "UNKNOWN";
-}
-
-function recordDbPerformanceMetric(state, { durationMs, error, statementType }) {
-  if (!state?.enabled || !Number.isFinite(durationMs)) {
-    return;
-  }
-
-  const dbState = state.db;
-  const normalizedStatementType = (statementType || "UNKNOWN").toString().toUpperCase().slice(0, 24) || "UNKNOWN";
-  const isError = Boolean(error);
-  const isSlow = durationMs >= dbState.slowQueryMs;
-
-  dbState.queryCount += 1;
-  if (isError) {
-    dbState.errorCount += 1;
-  }
-  if (isSlow) {
-    dbState.slowQueryCount += 1;
-  }
-  dbState.totalDurationMs += durationMs;
-  dbState.maxDurationMs = Math.max(dbState.maxDurationMs, durationMs);
-  dbState.lastDurationMs = durationMs;
-  pushRollingLatencySample(dbState.latencySample, durationMs);
-
-  let statementEntry = dbState.byStatementType.get(normalizedStatementType);
-  if (!statementEntry) {
-    statementEntry = {
-      statementType: normalizedStatementType,
-      count: 0,
-      errorCount: 0,
-      slowCount: 0,
-      totalDurationMs: 0,
-      maxDurationMs: 0,
-      lastDurationMs: 0,
-      latencySample: createRollingLatencySample(dbState.sampleSize),
-    };
-    dbState.byStatementType.set(normalizedStatementType, statementEntry);
-  }
-
-  statementEntry.count += 1;
-  if (isError) {
-    statementEntry.errorCount += 1;
-  }
-  if (isSlow) {
-    statementEntry.slowCount += 1;
-  }
-  statementEntry.totalDurationMs += durationMs;
-  statementEntry.maxDurationMs = Math.max(statementEntry.maxDurationMs, durationMs);
-  statementEntry.lastDurationMs = durationMs;
-  pushRollingLatencySample(statementEntry.latencySample, durationMs);
-}
-
-function wrapDbQueryWithMetrics(queryFn, state) {
-  return function wrappedDbQuery(...args) {
-    if (!state?.enabled) {
-      return queryFn(...args);
-    }
-
-    const statementType = resolveDbStatementType(args[0]);
-    const startedAtNs = process.hrtime.bigint();
-    const finalize = (error) => {
-      const endedAtNs = process.hrtime.bigint();
-      const durationMs = Number(endedAtNs - startedAtNs) / 1_000_000;
-      recordDbPerformanceMetric(state, {
-        durationMs,
-        error,
-        statementType,
-      });
-    };
-
-    const maybeCallback = args.length ? args[args.length - 1] : null;
-    if (typeof maybeCallback === "function") {
-      let callbackFinished = false;
-      args[args.length - 1] = function wrappedQueryCallback(error, ...callbackArgs) {
-        if (!callbackFinished) {
-          callbackFinished = true;
-          finalize(error);
-        }
-        return maybeCallback.call(this, error, ...callbackArgs);
-      };
-
-      try {
-        return queryFn(...args);
-      } catch (error) {
-        if (!callbackFinished) {
-          callbackFinished = true;
-          finalize(error);
-        }
-        throw error;
-      }
-    }
-
-    try {
-      const result = queryFn(...args);
-      if (result && typeof result.then === "function") {
-        return result.then(
-          (value) => {
-            finalize(null);
-            return value;
-          },
-          (error) => {
-            finalize(error);
-            throw error;
-          },
-        );
-      }
-
-      finalize(null);
-      return result;
-    } catch (error) {
-      finalize(error);
-      throw error;
-    }
-  };
-}
-
-function instrumentDbPoolWithMetrics(basePool, state) {
-  if (!basePool || !state?.enabled) {
-    return basePool;
-  }
-
-  if (typeof basePool.query === "function") {
-    basePool.query = wrapDbQueryWithMetrics(basePool.query.bind(basePool), state);
-  }
-
-  if (typeof basePool.connect === "function") {
-    const originalConnect = basePool.connect.bind(basePool);
-    basePool.connect = async (...args) => {
-      const client = await originalConnect(...args);
-      if (!client || typeof client.query !== "function" || client[DB_METRICS_CLIENT_PATCHED_FLAG]) {
-        return client;
-      }
-
-      client.query = wrapDbQueryWithMetrics(client.query.bind(client), state);
-      try {
-        client[DB_METRICS_CLIENT_PATCHED_FLAG] = true;
-      } catch (_error) {
-        // Ignore non-extensible clients; instrumentation still works for this object.
-      }
-      return client;
-    };
-  }
-
-  return basePool;
 }
 
 function toMetricMegabytes(valueInBytes) {
@@ -3756,13 +3593,14 @@ async function reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs) {
   const client = await pool.connect();
 
   try {
-    await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+    const txQuery = createDbQuery(client);
+    await txQuery("BEGIN");
+    await txQuery("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
       MINI_RUNTIME_STATE_SCOPE_REPLAY,
       normalizedReplayKey,
     ]);
 
-    const existingResult = await client.query(
+    const existingResult = await txQuery(
       `
         SELECT state
         FROM ${MINI_RUNTIME_STATE_TABLE}
@@ -3776,7 +3614,7 @@ async function reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs) {
 
     if (existingResult.rows.length) {
       const existingState = normalizeMiniRuntimeEntryState(existingResult.rows[0]?.state);
-      await client.query("COMMIT");
+      await txQuery("COMMIT");
       if (existingState === "used") {
         return {
           ok: false,
@@ -3793,7 +3631,7 @@ async function reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs) {
       };
     }
 
-    await client.query(
+    await txQuery(
       `
         INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
           (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
@@ -3808,7 +3646,7 @@ async function reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs) {
       [MINI_RUNTIME_STATE_SCOPE_REPLAY, normalizedReplayKey, new Date(safeExpiresAtMs).toISOString()],
     );
 
-    await client.query("COMMIT");
+    await txQuery("COMMIT");
     return {
       ok: true,
       reservation: {
@@ -3819,7 +3657,7 @@ async function reserveMiniWriteInitDataReplayKeyShared(replayKey, expiresAtMs) {
     };
   } catch (error) {
     try {
-      await client.query("ROLLBACK");
+      await createDbQuery(client)("ROLLBACK");
     } catch {
       // Best-effort rollback.
     }
@@ -3842,7 +3680,7 @@ async function releaseMiniWriteInitDataReplayKeyReservationShared(reservation, m
 
   if (markAsUsed) {
     const safeExpiresAtMs = Math.max(Date.now() + 1000, Number.parseInt(reservation.expiresAtMs, 10) || 0);
-    await pool.query(
+    await sharedDbQuery(
       `
         UPDATE ${MINI_RUNTIME_STATE_TABLE}
         SET state = 'used',
@@ -3856,7 +3694,7 @@ async function releaseMiniWriteInitDataReplayKeyReservationShared(reservation, m
     return;
   }
 
-  await pool.query(
+  await sharedDbQuery(
     `
       DELETE FROM ${MINI_RUNTIME_STATE_TABLE}
       WHERE scope = $1
@@ -3884,13 +3722,14 @@ async function reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey) {
   const client = await pool.connect();
 
   try {
-    await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+    const txQuery = createDbQuery(client);
+    await txQuery("BEGIN");
+    await txQuery("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
       MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY,
       cacheKey,
     ]);
 
-    const existingResult = await client.query(
+    const existingResult = await txQuery(
       `
         SELECT state, status_code, response_body
         FROM ${MINI_RUNTIME_STATE_TABLE}
@@ -3906,7 +3745,7 @@ async function reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey) {
       const existingRow = existingResult.rows[0] || {};
       const existingState = normalizeMiniRuntimeEntryState(existingRow.state);
       if (existingState === "done") {
-        await client.query("COMMIT");
+        await txQuery("COMMIT");
         const replayedStatus = Number.parseInt(existingRow.status_code, 10);
         const replayedBody =
           existingRow.response_body && typeof existingRow.response_body === "object" && !Array.isArray(existingRow.response_body)
@@ -3920,7 +3759,7 @@ async function reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey) {
         };
       }
 
-      await client.query("COMMIT");
+      await txQuery("COMMIT");
       return {
         ok: false,
         status: 409,
@@ -3929,7 +3768,7 @@ async function reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey) {
       };
     }
 
-    await client.query(
+    await txQuery(
       `
         INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
           (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
@@ -3946,7 +3785,7 @@ async function reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey) {
       [MINI_RUNTIME_STATE_SCOPE_IDEMPOTENCY, cacheKey, new Date(expiresAtMs).toISOString()],
     );
 
-    await client.query("COMMIT");
+    await txQuery("COMMIT");
     return {
       ok: true,
       reservation: {
@@ -3957,7 +3796,7 @@ async function reserveMiniWriteIdempotencyShared(userId, rawIdempotencyKey) {
     };
   } catch (error) {
     try {
-      await client.query("ROLLBACK");
+      await createDbQuery(client)("ROLLBACK");
     } catch {
       // Best-effort rollback.
     }
@@ -3979,7 +3818,7 @@ async function commitMiniWriteIdempotencySuccessShared(reservation, statusCode, 
       ? JSON.parse(JSON.stringify(responseBody))
       : { ok: true };
   const safeExpiresAtMs = Math.max(Date.now() + 1000, Number.parseInt(reservation.expiresAtMs, 10) || 0);
-  await pool.query(
+  await sharedDbQuery(
     `
       UPDATE ${MINI_RUNTIME_STATE_TABLE}
       SET state = 'done',
@@ -4006,7 +3845,7 @@ async function releaseMiniWriteIdempotencyReservationShared(reservation) {
   }
 
   await ensureDatabaseReady();
-  await pool.query(
+  await sharedDbQuery(
     `
       DELETE FROM ${MINI_RUNTIME_STATE_TABLE}
       WHERE scope = $1
@@ -5083,12 +4922,13 @@ async function purgeModerationSubmissionArtifactsInTransaction(client, rawSubmis
 
   const purgeAttachments = options.purgeAttachments !== false;
   const purgeSensitiveData = options.purgeSensitiveData !== false;
+  const txQuery = createDbQuery(client);
   let deletedFilesCount = 0;
   let scrubbedSubmissionsCount = 0;
   let storageKeys = [];
 
   if (purgeAttachments) {
-    const filesResult = await client.query(
+    const filesResult = await txQuery(
       `
         SELECT storage_key
         FROM ${MODERATION_FILES_TABLE}
@@ -5098,7 +4938,7 @@ async function purgeModerationSubmissionArtifactsInTransaction(client, rawSubmis
     );
     storageKeys = collectStoredAttachmentKeysFromRows(filesResult.rows);
 
-    const deleteFilesResult = await client.query(
+    const deleteFilesResult = await txQuery(
       `
         DELETE FROM ${MODERATION_FILES_TABLE}
         WHERE submission_id = ANY($1::text[])
@@ -5109,7 +4949,7 @@ async function purgeModerationSubmissionArtifactsInTransaction(client, rawSubmis
   }
 
   if (purgeSensitiveData) {
-    const scrubResult = await client.query(
+    const scrubResult = await txQuery(
       `
         UPDATE ${MODERATION_TABLE}
         SET mini_data = '{}'::jsonb,
@@ -5121,7 +4961,7 @@ async function purgeModerationSubmissionArtifactsInTransaction(client, rawSubmis
     );
     scrubbedSubmissionsCount = Number.isFinite(scrubResult?.rowCount) ? scrubResult.rowCount : 0;
   } else {
-    const markResult = await client.query(
+    const markResult = await txQuery(
       `
         UPDATE ${MODERATION_TABLE}
         SET purged_at = COALESCE(purged_at, NOW())
@@ -5162,9 +5002,10 @@ async function runMiniRetentionSweep() {
     let storageKeys = [];
     const client = await pool.connect();
     try {
-      await client.query("BEGIN");
+      const txQuery = createDbQuery(client);
+      await txQuery("BEGIN");
 
-      const candidateResult = await client.query(
+      const candidateResult = await txQuery(
         `
           SELECT id
           FROM ${MODERATION_TABLE}
@@ -5181,7 +5022,7 @@ async function runMiniRetentionSweep() {
       scannedSubmissionCount = submissionIds.length;
 
       if (submissionIds.length) {
-        const filesResult = await client.query(
+        const filesResult = await txQuery(
           `
             SELECT storage_key
             FROM ${MODERATION_FILES_TABLE}
@@ -5191,7 +5032,7 @@ async function runMiniRetentionSweep() {
         );
         storageKeys = collectStoredAttachmentKeysFromRows(filesResult.rows);
 
-        const deleteFilesResult = await client.query(
+        const deleteFilesResult = await txQuery(
           `
             DELETE FROM ${MODERATION_FILES_TABLE}
             WHERE submission_id = ANY($1::text[])
@@ -5200,7 +5041,7 @@ async function runMiniRetentionSweep() {
         );
         deletedFilesCount = Number.isFinite(deleteFilesResult?.rowCount) ? deleteFilesResult.rowCount : 0;
 
-        const deleteSubmissionsResult = await client.query(
+        const deleteSubmissionsResult = await txQuery(
           `
             DELETE FROM ${MODERATION_TABLE}
             WHERE id = ANY($1::text[]) AND status <> 'pending'
@@ -5210,10 +5051,10 @@ async function runMiniRetentionSweep() {
         deletedSubmissionsCount = Number.isFinite(deleteSubmissionsResult?.rowCount) ? deleteSubmissionsResult.rowCount : 0;
       }
 
-      await client.query("COMMIT");
+      await txQuery("COMMIT");
     } catch (error) {
       try {
-        await client.query("ROLLBACK");
+        await createDbQuery(client)("ROLLBACK");
       } catch {
         // Best-effort rollback.
       }
@@ -6741,308 +6582,15 @@ async function pruneAssistantSessionScopeStore(queryable = pool) {
 }
 
 async function getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId) {
-  if (!pool) {
-    recordAssistantSessionScopeMetricMiss(performanceObservability);
-    return null;
-  }
-
-  const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
-  try {
-    await ensureDatabaseReady();
-    const result = await pool.query(
-      `
-        SELECT scope
-        FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
-        WHERE cache_key = $1
-          AND expires_at > NOW()
-        LIMIT 1
-      `,
-      [identity.cacheKey],
-    );
-
-    if (!result.rows.length) {
-      const expiredDeleteResult = await pool.query(
-        `
-          DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
-          WHERE cache_key = $1
-            AND expires_at <= NOW()
-        `,
-        [identity.cacheKey],
-      );
-      const expiredDeleted = parseAssistantSessionScopeStoreCount(expiredDeleteResult?.rowCount);
-      if (expiredDeleted > 0) {
-        recordAssistantSessionScopeMetricEvictions(performanceObservability, expiredDeleted);
-      }
-      recordAssistantSessionScopeMetricMiss(performanceObservability);
-      return null;
-    }
-
-    const normalizedScope = normalizeAssistantScopePayload(result.rows[0]?.scope);
-    if (!normalizedScope) {
-      const invalidDeleteResult = await pool.query(
-        `
-          DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
-          WHERE cache_key = $1
-        `,
-        [identity.cacheKey],
-      );
-      const invalidDeleted = parseAssistantSessionScopeStoreCount(invalidDeleteResult?.rowCount);
-      if (invalidDeleted > 0) {
-        recordAssistantSessionScopeMetricEvictions(performanceObservability, invalidDeleted);
-      }
-      recordAssistantSessionScopeMetricMiss(performanceObservability);
-      return null;
-    }
-
-    if (normalizedScope.scopeEstablished !== true) {
-      recordAssistantSessionScopeMetricMiss(performanceObservability);
-      return null;
-    }
-
-    recordAssistantSessionScopeMetricHit(performanceObservability);
-    return normalizedScope;
-  } catch (error) {
-    recordAssistantSessionScopeMetricError(performanceObservability, error);
-    console.warn(`[assistant][scope-store] get failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
-    return null;
-  }
+  return assistantRepo.getAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId);
 }
 
 async function upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, rawScope, options = {}) {
-  const scopeStoragePayload = buildAssistantScopeStoragePayload(rawScope);
-  if (!scopeStoragePayload || !pool) {
-    return {
-      applied: false,
-      stale: false,
-      clientMessageSeq: normalizeAssistantClientMessageSeq(options?.clientMessageSeq),
-    };
-  }
-
-  const { scope, scopeJson, scopeBytes, truncated } = scopeStoragePayload;
-  const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
-  const clientMessageSeq = normalizeAssistantClientMessageSeq(options?.clientMessageSeq);
-  const expiresAt = new Date(Date.now() + ASSISTANT_SESSION_SCOPE_TTL_MS).toISOString();
-  let client = null;
-
-  try {
-    await ensureDatabaseReady();
-    client = await pool.connect();
-    await client.query("BEGIN");
-
-    const upsertResult =
-      clientMessageSeq > 0
-        ? await client.query(
-            `
-              INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
-                cache_key,
-                tenant_key,
-                user_key,
-                session_key,
-                scope,
-                last_seq,
-                scope_bytes,
-                updated_at,
-                expires_at
-              )
-              VALUES ($1, $2, $3, $4, $5::jsonb, $6::bigint, $7, NOW(), $8::timestamptz)
-              ON CONFLICT (cache_key) DO UPDATE
-              SET tenant_key = EXCLUDED.tenant_key,
-                  user_key = EXCLUDED.user_key,
-                  session_key = EXCLUDED.session_key,
-                  scope = EXCLUDED.scope,
-                  last_seq = EXCLUDED.last_seq,
-                  scope_bytes = EXCLUDED.scope_bytes,
-                  updated_at = NOW(),
-                  expires_at = EXCLUDED.expires_at
-              WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq < EXCLUDED.last_seq
-            `,
-            [
-              identity.cacheKey,
-              identity.tenantKey,
-              identity.userKey,
-              identity.sessionKey,
-              scopeJson,
-              clientMessageSeq,
-              scopeBytes,
-              expiresAt,
-            ],
-          )
-        : await client.query(
-            `
-              INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
-                cache_key,
-                tenant_key,
-                user_key,
-                session_key,
-                scope,
-                last_seq,
-                scope_bytes,
-                updated_at,
-                expires_at
-              )
-              VALUES ($1, $2, $3, $4, $5::jsonb, 0, $6, NOW(), $7::timestamptz)
-              ON CONFLICT (cache_key) DO UPDATE
-              SET tenant_key = EXCLUDED.tenant_key,
-                  user_key = EXCLUDED.user_key,
-                  session_key = EXCLUDED.session_key,
-                  scope = EXCLUDED.scope,
-                  last_seq = EXCLUDED.last_seq,
-                  scope_bytes = EXCLUDED.scope_bytes,
-                  updated_at = NOW(),
-                  expires_at = EXCLUDED.expires_at
-              WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq <= 0
-            `,
-            [identity.cacheKey, identity.tenantKey, identity.userKey, identity.sessionKey, scopeJson, scopeBytes, expiresAt],
-          );
-
-    const applied = parseAssistantSessionScopeStoreCount(upsertResult?.rowCount) > 0;
-    if (!applied) {
-      await client.query("COMMIT");
-      return {
-        applied: false,
-        stale: clientMessageSeq > 0,
-        clientMessageSeq,
-      };
-    }
-
-    const perUserMaintenance = await pruneAssistantSessionScopeStoreForUser(identity, client);
-    const maintenance = await pruneAssistantSessionScopeStore(client);
-    await client.query("COMMIT");
-
-    recordAssistantSessionScopeMetricSize(performanceObservability, maintenance.size);
-    recordAssistantSessionScopeMetricBytes(performanceObservability, maintenance.totalBytes);
-    const totalEvictions = perUserMaintenance.evictions + maintenance.evictions;
-    if (totalEvictions > 0) {
-      recordAssistantSessionScopeMetricEvictions(performanceObservability, totalEvictions);
-    }
-    if (truncated) {
-      console.warn(
-        `[assistant][scope-store] scope payload truncated to ${scope.clientComparables.length} clients for user=${identity.userKey} session=${identity.sessionKey}`,
-      );
-    }
-    return {
-      applied: true,
-      stale: false,
-      clientMessageSeq,
-    };
-  } catch (error) {
-    if (client) {
-      try {
-        await client.query("ROLLBACK");
-      } catch (_rollbackError) {
-        // Best effort rollback.
-      }
-    }
-    recordAssistantSessionScopeMetricError(performanceObservability, error);
-    console.warn(`[assistant][scope-store] upsert failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
-    return {
-      applied: false,
-      stale: false,
-      clientMessageSeq,
-    };
-  } finally {
-    if (client) {
-      client.release();
-    }
-  }
+  return assistantRepo.upsertAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, rawScope, options);
 }
 
 async function clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, options = {}) {
-  const clientMessageSeq = normalizeAssistantClientMessageSeq(options?.clientMessageSeq);
-  if (!pool) {
-    recordAssistantSessionScopeMetricSize(performanceObservability, 0);
-    recordAssistantSessionScopeMetricBytes(performanceObservability, 0);
-    return {
-      applied: false,
-      stale: false,
-      clientMessageSeq,
-    };
-  }
-
-  const identity = resolveAssistantSessionScopeIdentity(rawTenantKey, rawUsername, rawSessionId);
-  try {
-    await ensureDatabaseReady();
-    let applied = false;
-
-    if (clientMessageSeq > 0) {
-      const tombstonePayload = buildAssistantScopeClearTombstonePayload();
-      if (!tombstonePayload) {
-        return {
-          applied: false,
-          stale: false,
-          clientMessageSeq,
-        };
-      }
-
-      const expiresAt = new Date(Date.now() + ASSISTANT_SESSION_SCOPE_TTL_MS).toISOString();
-      const clearResult = await pool.query(
-        `
-          INSERT INTO ${ASSISTANT_SESSION_SCOPE_TABLE} (
-            cache_key,
-            tenant_key,
-            user_key,
-            session_key,
-            scope,
-            last_seq,
-            scope_bytes,
-            updated_at,
-            expires_at
-          )
-          VALUES ($1, $2, $3, $4, $5::jsonb, $6::bigint, $7, NOW(), $8::timestamptz)
-          ON CONFLICT (cache_key) DO UPDATE
-          SET tenant_key = EXCLUDED.tenant_key,
-              user_key = EXCLUDED.user_key,
-              session_key = EXCLUDED.session_key,
-              scope = EXCLUDED.scope,
-              last_seq = EXCLUDED.last_seq,
-              scope_bytes = EXCLUDED.scope_bytes,
-              updated_at = NOW(),
-              expires_at = EXCLUDED.expires_at
-          WHERE ${ASSISTANT_SESSION_SCOPE_TABLE}.last_seq < EXCLUDED.last_seq
-        `,
-        [
-          identity.cacheKey,
-          identity.tenantKey,
-          identity.userKey,
-          identity.sessionKey,
-          tombstonePayload.scopeJson,
-          clientMessageSeq,
-          tombstonePayload.scopeBytes,
-          expiresAt,
-        ],
-      );
-      applied = parseAssistantSessionScopeStoreCount(clearResult?.rowCount) > 0;
-    } else {
-      const clearResult = await pool.query(
-        `
-          DELETE FROM ${ASSISTANT_SESSION_SCOPE_TABLE}
-          WHERE cache_key = $1
-        `,
-        [identity.cacheKey],
-      );
-      applied = parseAssistantSessionScopeStoreCount(clearResult?.rowCount) > 0;
-    }
-
-    const maintenance = await pruneAssistantSessionScopeStore(pool);
-    recordAssistantSessionScopeMetricSize(performanceObservability, maintenance.size);
-    recordAssistantSessionScopeMetricBytes(performanceObservability, maintenance.totalBytes);
-    if (maintenance.evictions > 0) {
-      recordAssistantSessionScopeMetricEvictions(performanceObservability, maintenance.evictions);
-    }
-    return {
-      applied,
-      stale: clientMessageSeq > 0 && !applied,
-      clientMessageSeq,
-    };
-  } catch (error) {
-    recordAssistantSessionScopeMetricError(performanceObservability, error);
-    console.warn(`[assistant][scope-store] clear failed: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`);
-    return {
-      applied: false,
-      stale: false,
-      clientMessageSeq,
-    };
-  }
+  return assistantRepo.clearAssistantSessionScope(rawTenantKey, rawUsername, rawSessionId, options);
 }
 
 function hasAssistantScopeReferenceInMessage(normalizedMessage) {
@@ -12446,7 +11994,7 @@ async function maybeSweepMiniRuntimeStateSharedStore() {
 
   try {
     await ensureDatabaseReady();
-    await pool.query(`DELETE FROM ${MINI_RUNTIME_STATE_TABLE} WHERE expires_at <= NOW()`);
+    await sharedDbQuery(`DELETE FROM ${MINI_RUNTIME_STATE_TABLE} WHERE expires_at <= NOW()`);
   } catch (error) {
     console.warn("[mini runtime state] Failed to sweep expired rows:", sanitizeTextValue(error?.message, 220));
   }
@@ -12482,13 +12030,14 @@ async function consumeMiniRateLimitBucketShared(scope, subjectType, subject, pro
   const client = await pool.connect();
 
   try {
-    await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+    const txQuery = createDbQuery(client);
+    await txQuery("BEGIN");
+    await txQuery("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
       scopeKey,
       safeSubject,
     ]);
 
-    const existingResult = await client.query(
+    const existingResult = await txQuery(
       `
         SELECT hits, window_started_at, blocked_until
         FROM ${MINI_RUNTIME_STATE_TABLE}
@@ -12534,7 +12083,7 @@ async function consumeMiniRateLimitBucketShared(scope, subjectType, subject, pro
     }
 
     const expiresAtMs = Math.max(nowMs + windowMs * 2, blockedUntilMs, nowMs + 60_000);
-    await client.query(
+    await txQuery(
       `
         INSERT INTO ${MINI_RUNTIME_STATE_TABLE}
           (scope, entry_key, state, hits, window_started_at, blocked_until, status_code, response_body, expires_at, updated_at)
@@ -12559,14 +12108,14 @@ async function consumeMiniRateLimitBucketShared(scope, subjectType, subject, pro
       ],
     );
 
-    await client.query("COMMIT");
+    await txQuery("COMMIT");
     return {
       allowed,
       retryAfterMs,
     };
   } catch (error) {
     try {
-      await client.query("ROLLBACK");
+      await createDbQuery(client)("ROLLBACK");
     } catch {
       // Best-effort rollback.
     }
@@ -15594,7 +15143,7 @@ async function getCachedGhlCallTranscriptByClientAndMessageId(clientName, messag
     return null;
   }
 
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       SELECT
         client_name,
@@ -15637,7 +15186,7 @@ async function listCachedGhlCallTranscriptsByMessageIds(clientName, messageIds) 
     return new Map();
   }
 
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       SELECT
         client_name,
@@ -15684,7 +15233,7 @@ async function upsertGhlCallTranscriptCacheRow(row) {
   }
 
   const audioSizeBytes = Number.parseInt(sanitizeTextValue(normalizedRow?.audioSizeBytes, 20), 10);
-  await pool.query(
+  await sharedDbQuery(
     `
       INSERT INTO ${GHL_CALL_TRANSCRIPT_CACHE_TABLE}
         (
@@ -16369,7 +15918,7 @@ async function getCachedGhlBasicNoteByClientName(clientName) {
     return null;
   }
 
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       SELECT
         client_name,
@@ -16414,7 +15963,7 @@ async function listCachedGhlBasicNoteRowsByClientNames(clientNames) {
     return [];
   }
 
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       SELECT
         client_name,
@@ -16454,7 +16003,7 @@ async function upsertGhlBasicNoteCacheRow(row) {
     return null;
   }
 
-  await pool.query(
+  await sharedDbQuery(
     `
       INSERT INTO ${GHL_BASIC_NOTE_CACHE_TABLE}
         (
@@ -18017,7 +17566,7 @@ async function listCachedGhlClientManagerRowsByClientNames(clientNames) {
     return [];
   }
 
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       SELECT client_name, managers, managers_label, matched_contacts, status, error, updated_at
       FROM ${GHL_CLIENT_MANAGER_CACHE_TABLE}
@@ -18060,7 +17609,7 @@ async function upsertGhlClientManagerCacheRows(rows) {
       );
     }
 
-    const result = await pool.query(
+    const result = await sharedDbQuery(
       `
         INSERT INTO ${GHL_CLIENT_MANAGER_CACHE_TABLE}
           (client_name, managers, managers_label, matched_contacts, status, error)
@@ -18091,11 +17640,11 @@ async function deleteStaleGhlClientManagerCacheRows(clientNames) {
     .filter(Boolean);
 
   if (!names.length) {
-    const result = await pool.query(`DELETE FROM ${GHL_CLIENT_MANAGER_CACHE_TABLE}`);
+    const result = await sharedDbQuery(`DELETE FROM ${GHL_CLIENT_MANAGER_CACHE_TABLE}`);
     return result.rowCount || 0;
   }
 
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       DELETE FROM ${GHL_CLIENT_MANAGER_CACHE_TABLE}
       WHERE NOT (client_name = ANY($1::text[]))
@@ -19829,7 +19378,7 @@ async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE, optio
   queryParts.push(`ORDER BY created_on DESC, lead_id ASC`);
   queryParts.push(`LIMIT $${values.length}`);
 
-  const result = await pool.query(queryParts.join("\n"), values);
+  const result = await sharedDbQuery(queryParts.join("\n"), values);
 
   return result.rows.map(mapGhlLeadCacheRow).filter(Boolean);
 }
@@ -19837,7 +19386,7 @@ async function listCachedGhlLeadsRows(limit = GHL_LEADS_MAX_ROWS_RESPONSE, optio
 async function getGhlLeadsSyncCursor() {
   await ensureDatabaseReady();
 
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       SELECT
         MAX(created_on) AS latest_created_on,
@@ -19899,7 +19448,7 @@ async function upsertGhlLeadsCacheRows(rows) {
       );
     }
 
-    const result = await pool.query(
+    const result = await sharedDbQuery(
       `
         INSERT INTO ${GHL_LEADS_CACHE_TABLE} (
           lead_id,
@@ -19962,7 +19511,7 @@ async function deleteGhlLeadsCacheRowsByLeadIds(leadIds) {
   }
 
   const uniqueIds = [...new Set(ids)];
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       DELETE FROM ${GHL_LEADS_CACHE_TABLE}
       WHERE lead_id = ANY($1::text[])
@@ -19974,7 +19523,7 @@ async function deleteGhlLeadsCacheRowsByLeadIds(leadIds) {
 
 async function deleteMissedCallGhlLeadsCacheRows() {
   await ensureDatabaseReady();
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       DELETE FROM ${GHL_LEADS_CACHE_TABLE}
       WHERE LOWER(COALESCE(opportunity_name, '')) LIKE 'missed call%'
@@ -20509,26 +20058,14 @@ async function persistQuickBooksRefreshToken(tokenValue, refreshTokenExpiresAtIs
     return;
   }
 
-  const normalizedRefreshTokenExpiresAt = sanitizeTextValue(refreshTokenExpiresAtIso, 80) || null;
+  await quickBooksRepo.persistQuickBooksRefreshToken(normalizedToken, refreshTokenExpiresAtIso);
+}
 
-  await ensureDatabaseReady();
-  await pool.query(
-    `
-      INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (
-        id,
-        refresh_token,
-        refresh_token_expires_at,
-        updated_at
-      )
-      VALUES ($1, $2, $3::timestamptz, NOW())
-      ON CONFLICT (id)
-      DO UPDATE SET
-        refresh_token = EXCLUDED.refresh_token,
-        refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
-        updated_at = NOW()
-    `,
-    [QUICKBOOKS_AUTH_STATE_ROW_ID, normalizedToken, normalizedRefreshTokenExpiresAt],
-  );
+async function loadQuickBooksRefreshTokenFromStateStore() {
+  if (!pool) {
+    return "";
+  }
+  return quickBooksRepo.loadQuickBooksRefreshTokenFromStateStore();
 }
 
 function isQuickBooksInvalidRefreshTokenDetails(detailsText) {
@@ -21586,7 +21123,7 @@ async function ensureDatabaseReady() {
 
   if (!dbReadyPromise) {
     dbReadyPromise = (async () => {
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${STATE_TABLE} (
           id BIGINT PRIMARY KEY,
           records JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -21594,7 +21131,7 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(
+      await sharedDbQuery(
         `
           INSERT INTO ${STATE_TABLE} (id, records)
           VALUES ($1, '[]'::jsonb)
@@ -21603,7 +21140,7 @@ async function ensureDatabaseReady() {
         [STATE_ROW_ID],
       );
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE} (
           id TEXT PRIMARY KEY,
           record JSONB NOT NULL,
@@ -21619,77 +21156,77 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS record_hash TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS client_name TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS company_name TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS closed_by TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS source_state_updated_at TIMESTAMPTZ
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS source_state_row_id BIGINT NOT NULL DEFAULT ${STATE_ROW_ID}
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${CLIENT_RECORDS_V2_TABLE}
         ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_client_name_idx
         ON ${CLIENT_RECORDS_V2_TABLE} (client_name)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_created_at_idx
         ON ${CLIENT_RECORDS_V2_TABLE} (created_at DESC NULLS LAST)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_updated_at_idx
         ON ${CLIENT_RECORDS_V2_TABLE} (updated_at DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_state_updated_at_idx
         ON ${CLIENT_RECORDS_V2_TABLE} (source_state_updated_at DESC NULLS LAST)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${CLIENT_RECORDS_V2_TABLE_NAME}_record_gin_idx
         ON ${CLIENT_RECORDS_V2_TABLE} USING GIN (record)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${MODERATION_TABLE} (
           id TEXT PRIMARY KEY,
           record JSONB NOT NULL,
@@ -21704,32 +21241,32 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${MODERATION_TABLE}
         ADD COLUMN IF NOT EXISTS mini_data JSONB NOT NULL DEFAULT '{}'::jsonb
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${MODERATION_TABLE}
         ADD COLUMN IF NOT EXISTS purged_at TIMESTAMPTZ
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${MODERATION_TABLE_NAME}_status_submitted_at_id_idx
         ON ${MODERATION_TABLE} (status, submitted_at DESC, id DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${MODERATION_TABLE_NAME}_status_reviewed_submitted_idx
         ON ${MODERATION_TABLE} (status, reviewed_at DESC, submitted_at DESC, id DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${MODERATION_TABLE_NAME}_purged_at_idx
         ON ${MODERATION_TABLE} (purged_at DESC NULLS LAST)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${MODERATION_FILES_TABLE} (
           id TEXT PRIMARY KEY,
           submission_id TEXT NOT NULL REFERENCES ${MODERATION_TABLE}(id) ON DELETE CASCADE,
@@ -21744,131 +21281,39 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${MODERATION_FILES_TABLE}
         ALTER COLUMN content DROP NOT NULL
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${MODERATION_FILES_TABLE}
         ADD COLUMN IF NOT EXISTS storage_provider TEXT NOT NULL DEFAULT 'bytea'
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${MODERATION_FILES_TABLE}
         ADD COLUMN IF NOT EXISTS storage_key TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${MODERATION_FILES_TABLE}
         ADD COLUMN IF NOT EXISTS storage_url TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${MODERATION_FILES_TABLE_NAME}_submission_idx
         ON ${MODERATION_FILES_TABLE} (submission_id)
       `);
 
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE} (
-          transaction_type TEXT NOT NULL,
-          transaction_id TEXT NOT NULL,
-          customer_id TEXT NOT NULL DEFAULT '',
-          client_name TEXT NOT NULL,
-          client_phone TEXT NOT NULL DEFAULT '',
-          client_email TEXT NOT NULL DEFAULT '',
-          payment_amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
-          payment_date DATE NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          PRIMARY KEY (transaction_type, transaction_id)
-        )
-      `);
-
-      await pool.query(`
-        ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
-        ADD COLUMN IF NOT EXISTS customer_id TEXT NOT NULL DEFAULT ''
-      `);
-
-      await pool.query(`
-        ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
-        ADD COLUMN IF NOT EXISTS client_phone TEXT NOT NULL DEFAULT ''
-      `);
-
-      await pool.query(`
-        ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
-        ADD COLUMN IF NOT EXISTS client_email TEXT NOT NULL DEFAULT ''
-      `);
-
-      await pool.query(`
-        CREATE INDEX IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE_NAME}_payment_date_idx
-        ON ${QUICKBOOKS_TRANSACTIONS_TABLE} (payment_date DESC)
-      `);
-
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE} (
-          customer_id TEXT PRIMARY KEY,
-          client_name TEXT NOT NULL DEFAULT '',
-          client_phone TEXT NOT NULL DEFAULT '',
-          client_email TEXT NOT NULL DEFAULT '',
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-      `);
-
-      await pool.query(`
-        CREATE INDEX IF NOT EXISTS ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME}_updated_at_idx
-        ON ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE} (updated_at DESC)
-      `);
-
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_AUTH_STATE_TABLE} (
-          id BIGINT PRIMARY KEY,
-          refresh_token TEXT NOT NULL DEFAULT '',
-          refresh_token_expires_at TIMESTAMPTZ,
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-      `);
-
-      await pool.query(
-        `
-          INSERT INTO ${QUICKBOOKS_AUTH_STATE_TABLE} (
-            id,
-            refresh_token
-          )
-          VALUES ($1, $2)
-          ON CONFLICT (id) DO NOTHING
-        `,
-        [QUICKBOOKS_AUTH_STATE_ROW_ID, sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)],
-      );
-
-      if (sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)) {
-        await pool.query(
-          `
-            UPDATE ${QUICKBOOKS_AUTH_STATE_TABLE}
-            SET refresh_token = $2,
-                updated_at = NOW()
-            WHERE id = $1
-              AND COALESCE(refresh_token, '') = ''
-          `,
-          [QUICKBOOKS_AUTH_STATE_ROW_ID, sanitizeTextValue(QUICKBOOKS_REFRESH_TOKEN, 6000)],
-        );
+      const quickBooksSchemaState = await quickBooksRepo.ensureQuickBooksSchema({
+        initialRefreshToken: QUICKBOOKS_REFRESH_TOKEN,
+      });
+      if (quickBooksSchemaState?.storedRefreshToken) {
+        quickBooksRuntimeRefreshToken = quickBooksSchemaState.storedRefreshToken;
       }
 
-      const quickBooksAuthStateResult = await pool.query(
-        `
-          SELECT refresh_token
-          FROM ${QUICKBOOKS_AUTH_STATE_TABLE}
-          WHERE id = $1
-          LIMIT 1
-        `,
-        [QUICKBOOKS_AUTH_STATE_ROW_ID],
-      );
-      const storedQuickBooksRefreshToken = sanitizeTextValue(quickBooksAuthStateResult.rows[0]?.refresh_token, 6000);
-      if (storedQuickBooksRefreshToken) {
-        quickBooksRuntimeRefreshToken = storedQuickBooksRefreshToken;
-      }
-
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${GHL_CLIENT_MANAGER_CACHE_TABLE} (
           client_name TEXT PRIMARY KEY,
           managers JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -21880,12 +21325,12 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_CLIENT_MANAGER_CACHE_TABLE_NAME}_updated_at_idx
         ON ${GHL_CLIENT_MANAGER_CACHE_TABLE} (updated_at DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${GHL_BASIC_NOTE_CACHE_TABLE} (
           client_name TEXT PRIMARY KEY,
           status TEXT NOT NULL DEFAULT 'not_found',
@@ -21908,32 +21353,32 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS memo_title TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS memo_body TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS memo_created_at TIMESTAMPTZ
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_BASIC_NOTE_CACHE_TABLE_NAME}_next_refresh_idx
         ON ${GHL_BASIC_NOTE_CACHE_TABLE} (next_refresh_at ASC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_BASIC_NOTE_CACHE_TABLE_NAME}_updated_at_idx
         ON ${GHL_BASIC_NOTE_CACHE_TABLE} (updated_at DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${GHL_CALL_TRANSCRIPT_CACHE_TABLE} (
           client_name TEXT NOT NULL,
           message_id TEXT NOT NULL,
@@ -21949,22 +21394,22 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME}_updated_at_idx
         ON ${GHL_CALL_TRANSCRIPT_CACHE_TABLE} (updated_at DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_CALL_TRANSCRIPT_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS formatted_transcript TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME}_client_name_idx
         ON ${GHL_CALL_TRANSCRIPT_CACHE_TABLE} (client_name, updated_at DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${GHL_LEADS_CACHE_TABLE} (
           lead_id TEXT PRIMARY KEY,
           contact_id TEXT NOT NULL DEFAULT '',
@@ -21988,42 +21433,42 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS lead_type TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS assigned_to TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_LEADS_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_LEADS_CACHE_TABLE_NAME}_created_on_idx
         ON ${GHL_LEADS_CACHE_TABLE} (created_on DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_LEADS_CACHE_TABLE_NAME}_ghl_updated_at_idx
         ON ${GHL_LEADS_CACHE_TABLE} (ghl_updated_at DESC NULLS LAST)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE} (
           id TEXT PRIMARY KEY,
           client_name TEXT NOT NULL DEFAULT '',
@@ -22046,57 +21491,57 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
         ADD COLUMN IF NOT EXISTS client_name_lookup TEXT NOT NULL DEFAULT ''
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
         ADD COLUMN IF NOT EXISTS external_id TEXT
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
         ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
         ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
         ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${GHL_CONTRACT_ARCHIVE_TABLE}
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE_NAME}_client_lookup_idx
         ON ${GHL_CONTRACT_ARCHIVE_TABLE} (client_name_lookup)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE_NAME}_contact_id_idx
         ON ${GHL_CONTRACT_ARCHIVE_TABLE} (contact_id)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE_NAME}_archived_at_idx
         ON ${GHL_CONTRACT_ARCHIVE_TABLE} (archived_at DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_ARCHIVE_TABLE_NAME}_external_id_idx
         ON ${GHL_CONTRACT_ARCHIVE_TABLE} (external_id)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE} (
           id BIGSERIAL PRIMARY KEY,
           asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -22114,17 +21559,17 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE_NAME}_asked_at_idx
         ON ${ASSISTANT_REVIEW_TABLE} (asked_at DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE_NAME}_corrected_at_idx
         ON ${ASSISTANT_REVIEW_TABLE} (corrected_at DESC NULLS LAST)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE} (
           cache_key TEXT PRIMARY KEY,
           tenant_key TEXT NOT NULL DEFAULT '${ASSISTANT_SESSION_SCOPE_DEFAULT_TENANT_KEY}',
@@ -22138,43 +21583,43 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${ASSISTANT_SESSION_SCOPE_TABLE}
         ADD COLUMN IF NOT EXISTS scope_bytes INTEGER NOT NULL DEFAULT 0
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         ALTER TABLE ${ASSISTANT_SESSION_SCOPE_TABLE}
         ADD COLUMN IF NOT EXISTS last_seq BIGINT NOT NULL DEFAULT 0
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         UPDATE ${ASSISTANT_SESSION_SCOPE_TABLE}
         SET scope_bytes = GREATEST(OCTET_LENGTH(scope::text), 0)
         WHERE scope_bytes <= 0
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_expires_at_idx
         ON ${ASSISTANT_SESSION_SCOPE_TABLE} (expires_at ASC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_updated_at_idx
         ON ${ASSISTANT_SESSION_SCOPE_TABLE} (updated_at ASC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_tenant_user_session_idx
         ON ${ASSISTANT_SESSION_SCOPE_TABLE} (tenant_key, user_key, session_key)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${ASSISTANT_SESSION_SCOPE_TABLE_NAME}_tenant_user_updated_idx
         ON ${ASSISTANT_SESSION_SCOPE_TABLE} (tenant_key, user_key, updated_at DESC, cache_key DESC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE} (
           scope TEXT NOT NULL,
           entry_key TEXT NOT NULL,
@@ -22191,12 +21636,12 @@ async function ensureDatabaseReady() {
         )
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE_NAME}_expires_at_idx
         ON ${MINI_RUNTIME_STATE_TABLE} (expires_at ASC)
       `);
 
-      await pool.query(`
+      await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${MINI_RUNTIME_STATE_TABLE_NAME}_scope_expires_idx
         ON ${MINI_RUNTIME_STATE_TABLE} (scope, expires_at ASC)
       `);
@@ -22209,19 +21654,149 @@ async function ensureDatabaseReady() {
   return dbReadyPromise;
 }
 
+const recordsRepo = createRecordsRepo({
+  db: {
+    pool,
+    query: sharedDbQuery,
+    tx: sharedDbTx,
+    createClientQuery: (client) => createDbQuery(client),
+  },
+  ensureDatabaseReady,
+  tables: {
+    stateTable: STATE_TABLE,
+    stateRowId: STATE_ROW_ID,
+    clientRecordsV2Table: CLIENT_RECORDS_V2_TABLE,
+  },
+  flags: {
+    dualWriteV2Enabled: DUAL_WRITE_V2_ENABLED,
+    dualReadCompareEnabled: DUAL_READ_COMPARE_ENABLED,
+    writeV2Enabled: WRITE_V2_ENABLED,
+    legacyMirrorEnabled: LEGACY_MIRROR_ENABLED,
+  },
+  helpers: {
+    normalizeRecordStateTimestamp,
+    normalizeLegacyRecordsSnapshot,
+    computeRecordHash,
+    computeRowsChecksum,
+    sanitizeTextValue,
+    createHttpError,
+    isRecordStateRevisionMatch,
+    applyRecordsPatchOperations,
+    normalizeDualWriteSummaryValue,
+    buildDualReadCompareSummaryPayload,
+    buildDualWriteSummaryPayload,
+  },
+  metrics: {
+    recordDualReadCompareAttempt,
+    recordDualReadCompareMismatch,
+    recordDualReadCompareSuccess: recordDualReadCompareMatch,
+    recordDualWriteAttempt: recordDualWriteMetricAttempt,
+    recordDualWriteSuccess: recordDualWriteMetricSuccess,
+    recordDualWriteFailure: recordDualWriteMetricFailure,
+  },
+  performanceObservability,
+  logger: console,
+});
+
+const assistantRepo = createAssistantRepo({
+  db: {
+    pool,
+    query: sharedDbQuery,
+    tx: sharedDbTx,
+    createClientQuery: (client) => createDbQuery(client),
+  },
+  ensureDatabaseReady,
+  tables: {
+    assistantSessionScopeTable: ASSISTANT_SESSION_SCOPE_TABLE,
+    assistantReviewTable: ASSISTANT_REVIEW_TABLE,
+  },
+  constants: {
+    ASSISTANT_SESSION_SCOPE_MAX_SESSIONS_PER_USER,
+    ASSISTANT_SESSION_SCOPE_MAX_ENTRIES,
+    ASSISTANT_SESSION_SCOPE_MAX_TOTAL_BYTES,
+    ASSISTANT_SESSION_SCOPE_TTL_MS,
+    ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED,
+    ASSISTANT_REVIEW_RETENTION_SWEEP_BATCH_LIMIT,
+    ASSISTANT_REVIEW_RETENTION_DAYS,
+    ASSISTANT_MAX_MESSAGE_LENGTH,
+    ASSISTANT_OWNER_LEARNING_CANDIDATE_LIMIT,
+    ASSISTANT_OWNER_LEARNING_MIN_CONTEXT_SCORE,
+    ASSISTANT_OWNER_LEARNING_MAX_PROMPT_EXAMPLES,
+    ASSISTANT_OWNER_LEARNING_DIRECT_MATCH_MIN_SCORE,
+    ASSISTANT_REVIEW_MAX_TEXT_LENGTH,
+    ASSISTANT_REVIEW_MAX_COMMENT_LENGTH,
+    ASSISTANT_REVIEW_PII_MODE,
+  },
+  helpers: {
+    parseAssistantSessionScopeStoreCount,
+    parseAssistantSessionScopeStoreBytes,
+    resolveAssistantSessionScopeIdentity,
+    normalizeAssistantScopePayload,
+    normalizeAssistantClientMessageSeq,
+    buildAssistantScopeStoragePayload,
+    buildAssistantScopeClearTombstonePayload,
+    sanitizeTextValue,
+    normalizeAssistantComparableText,
+    tokenizeAssistantText,
+    scoreAssistantOwnerLearningCandidate,
+    normalizeAssistantReplyForDisplay,
+    normalizeAssistantReviewClientMentions,
+    sanitizeAssistantReviewTextForStorage,
+    normalizeAssistantChatMode,
+    normalizeAssistantReviewLimit,
+    normalizeAssistantReviewOffset,
+    mapAssistantReviewRow,
+    createHttpError,
+    resolveOptionalBoolean,
+  },
+  metrics: {
+    recordAssistantSessionScopeMetricHit,
+    recordAssistantSessionScopeMetricMiss,
+    recordAssistantSessionScopeMetricError,
+    recordAssistantSessionScopeMetricEvictions,
+    recordAssistantSessionScopeMetricSize,
+    recordAssistantSessionScopeMetricBytes,
+  },
+  performanceObservability,
+  logger: console,
+});
+
+const quickBooksRepo = createQuickBooksRepo({
+  db: {
+    query: sharedDbQuery,
+    tx: sharedDbTx,
+  },
+  ensureDatabaseReady,
+  tables: {
+    quickBooksTransactionsTable: QUICKBOOKS_TRANSACTIONS_TABLE,
+    quickBooksTransactionsTableName: QUICKBOOKS_TRANSACTIONS_TABLE_NAME,
+    quickBooksCustomersCacheTable: QUICKBOOKS_CUSTOMERS_CACHE_TABLE,
+    quickBooksCustomersCacheTableName: QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME,
+    quickBooksAuthStateTable: QUICKBOOKS_AUTH_STATE_TABLE,
+    quickBooksAuthStateRowId: QUICKBOOKS_AUTH_STATE_ROW_ID,
+  },
+  constants: {
+    quickBooksCacheUpsertBatchSize: QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE,
+    quickBooksMinVisibleAbsAmount: QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT,
+    quickBooksZeroReconcileMaxRows: QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS,
+  },
+  helpers: {
+    sanitizeTextValue,
+  },
+});
+
+const quickBooksService = createQuickBooksService({
+  repo: quickBooksRepo,
+  listQuickBooksOutgoingTransactionsInRange,
+  buildQuickBooksSyncMeta,
+  enqueueQuickBooksSyncJob,
+  buildQuickBooksSyncJobPayload,
+  getQuickBooksSyncJobById,
+  requestOpenAiQuickBooksInsight,
+});
+
 async function getStoredRecords() {
-  await ensureDatabaseReady();
-  const result = await pool.query(`SELECT records, updated_at FROM ${STATE_TABLE} WHERE id = $1`, [STATE_ROW_ID]);
-
-  if (!result.rows.length) {
-    return { records: [], updatedAt: null };
-  }
-
-  const row = result.rows[0];
-  return {
-    records: Array.isArray(row.records) ? row.records : [],
-    updatedAt: row.updated_at || null,
-  };
+  return recordsRepo.getStoredRecords();
 }
 
 function resolveRecordsV2UpdatedAt(candidateValues) {
@@ -22250,35 +21825,7 @@ function normalizeRecordFromV2Row(rawValue) {
 }
 
 async function getStoredRecordsFromV2() {
-  await ensureDatabaseReady();
-  const stateResult = await pool.query(`SELECT updated_at FROM ${STATE_TABLE} WHERE id = $1`, [STATE_ROW_ID]);
-  const stateUpdatedAt = stateResult.rows[0]?.updated_at || null;
-  const result = await pool.query(
-    `
-      SELECT id, record, source_state_updated_at, updated_at
-      FROM ${CLIENT_RECORDS_V2_TABLE}
-      WHERE source_state_row_id = $1
-      ORDER BY id ASC
-    `,
-    [STATE_ROW_ID],
-  );
-
-  const records = [];
-  const updatedAtCandidates = [];
-
-  for (const row of result.rows) {
-    const record = normalizeRecordFromV2Row(row?.record);
-    if (record) {
-      records.push(record);
-    }
-    updatedAtCandidates.push(row?.source_state_updated_at, row?.updated_at);
-  }
-  updatedAtCandidates.push(stateUpdatedAt);
-
-  return {
-    records,
-    updatedAt: resolveRecordsV2UpdatedAt(updatedAtCandidates),
-  };
+  return recordsRepo.getStoredRecordsFromV2();
 }
 
 function normalizeAssistantRecordsSnapshotVersion(rawUpdatedAt) {
@@ -22481,9 +22028,7 @@ function pruneAssistantPreparedDataCache(nowMs = Date.now()) {
 }
 
 async function getStoredRecordsHeadRevision() {
-  await ensureDatabaseReady();
-  const revisionResult = await pool.query(`SELECT updated_at FROM ${STATE_TABLE} WHERE id = $1`, [STATE_ROW_ID]);
-  return revisionResult.rows[0]?.updated_at || null;
+  return recordsRepo.getStoredRecordsHeadRevision();
 }
 
 async function getStoredRecordsForAssistantChat() {
@@ -22665,66 +22210,7 @@ function compareLegacyAndV2RecordSnapshots(legacyRows, v2Rows, options = {}) {
 }
 
 async function runDualReadCompareForLegacyRecords(records, options = {}) {
-  if (!DUAL_READ_COMPARE_ENABLED || !pool) {
-    return;
-  }
-
-  recordDualReadCompareAttempt(performanceObservability);
-  const source = sanitizeTextValue(options.source, 80) || "GET /api/records";
-  const requestedBy = sanitizeTextValue(options.requestedBy, 160);
-
-  try {
-    await ensureDatabaseReady();
-
-    const legacySnapshot = normalizeLegacyRecordsSnapshot(records, {
-      sourceStateRowId: STATE_ROW_ID,
-    });
-
-    const v2Result = await pool.query(
-      `
-        SELECT id, record, record_hash
-        FROM ${CLIENT_RECORDS_V2_TABLE}
-        WHERE source_state_row_id = $1
-        ORDER BY id ASC
-      `,
-      [STATE_ROW_ID],
-    );
-
-    const v2Rows = [];
-    for (const row of v2Result.rows) {
-      const normalizedRow = normalizeV2RowForDualReadCompare(row);
-      if (!normalizedRow) {
-        continue;
-      }
-      v2Rows.push(normalizedRow);
-    }
-    v2Rows.sort((left, right) => left.id.localeCompare(right.id));
-
-    const compareResult = compareLegacyAndV2RecordSnapshots(legacySnapshot.rows, v2Rows, {
-      source,
-      maxSampleIds: 20,
-    });
-
-    if (compareResult.mismatchDetected) {
-      const summary = {
-        requestedBy,
-        ...compareResult.summary,
-      };
-      recordDualReadCompareMismatch(performanceObservability, summary);
-      console.warn("[records dual-read compare] mismatch detected:", buildDualReadCompareSummaryPayload(summary));
-      return;
-    }
-
-    recordDualReadCompareMatch(performanceObservability);
-  } catch (error) {
-    recordDualReadCompareError(performanceObservability, error);
-    console.error("[records dual-read compare] failed:", {
-      source,
-      requestedBy,
-      code: sanitizeTextValue(error?.code, 80),
-      message: sanitizeTextValue(error?.message, 600),
-    });
-  }
+  return recordsRepo.runDualReadCompareForLegacyRecords(records, options);
 }
 
 function scheduleDualReadCompareForLegacyRecords(records, options = {}) {
@@ -22752,109 +22238,7 @@ function normalizeSourceStateUpdatedAtForV2(rawValue) {
 }
 
 async function syncLegacyRecordsSnapshotToV2(client, records, options = {}) {
-  const sourceStateRowId = STATE_ROW_ID;
-  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.writeTimestamp) || new Date().toISOString();
-  const sourceStateUpdatedAt = normalizeSourceStateUpdatedAtForV2(options.sourceStateUpdatedAt) || writeTimestamp;
-  const snapshot = normalizeLegacyRecordsSnapshot(records, {
-    sourceStateUpdatedAt,
-    sourceStateRowId,
-  });
-
-  let insertedCount = 0;
-  let updatedCount = 0;
-  let unchangedCount = 0;
-
-  for (const row of snapshot.rows) {
-    const result = await client.query(
-      `
-        INSERT INTO ${CLIENT_RECORDS_V2_TABLE}
-          (id, record, record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id, inserted_at, updated_at)
-        VALUES
-          ($1, $2::jsonb, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9, $10::timestamptz, $10::timestamptz)
-        ON CONFLICT (id)
-        DO UPDATE SET
-          record = EXCLUDED.record,
-          record_hash = EXCLUDED.record_hash,
-          client_name = EXCLUDED.client_name,
-          company_name = EXCLUDED.company_name,
-          closed_by = EXCLUDED.closed_by,
-          created_at = EXCLUDED.created_at,
-          source_state_updated_at = EXCLUDED.source_state_updated_at,
-          source_state_row_id = EXCLUDED.source_state_row_id,
-          updated_at = EXCLUDED.updated_at
-        WHERE
-          (record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id)
-          IS DISTINCT FROM
-          (EXCLUDED.record_hash, EXCLUDED.client_name, EXCLUDED.company_name, EXCLUDED.closed_by, EXCLUDED.created_at, EXCLUDED.source_state_updated_at, EXCLUDED.source_state_row_id)
-        RETURNING (xmax = 0) AS inserted
-      `,
-      [
-        row.id,
-        JSON.stringify(row.record),
-        row.recordHash,
-        row.clientName,
-        row.companyName,
-        row.closedBy,
-        row.createdAt,
-        row.sourceStateUpdatedAt,
-        row.sourceStateRowId,
-        writeTimestamp,
-      ],
-    );
-
-    if (!result.rows.length) {
-      unchangedCount += 1;
-      continue;
-    }
-
-    if (result.rows[0]?.inserted) {
-      insertedCount += 1;
-    } else {
-      updatedCount += 1;
-    }
-  }
-
-  let deletedCount = 0;
-  if (snapshot.rows.length) {
-    const ids = snapshot.rows.map((row) => row.id);
-    const deleteResult = await client.query(
-      `
-        DELETE FROM ${CLIENT_RECORDS_V2_TABLE}
-        WHERE source_state_row_id = $1
-          AND NOT (id = ANY($2::text[]))
-      `,
-      [sourceStateRowId, ids],
-    );
-    deletedCount = deleteResult.rowCount || 0;
-  } else {
-    const deleteResult = await client.query(
-      `
-        DELETE FROM ${CLIENT_RECORDS_V2_TABLE}
-        WHERE source_state_row_id = $1
-      `,
-      [sourceStateRowId],
-    );
-    deletedCount = deleteResult.rowCount || 0;
-  }
-
-  const countResult = await client.query(
-    `SELECT COUNT(*)::bigint AS total FROM ${CLIENT_RECORDS_V2_TABLE} WHERE source_state_row_id = $1`,
-    [sourceStateRowId],
-  );
-  const v2Count = normalizeDualWriteSummaryValue(countResult.rows[0]?.total);
-
-  return {
-    writeTimestamp,
-    expectedCount: snapshot.rows.length,
-    v2Count,
-    insertedCount,
-    updatedCount,
-    unchangedCount,
-    deletedCount,
-    skippedInvalidRecordCount: snapshot.skippedInvalidRecordCount,
-    skippedMissingIdCount: snapshot.skippedMissingIdCount,
-    duplicateIdCount: snapshot.duplicateIdCount,
-  };
+  return recordsRepo.syncLegacyRecordsSnapshotToV2(client, records, options);
 }
 
 async function applyRecordsDualWriteV2(client, records, options = {}) {
@@ -22927,84 +22311,15 @@ async function applyRecordsDualWriteV2(client, records, options = {}) {
 }
 
 async function upsertLegacyStateRevisionPointer(client, updatedAt) {
-  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(updatedAt) || new Date().toISOString();
-  await client.query(
-    `
-      INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-      VALUES ($1, '[]'::jsonb, $2::timestamptz)
-      ON CONFLICT (id)
-      DO UPDATE SET
-        updated_at = EXCLUDED.updated_at
-    `,
-    [STATE_ROW_ID, writeTimestamp],
-  );
-  return writeTimestamp;
+  return recordsRepo.upsertLegacyStateRevisionPointer(client, updatedAt);
 }
 
 async function mirrorLegacyStateRecordsBestEffort(client, records, updatedAt, options = {}) {
-  if (!LEGACY_MIRROR_ENABLED) {
-    return {
-      enabled: false,
-      attempted: false,
-    };
-  }
-
-  const mode = sanitizeTextValue(options.mode, 32) || "unknown";
-  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(updatedAt) || new Date().toISOString();
-  let mirrored = false;
-  let failed = false;
-  let errorMessage = "";
-
-  await client.query("SAVEPOINT legacy_mirror_write");
-  try {
-    await client.query(
-      `
-        INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-        VALUES ($1, $2::jsonb, $3::timestamptz)
-        ON CONFLICT (id)
-        DO UPDATE SET
-          records = EXCLUDED.records,
-          updated_at = EXCLUDED.updated_at
-      `,
-      [STATE_ROW_ID, JSON.stringify(records), writeTimestamp],
-    );
-    mirrored = true;
-    await client.query("RELEASE SAVEPOINT legacy_mirror_write");
-  } catch (error) {
-    failed = true;
-    errorMessage = sanitizeTextValue(error?.message, 600);
-    await client.query("ROLLBACK TO SAVEPOINT legacy_mirror_write");
-    await client.query("RELEASE SAVEPOINT legacy_mirror_write");
-    console.warn("[records write_v2] legacy mirror write failed (primary write kept):", {
-      mode,
-      errorCode: sanitizeTextValue(error?.code, 80),
-      message: errorMessage,
-    });
-  }
-
-  return {
-    enabled: true,
-    attempted: true,
-    mirrored,
-    failed,
-    errorMessage,
-  };
+  return recordsRepo.mirrorLegacyStateRecordsBestEffort(client, records, updatedAt, options);
 }
 
 async function prependSingleRecordToLegacyState(client, record, options = {}) {
-  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.writeTimestamp) || new Date().toISOString();
-  await client.query(
-    `
-      INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-      VALUES ($1, jsonb_build_array($2::jsonb), $3::timestamptz)
-      ON CONFLICT (id)
-      DO UPDATE SET
-        records = jsonb_build_array($2::jsonb) || COALESCE(records, '[]'::jsonb),
-        updated_at = EXCLUDED.updated_at
-    `,
-    [STATE_ROW_ID, JSON.stringify(record || {}), writeTimestamp],
-  );
-  return writeTimestamp;
+  return recordsRepo.prependSingleRecordToLegacyState(client, record, options);
 }
 
 function shouldWriteLegacyStateOnMiniApproval(options = {}) {
@@ -23025,410 +22340,40 @@ function shouldWriteLegacyStateOnMiniApproval(options = {}) {
 }
 
 async function upsertSingleRecordToV2(client, record, options = {}) {
-  const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.writeTimestamp) || new Date().toISOString();
-  const snapshot = normalizeLegacyRecordsSnapshot([record], {
-    sourceStateUpdatedAt: writeTimestamp,
-    sourceStateRowId: STATE_ROW_ID,
-  });
-  const row = snapshot.rows[0];
-  if (!row) {
-    throw createHttpError(
-      "Cannot approve submission. Record payload is invalid.",
-      400,
-      "invalid_submission_record",
-    );
-  }
-
-  await client.query(
-    `
-      INSERT INTO ${CLIENT_RECORDS_V2_TABLE}
-        (id, record, record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id, inserted_at, updated_at)
-      VALUES
-        ($1, $2::jsonb, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9, $10::timestamptz, $10::timestamptz)
-      ON CONFLICT (id)
-      DO UPDATE SET
-        record = EXCLUDED.record,
-        record_hash = EXCLUDED.record_hash,
-        client_name = EXCLUDED.client_name,
-        company_name = EXCLUDED.company_name,
-        closed_by = EXCLUDED.closed_by,
-        created_at = EXCLUDED.created_at,
-        source_state_updated_at = EXCLUDED.source_state_updated_at,
-        source_state_row_id = EXCLUDED.source_state_row_id,
-        updated_at = EXCLUDED.updated_at
-      WHERE
-        (record_hash, client_name, company_name, closed_by, created_at, source_state_updated_at, source_state_row_id)
-        IS DISTINCT FROM
-        (EXCLUDED.record_hash, EXCLUDED.client_name, EXCLUDED.company_name, EXCLUDED.closed_by, EXCLUDED.created_at, EXCLUDED.source_state_updated_at, EXCLUDED.source_state_row_id)
-    `,
-    [
-      row.id,
-      JSON.stringify(row.record),
-      row.recordHash,
-      row.clientName,
-      row.companyName,
-      row.closedBy,
-      row.createdAt,
-      row.sourceStateUpdatedAt,
-      row.sourceStateRowId,
-      writeTimestamp,
-    ],
-  );
-
-  return {
-    writeTimestamp,
-  };
+  return recordsRepo.upsertSingleRecordToV2(client, record, options);
 }
 
 async function listCurrentRecordsFromV2ForWrite(client) {
-  const result = await client.query(
-    `
-      SELECT id, record
-      FROM ${CLIENT_RECORDS_V2_TABLE}
-      WHERE source_state_row_id = $1
-      ORDER BY id ASC
-    `,
-    [STATE_ROW_ID],
-  );
-
-  const records = [];
-  for (const row of result.rows) {
-    const record = normalizeRecordFromV2Row(row?.record);
-    if (!record) {
-      continue;
-    }
-    records.push(record);
-  }
-  return records;
+  return recordsRepo.listCurrentRecordsFromV2ForWrite(client);
 }
 
 async function saveStoredRecordsUsingV2(records, options = {}) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const stateResult = await client.query(
-      `
-        SELECT updated_at
-        FROM ${STATE_TABLE}
-        WHERE id = $1
-        FOR UPDATE
-      `,
-      [STATE_ROW_ID],
-    );
-
-    const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
-    if (!isRecordStateRevisionMatch(options.expectedUpdatedAt, currentUpdatedAt)) {
-      const conflictError = createHttpError(
-        "Records were updated by another operation. Refresh records and try again.",
-        409,
-        "records_conflict",
-      );
-      conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
-      throw conflictError;
-    }
-
-    const writeTimestamp = new Date().toISOString();
-    const syncSummary = await syncLegacyRecordsSnapshotToV2(client, records, {
-      sourceStateUpdatedAt: writeTimestamp,
-      writeTimestamp,
-    });
-
-    if (syncSummary.v2Count !== syncSummary.expectedCount) {
-      const desyncError = createHttpError(
-        "client_records_v2 is out of sync after write verification. Write was rolled back.",
-        503,
-        "records_v2_write_desync",
-      );
-      desyncError.detail = `expected=${syncSummary.expectedCount}, actual=${syncSummary.v2Count}`;
-      throw desyncError;
-    }
-
-    const updatedAt = await upsertLegacyStateRevisionPointer(client, writeTimestamp);
-    await mirrorLegacyStateRecordsBestEffort(client, records, updatedAt, {
-      mode: "put",
-    });
-
-    await client.query("COMMIT");
-    return updatedAt;
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // Best-effort rollback.
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  return recordsRepo.saveStoredRecordsUsingV2(records, options);
 }
 
 async function saveStoredRecordsPatchUsingV2(operations, options = {}) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const stateResult = await client.query(
-      `
-        SELECT updated_at
-        FROM ${STATE_TABLE}
-        WHERE id = $1
-        FOR UPDATE
-      `,
-      [STATE_ROW_ID],
-    );
-
-    const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
-    if (!isRecordStateRevisionMatch(options.expectedUpdatedAt, currentUpdatedAt)) {
-      const conflictError = createHttpError(
-        "Records were updated by another operation. Refresh records and try again.",
-        409,
-        "records_conflict",
-      );
-      conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
-      throw conflictError;
-    }
-
-    const normalizedOperations = Array.isArray(operations) ? operations : [];
-    if (!normalizedOperations.length) {
-      await client.query("COMMIT");
-      return {
-        updatedAt: currentUpdatedAt,
-      };
-    }
-
-    const currentRecords = await listCurrentRecordsFromV2ForWrite(client);
-    const nextRecords = applyRecordsPatchOperations(currentRecords, normalizedOperations);
-    const writeTimestamp = new Date().toISOString();
-    const syncSummary = await syncLegacyRecordsSnapshotToV2(client, nextRecords, {
-      sourceStateUpdatedAt: writeTimestamp,
-      writeTimestamp,
-    });
-
-    if (syncSummary.v2Count !== syncSummary.expectedCount) {
-      const desyncError = createHttpError(
-        "client_records_v2 is out of sync after write verification. Write was rolled back.",
-        503,
-        "records_v2_write_desync",
-      );
-      desyncError.detail = `expected=${syncSummary.expectedCount}, actual=${syncSummary.v2Count}`;
-      throw desyncError;
-    }
-
-    const updatedAt = await upsertLegacyStateRevisionPointer(client, writeTimestamp);
-    await mirrorLegacyStateRecordsBestEffort(client, nextRecords, updatedAt, {
-      mode: "patch",
-    });
-
-    await client.query("COMMIT");
-    return {
-      updatedAt,
-    };
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // Best-effort rollback.
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  return recordsRepo.saveStoredRecordsPatchUsingV2(operations, options);
 }
 
 async function saveStoredRecords(records, options = {}) {
-  await ensureDatabaseReady();
-  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(options, "expectedUpdatedAt");
-  if (!hasExpectedUpdatedAt) {
-    throw createHttpError(
-      "Payload must include `expectedUpdatedAt` (latest revision from GET /api/records).",
-      428,
-      "records_precondition_required",
-    );
-  }
-
-  const expectedUpdatedAt = options.expectedUpdatedAt;
-  const expectedUpdatedAtMs = normalizeRecordStateTimestamp(expectedUpdatedAt);
-  if (expectedUpdatedAt !== null && expectedUpdatedAt !== "" && expectedUpdatedAtMs === null) {
-    throw createHttpError("`expectedUpdatedAt` must be a valid ISO datetime or null.", 400, "invalid_expected_updated_at");
-  }
-
-  if (WRITE_V2_ENABLED) {
-    return saveStoredRecordsUsingV2(records, {
-      expectedUpdatedAt,
-    });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const stateResult = await client.query(
-      `
-        SELECT updated_at
-        FROM ${STATE_TABLE}
-        WHERE id = $1
-        FOR UPDATE
-      `,
-      [STATE_ROW_ID],
-    );
-
-    const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
-    if (!isRecordStateRevisionMatch(expectedUpdatedAt, currentUpdatedAt)) {
-      const conflictError = createHttpError(
-        "Records were updated by another operation. Refresh records and try again.",
-        409,
-        "records_conflict",
-      );
-      conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
-      throw conflictError;
-    }
-
-    const result = await client.query(
-      `
-        INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-        VALUES ($1, $2::jsonb, NOW())
-        ON CONFLICT (id)
-        DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
-        RETURNING updated_at
-      `,
-      [STATE_ROW_ID, JSON.stringify(records)],
-    );
-
-    const updatedAt = result.rows[0]?.updated_at || null;
-    await applyRecordsDualWriteV2(client, records, {
-      mode: "put",
-      sourceStateUpdatedAt: updatedAt,
-    });
-
-    await client.query("COMMIT");
-    return updatedAt;
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // Best-effort rollback.
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  return recordsRepo.saveStoredRecords(records, options);
 }
 
 async function saveStoredRecordsPatch(operations, options = {}) {
-  await ensureDatabaseReady();
-
-  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(options, "expectedUpdatedAt");
-  if (!hasExpectedUpdatedAt) {
-    throw createHttpError(
-      "Payload must include `expectedUpdatedAt` (latest revision from GET /api/records).",
-      428,
-      "records_precondition_required",
-    );
-  }
-
-  const expectedUpdatedAt = options.expectedUpdatedAt;
-  const expectedUpdatedAtMs = normalizeRecordStateTimestamp(expectedUpdatedAt);
-  if (expectedUpdatedAt !== null && expectedUpdatedAt !== "" && expectedUpdatedAtMs === null) {
-    throw createHttpError("`expectedUpdatedAt` must be a valid ISO datetime or null.", 400, "invalid_expected_updated_at");
-  }
-
-  if (WRITE_V2_ENABLED) {
-    return saveStoredRecordsPatchUsingV2(operations, {
-      expectedUpdatedAt,
-    });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const stateResult = await client.query(
-      `
-        SELECT records, updated_at
-        FROM ${STATE_TABLE}
-        WHERE id = $1
-        FOR UPDATE
-      `,
-      [STATE_ROW_ID],
-    );
-
-    const currentUpdatedAt = stateResult.rows[0]?.updated_at || null;
-    if (!isRecordStateRevisionMatch(expectedUpdatedAt, currentUpdatedAt)) {
-      const conflictError = createHttpError(
-        "Records were updated by another operation. Refresh records and try again.",
-        409,
-        "records_conflict",
-      );
-      conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
-      throw conflictError;
-    }
-
-    const currentRecords = Array.isArray(stateResult.rows[0]?.records) ? stateResult.rows[0].records : [];
-    const normalizedOperations = Array.isArray(operations) ? operations : [];
-
-    if (!normalizedOperations.length) {
-      await client.query("COMMIT");
-      return {
-        updatedAt: currentUpdatedAt,
-      };
-    }
-
-    const nextRecords = applyRecordsPatchOperations(currentRecords, normalizedOperations);
-
-    const result = await client.query(
-      `
-        INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-        VALUES ($1, $2::jsonb, NOW())
-        ON CONFLICT (id)
-        DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
-        RETURNING updated_at
-      `,
-      [STATE_ROW_ID, JSON.stringify(nextRecords)],
-    );
-
-    const updatedAt = result.rows[0]?.updated_at || null;
-    await applyRecordsDualWriteV2(client, nextRecords, {
-      mode: "patch",
-      sourceStateUpdatedAt: updatedAt,
-    });
-
-    await client.query("COMMIT");
-    return {
-      updatedAt,
-    };
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // Best-effort rollback.
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  return recordsRepo.saveStoredRecordsPatch(operations, options);
 }
 
 async function listCachedQuickBooksCustomerContacts(customerIds) {
-  await ensureDatabaseReady();
-
   const normalizedIds = [...new Set((Array.isArray(customerIds) ? customerIds : []).map(normalizeQuickBooksCustomerId))]
     .filter(Boolean);
   if (!normalizedIds.length) {
     return new Map();
   }
 
-  const result = await pool.query(
-    `
-      SELECT customer_id, client_name, client_phone, client_email
-      FROM ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE}
-      WHERE customer_id = ANY($1::text[])
-    `,
-    [normalizedIds],
-  );
+  const rows = await quickBooksRepo.listCachedQuickBooksCustomerContacts(normalizedIds);
 
   const cache = new Map();
-  for (const row of result.rows) {
+  for (const row of rows) {
     const mapped = mapQuickBooksCustomerContactRow(row);
     if (!mapped) {
       continue;
@@ -23440,8 +22385,6 @@ async function listCachedQuickBooksCustomerContacts(customerIds) {
 }
 
 async function upsertQuickBooksCustomerContacts(customerContacts) {
-  await ensureDatabaseReady();
-
   const items = (Array.isArray(customerContacts) ? customerContacts : [])
     .map((item) => {
       const customerId = normalizeQuickBooksCustomerId(item?.customerId);
@@ -23461,59 +22404,7 @@ async function upsertQuickBooksCustomerContacts(customerContacts) {
       writtenCount: 0,
     };
   }
-
-  const client = await pool.connect();
-  let writtenCount = 0;
-
-  try {
-    await client.query("BEGIN");
-
-    for (let offset = 0; offset < items.length; offset += QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE) {
-      const batch = items.slice(offset, offset + QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE);
-      const placeholders = [];
-      const values = [];
-
-      for (let index = 0; index < batch.length; index += 1) {
-        const item = batch[index];
-        const base = index * 4;
-        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`);
-        values.push(item.customerId, item.clientName, item.clientPhone, item.clientEmail);
-      }
-
-      const result = await client.query(
-        `
-          INSERT INTO ${QUICKBOOKS_CUSTOMERS_CACHE_TABLE}
-            (customer_id, client_name, client_phone, client_email)
-          VALUES ${placeholders.join(", ")}
-          ON CONFLICT (customer_id)
-          DO UPDATE
-          SET
-            client_name = EXCLUDED.client_name,
-            client_phone = EXCLUDED.client_phone,
-            client_email = EXCLUDED.client_email,
-            updated_at = NOW()
-        `,
-        values,
-      );
-
-      writtenCount += result.rowCount || 0;
-    }
-
-    await client.query("COMMIT");
-
-    return {
-      writtenCount,
-    };
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // Best-effort rollback.
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  return quickBooksRepo.upsertQuickBooksCustomerContacts(items);
 }
 
 async function enrichQuickBooksTransactionsWithCustomerContacts(accessToken, transactionItems, options = {}) {
@@ -23593,29 +22484,9 @@ async function enrichQuickBooksTransactionsWithCustomerContacts(accessToken, tra
 }
 
 async function listCachedQuickBooksTransactionsInRange(fromDate, toDate) {
-  await ensureDatabaseReady();
-
-  const result = await pool.query(
-    `
-      SELECT
-        transaction_type,
-        transaction_id,
-        customer_id,
-        client_name,
-        client_phone,
-        client_email,
-        payment_amount,
-        payment_date::text AS payment_date
-      FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
-      WHERE payment_date >= $1::date
-        AND payment_date <= $2::date
-      ORDER BY payment_date DESC, updated_at DESC, transaction_type ASC, transaction_id ASC
-    `,
-    [fromDate, toDate],
-  );
-
   const items = [];
-  for (const row of result.rows) {
+  const rows = await quickBooksRepo.listCachedQuickBooksTransactionsInRange(fromDate, toDate);
+  for (const row of rows) {
     const mapped = mapQuickBooksTransactionRow(row);
     if (!mapped) {
       continue;
@@ -23630,46 +22501,13 @@ async function listCachedQuickBooksTransactionsInRange(fromDate, toDate) {
 }
 
 async function getLatestCachedQuickBooksPaymentDate(fromDate, toDate) {
-  await ensureDatabaseReady();
-
-  const result = await pool.query(
-    `
-      SELECT MAX(payment_date)::text AS max_date
-      FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
-      WHERE payment_date >= $1::date
-        AND payment_date <= $2::date
-    `,
-    [fromDate, toDate],
-  );
-
-  const maxDate = sanitizeTextValue(result.rows[0]?.max_date, 20);
+  const maxDate = await quickBooksRepo.getLatestCachedQuickBooksPaymentDate(fromDate, toDate);
   return isValidIsoDateString(maxDate) ? maxDate : "";
 }
 
 async function listCachedQuickBooksZeroPaymentsInRange(fromDate, toDate) {
-  await ensureDatabaseReady();
-
-  const result = await pool.query(
-    `
-      SELECT
-        transaction_id,
-        customer_id,
-        client_name,
-        client_phone,
-        client_email,
-        payment_date::text AS payment_date
-      FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
-      WHERE transaction_type = 'payment'
-        AND payment_date >= $1::date
-        AND payment_date <= $2::date
-        AND ABS(payment_amount) < $3
-      ORDER BY payment_date DESC, updated_at ASC, transaction_id ASC
-      LIMIT $4
-    `,
-    [fromDate, toDate, QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT, QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS],
-  );
-
-  return result.rows
+  const rows = await quickBooksRepo.listCachedQuickBooksZeroPaymentsInRange(fromDate, toDate);
+  return rows
     .map((row) => ({
       transactionId: sanitizeTextValue(row?.transaction_id, 160),
       customerId: normalizeQuickBooksCustomerId(row?.customer_id),
@@ -23767,8 +22605,6 @@ async function reconcileCachedQuickBooksZeroPayments(accessToken, fromDate, toDa
 }
 
 async function upsertQuickBooksTransactions(items) {
-  await ensureDatabaseReady();
-
   const normalizedItems = (Array.isArray(items) ? items : [])
     .map(normalizeQuickBooksTransaction)
     .filter((item) => item !== null);
@@ -23778,81 +22614,7 @@ async function upsertQuickBooksTransactions(items) {
       writtenCount: 0,
     };
   }
-
-  const client = await pool.connect();
-  let insertedCount = 0;
-  let writtenCount = 0;
-
-  try {
-    await client.query("BEGIN");
-
-    for (let offset = 0; offset < normalizedItems.length; offset += QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE) {
-      const batch = normalizedItems.slice(offset, offset + QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE);
-      const placeholders = [];
-      const values = [];
-
-      for (let index = 0; index < batch.length; index += 1) {
-        const item = batch[index];
-        const base = index * 8;
-        placeholders.push(
-          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}::date)`,
-        );
-        values.push(
-          item.transactionType,
-          item.transactionId,
-          item.customerId,
-          item.clientName,
-          item.clientPhone,
-          item.clientEmail,
-          item.paymentAmount,
-          item.paymentDate,
-        );
-      }
-
-      const result = await client.query(
-        `
-          INSERT INTO ${QUICKBOOKS_TRANSACTIONS_TABLE}
-            (transaction_type, transaction_id, customer_id, client_name, client_phone, client_email, payment_amount, payment_date)
-          VALUES ${placeholders.join(", ")}
-          ON CONFLICT (transaction_type, transaction_id)
-          DO UPDATE
-          SET
-            customer_id = EXCLUDED.customer_id,
-            client_name = EXCLUDED.client_name,
-            client_phone = EXCLUDED.client_phone,
-            client_email = EXCLUDED.client_email,
-            payment_amount = EXCLUDED.payment_amount,
-            payment_date = EXCLUDED.payment_date,
-            updated_at = NOW()
-          RETURNING (xmax = 0) AS inserted
-        `,
-        values,
-      );
-
-      writtenCount += result.rowCount || 0;
-      for (const row of result.rows) {
-        if (row?.inserted) {
-          insertedCount += 1;
-        }
-      }
-    }
-
-    await client.query("COMMIT");
-
-    return {
-      insertedCount,
-      writtenCount,
-    };
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // Best-effort rollback.
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
+  return quickBooksRepo.upsertQuickBooksTransactions(normalizedItems);
 }
 
 function buildQuickBooksSyncMeta(options = {}) {
@@ -24892,102 +23654,7 @@ function scoreAssistantOwnerLearningCandidate(messageComparable, messageTokens, 
 }
 
 async function findAssistantOwnerLearningForMessage(message, options = {}) {
-  await ensureDatabaseReady();
-
-  const normalizedMessage = sanitizeTextValue(message, ASSISTANT_MAX_MESSAGE_LENGTH);
-  const messageComparable = normalizeAssistantComparableText(normalizedMessage, ASSISTANT_MAX_MESSAGE_LENGTH);
-  const messageTokens = tokenizeAssistantText(messageComparable);
-  if (!messageComparable || !messageTokens.length) {
-    return {
-      promptExamples: [],
-      directMatch: null,
-    };
-  }
-
-  const parsedCandidateLimit = Number.parseInt(options?.candidateLimit, 10);
-  const candidateLimit =
-    Number.isFinite(parsedCandidateLimit) && parsedCandidateLimit > 0
-      ? Math.min(Math.max(parsedCandidateLimit, 10), 600)
-      : ASSISTANT_OWNER_LEARNING_CANDIDATE_LIMIT;
-
-  const result = await pool.query(
-    `
-      SELECT
-        id,
-        question,
-        corrected_reply,
-        correction_note,
-        corrected_at
-      FROM ${ASSISTANT_REVIEW_TABLE}
-      WHERE corrected_at IS NOT NULL
-        AND COALESCE(NULLIF(TRIM(corrected_reply), ''), '') <> ''
-      ORDER BY corrected_at DESC, id DESC
-      LIMIT $1
-    `,
-    [candidateLimit],
-  );
-
-  const ranked = [];
-  for (const row of result.rows) {
-    const idValue = Number.parseInt(row?.id, 10);
-    const question = sanitizeTextValue(row?.question, ASSISTANT_MAX_MESSAGE_LENGTH);
-    const ownerAnswer = normalizeAssistantReplyForDisplay(sanitizeTextValue(row?.corrected_reply, ASSISTANT_REVIEW_MAX_TEXT_LENGTH));
-    const correctionNote = sanitizeTextValue(row?.correction_note, ASSISTANT_REVIEW_MAX_COMMENT_LENGTH);
-    const correctedAt = row?.corrected_at ? new Date(row.corrected_at).toISOString() : null;
-    if (!question || !ownerAnswer) {
-      continue;
-    }
-
-    const scoreProfile = scoreAssistantOwnerLearningCandidate(messageComparable, messageTokens, question, ownerAnswer);
-    if (scoreProfile.score < ASSISTANT_OWNER_LEARNING_MIN_CONTEXT_SCORE) {
-      continue;
-    }
-
-    ranked.push({
-      id: Number.isFinite(idValue) ? idValue : 0,
-      question,
-      ownerAnswer,
-      correctionNote,
-      correctedAt,
-      score: scoreProfile.score,
-      isDirectMatch: scoreProfile.isDirectMatch,
-    });
-  }
-
-  ranked.sort((left, right) => {
-    if (right.score !== left.score) {
-      return right.score - left.score;
-    }
-
-    const rightCorrectedAt = right.correctedAt ? Date.parse(right.correctedAt) : 0;
-    const leftCorrectedAt = left.correctedAt ? Date.parse(left.correctedAt) : 0;
-    if (Number.isFinite(rightCorrectedAt) && Number.isFinite(leftCorrectedAt) && rightCorrectedAt !== leftCorrectedAt) {
-      return rightCorrectedAt - leftCorrectedAt;
-    }
-
-    return right.id - left.id;
-  });
-
-  const promptExamples = ranked.slice(0, ASSISTANT_OWNER_LEARNING_MAX_PROMPT_EXAMPLES).map((item) => ({
-    question: item.question,
-    ownerAnswer: item.ownerAnswer,
-    correctionNote: item.correctionNote,
-    correctedAt: item.correctedAt,
-  }));
-  const directMatchCandidate =
-    ranked.find((item) => item.isDirectMatch && item.score >= ASSISTANT_OWNER_LEARNING_DIRECT_MATCH_MIN_SCORE) || null;
-
-  return {
-    promptExamples,
-    directMatch: directMatchCandidate
-      ? {
-          question: directMatchCandidate.question,
-          ownerAnswer: directMatchCandidate.ownerAnswer,
-          correctionNote: directMatchCandidate.correctionNote,
-          correctedAt: directMatchCandidate.correctedAt,
-        }
-      : null,
-  };
+  return assistantRepo.findAssistantOwnerLearningForMessage(message, options);
 }
 
 function buildAssistantReviewRetentionCutoffIso(nowMs = Date.now()) {
@@ -24996,41 +23663,7 @@ function buildAssistantReviewRetentionCutoffIso(nowMs = Date.now()) {
 }
 
 async function runAssistantReviewRetentionSweep() {
-  if (!ASSISTANT_REVIEW_RETENTION_SWEEP_ENABLED || !pool) {
-    return;
-  }
-  if (assistantReviewRetentionSweepInFlight) {
-    return;
-  }
-
-  assistantReviewRetentionSweepInFlight = true;
-  try {
-    await ensureDatabaseReady();
-    const deleteResult = await pool.query(
-      `
-        WITH candidates AS (
-          SELECT id
-          FROM ${ASSISTANT_REVIEW_TABLE}
-          WHERE asked_at < $1::timestamptz
-          ORDER BY asked_at ASC, id ASC
-          LIMIT $2
-        )
-        DELETE FROM ${ASSISTANT_REVIEW_TABLE}
-        WHERE id IN (SELECT id FROM candidates)
-      `,
-      [buildAssistantReviewRetentionCutoffIso(), ASSISTANT_REVIEW_RETENTION_SWEEP_BATCH_LIMIT],
-    );
-    const deletedCount = Number.isFinite(deleteResult?.rowCount) ? deleteResult.rowCount : 0;
-    if (deletedCount > 0) {
-      console.log(
-        `[assistant review retention] purged=${deletedCount} older_than_days=${ASSISTANT_REVIEW_RETENTION_DAYS}`,
-      );
-    }
-  } catch (error) {
-    console.error("[assistant review retention] sweep failed:", error);
-  } finally {
-    assistantReviewRetentionSweepInFlight = false;
-  }
+  return assistantRepo.runAssistantReviewRetentionSweep();
 }
 
 function startAssistantReviewRetentionSweepScheduler() {
@@ -25049,156 +23682,15 @@ function startAssistantReviewRetentionSweepScheduler() {
 }
 
 async function logAssistantReviewQuestion(entry) {
-  await ensureDatabaseReady();
-
-  const reviewClientMentions = normalizeAssistantReviewClientMentions(entry?.clientMentions);
-  const question = sanitizeAssistantReviewTextForStorage(entry?.question, {
-    maxLength: ASSISTANT_MAX_MESSAGE_LENGTH,
-    piiMode: ASSISTANT_REVIEW_PII_MODE,
-    clientMentions: reviewClientMentions,
-  });
-  if (!question) {
-    return null;
-  }
-
-  const assistantReply = sanitizeAssistantReviewTextForStorage(entry?.assistantReply, {
-    maxLength: ASSISTANT_REVIEW_MAX_TEXT_LENGTH,
-    piiMode: ASSISTANT_REVIEW_PII_MODE,
-    clientMentions: reviewClientMentions,
-  });
-  const askedByUsername = sanitizeTextValue(entry?.askedByUsername, 200);
-  const askedByDisplayName = sanitizeTextValue(entry?.askedByDisplayName, 220);
-  const mode = normalizeAssistantChatMode(entry?.mode);
-  const provider = sanitizeTextValue(entry?.provider, 40) || "rules";
-  const recordsUsedValue = Number.parseInt(entry?.recordsUsed, 10);
-  const recordsUsed = Number.isFinite(recordsUsedValue) && recordsUsedValue >= 0 ? recordsUsedValue : 0;
-
-  const result = await pool.query(
-    `
-      INSERT INTO ${ASSISTANT_REVIEW_TABLE}
-        (asked_by_username, asked_by_display_name, mode, question, assistant_reply, provider, records_used)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING
-        id,
-        asked_at,
-        asked_by_username,
-        asked_by_display_name,
-        mode,
-        question,
-        assistant_reply,
-        provider,
-        records_used,
-        corrected_reply,
-        correction_note,
-        corrected_by,
-        corrected_at
-    `,
-    [askedByUsername, askedByDisplayName, mode, question, assistantReply, provider, recordsUsed],
-  );
-
-  return result.rows[0] ? mapAssistantReviewRow(result.rows[0]) : null;
+  return assistantRepo.logAssistantReviewQuestion(entry);
 }
 
 async function listAssistantReviewQuestions(options = {}) {
-  await ensureDatabaseReady();
-
-  const limit = normalizeAssistantReviewLimit(options.limit);
-  const offset = normalizeAssistantReviewOffset(options.offset);
-
-  const [countResult, listResult] = await Promise.all([
-    pool.query(
-      `
-        SELECT COUNT(*)::BIGINT AS total
-        FROM ${ASSISTANT_REVIEW_TABLE}
-        WHERE corrected_at IS NULL
-      `,
-    ),
-    pool.query(
-      `
-        SELECT
-          id,
-          asked_at,
-          asked_by_username,
-          asked_by_display_name,
-          mode,
-          question,
-          assistant_reply,
-          provider,
-          records_used,
-          corrected_reply,
-          correction_note,
-          corrected_by,
-          corrected_at
-        FROM ${ASSISTANT_REVIEW_TABLE}
-        WHERE corrected_at IS NULL
-        ORDER BY asked_at DESC, id DESC
-        LIMIT $1
-        OFFSET $2
-      `,
-      [limit, offset],
-    ),
-  ]);
-
-  const total = Number.parseInt(countResult.rows[0]?.total, 10);
-  const items = listResult.rows.map(mapAssistantReviewRow).filter((item) => item.id > 0);
-
-  return {
-    total: Number.isFinite(total) && total >= 0 ? total : 0,
-    limit,
-    offset,
-    items,
-  };
+  return assistantRepo.listAssistantReviewQuestions(options);
 }
 
 async function saveAssistantReviewCorrection(reviewId, payload, correctedBy) {
-  await ensureDatabaseReady();
-
-  const normalizedId = Number.parseInt(sanitizeTextValue(reviewId, 30), 10);
-  if (!Number.isFinite(normalizedId) || normalizedId <= 0) {
-    throw createHttpError("Invalid review id.", 400);
-  }
-
-  const correctedReply = sanitizeTextValue(payload?.correctedReply, ASSISTANT_REVIEW_MAX_TEXT_LENGTH);
-  const correctionNote = sanitizeTextValue(payload?.correctionNote, ASSISTANT_REVIEW_MAX_COMMENT_LENGTH);
-  const markCorrect = resolveOptionalBoolean(payload?.markCorrect) === true;
-  const normalizedCorrectedBy = sanitizeTextValue(correctedBy, 220) || "owner";
-  const hasCorrectionPayload = Boolean(correctedReply || correctionNote);
-  const shouldMarkCompleted = markCorrect || hasCorrectionPayload;
-  if (!shouldMarkCompleted) {
-    throw createHttpError("Provide a corrected answer, a correction note, or mark as correct.", 400);
-  }
-
-  const result = await pool.query(
-    `
-      UPDATE ${ASSISTANT_REVIEW_TABLE}
-      SET corrected_reply = CASE WHEN $6 THEN COALESCE(NULLIF($2, ''), assistant_reply) ELSE $2 END,
-          correction_note = $3,
-          corrected_by = CASE WHEN $5 THEN $4 ELSE '' END,
-          corrected_at = CASE WHEN $5 THEN NOW() ELSE NULL END
-      WHERE id = $1
-      RETURNING
-        id,
-        asked_at,
-        asked_by_username,
-        asked_by_display_name,
-        mode,
-        question,
-        assistant_reply,
-        provider,
-        records_used,
-        corrected_reply,
-        correction_note,
-        corrected_by,
-        corrected_at
-    `,
-    [normalizedId, correctedReply, correctionNote, normalizedCorrectedBy, shouldMarkCompleted, markCorrect],
-  );
-
-  if (!result.rows.length) {
-    throw createHttpError("Assistant review item not found.", 404);
-  }
-
-  return mapAssistantReviewRow(result.rows[0]);
+  return assistantRepo.saveAssistantReviewCorrection(reviewId, payload, correctedBy);
 }
 
 async function queueClientSubmission(record, submittedBy, miniData = {}, attachments = []) {
@@ -25212,9 +23704,10 @@ async function queueClientSubmission(record, submittedBy, miniData = {}, attachm
   const client = await pool.connect();
 
   try {
-    await client.query("BEGIN");
+    const txQuery = createDbQuery(client);
+    await txQuery("BEGIN");
 
-    const result = await client.query(
+    const result = await txQuery(
       `
         INSERT INTO ${MODERATION_TABLE} (id, record, mini_data, submitted_by, status)
         VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, 'pending')
@@ -25259,7 +23752,7 @@ async function queueClientSubmission(record, submittedBy, miniData = {}, attachm
         }
       }
 
-      await client.query(
+      await txQuery(
         `
           INSERT INTO ${MODERATION_FILES_TABLE}
             (id, submission_id, file_name, mime_type, size_bytes, content, storage_provider, storage_key, storage_url)
@@ -25279,7 +23772,7 @@ async function queueClientSubmission(record, submittedBy, miniData = {}, attachm
       );
     }
 
-    await client.query("COMMIT");
+    await txQuery("COMMIT");
 
     return {
       id: result.rows[0]?.id || submissionId,
@@ -25290,7 +23783,7 @@ async function queueClientSubmission(record, submittedBy, miniData = {}, attachm
     };
   } catch (error) {
     try {
-      await client.query("ROLLBACK");
+      await createDbQuery(client)("ROLLBACK");
     } catch {
       // Best-effort rollback.
     }
@@ -25319,7 +23812,7 @@ async function listPendingSubmissionFiles(submissionId) {
     };
   }
 
-  const submissionResult = await pool.query(
+  const submissionResult = await sharedDbQuery(
     `SELECT id, status FROM ${MODERATION_TABLE} WHERE id = $1`,
     [normalizedSubmissionId],
   );
@@ -25340,7 +23833,7 @@ async function listPendingSubmissionFiles(submissionId) {
     };
   }
 
-  const filesResult = await pool.query(
+  const filesResult = await sharedDbQuery(
     `
       SELECT id, file_name, mime_type, size_bytes, created_at
       FROM ${MODERATION_FILES_TABLE}
@@ -25378,7 +23871,7 @@ async function getPendingSubmissionFile(submissionId, fileId) {
     };
   }
 
-  const filesResult = await pool.query(
+  const filesResult = await sharedDbQuery(
     `
       SELECT
         f.id,
@@ -25794,7 +24287,7 @@ async function listModerationSubmissions(options = {}) {
   const limitParamIndex = queryParams.length;
 
   const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       SELECT id, record, mini_data, submitted_by, status, submitted_at, reviewed_at, reviewed_by, review_note, purged_at
       FROM ${MODERATION_TABLE}
@@ -25859,9 +24352,10 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
   let reviewPurgeScrubbedSubmissionsCount = 0;
 
   try {
-    await client.query("BEGIN");
+    const txQuery = createDbQuery(client);
+    await txQuery("BEGIN");
 
-    const submissionResult = await client.query(
+    const submissionResult = await txQuery(
       `
         SELECT id, record, mini_data, submitted_by, status, submitted_at, purged_at
         FROM ${MODERATION_TABLE}
@@ -25872,7 +24366,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
     );
 
     if (!submissionResult.rows.length) {
-      await client.query("ROLLBACK");
+      await txQuery("ROLLBACK");
       return {
         ok: false,
         status: 404,
@@ -25882,7 +24376,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
 
     const submission = submissionResult.rows[0];
     if (submission.status !== "pending") {
-      await client.query("ROLLBACK");
+      await txQuery("ROLLBACK");
       return {
         ok: false,
         status: 409,
@@ -25900,7 +24394,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
         },
       );
       if (!approveRequiredValidation.ok) {
-        await client.query("ROLLBACK");
+        await txQuery("ROLLBACK");
         return {
           ok: false,
           status: 400,
@@ -25908,7 +24402,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
         };
       }
 
-      await client.query(
+      await txQuery(
         `SELECT updated_at FROM ${STATE_TABLE} WHERE id = $1 FOR UPDATE`,
         [STATE_ROW_ID],
       );
@@ -25936,7 +24430,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
       }
     }
 
-    const updateResult = await client.query(
+    const updateResult = await txQuery(
       `
         UPDATE ${MODERATION_TABLE}
         SET status = $2, reviewed_at = NOW(), reviewed_by = $3, review_note = $4
@@ -25964,7 +24458,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
       }
     }
 
-    await client.query("COMMIT");
+    await txQuery("COMMIT");
 
     if (reviewPurgeStorageKeys.length) {
       try {
@@ -25987,7 +24481,7 @@ async function reviewClientSubmission(submissionId, decision, reviewedBy, review
     };
   } catch (error) {
     try {
-      await client.query("ROLLBACK");
+      await createDbQuery(client)("ROLLBACK");
     } catch {
       // Best-effort rollback.
     }
@@ -26388,32 +24882,6 @@ function buildPublicErrorPayload(error, fallbackMessage) {
   return payload;
 }
 
-function resolveDbHttpStatus(error, fallbackStatus = 500) {
-  const code = sanitizeTextValue(error?.code, 40).toUpperCase();
-  const unavailableCodes = new Set([
-    "28P01",
-    "3D000",
-    "08001",
-    "08003",
-    "08004",
-    "08006",
-    "57P01",
-    "57P02",
-    "57P03",
-    "ENOTFOUND",
-    "ECONNREFUSED",
-    "ECONNRESET",
-    "ETIMEDOUT",
-    "EHOSTUNREACH",
-  ]);
-
-  if (unavailableCodes.has(code)) {
-    return 503;
-  }
-
-  return fallbackStatus;
-}
-
 function sendWhitelistedWebStaticAsset(req, res) {
   const requestPath = sanitizeTextValue(req.path, 240);
   const fileName = WEB_STATIC_ASSET_ALLOWLIST.get(requestPath);
@@ -26692,7 +25160,13 @@ if (webAppDistAvailable) {
 
 registerCustomDashboardModule({
   app,
-  pool,
+  db: pool
+    ? {
+        pool,
+        query: sharedDbQuery,
+        tx: sharedDbTx,
+      }
+    : null,
   requireWebPermission,
   hasWebAuthPermission,
   listWebAuthUsers,
@@ -27073,6 +25547,7 @@ registerAuthProtectedRoutes({
 });
 
 const quickBooksController = createQuickBooksController({
+  quickBooksService,
   sanitizeTextValue,
   enforceRateLimit,
   rateLimitProfileApiExpensive: RATE_LIMIT_PROFILE_API_EXPENSIVE,
@@ -30794,7 +29269,7 @@ const handleHealthGet = async (_req, res) => {
 
   try {
     await ensureDatabaseReady();
-    await pool.query("SELECT 1");
+    await sharedDbQuery("SELECT 1");
     res.json({
       ok: true,
       status: "healthy",
@@ -32016,7 +30491,7 @@ async function insertGhlContractArchiveRow(entry = {}) {
       ? metadataInput
       : {};
   const archiveId = `ghl-contract-${generateId()}`;
-  const result = await pool.query(
+  const result = await sharedDbQuery(
     `
       INSERT INTO ${GHL_CONTRACT_ARCHIVE_TABLE}
         (
@@ -32089,7 +30564,7 @@ async function getLatestGhlContractArchiveRow(clientName, contactId = "") {
 
   const normalizedContactId = sanitizeTextValue(contactId, 200);
   if (normalizedContactId) {
-    const byContactId = await pool.query(
+    const byContactId = await sharedDbQuery(
       `
         SELECT
           id,
@@ -32127,7 +30602,7 @@ async function getLatestGhlContractArchiveRow(clientName, contactId = "") {
   if (!normalizedClientNameLookup) {
     return null;
   }
-  const byClientName = await pool.query(
+  const byClientName = await sharedDbQuery(
     `
       SELECT
         id,

@@ -312,7 +312,7 @@ const GHL_CALL_TO_PHONE_FIELDS = ["to", "toNumber", "meta.call.to", "meta.call.t
 function registerCustomDashboardModule(config) {
   const {
     app,
-    pool,
+    db,
     requireWebPermission,
     hasWebAuthPermission,
     listWebAuthUsers,
@@ -331,6 +331,8 @@ function registerCustomDashboardModule(config) {
   const dbSchema = resolveSafeSqlIdentifier(process.env.DB_SCHEMA, CUSTOM_DASHBOARD_DB_SCHEMA_DEFAULT);
   const tableName = resolveSafeSqlIdentifier(process.env.DB_CUSTOM_DASHBOARD_APP_DATA_TABLE_NAME, CUSTOM_DASHBOARD_TABLE_DEFAULT);
   const appDataTable = `"${dbSchema}"."${tableName}"`;
+  const pool = db && db.pool ? db.pool : null;
+  const dbQuery = db && typeof db.query === "function" ? db.query : null;
 
   const uploadMiddleware = multer({
     storage: multer.memoryStorage(),
@@ -343,13 +345,12 @@ function registerCustomDashboardModule(config) {
   let appDataReadyPromise = null;
 
   async function ensureAppDataTableReady() {
-    if (!pool) {
+    if (!dbQuery) {
       throw createHttpError("Database is not configured. Add DATABASE_URL in Render environment variables.", 503);
     }
 
     if (!appDataReadyPromise) {
-      appDataReadyPromise = pool
-        .query(
+      appDataReadyPromise = dbQuery(
           `
             CREATE TABLE IF NOT EXISTS ${appDataTable} (
               key TEXT PRIMARY KEY,
@@ -357,6 +358,7 @@ function registerCustomDashboardModule(config) {
               updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
           `,
+          [],
         )
         .catch((error) => {
           appDataReadyPromise = null;
@@ -367,14 +369,14 @@ function registerCustomDashboardModule(config) {
     return appDataReadyPromise;
   }
 
-  async function readAppDataValue(key, fallbackValue) {
+  async function readAppDataValue(key, fallbackValue, options = {}) {
     await ensureAppDataTableReady();
     const normalizedKey = sanitizeTextValue(key, 240);
     if (!normalizedKey) {
       return fallbackValue;
     }
 
-    const result = await pool.query(`SELECT value FROM ${appDataTable} WHERE key = $1 LIMIT 1`, [normalizedKey]);
+    const result = await dbQuery(`SELECT value FROM ${appDataTable} WHERE key = $1 LIMIT 1`, [normalizedKey], options);
     if (!result.rows.length) {
       return fallbackValue;
     }
@@ -382,7 +384,7 @@ function registerCustomDashboardModule(config) {
     return result.rows[0]?.value ?? fallbackValue;
   }
 
-  async function upsertAppDataValue(key, value) {
+  async function upsertAppDataValue(key, value, options = {}) {
     await ensureAppDataTableReady();
     const normalizedKey = sanitizeTextValue(key, 240);
     if (!normalizedKey) {
@@ -390,7 +392,7 @@ function registerCustomDashboardModule(config) {
     }
 
     const serialized = JSON.stringify(value ?? null);
-    await pool.query(
+    await dbQuery(
       `
         INSERT INTO ${appDataTable} (key, value, updated_at)
         VALUES ($1, $2::jsonb, NOW())
@@ -400,6 +402,7 @@ function registerCustomDashboardModule(config) {
             updated_at = NOW()
       `,
       [normalizedKey, serialized],
+      options,
     );
   }
 
