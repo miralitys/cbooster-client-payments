@@ -34,15 +34,30 @@ function registerRecordsRoutes(context) {
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
     handlers.handleRecordsGet,
   );
+  app.get(
+    "/api/clients",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
+    handlers.handleRecordsGet,
+  );
 
   app.put(
     "/api/records",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
     handlers.handleRecordsPut,
   );
+  app.put(
+    "/api/clients",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
+    handlers.handleRecordsPut,
+  );
 
   app.patch(
     "/api/records",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
+    handlers.handleRecordsPatch,
+  );
+  app.patch(
+    "/api/clients",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
     handlers.handleRecordsPatch,
   );

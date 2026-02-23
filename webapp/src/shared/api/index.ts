@@ -1,6 +1,7 @@
 export { ApiError, apiRequest } from "@/shared/api/fetcher";
 export { getSession } from "@/shared/api/session";
 export { getRecords, patchRecords, putRecords } from "@/shared/api/records";
+export { getClients, patchClients, putClients } from "@/shared/api/clients";
 export { queueAssistantSessionContextResetBeacon, resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api/assistant";
 export {
   approveModerationSubmission,

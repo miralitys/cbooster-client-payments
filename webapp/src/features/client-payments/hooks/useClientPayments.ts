@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 
-import { ApiError, getRecords, getSession, patchRecords, putRecords } from "@/shared/api";
+import { ApiError, getClients, getSession, patchClients, putClients } from "@/shared/api";
 import type { ClientRecord } from "@/shared/types/records";
 import type { Session } from "@/shared/types/session";
 import {
@@ -184,17 +184,17 @@ export function useClientPayments() {
       if (recordsPatchEnabledRef.current) {
         const operations = buildRecordsPatchOperations(baselineRecordsRef.current, snapshot);
         try {
-          savePayload = await patchRecords(operations, serverUpdatedAtRef.current);
+          savePayload = await patchClients(operations, serverUpdatedAtRef.current);
         } catch (error) {
           if (!shouldFallbackToPutFromPatch(error)) {
             throw error;
           }
 
           recordsPatchEnabledRef.current = false;
-          savePayload = await putRecords(snapshot, serverUpdatedAtRef.current);
+          savePayload = await putClients(snapshot, serverUpdatedAtRef.current);
         }
       } else {
-        savePayload = await putRecords(snapshot, serverUpdatedAtRef.current);
+        savePayload = await putClients(snapshot, serverUpdatedAtRef.current);
       }
 
       baselineRef.current = serialized;
@@ -288,7 +288,7 @@ export function useClientPayments() {
       setLoadError("");
 
       try {
-        const [sessionPayload, recordsPayload] = await Promise.all([getSession(), getRecords()]);
+        const [sessionPayload, recordsPayload] = await Promise.all([getSession(), getClients()]);
         if (cancelled) {
           return;
         }
@@ -487,7 +487,7 @@ export function useClientPayments() {
     setIsLoading(true);
 
     try {
-      const recordsPayload = await getRecords();
+      const recordsPayload = await getClients();
       const normalized = normalizeRecords(recordsPayload.records);
       setRecords(normalized);
       baselineRef.current = serializeRecords(normalized);

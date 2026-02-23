@@ -75,6 +75,7 @@ export default function ClientsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [search, setSearch] = useState("");
+  const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
   const [salesFilter, setSalesFilter] = useState(SALES_FILTER_ALL);
   const [clientManagerFilter, setClientManagerFilter] = useState(MANAGER_FILTER_ALL);
   const [statusFilter, setStatusFilter] = useState<ClientsStatusFilter>("all");
@@ -454,114 +455,124 @@ export default function ClientsPage() {
               onChange={(event) => setSearch(event.target.value)}
               autoComplete="off"
             />
-            <Button type="button" variant="ghost" onClick={() => setSearch("")} disabled={!search.trim()}>
-              Clear
+            <Button
+              type="button"
+              variant={isMoreFiltersOpen ? "secondary" : "ghost"}
+              onClick={() => setIsMoreFiltersOpen((previous) => !previous)}
+              aria-expanded={isMoreFiltersOpen}
+              aria-controls="clients-advanced-filters"
+            >
+              More
             </Button>
           </div>
         </div>
 
-        <div className="filters-grid-react">
-          <div className="filter-field">
-            <label htmlFor="clients-contract-date-from-input">Contract Date From</label>
-            <DateInput
-              id="clients-contract-date-from-input"
-              value={contractDateFrom}
-              onChange={setContractDateFrom}
-              placeholder="MM/DD/YYYY"
-            />
-          </div>
+        {isMoreFiltersOpen ? (
+          <div id="clients-advanced-filters">
+            <div className="filters-grid-react">
+              <div className="filter-field">
+                <label htmlFor="clients-contract-date-from-input">Contract Date From</label>
+                <DateInput
+                  id="clients-contract-date-from-input"
+                  value={contractDateFrom}
+                  onChange={setContractDateFrom}
+                  placeholder="MM/DD/YYYY"
+                />
+              </div>
 
-          <div className="filter-field">
-            <label htmlFor="clients-contract-date-to-input">Contract Date To</label>
-            <DateInput
-              id="clients-contract-date-to-input"
-              value={contractDateTo}
-              onChange={setContractDateTo}
-              placeholder="MM/DD/YYYY"
-            />
-          </div>
+              <div className="filter-field">
+                <label htmlFor="clients-contract-date-to-input">Contract Date To</label>
+                <DateInput
+                  id="clients-contract-date-to-input"
+                  value={contractDateTo}
+                  onChange={setContractDateTo}
+                  placeholder="MM/DD/YYYY"
+                />
+              </div>
 
-          <div className="filter-field">
-            <label htmlFor="clients-sales-filter-select">Sales (Closed By)</label>
-            <Select
-              id="clients-sales-filter-select"
-              value={salesFilter}
-              onChange={(event) => setSalesFilter(event.target.value)}
-            >
-              <option value={SALES_FILTER_ALL}>All Sales</option>
-              {salesFilterOptions.hasUnassigned ? <option value={SALES_FILTER_UNASSIGNED}>Unassigned</option> : null}
-              {salesFilterOptions.sales.map((salesName) => (
-                <option key={salesName} value={salesName}>
-                  {salesName}
-                </option>
-              ))}
-            </Select>
-          </div>
+              <div className="filter-field">
+                <label htmlFor="clients-sales-filter-select">Sales (Closed By)</label>
+                <Select
+                  id="clients-sales-filter-select"
+                  value={salesFilter}
+                  onChange={(event) => setSalesFilter(event.target.value)}
+                >
+                  <option value={SALES_FILTER_ALL}>All Sales</option>
+                  {salesFilterOptions.hasUnassigned ? <option value={SALES_FILTER_UNASSIGNED}>Unassigned</option> : null}
+                  {salesFilterOptions.sales.map((salesName) => (
+                    <option key={salesName} value={salesName}>
+                      {salesName}
+                    </option>
+                  ))}
+                </Select>
+              </div>
 
-          <div className="filter-field">
-            <label htmlFor="clients-manager-filter-select">Client Manager</label>
-            <Select
-              id="clients-manager-filter-select"
-              value={clientManagerFilter}
-              onChange={(event) => setClientManagerFilter(event.target.value)}
-            >
-              <option value={MANAGER_FILTER_ALL}>All Managers</option>
-              {managerFilterOptions.hasUnassigned ? <option value={MANAGER_FILTER_UNASSIGNED}>Unassigned</option> : null}
-              {managerFilterOptions.managers.map((managerName) => (
-                <option key={managerName} value={managerName}>
-                  {managerName}
-                </option>
-              ))}
-            </Select>
-          </div>
+              <div className="filter-field">
+                <label htmlFor="clients-manager-filter-select">Client Manager</label>
+                <Select
+                  id="clients-manager-filter-select"
+                  value={clientManagerFilter}
+                  onChange={(event) => setClientManagerFilter(event.target.value)}
+                >
+                  <option value={MANAGER_FILTER_ALL}>All Managers</option>
+                  {managerFilterOptions.hasUnassigned ? <option value={MANAGER_FILTER_UNASSIGNED}>Unassigned</option> : null}
+                  {managerFilterOptions.managers.map((managerName) => (
+                    <option key={managerName} value={managerName}>
+                      {managerName}
+                    </option>
+                  ))}
+                </Select>
+              </div>
 
-          <div className="filter-field">
-            <label htmlFor="clients-status-filter-select">Status</label>
-            <Select
-              id="clients-status-filter-select"
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as ClientsStatusFilter)}
-            >
-              {STATUS_FILTER_OPTIONS.map((option) => (
-                <option key={option.key} value={option.key}>
-                  {option.label}
-                </option>
-              ))}
-            </Select>
-          </div>
+              <div className="filter-field">
+                <label htmlFor="clients-status-filter-select">Status</label>
+                <Select
+                  id="clients-status-filter-select"
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value as ClientsStatusFilter)}
+                >
+                  {STATUS_FILTER_OPTIONS.map((option) => (
+                    <option key={option.key} value={option.key}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+              </div>
 
-          <div className="filter-field">
-            <label htmlFor="clients-contract-signed-filter-select">Contract Signed</label>
-            <Select
-              id="clients-contract-signed-filter-select"
-              value={contractSignedFilter}
-              onChange={(event) => setContractSignedFilter(event.target.value as ContractSignedFilter)}
-            >
-              <option value="all">All</option>
-              <option value="signed">Signed</option>
-              <option value="unsigned">Not Signed</option>
-            </Select>
-          </div>
-        </div>
+              <div className="filter-field">
+                <label htmlFor="clients-contract-signed-filter-select">Contract Signed</label>
+                <Select
+                  id="clients-contract-signed-filter-select"
+                  value={contractSignedFilter}
+                  onChange={(event) => setContractSignedFilter(event.target.value as ContractSignedFilter)}
+                >
+                  <option value="all">All</option>
+                  <option value="signed">Signed</option>
+                  <option value="unsigned">Not Signed</option>
+                </Select>
+              </div>
+            </div>
 
-        <div className="cb-page-header-toolbar">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setSalesFilter(SALES_FILTER_ALL);
-              setClientManagerFilter(MANAGER_FILTER_ALL);
-              setStatusFilter("all");
-              setContractSignedFilter("all");
-              setContractDateFrom("");
-              setContractDateTo("");
-            }}
-            disabled={!hasActiveStructuredFilters}
-          >
-            Reset Filters
-          </Button>
-        </div>
+            <div className="cb-page-header-toolbar">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setSalesFilter(SALES_FILTER_ALL);
+                  setClientManagerFilter(MANAGER_FILTER_ALL);
+                  setStatusFilter("all");
+                  setContractSignedFilter("all");
+                  setContractDateFrom("");
+                  setContractDateTo("");
+                }}
+                disabled={!hasActiveStructuredFilters}
+              >
+                Reset Filters
+              </Button>
+            </div>
+          </div>
+        ) : null}
 
         {isLoading ? <LoadingSkeleton rows={6} /> : null}
         {!isLoading && loadError ? (
