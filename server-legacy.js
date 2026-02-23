@@ -32,6 +32,12 @@ const {
 } = require("./client-records-v2-utils");
 const { normalizeAuthUsernameForScopeKey } = require("./assistant-session-scope-identity-utils");
 const { registerCustomDashboardModule } = require("./custom-dashboard-module");
+const { registerAuthPublicRoutes, registerAuthProtectedRoutes } = require("./server/routes/auth.routes");
+const { registerRecordsRoutes } = require("./server/routes/records.routes");
+const { registerGhlRoutes } = require("./server/routes/ghl.routes");
+const { registerQuickBooksRoutes } = require("./server/routes/quickbooks.routes");
+const { registerModerationRoutes } = require("./server/routes/moderation.routes");
+const { registerMiniRoutes } = require("./server/routes/mini.routes");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
@@ -26788,7 +26794,7 @@ function setWebAppStaticHeaders(res, filePath) {
   }
 }
 
-app.get("/login", (req, res) => {
+const handleWebLoginPage = (req, res) => {
   const nextPath = resolveSafeNextPath(req.query.next);
   const currentSessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
   const currentUser = getWebAuthUserByUsername(parseWebAuthSessionToken(currentSessionToken));
@@ -26812,9 +26818,9 @@ app.get("/login", (req, res) => {
         errorMessage: resolveWebLoginErrorMessage(errorCode),
       }),
     );
-});
+};
 
-app.post("/login", (req, res) => {
+const handleWebLoginSubmit = (req, res) => {
   const username = req.body?.username;
   const password = req.body?.password;
   const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
@@ -26850,7 +26856,7 @@ app.post("/login", (req, res) => {
     return;
   }
   res.redirect(302, nextPath);
-});
+};
 
 function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
@@ -26964,18 +26970,22 @@ function handleApiAuthLogout(req, res) {
   });
 }
 
-app.post("/api/auth/login", handleApiAuthLogin);
-app.post("/api/auth/logout", requireWebApiCsrf, handleApiAuthLogout);
-app.post("/api/mobile/auth/login", handleApiAuthLogin);
-app.post("/api/mobile/auth/logout", requireWebApiCsrf, handleApiAuthLogout);
-
 function handleWebLogout(req, res) {
   clearWebAuthSessionCookie(req, res);
   res.redirect(302, "/login");
 }
 
-app.get("/logout", handleWebLogout);
-app.post("/logout", handleWebLogout);
+registerAuthPublicRoutes({
+  app,
+  requireWebApiCsrf,
+  handlers: {
+    handleWebLoginPage,
+    handleWebLoginSubmit,
+    handleApiAuthLogin,
+    handleApiAuthLogout,
+    handleWebLogout,
+  },
+});
 
 app.use(requireWebAuth);
 app.use(applyNoStorePrivateHeadersForAuthenticatedApi);
@@ -27010,7 +27020,7 @@ registerCustomDashboardModule({
 
 app.get([...WEB_STATIC_ASSET_ALLOWLIST.keys()], sendWhitelistedWebStaticAsset);
 
-app.get("/first-password", async (req, res) => {
+const handleWebFirstPasswordPage = async (req, res) => {
   const nextPath = resolveSafeNextPath(req.query.next);
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
   if (!userProfile) {
@@ -27043,9 +27053,9 @@ app.get("/first-password", async (req, res) => {
       }),
     );
   }
-});
+};
 
-app.post("/first-password", async (req, res) => {
+const handleWebFirstPasswordSubmit = async (req, res) => {
   const nextPath = resolveSafeNextPath(req.body?.next || req.query.next);
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
   if (!userProfile) {
@@ -27088,7 +27098,7 @@ app.post("/first-password", async (req, res) => {
         }),
       );
   }
-});
+};
 
 function handleApiAuthFirstPassword(req, res) {
   const normalizedPathname = normalizeRequestPathname(req, 260);
@@ -27169,9 +27179,6 @@ function handleApiAuthFirstPassword(req, res) {
   }
 }
 
-app.post("/api/auth/first-password", handleApiAuthFirstPassword);
-app.post("/api/mobile/auth/first-password", handleApiAuthFirstPassword);
-
 function handleApiAuthSession(req, res) {
   const normalizedPathname = normalizeRequestPathname(req, 260);
   const isMobileApiSession = normalizedPathname.startsWith("/api/mobile/");
@@ -27188,10 +27195,7 @@ function handleApiAuthSession(req, res) {
   res.json(payload);
 }
 
-app.get("/api/auth/session", handleApiAuthSession);
-app.get("/api/mobile/auth/session", handleApiAuthSession);
-
-app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (req, res) => {
+const handleApiAuthAccessModel = (req, res) => {
   const userProfile = req.webAuthProfile || getWebAuthUserByUsername(req.webAuthUser);
   res.json({
     ok: true,
@@ -27199,9 +27203,9 @@ app.get("/api/auth/access-model", requireWebPermission(WEB_AUTH_PERMISSION_MANAG
     permissions: userProfile?.permissions || {},
     accessModel: buildWebAuthAccessModel(),
   });
-});
+};
 
-app.get("/api/assistant/reviews", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), async (req, res) => {
+const handleAssistantReviewsList = async (req, res) => {
   if (!req.webAuthProfile?.isOwner) {
     res.status(403).json({
       error: "Access denied. Owner role is required.",
@@ -27233,9 +27237,9 @@ app.get("/api/assistant/reviews", requireWebPermission(WEB_AUTH_PERMISSION_MANAG
     console.error("GET /api/assistant/reviews failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load assistant reviews"));
   }
-});
+};
 
-app.put("/api/assistant/reviews/:id", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), async (req, res) => {
+const handleAssistantReviewUpdate = async (req, res) => {
   if (!req.webAuthProfile?.isOwner) {
     res.status(403).json({
       error: "Access denied. Owner role is required.",
@@ -27262,18 +27266,18 @@ app.put("/api/assistant/reviews/:id", requireWebPermission(WEB_AUTH_PERMISSION_M
       .status(error.httpStatus || resolveDbHttpStatus(error))
       .json(buildPublicErrorPayload(error, "Failed to save assistant review correction"));
   }
-});
+};
 
-app.get("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (_req, res) => {
+const handleApiAuthUsersList = (_req, res) => {
   const items = listWebAuthUsers().map((item) => buildWebAuthPublicUser(item));
   res.json({
     ok: true,
     count: items.length,
     items,
   });
-});
+};
 
-app.post("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (req, res) => {
+const handleApiAuthUsersCreate = (req, res) => {
   let normalizedPayload;
   try {
     normalizedPayload = normalizeWebAuthRegistrationPayload(req.body);
@@ -27303,9 +27307,9 @@ app.post("/api/auth/users", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCE
       error: sanitizeTextValue(error?.message, 260) || "Failed to create user.",
     });
   }
-});
+};
 
-app.put("/api/auth/users/:username", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL), (req, res) => {
+const handleApiAuthUsersUpdate = (req, res) => {
   const targetUsername = normalizeWebAuthUsername(req.params.username);
   if (!targetUsername) {
     res.status(400).json({
@@ -27338,9 +27342,9 @@ app.put("/api/auth/users/:username", requireWebPermission(WEB_AUTH_PERMISSION_MA
       error: sanitizeTextValue(error?.message, 260) || "Failed to update user.",
     });
   }
-});
+};
 
-app.delete("/api/auth/users/:username", requireOwnerOrAdminAccess(), (req, res) => {
+const handleApiAuthUsersDelete = (req, res) => {
   const targetUsername = normalizeWebAuthUsername(req.params.username);
   if (!targetUsername) {
     res.status(400).json({
@@ -27364,9 +27368,31 @@ app.delete("/api/auth/users/:username", requireOwnerOrAdminAccess(), (req, res) 
       error: sanitizeTextValue(error?.message, 260) || "Failed to delete user.",
     });
   }
+};
+
+registerAuthProtectedRoutes({
+  app,
+  requireWebPermission,
+  requireOwnerOrAdminAccess,
+  permissionKeys: {
+    WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL,
+  },
+  handlers: {
+    handleWebFirstPasswordPage,
+    handleWebFirstPasswordSubmit,
+    handleApiAuthFirstPassword,
+    handleApiAuthSession,
+    handleApiAuthAccessModel,
+    handleAssistantReviewsList,
+    handleAssistantReviewUpdate,
+    handleApiAuthUsersList,
+    handleApiAuthUsersCreate,
+    handleApiAuthUsersUpdate,
+    handleApiAuthUsersDelete,
+  },
 });
 
-app.all("/api/quickbooks/*", (req, res, next) => {
+const handleQuickbooksReadonlyGuard = (req, res, next) => {
   const pathname = sanitizeTextValue(req.path, 260);
   const isAllowedSyncPost =
     req.method === "POST" &&
@@ -27383,7 +27409,7 @@ app.all("/api/quickbooks/*", (req, res, next) => {
     error:
       "QuickBooks integration is read-only toward QuickBooks. Use GET for reads and POST /api/quickbooks/payments/recent/sync (sync) or POST /api/quickbooks/transaction-insight (Ask GPT).",
   });
-});
+};
 
 function resolveQuickBooksDateRangeFromRequest(req, source = "query") {
   const payload = source === "body" ? req.body : req.query;
@@ -27508,7 +27534,7 @@ async function respondQuickBooksOutgoingPayments(req, res, options = {}) {
   }
 }
 
-app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+const handleQuickBooksRecentPaymentsGet = async (req, res) => {
   const syncRequestedOnGet =
     parseQuickBooksSyncFlag(req.query.sync) ||
     parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
@@ -27534,9 +27560,9 @@ app.get("/api/quickbooks/payments/recent", requireWebPermission(WEB_AUTH_PERMISS
     range,
     routeLabel: "GET /api/quickbooks/payments/recent",
   });
-});
+};
 
-app.get("/api/quickbooks/payments/outgoing", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+const handleQuickBooksOutgoingPaymentsGet = async (req, res) => {
   const syncRequestedOnGet =
     parseQuickBooksSyncFlag(req.query.sync) ||
     parseQuickBooksTotalRefreshFlag(req.query.fullSync || req.query.totalRefresh);
@@ -27562,9 +27588,9 @@ app.get("/api/quickbooks/payments/outgoing", requireWebPermission(WEB_AUTH_PERMI
     range,
     routeLabel: "GET /api/quickbooks/payments/outgoing",
   });
-});
+};
 
-app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+const handleQuickBooksRecentPaymentsSyncPost = async (req, res) => {
   const shouldTotalRefresh = parseQuickBooksTotalRefreshFlag(req.body?.fullSync || req.body?.totalRefresh);
   let range;
   try {
@@ -27639,9 +27665,9 @@ app.post("/api/quickbooks/payments/recent/sync", requireWebPermission(WEB_AUTH_P
     reused,
     job: buildQuickBooksSyncJobPayload(job),
   });
-});
+};
 
-app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (req, res) => {
+const handleQuickBooksSyncJobGet = (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
@@ -27675,9 +27701,9 @@ app.get("/api/quickbooks/payments/recent/sync-jobs/:jobId", requireWebPermission
     ok: true,
     job: buildQuickBooksSyncJobPayload(job),
   });
-});
+};
 
-app.post("/api/quickbooks/transaction-insight", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), async (req, res) => {
+const handleQuickBooksTransactionInsightPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.quickbooks.read",
@@ -27738,6 +27764,22 @@ app.post("/api/quickbooks/transaction-insight", requireWebPermission(WEB_AUTH_PE
       code: sanitizeTextValue(error?.code, 80) || "quickbooks_insight_failed",
     });
   }
+};
+
+registerQuickBooksRoutes({
+  app,
+  requireWebPermission,
+  permissionKeys: {
+    WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS,
+  },
+  handlers: {
+    handleQuickbooksReadonlyGuard,
+    handleQuickBooksRecentPaymentsGet,
+    handleQuickBooksOutgoingPaymentsGet,
+    handleQuickBooksRecentPaymentsSyncPost,
+    handleQuickBooksSyncJobGet,
+    handleQuickBooksTransactionInsightPost,
+  },
 });
 
 const IDENTITYIQ_EMAIL_INPUT_SELECTORS = Object.freeze([
@@ -31112,7 +31154,7 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
   }
 }
 
-app.post("/api/ghl/contract-text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+const handleGhlContractTextPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.ghl.contract_text.read",
@@ -31189,7 +31231,7 @@ app.post("/api/ghl/contract-text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW
     };
     res.status(error?.httpStatus || 502).json(responsePayload);
   }
-});
+};
 
 const PAYMENT_PROBABILITY_MODEL_VERSION =
   sanitizeTextValue(process.env.PAYMENT_PROBABILITY_MODEL_VERSION, 120) || "v2-local-2026-02-22";
@@ -31302,7 +31344,7 @@ function computePaymentProbabilityFromLocalModel(features) {
   };
 }
 
-app.post("/api/payment-probability", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handlePaymentProbabilityPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.payment_probability.read",
@@ -31340,9 +31382,9 @@ app.post("/api/payment-probability", requireWebPermission(WEB_AUTH_PERMISSION_VI
       code: sanitizeTextValue(error?.code, 80) || "payment_probability_request_failed",
     });
   }
-});
+};
 
-app.post("/api/identityiq/credit-score", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleIdentityIqCreditScorePost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.identityiq.read",
@@ -31402,9 +31444,9 @@ app.post("/api/identityiq/credit-score", requireWebPermission(WEB_AUTH_PERMISSIO
       code: sanitizeTextValue(error?.code, 80) || "identityiq_request_failed",
     });
   }
-});
+};
 
-app.get("/api/health", async (_req, res) => {
+const handleHealthGet = async (_req, res) => {
   if (!pool) {
     res.status(503).json({
       ok: false,
@@ -31427,14 +31469,14 @@ app.get("/api/health", async (_req, res) => {
       status: "unhealthy",
     });
   }
-});
+};
 
-app.get("/api/diagnostics/performance", requireOwnerOrAdminAccess(), (req, res) => {
+const handlePerformanceDiagnosticsGet = (req, res) => {
   res.setHeader("Cache-Control", "no-store, private");
   res.json(buildPerformanceDiagnosticsPayload(performanceObservability));
-});
+};
 
-app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleRecordsGet = async (req, res) => {
   if (SIMULATE_SLOW_RECORDS) {
     await delayMs(SIMULATE_SLOW_RECORDS_DELAY_MS);
     res.json({
@@ -31473,9 +31515,9 @@ app.get("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAY
     console.error("GET /api/records failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load records"));
   }
-});
+};
 
-app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleAssistantContextResetPost = async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -31495,9 +31537,9 @@ app.post("/api/assistant/context/reset", requireWebPermission(WEB_AUTH_PERMISSIO
     console.error("POST /api/assistant/context/reset failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to reset assistant context"));
   }
-});
+};
 
-app.post("/api/assistant/context/reset/telemetry", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (req, res) => {
+const handleAssistantContextResetTelemetryPost = (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.assistant.context_reset_telemetry",
@@ -31532,9 +31574,9 @@ app.post("/api/assistant/context/reset/telemetry", requireWebPermission(WEB_AUTH
   res.json({
     ok: true,
   });
-});
+};
 
-app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleAssistantChatPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.assistant.chat",
@@ -31716,9 +31758,9 @@ app.post("/api/assistant/chat", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CL
     console.error("POST /api/assistant/chat failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to process assistant request"));
   }
-});
+};
 
-app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleAssistantTtsPost = async (req, res) => {
   if (!ASSISTANT_TTS_ENDPOINT_ENABLED) {
     res.status(404).json({
       error: "API route not found",
@@ -31786,6 +31828,29 @@ app.post("/api/assistant/tts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLI
       error: sanitizeTextValue(error?.message, 600) || "Failed to synthesize assistant audio.",
     });
   }
+};
+
+registerRecordsRoutes({
+  app,
+  requireWebPermission,
+  requireOwnerOrAdminAccess,
+  permissionKeys: {
+    WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS,
+    WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS,
+  },
+  handlers: {
+    handlePaymentProbabilityPost,
+    handleIdentityIqCreditScorePost,
+    handleHealthGet,
+    handlePerformanceDiagnosticsGet,
+    handleRecordsGet,
+    handleAssistantContextResetPost,
+    handleAssistantContextResetTelemetryPost,
+    handleAssistantChatPost,
+    handleAssistantTtsPost,
+    handleRecordsPut,
+    handleRecordsPatch,
+  },
 });
 
 async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/leads", options = {}) {
@@ -36344,7 +36409,7 @@ async function fetchGhlContractFileForDownload(contractUrl, options = {}) {
   );
 }
 
-app.get("/api/ghl/leads", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+const handleGhlLeadsGet = async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
   const rangeMode = normalizeGhlLeadsRangeMode(
     req.query.range || req.query.rangeMode || req.query.period,
@@ -36361,9 +36426,9 @@ app.get("/api/ghl/leads", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_M
   await respondGhlLeads(req, res, "none", "GET /api/ghl/leads", {
     rangeMode,
   });
-});
+};
 
-app.post("/api/ghl/leads/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+const handleGhlLeadsRefreshPost = async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.body?.refresh || req.body?.mode || "incremental");
   const rangeMode = normalizeGhlLeadsRangeMode(
     req.body?.range || req.body?.rangeMode || req.body?.period,
@@ -36373,9 +36438,9 @@ app.post("/api/ghl/leads/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW
   await respondGhlLeads(req, res, resolvedRefreshMode, "POST /api/ghl/leads/refresh", {
     rangeMode,
   });
-});
+};
 
-app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+const handleGhlClientManagersGet = async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.query.refresh);
   if (refreshMode !== "none") {
     res.status(405).json({
@@ -36386,15 +36451,15 @@ app.get("/api/ghl/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIE
   }
 
   await respondGhlClientManagers(req, res, "none", "GET /api/ghl/client-managers");
-});
+};
 
-app.post("/api/ghl/client-managers/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), async (req, res) => {
+const handleGhlClientManagersRefreshPost = async (req, res) => {
   const refreshMode = normalizeGhlRefreshMode(req.body?.refresh || req.body?.mode || "incremental");
   const resolvedRefreshMode = refreshMode === "none" ? "incremental" : refreshMode;
   await respondGhlClientManagers(req, res, resolvedRefreshMode, "POST /api/ghl/client-managers/refresh");
-});
+};
 
-app.post("/api/ghl/client-contracts/archive", async (req, res) => {
+const handleGhlClientContractsArchivePost = async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -36489,7 +36554,7 @@ app.post("/api/ghl/client-contracts/archive", async (req, res) => {
       error: sanitizeTextValue(error?.message, 600) || "Failed to archive GHL contract PDF.",
     });
   }
-});
+};
 
 function respondGhlContractDocumentsDisabled(res) {
   res.setHeader("Cache-Control", "no-store, private");
@@ -36500,154 +36565,142 @@ function respondGhlContractDocumentsDisabled(res) {
   });
 }
 
-app.get("/api/ghl/client-contracts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
+const handleGhlClientContractsGet = (_req, res) => {
   respondGhlContractDocumentsDisabled(res);
-});
+};
 
-app.get("/api/ghl/client-contracts/download", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
+const handleGhlClientContractsDownloadGet = (_req, res) => {
   respondGhlContractDocumentsDisabled(res);
-});
-app.get("/api/ghl/client-contracts/text", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
+};
+const handleGhlClientContractsTextGet = (_req, res) => {
   respondGhlContractDocumentsDisabled(res);
-});
+};
 
-app.get(
-  "/api/ghl/client-basic-notes/refresh-all",
-  requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
-  (_req, res) => {
+const handleGhlClientBasicNotesRefreshAllGet = (_req, res) => {
+  res.json({
+    ok: true,
+    job: getGhlBasicNoteManualRefreshStateSnapshot(),
+  });
+};
+
+const handleGhlClientBasicNotesRefreshAllPost = async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.basic_notes.refresh_all",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_REFRESH_ALL.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_REFRESH_ALL.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.blockMs,
+      },
+      message: "Bulk BASIC/MEMO refresh limit reached. Please wait before retrying.",
+      code: "ghl_basic_notes_refresh_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  if (ghlBasicNoteManualRefreshState.inFlight) {
+    res.status(409).json({
+      ok: false,
+      error: "Bulk BASIC/MEMO refresh is already in progress.",
+      job: getGhlBasicNoteManualRefreshStateSnapshot(),
+    });
+    return;
+  }
+
+  void runGhlBasicNoteManualRefreshAll(req.webAuthUser || "");
+  res.status(202).json({
+    ok: true,
+    started: true,
+    job: getGhlBasicNoteManualRefreshStateSnapshot(),
+  });
+};
+
+const handleGhlClientBasicNotesMissingGet = async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  try {
+    const state = await getStoredRecords();
+    const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
+    const clientNames = visibilityContext.visibleClientNames;
+    const cachedRows = await listCachedGhlBasicNoteRowsByClientNames(clientNames);
+    const cacheByClientName = new Map();
+    for (const row of cachedRows) {
+      if (!row?.clientName) {
+        continue;
+      }
+      cacheByClientName.set(row.clientName, row);
+    }
+
+    const missingItems = [];
+    for (const clientName of clientNames) {
+      const cachedRow = cacheByClientName.get(clientName) || null;
+      if (!cachedRow) {
+        missingItems.push({
+          clientName,
+          reason: "no_cache_row",
+        });
+        continue;
+      }
+
+      const status = sanitizeTextValue(cachedRow.status, 40).toLowerCase() || "unknown";
+      const noteBody = sanitizeTextValue(cachedRow.noteBody, 12000);
+
+      if (status !== "found") {
+        missingItems.push({
+          clientName,
+          reason: `status_${status}`,
+        });
+        continue;
+      }
+
+      if (!noteBody) {
+        missingItems.push({
+          clientName,
+          reason: "empty_basic_info",
+        });
+      }
+    }
+
     res.json({
       ok: true,
-      job: getGhlBasicNoteManualRefreshStateSnapshot(),
+      source: "cache-only",
+      totalClients: clientNames.length,
+      cachedRowsCount: cachedRows.length,
+      missingCount: missingItems.length,
+      missingItems,
     });
-  },
-);
-
-app.post(
-  "/api/ghl/client-basic-notes/refresh-all",
-  requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
-  async (req, res) => {
-    if (
-      !enforceRateLimit(req, res, {
-        scope: "api.ghl.basic_notes.refresh_all",
-        ipProfile: {
-          windowMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.windowMs,
-          maxHits: RATE_LIMIT_PROFILE_API_REFRESH_ALL.maxHitsIp,
-          blockMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.blockMs,
-        },
-        userProfile: {
-          windowMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.windowMs,
-          maxHits: RATE_LIMIT_PROFILE_API_REFRESH_ALL.maxHitsUser,
-          blockMs: RATE_LIMIT_PROFILE_API_REFRESH_ALL.blockMs,
-        },
-        message: "Bulk BASIC/MEMO refresh limit reached. Please wait before retrying.",
-        code: "ghl_basic_notes_refresh_rate_limited",
-      })
-    ) {
-      return;
-    }
-
-    if (!pool) {
-      res.status(503).json({
-        error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-      });
-      return;
-    }
-
-    if (!isGhlConfigured()) {
-      res.status(503).json({
-        error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
-      });
-      return;
-    }
-
-    if (ghlBasicNoteManualRefreshState.inFlight) {
-      res.status(409).json({
-        ok: false,
-        error: "Bulk BASIC/MEMO refresh is already in progress.",
-        job: getGhlBasicNoteManualRefreshStateSnapshot(),
-      });
-      return;
-    }
-
-    void runGhlBasicNoteManualRefreshAll(req.webAuthUser || "");
-    res.status(202).json({
-      ok: true,
-      started: true,
-      job: getGhlBasicNoteManualRefreshStateSnapshot(),
+  } catch (error) {
+    console.error("GET /api/ghl/client-basic-notes/missing failed:", error);
+    res.status(error.httpStatus || 500).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load missing BasicInfo clients from cache.",
     });
-  },
-);
-
-app.get(
-  "/api/ghl/client-basic-notes/missing",
-  requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
-  async (req, res) => {
-    if (!pool) {
-      res.status(503).json({
-        error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-      });
-      return;
-    }
-
-    try {
-      const state = await getStoredRecords();
-      const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
-      const clientNames = visibilityContext.visibleClientNames;
-      const cachedRows = await listCachedGhlBasicNoteRowsByClientNames(clientNames);
-      const cacheByClientName = new Map();
-      for (const row of cachedRows) {
-        if (!row?.clientName) {
-          continue;
-        }
-        cacheByClientName.set(row.clientName, row);
-      }
-
-      const missingItems = [];
-      for (const clientName of clientNames) {
-        const cachedRow = cacheByClientName.get(clientName) || null;
-        if (!cachedRow) {
-          missingItems.push({
-            clientName,
-            reason: "no_cache_row",
-          });
-          continue;
-        }
-
-        const status = sanitizeTextValue(cachedRow.status, 40).toLowerCase() || "unknown";
-        const noteBody = sanitizeTextValue(cachedRow.noteBody, 12000);
-
-        if (status !== "found") {
-          missingItems.push({
-            clientName,
-            reason: `status_${status}`,
-          });
-          continue;
-        }
-
-        if (!noteBody) {
-          missingItems.push({
-            clientName,
-            reason: "empty_basic_info",
-          });
-        }
-      }
-
-      res.json({
-        ok: true,
-        source: "cache-only",
-        totalClients: clientNames.length,
-        cachedRowsCount: cachedRows.length,
-        missingCount: missingItems.length,
-        missingItems,
-      });
-    } catch (error) {
-      console.error("GET /api/ghl/client-basic-notes/missing failed:", error);
-      res.status(error.httpStatus || 500).json({
-        error: sanitizeTextValue(error?.message, 600) || "Failed to load missing BasicInfo clients from cache.",
-      });
-    }
-  },
-);
+  }
+};
 
 function resolveGhlBasicNoteInput(req, source = "query") {
   const payload = source === "body" ? req.body : req.query;
@@ -36673,7 +36726,7 @@ async function resolveGhlBasicNoteContext(req, input) {
   };
 }
 
-app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleGhlClientBasicNoteGet = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.ghl.basic_note",
@@ -36726,9 +36779,9 @@ app.get("/api/ghl/client-basic-note", requireWebPermission(WEB_AUTH_PERMISSION_V
       error: sanitizeTextValue(error?.message, 600) || "Failed to load GoHighLevel BASIC note from cache.",
     });
   }
-});
+};
 
-app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleGhlClientBasicNoteRefreshPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.ghl.basic_note.refresh",
@@ -36811,9 +36864,9 @@ app.post("/api/ghl/client-basic-note/refresh", requireWebPermission(WEB_AUTH_PER
       error: sanitizeTextValue(error?.message, 600) || "Failed to refresh GoHighLevel BASIC note.",
     });
   }
-});
+};
 
-app.get("/api/ghl/client-communications", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleGhlClientCommunicationsGet = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.ghl.client_communications",
@@ -36874,9 +36927,9 @@ app.get("/api/ghl/client-communications", requireWebPermission(WEB_AUTH_PERMISSI
       error: sanitizeTextValue(error?.message, 600) || "Failed to load client communications from GoHighLevel.",
     });
   }
-});
+};
 
-app.get("/api/ghl/client-communications/recording", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleGhlClientCommunicationsRecordingGet = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.ghl.client_communications.recording",
@@ -36943,9 +36996,9 @@ app.get("/api/ghl/client-communications/recording", requireWebPermission(WEB_AUT
       error: message,
     });
   }
-});
+};
 
-app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleGhlClientCommunicationsTranscriptPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.ghl.client_communications.transcript",
@@ -37095,9 +37148,9 @@ app.post("/api/ghl/client-communications/transcript", requireWebPermission(WEB_A
       code: sanitizeTextValue(error?.code, 120) || "ghl_transcript_failed",
     });
   }
-});
+};
 
-app.post("/api/ghl/client-communications/normalize-transcripts", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), async (req, res) => {
+const handleGhlClientCommunicationsNormalizeTranscriptsPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.ghl.client_communications.normalize_transcripts",
@@ -37178,9 +37231,39 @@ app.post("/api/ghl/client-communications/normalize-transcripts", requireWebPermi
       code: sanitizeTextValue(error?.code, 120) || "ghl_normalize_transcripts_failed",
     });
   }
+};
+
+registerGhlRoutes({
+  app,
+  requireWebPermission,
+  permissionKeys: {
+    WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS,
+    WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS,
+    WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS,
+  },
+  handlers: {
+    handleGhlContractTextPost,
+    handleGhlLeadsGet,
+    handleGhlLeadsRefreshPost,
+    handleGhlClientManagersGet,
+    handleGhlClientManagersRefreshPost,
+    handleGhlClientContractsArchivePost,
+    handleGhlClientContractsGet,
+    handleGhlClientContractsDownloadGet,
+    handleGhlClientContractsTextGet,
+    handleGhlClientBasicNotesRefreshAllGet,
+    handleGhlClientBasicNotesRefreshAllPost,
+    handleGhlClientBasicNotesMissingGet,
+    handleGhlClientBasicNoteGet,
+    handleGhlClientBasicNoteRefreshPost,
+    handleGhlClientCommunicationsGet,
+    handleGhlClientCommunicationsRecordingGet,
+    handleGhlClientCommunicationsTranscriptPost,
+    handleGhlClientCommunicationsNormalizeTranscriptsPost,
+  },
 });
 
-app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS), async (req, res) => {
+async function handleRecordsPut(req, res) {
   if (
     !enforceRateLimit(req, res, {
       scope: "api.records.write",
@@ -37253,9 +37336,9 @@ app.put("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_P
     }
     res.status(error.httpStatus || resolveDbHttpStatus(error)).json(payload);
   }
-});
+}
 
-app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS), async (req, res) => {
+async function handleRecordsPatch(req, res) {
   if (!RECORDS_PATCH_ENABLED) {
     res.status(404).json({
       error: "API route not found",
@@ -37337,9 +37420,9 @@ app.patch("/api/records", requireWebPermission(WEB_AUTH_PERMISSION_MANAGE_CLIENT
     }
     res.status(error.httpStatus || resolveDbHttpStatus(error)).json(payload);
   }
-});
+}
 
-app.post("/api/mini/access", async (req, res) => {
+const handleMiniAccessPost = async (req, res) => {
   if (
     !(await enforceMiniRateLimit(req, res, {
       scope: "api.mini.access",
@@ -37394,9 +37477,9 @@ app.post("/api/mini/access", async (req, res) => {
       attachments: MINI_CLIENT_ATTACHMENTS_CONFIG,
     },
   });
-});
+};
 
-app.post("/api/mini/clients", async (req, res) => {
+const handleMiniClientsPost = async (req, res) => {
   const multipartRequest = isMultipartRequest(req);
   const idempotencyKeyResult = resolveMiniIdempotencyKeyFromRequest(req);
   if (!idempotencyKeyResult.ok) {
@@ -37624,9 +37707,9 @@ app.post("/api/mini/clients", async (req, res) => {
     await cleanupTemporaryAttachmentFiles(attachmentsResult.attachments || []);
     await cleanupTemporaryUploadFiles(req.files);
   }
-});
+};
 
-app.get("/api/moderation/submissions", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_MODERATION), async (req, res) => {
+const handleModerationSubmissionsGet = async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -37666,9 +37749,9 @@ app.get("/api/moderation/submissions", requireWebPermission(WEB_AUTH_PERMISSION_
       .status(resolveDbHttpStatus(error))
       .json(buildPublicErrorPayload(error, "Failed to load moderation submissions"));
   }
-});
+};
 
-app.get("/api/moderation/submissions/:id/files", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_MODERATION), async (req, res) => {
+const handleModerationSubmissionFilesGet = async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -37704,9 +37787,9 @@ app.get("/api/moderation/submissions/:id/files", requireWebPermission(WEB_AUTH_P
     console.error("GET /api/moderation/submissions/:id/files failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load submission files"));
   }
-});
+};
 
-app.get("/api/moderation/submissions/:id/files/:fileId", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_MODERATION), async (req, res) => {
+const handleModerationSubmissionFileGet = async (req, res) => {
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
@@ -37742,9 +37825,9 @@ app.get("/api/moderation/submissions/:id/files/:fileId", requireWebPermission(WE
     console.error("GET /api/moderation/submissions/:id/files/:fileId failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load file"));
   }
-});
+};
 
-app.post("/api/moderation/submissions/:id/approve", requireWebPermission(WEB_AUTH_PERMISSION_REVIEW_MODERATION), async (req, res) => {
+const handleModerationApprovePost = async (req, res) => {
   try {
     const result = await reviewClientSubmission(
       req.params.id,
@@ -37768,9 +37851,9 @@ app.post("/api/moderation/submissions/:id/approve", requireWebPermission(WEB_AUT
     console.error("POST /api/moderation/submissions/:id/approve failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to approve submission"));
   }
-});
+};
 
-app.post("/api/moderation/submissions/:id/reject", requireWebPermission(WEB_AUTH_PERMISSION_REVIEW_MODERATION), async (req, res) => {
+const handleModerationRejectPost = async (req, res) => {
   try {
     const result = await reviewClientSubmission(
       req.params.id,
@@ -37794,14 +37877,35 @@ app.post("/api/moderation/submissions/:id/reject", requireWebPermission(WEB_AUTH
     console.error("POST /api/moderation/submissions/:id/reject failed:", error);
     res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to reject submission"));
   }
+};
+
+const handleMiniPageGet = (_req, res) => {
+  res.sendFile(path.join(staticRoot, "mini.html"));
+};
+
+registerMiniRoutes({
+  app,
+  handlers: {
+    handleMiniAccessPost,
+    handleMiniClientsPost,
+    handleMiniPageGet,
+  },
 });
 
-app.get("/mini", (_req, res) => {
-  res.sendFile(path.join(staticRoot, "mini.html"));
-});
-
-app.get("/mini.html", (_req, res) => {
-  res.sendFile(path.join(staticRoot, "mini.html"));
+registerModerationRoutes({
+  app,
+  requireWebPermission,
+  permissionKeys: {
+    WEB_AUTH_PERMISSION_VIEW_MODERATION,
+    WEB_AUTH_PERMISSION_REVIEW_MODERATION,
+  },
+  handlers: {
+    handleModerationSubmissionsGet,
+    handleModerationSubmissionFilesGet,
+    handleModerationSubmissionFileGet,
+    handleModerationApprovePost,
+    handleModerationRejectPost,
+  },
 });
 
 app.get("/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (_req, res) => {
