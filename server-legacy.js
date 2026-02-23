@@ -38,6 +38,10 @@ const { registerGhlRoutes } = require("./server/routes/ghl.routes");
 const { registerQuickBooksRoutes } = require("./server/routes/quickbooks.routes");
 const { registerModerationRoutes } = require("./server/routes/moderation.routes");
 const { registerMiniRoutes } = require("./server/routes/mini.routes");
+const { createGhlReadOnlyGuard } = require("./server/integrations/ghl/client");
+const { createGhlNotesController } = require("./server/domains/ghl-notes");
+const { createGhlLeadsController } = require("./server/domains/ghl-leads");
+const { createGhlCommunicationsController } = require("./server/domains/ghl-communications");
 const { createRecordsValidation } = require("./server/domains/records/records.validation");
 const { createRecordsService } = require("./server/domains/records/records.service");
 const { createRecordsController } = require("./server/domains/records/records.controller");
@@ -13380,6 +13384,15 @@ function isGhlConfigured() {
   return Boolean(GHL_API_KEY && GHL_LOCATION_ID);
 }
 
+const ghlReadOnlyGuard = createGhlReadOnlyGuard({
+  logger: {
+    warn: (message) => {
+      console.warn(message);
+    },
+  },
+  errorFactory: (message) => createHttpError(message, 403, "ghl_read_only_blocked"),
+});
+
 function buildGhlRequestHeaders(includeJsonBody = false) {
   const headers = {
     Authorization: `Bearer ${GHL_API_KEY}`,
@@ -13465,6 +13478,11 @@ function isGhlRetryableNetworkError(error) {
 
 async function requestGhlApi(pathname, options = {}) {
   const method = (options.method || "GET").toString().toUpperCase();
+  ghlReadOnlyGuard.assertAllowedRequest({
+    method,
+    pathname,
+    source: "requestGhlApi",
+  });
   const includeJsonBody = method !== "GET" && method !== "HEAD";
   const headers = buildGhlRequestHeaders(includeJsonBody);
   const query = options.query && typeof options.query === "object" ? options.query : {};
@@ -15277,6 +15295,11 @@ async function fetchGhlCallRecordingByMessageId(messageId) {
   }
 
   const url = buildGhlCallRecordingFetchUrl(normalizedMessageId);
+  ghlReadOnlyGuard.assertAllowedRequest({
+    method: "GET",
+    pathname: url?.pathname || "/conversations/messages/recording",
+    source: "fetchGhlCallRecordingByMessageId",
+  });
   const headers = {
     Authorization: `Bearer ${GHL_API_KEY}`,
     Version: GHL_API_VERSION,
@@ -29687,6 +29710,11 @@ function buildGhlSessionRequestHeaders(sessionToken, includeJsonBody = false) {
 
 async function requestGhlApiWithSessionToken(pathname, sessionToken, options = {}) {
   const method = sanitizeTextValue(options?.method, 16).toUpperCase() || "GET";
+  ghlReadOnlyGuard.assertAllowedRequest({
+    method,
+    pathname,
+    source: "requestGhlApiWithSessionToken",
+  });
   const includeJsonBody = method !== "GET" && method !== "HEAD";
   const query = options?.query && typeof options.query === "object" ? options.query : {};
   const timeoutMs = Math.min(
@@ -29757,6 +29785,11 @@ async function requestGhlApiWithSessionToken(pathname, sessionToken, options = {
 }
 
 async function requestGhlBinaryWithSessionToken(pathname, sessionToken, options = {}) {
+  ghlReadOnlyGuard.assertAllowedRequest({
+    method: "GET",
+    pathname,
+    source: "requestGhlBinaryWithSessionToken",
+  });
   const timeoutMs = Math.min(
     Math.max(parsePositiveInteger(options?.timeoutMs, GHL_APP_REQUEST_TIMEOUT_MS), 500),
     120000,
@@ -36895,6 +36928,28 @@ const handleGhlClientCommunicationsNormalizeTranscriptsPost = async (req, res) =
   }
 };
 
+const ghlLeadsController = createGhlLeadsController({
+  handleGhlLeadsGet,
+  handleGhlLeadsRefreshPost,
+  handleGhlClientManagersGet,
+  handleGhlClientManagersRefreshPost,
+});
+
+const ghlNotesController = createGhlNotesController({
+  handleGhlClientBasicNotesRefreshAllGet,
+  handleGhlClientBasicNotesRefreshAllPost,
+  handleGhlClientBasicNotesMissingGet,
+  handleGhlClientBasicNoteGet,
+  handleGhlClientBasicNoteRefreshPost,
+});
+
+const ghlCommunicationsController = createGhlCommunicationsController({
+  handleGhlClientCommunicationsGet,
+  handleGhlClientCommunicationsRecordingGet,
+  handleGhlClientCommunicationsTranscriptPost,
+  handleGhlClientCommunicationsNormalizeTranscriptsPost,
+});
+
 registerGhlRoutes({
   app,
   requireWebPermission,
@@ -36905,23 +36960,24 @@ registerGhlRoutes({
   },
   handlers: {
     handleGhlContractTextPost,
-    handleGhlLeadsGet,
-    handleGhlLeadsRefreshPost,
-    handleGhlClientManagersGet,
-    handleGhlClientManagersRefreshPost,
+    handleGhlLeadsGet: ghlLeadsController.handleGhlLeadsGet,
+    handleGhlLeadsRefreshPost: ghlLeadsController.handleGhlLeadsRefreshPost,
+    handleGhlClientManagersGet: ghlLeadsController.handleGhlClientManagersGet,
+    handleGhlClientManagersRefreshPost: ghlLeadsController.handleGhlClientManagersRefreshPost,
     handleGhlClientContractsArchivePost,
     handleGhlClientContractsGet,
     handleGhlClientContractsDownloadGet,
     handleGhlClientContractsTextGet,
-    handleGhlClientBasicNotesRefreshAllGet,
-    handleGhlClientBasicNotesRefreshAllPost,
-    handleGhlClientBasicNotesMissingGet,
-    handleGhlClientBasicNoteGet,
-    handleGhlClientBasicNoteRefreshPost,
-    handleGhlClientCommunicationsGet,
-    handleGhlClientCommunicationsRecordingGet,
-    handleGhlClientCommunicationsTranscriptPost,
-    handleGhlClientCommunicationsNormalizeTranscriptsPost,
+    handleGhlClientBasicNotesRefreshAllGet: ghlNotesController.handleGhlClientBasicNotesRefreshAllGet,
+    handleGhlClientBasicNotesRefreshAllPost: ghlNotesController.handleGhlClientBasicNotesRefreshAllPost,
+    handleGhlClientBasicNotesMissingGet: ghlNotesController.handleGhlClientBasicNotesMissingGet,
+    handleGhlClientBasicNoteGet: ghlNotesController.handleGhlClientBasicNoteGet,
+    handleGhlClientBasicNoteRefreshPost: ghlNotesController.handleGhlClientBasicNoteRefreshPost,
+    handleGhlClientCommunicationsGet: ghlCommunicationsController.handleGhlClientCommunicationsGet,
+    handleGhlClientCommunicationsRecordingGet: ghlCommunicationsController.handleGhlClientCommunicationsRecordingGet,
+    handleGhlClientCommunicationsTranscriptPost: ghlCommunicationsController.handleGhlClientCommunicationsTranscriptPost,
+    handleGhlClientCommunicationsNormalizeTranscriptsPost:
+      ghlCommunicationsController.handleGhlClientCommunicationsNormalizeTranscriptsPost,
   },
 });
 
