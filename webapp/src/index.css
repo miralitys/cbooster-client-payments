@@ -770,6 +770,26 @@ a {
   flex-wrap: wrap;
 }
 
+.clients-react-page .cb-table th.clients-column-client,
+.clients-react-page .cb-table td.clients-column-client {
+  min-width: clamp(180px, 18vw, 300px);
+  white-space: normal;
+}
+
+.clients-react-page .cb-table th.clients-column-contact,
+.clients-react-page .cb-table td.clients-column-contact {
+  min-width: clamp(180px, 18vw, 280px);
+  white-space: normal;
+}
+
+.clients-contact-cell {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .th-sort-btn {
   width: 100%;
   border: 0;
