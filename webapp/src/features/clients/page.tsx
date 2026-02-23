@@ -11,7 +11,7 @@ import {
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
-import { getClientManagers, getClients } from "@/shared/api";
+import { getClientManagers, getRecords } from "@/shared/api";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
 import type { ClientRecord } from "@/shared/types/records";
 import {
@@ -90,7 +90,7 @@ export default function ClientsPage() {
     setLoadError("");
 
     try {
-      const payload = await getClients();
+      const payload = await getRecords();
       const normalizedRecords = normalizeRecords(Array.isArray(payload.records) ? payload.records : []);
       setRecords(normalizedRecords);
     } catch (error) {
