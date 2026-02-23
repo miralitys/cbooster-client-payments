@@ -44,17 +44,6 @@ function registerAuthProtectedRoutes(context) {
   );
 
   app.get(
-    "/api/assistant/reviews",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
-    handlers.handleAssistantReviewsList,
-  );
-  app.put(
-    "/api/assistant/reviews/:id",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
-    handlers.handleAssistantReviewUpdate,
-  );
-
-  app.get(
     "/api/auth/users",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
     handlers.handleApiAuthUsersList,

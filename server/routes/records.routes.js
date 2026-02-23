@@ -35,30 +35,6 @@ function registerRecordsRoutes(context) {
     handlers.handleRecordsGet,
   );
 
-  app.post(
-    "/api/assistant/context/reset",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
-    handlers.handleAssistantContextResetPost,
-  );
-
-  app.post(
-    "/api/assistant/context/reset/telemetry",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
-    handlers.handleAssistantContextResetTelemetryPost,
-  );
-
-  app.post(
-    "/api/assistant/chat",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
-    handlers.handleAssistantChatPost,
-  );
-
-  app.post(
-    "/api/assistant/tts",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
-    handlers.handleAssistantTtsPost,
-  );
-
   app.put(
     "/api/records",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS),
