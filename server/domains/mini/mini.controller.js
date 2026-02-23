@@ -169,7 +169,7 @@ function createMiniController(dependencies = {}) {
 
       const contentLengthBytes = resolveRequestContentLengthBytes(req);
       if (Number.isFinite(contentLengthBytes) && contentLengthBytes > miniMultipartMaxContentLengthBytes) {
-        respondMiniRequestEarlyAndClose(req, res, 413, {
+        respondMiniRequestEarlyAndClose(req, res, 400, {
           error: "Attachment payload is too large.",
           code: "mini_multipart_too_large",
         });
