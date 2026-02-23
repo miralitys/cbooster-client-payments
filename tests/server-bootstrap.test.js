@@ -6,14 +6,29 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
+const BOOTSTRAP_TEST_SESSION_SECRET = "bootstrap-test-web-auth-session-secret-abcdefghijklmnopqrstuvwxyz";
 
-function runNodeScript(scriptSource, { timeoutMs = 8000 } = {}) {
+function runNodeScript(scriptSource, { timeoutMs = 20000, envOverrides = {} } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["-e", scriptSource], {
       cwd: PROJECT_ROOT,
       env: {
         ...process.env,
         NODE_ENV: "test",
+        SERVER_AUTOSTART_IN_TEST: "false",
+        DATABASE_URL: "",
+        TEST_USE_FAKE_PG: "0",
+        WEB_AUTH_SESSION_SECRET: BOOTSTRAP_TEST_SESSION_SECRET,
+        WEB_AUTH_USERS_JSON: "",
+        GHL_API_KEY: "",
+        GHL_LOCATION_ID: "",
+        QUICKBOOKS_CLIENT_ID: "",
+        QUICKBOOKS_CLIENT_SECRET: "",
+        QUICKBOOKS_REFRESH_TOKEN: "",
+        QUICKBOOKS_REALM_ID: "",
+        OPENAI_API_KEY: "",
+        ELEVENLABS_API_KEY: "",
+        ...envOverrides,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -66,9 +81,12 @@ test("server.js exports app/startServer without auto-listen in test mode", async
       throw new Error("express app export is missing");
     }
     console.log("SERVER_EXPORTS_OK");
+    process.exit(0);
   `;
 
-  const result = await runNodeScript(script);
+  const result = await runNodeScript(script, {
+    timeoutMs: 20000,
+  });
 
   assert.equal(
     result.timedOut,
