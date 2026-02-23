@@ -3,6 +3,7 @@
 function createQuickBooksService(dependencies = {}) {
   const {
     repo,
+    listCachedQuickBooksTransactionsInRange: listCachedTransactionsInRange,
     listQuickBooksOutgoingTransactionsInRange,
     buildQuickBooksSyncMeta,
     enqueueQuickBooksSyncJob,
@@ -17,6 +18,9 @@ function createQuickBooksService(dependencies = {}) {
 
   return {
     listCachedQuickBooksTransactionsInRange(rangeFrom, rangeTo) {
+      if (typeof listCachedTransactionsInRange === "function") {
+        return listCachedTransactionsInRange(rangeFrom, rangeTo);
+      }
       return repo.listCachedQuickBooksTransactionsInRange(rangeFrom, rangeTo);
     },
     listQuickBooksOutgoingTransactionsInRange(rangeFrom, rangeTo) {

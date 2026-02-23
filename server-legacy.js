@@ -21787,6 +21787,7 @@ const quickBooksRepo = createQuickBooksRepo({
 
 const quickBooksService = createQuickBooksService({
   repo: quickBooksRepo,
+  listCachedQuickBooksTransactionsInRange,
   listQuickBooksOutgoingTransactionsInRange,
   buildQuickBooksSyncMeta,
   enqueueQuickBooksSyncJob,
