@@ -1,5 +1,13 @@
 # Testing Notes
 
+## Pre-PR guardrails
+
+Run architecture checks before opening a PR:
+
+```bash
+npm run guard:architecture
+```
+
 ## `tests/server-bootstrap.test.js`
 
 Purpose:

@@ -1,0 +1,15 @@
+# Architecture guard ignore rules
+# Empty/comment lines are ignored.
+#
+# Default format:
+#   path-glob
+# Example:
+#   server/domains/**/generated-*.js
+#
+# Regex format:
+#   regex:<pattern>
+# Applied to full ripgrep match line: path:line:content
+#
+# Known migration exceptions (warn-only SQL checker):
+client-records-v2-utils.js
+custom-dashboard-module.js
