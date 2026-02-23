@@ -2,12 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { AssistantWidget } from "@/features/assistant/AssistantWidget";
+import { getSession } from "@/shared/api/session";
+import { isOwnerOrAdminSession } from "@/shared/lib/access";
 import { ModalStackProvider, ToastHost } from "@/shared/ui";
 
 interface NavigationItem {
   to: string;
   label: string;
   external?: boolean;
+  ownerAdminOnly?: boolean;
 }
 
 const NAV_ITEMS: NavigationItem[] = [
@@ -18,7 +21,7 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/payment-probability", label: "Client Payment Probability" },
   { to: "/identityiq-score", label: "IdentityIQ Scores" },
   { to: "/ghl-contracts", label: "GHL Contract Text" },
-  { to: "/quickbooks", label: "QuickBooks" },
+  { to: "/quickbooks", label: "QuickBooks", ownerAdminOnly: true },
   { to: "/leads", label: "Leads" },
   { to: "/access-control", label: "Access Control" },
 ];
@@ -69,6 +72,7 @@ function resolvePageTitle(pathname: string): string {
 export function Layout() {
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [canViewQuickBooks, setCanViewQuickBooks] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const pageTitle = resolvePageTitle(location.pathname);
 
@@ -98,6 +102,28 @@ export function Layout() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+
+    void getSession()
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setCanViewQuickBooks(isOwnerOrAdminSession(payload));
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+        setCanViewQuickBooks(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   return (
     <ModalStackProvider>
       <main className="page-shell">
@@ -124,7 +150,7 @@ export function Layout() {
               </button>
 
               <div id="app-account-menu-panel" className="account-menu__panel" role="menu" hidden={!menuOpen}>
-                {NAV_ITEMS.map((item) => {
+                {NAV_ITEMS.filter((item) => !item.ownerAdminOnly || canViewQuickBooks).map((item) => {
                   if (item.external) {
                     return (
                       <a

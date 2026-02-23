@@ -25575,6 +25575,7 @@ const quickBooksController = createQuickBooksController({
 
 registerQuickBooksRoutes({
   app,
+  requireOwnerOrAdminAccess,
   requireWebPermission,
   permissionKeys: {
     WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS,
@@ -35219,7 +35220,7 @@ registerModerationRoutes({
   },
 });
 
-app.get("/quickbooks-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS), (_req, res) => {
+app.get("/quickbooks-payments", requireOwnerOrAdminAccess(), (_req, res) => {
   res.redirect(302, "/app/quickbooks-payments");
 });
 

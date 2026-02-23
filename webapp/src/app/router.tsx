@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { Layout } from "@/app/Layout";
+import { OwnerAdminRoute } from "@/app/OwnerAdminRoute";
 import AccessControlPage from "@/features/access-control/page";
 import ClientsPage from "@/features/clients/page";
 import ClientPaymentsPage from "@/features/client-payments/page";
@@ -25,8 +26,22 @@ export function AppRouter() {
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="custom-dashboard" element={<CustomDashboardPage />} />
         <Route path="clients" element={<ClientsPage />} />
-        <Route path="quickbooks" element={<QuickBooksPage />} />
-        <Route path="quickbooks-payments" element={<QuickBooksPage />} />
+        <Route
+          path="quickbooks"
+          element={(
+            <OwnerAdminRoute>
+              <QuickBooksPage />
+            </OwnerAdminRoute>
+          )}
+        />
+        <Route
+          path="quickbooks-payments"
+          element={(
+            <OwnerAdminRoute>
+              <QuickBooksPage />
+            </OwnerAdminRoute>
+          )}
+        />
         <Route path="client-managers" element={<Navigate to="/client-payments" replace />} />
         <Route path="leads" element={<LeadsPage />} />
         <Route path="access-control" element={<AccessControlPage />} />
