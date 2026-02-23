@@ -11,7 +11,7 @@ import {
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
-import { getClientManagers, getRecords } from "@/shared/api";
+import { getClientManagers, getClients } from "@/shared/api";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
 import type { ClientRecord } from "@/shared/types/records";
 import {
@@ -89,7 +89,7 @@ export default function ClientsPage() {
     setLoadError("");
 
     try {
-      const payload = await getRecords();
+      const payload = await getClients();
       const normalizedRecords = normalizeRecords(Array.isArray(payload.records) ? payload.records : []);
       setRecords(normalizedRecords);
     } catch (error) {
@@ -321,42 +321,6 @@ export default function ClientsPage() {
     [filteredRecords],
   );
 
-  const hasActiveFilters = useMemo(() => {
-    return (
-      Boolean(search.trim()) ||
-      salesFilter !== SALES_FILTER_ALL ||
-      clientManagerFilter !== MANAGER_FILTER_ALL ||
-      statusFilter !== "all" ||
-      contractSignedFilter !== "all" ||
-      Boolean(contractDateFrom.trim()) ||
-      Boolean(contractDateTo.trim())
-    );
-  }, [clientManagerFilter, contractDateFrom, contractDateTo, contractSignedFilter, salesFilter, search, statusFilter]);
-
-  const statusMessage = useMemo(() => {
-    if (isLoading) {
-      return "Loading clients from Client Payments...";
-    }
-
-    if (loadError) {
-      return loadError;
-    }
-
-    if (!records.length) {
-      return "No clients found in Client Payments.";
-    }
-
-    if (hasActiveFilters && !filteredRecords.length) {
-      return "No clients match current filters.";
-    }
-
-    if (hasActiveFilters) {
-      return `Showing ${filteredRecords.length} of ${records.length} clients from Client Payments.`;
-    }
-
-    return `Loaded ${records.length} clients from Client Payments.`;
-  }, [filteredRecords.length, hasActiveFilters, isLoading, loadError, records.length]);
-
   const hasActiveStructuredFilters = useMemo(() => {
     return (
       salesFilter !== SALES_FILTER_ALL ||
@@ -454,31 +418,26 @@ export default function ClientsPage() {
   return (
     <PageShell className="clients-react-page">
       <PageHeader
-        title="Clients"
-        subtitle="All client profiles sourced from Client Payments"
         actions={
           <Button type="button" variant="secondary" onClick={() => void loadClients()} isLoading={isLoading}>
             Refresh
           </Button>
         }
         meta={
-          <>
-            <p className={`dashboard-message ${loadError ? "error" : ""}`.trim()}>{statusMessage}</p>
-            <div className="page-header__stats">
-              <span className="stat-chip">
-                <span className="stat-chip__label">Clients:</span>
-                <span className="stat-chip__value">{filteredRecords.length}</span>
-              </span>
-              <span className="stat-chip">
-                <span className="stat-chip__label">Contract Total:</span>
-                <span className="stat-chip__value">{formatMoney(totalContractAmount)}</span>
-              </span>
-              <span className="stat-chip">
-                <span className="stat-chip__label">Balance:</span>
-                <span className="stat-chip__value">{formatMoney(totalBalanceAmount)}</span>
-              </span>
-            </div>
-          </>
+          <div className="page-header__stats">
+            <span className="stat-chip">
+              <span className="stat-chip__label">Clients:</span>
+              <span className="stat-chip__value">{filteredRecords.length}</span>
+            </span>
+            <span className="stat-chip">
+              <span className="stat-chip__label">Contract Total:</span>
+              <span className="stat-chip__value">{formatMoney(totalContractAmount)}</span>
+            </span>
+            <span className="stat-chip">
+              <span className="stat-chip__label">Balance:</span>
+              <span className="stat-chip__value">{formatMoney(totalBalanceAmount)}</span>
+            </span>
+          </div>
         }
       />
 
