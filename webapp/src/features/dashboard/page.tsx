@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
 import { withStableRowKeys, type RowWithKey } from "@/shared/lib/stableRowKeys";
-import { isOwnerOrAdminSession } from "@/shared/lib/access";
 import {
   approveModerationSubmission,
   getModerationSubmissionFiles,
@@ -102,7 +101,6 @@ function mergeModerationSubmissions(
 
 export default function DashboardPage() {
   const [sessionCanReview, setSessionCanReview] = useState(false);
-  const [sessionCanViewQuickBooks, setSessionCanViewQuickBooks] = useState<boolean | null>(null);
 
   const [overviewPeriod, setOverviewPeriod] = useState<OverviewPeriodKey>("currentWeek");
   const [records, setRecords] = useState<ClientRecord[]>([]);
@@ -277,13 +275,6 @@ export default function DashboardPage() {
   );
 
   const loadTodayQuickBooksPayments = useCallback(async () => {
-    if (sessionCanViewQuickBooks !== true) {
-      setTodayPayments([]);
-      setTodayPaymentsError("");
-      setTodayPaymentsLoading(false);
-      return;
-    }
-
     setTodayPaymentsLoading(true);
     setTodayPaymentsError("");
     try {
@@ -307,19 +298,11 @@ export default function DashboardPage() {
     } finally {
       setTodayPaymentsLoading(false);
     }
-  }, [sessionCanViewQuickBooks, showDashboardMessage]);
+  }, [showDashboardMessage]);
 
   const reloadDashboard = useCallback(async () => {
-    const requests: Array<Promise<unknown>> = [loadOverview(), loadPendingSubmissions()];
-    if (sessionCanViewQuickBooks === true) {
-      requests.push(loadTodayQuickBooksPayments());
-    } else {
-      setTodayPayments([]);
-      setTodayPaymentsError("");
-      setTodayPaymentsLoading(false);
-    }
-    await Promise.all(requests);
-  }, [loadOverview, loadPendingSubmissions, loadTodayQuickBooksPayments, sessionCanViewQuickBooks]);
+    await Promise.all([loadOverview(), loadPendingSubmissions(), loadTodayQuickBooksPayments()]);
+  }, [loadOverview, loadPendingSubmissions, loadTodayQuickBooksPayments]);
 
   const loadMorePendingSubmissions = useCallback(async () => {
     if (!submissionsHasMore || !submissionsNextCursor || submissionsLoading || submissionsLoadingMore) {
@@ -342,15 +325,10 @@ export default function DashboardPage() {
     void getSession()
       .then((payload) => {
         setSessionCanReview(Boolean(payload?.permissions?.review_moderation));
-        setSessionCanViewQuickBooks(isOwnerOrAdminSession(payload));
       })
       .catch(() => {
         setSessionCanReview(false);
-        setSessionCanViewQuickBooks(false);
       });
-  }, []);
-
-  useEffect(() => {
     void reloadDashboard();
   }, [reloadDashboard]);
 
@@ -623,33 +601,31 @@ export default function DashboardPage() {
         ) : null}
       </Panel>
 
-      {sessionCanViewQuickBooks === true ? (
-        <Panel className="table-panel payments-today-panel" title="New Payment Today">
-          <p className={`payments-today-kpi ${todayPaymentsError ? "error" : !todayPayments.length ? "is-muted" : ""}`.trim()}>
-            {todayPaymentsError
-              ? todayPaymentsError
-              : todayPayments.length
-                ? `${todayQuickBooksKpi} - ${todayPayments.length} QuickBooks payment${todayPayments.length === 1 ? "" : "s"}`
-                : "No QuickBooks payments recorded today."}
-          </p>
-          <p className="payments-today-date">{todayLabel}</p>
+      <Panel className="table-panel payments-today-panel" title="New Payment Today">
+        <p className={`payments-today-kpi ${todayPaymentsError ? "error" : !todayPayments.length ? "is-muted" : ""}`.trim()}>
+          {todayPaymentsError
+            ? todayPaymentsError
+            : todayPayments.length
+              ? `${todayQuickBooksKpi} - ${todayPayments.length} QuickBooks payment${todayPayments.length === 1 ? "" : "s"}`
+              : "No QuickBooks payments recorded today."}
+        </p>
+        <p className="payments-today-date">{todayLabel}</p>
 
-          {todayPaymentsLoading ? <LoadingSkeleton rows={4} /> : null}
-          {!todayPaymentsLoading && !todayPaymentsError && !todayPayments.length ? (
-            <EmptyState title="No QuickBooks payments recorded for today." />
-          ) : null}
+        {todayPaymentsLoading ? <LoadingSkeleton rows={4} /> : null}
+        {!todayPaymentsLoading && !todayPaymentsError && !todayPayments.length ? (
+          <EmptyState title="No QuickBooks payments recorded for today." />
+        ) : null}
 
-          {!todayPaymentsLoading && todayPayments.length ? (
-            <Table
-              className="payments-today-table-wrap"
-              columns={todayPaymentsColumns}
-              rows={todayPayments}
-              rowKey={(item) => item._rowKey}
-              density="compact"
-            />
-          ) : null}
-        </Panel>
-      ) : null}
+        {!todayPaymentsLoading && todayPayments.length ? (
+          <Table
+            className="payments-today-table-wrap"
+            columns={todayPaymentsColumns}
+            rows={todayPayments}
+            rowKey={(item) => item._rowKey}
+            density="compact"
+          />
+        ) : null}
+      </Panel>
 
       <Modal
         open={Boolean(activeSubmission)}

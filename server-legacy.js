@@ -25578,6 +25578,7 @@ registerQuickBooksRoutes({
   requireOwnerOrAdminAccess,
   requireWebPermission,
   permissionKeys: {
+    WEB_AUTH_PERMISSION_VIEW_DASHBOARD,
     WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS,
   },
   handlers: {
