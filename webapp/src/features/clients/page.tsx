@@ -539,7 +539,7 @@ export default function ClientsPage() {
           <label className="search-label" htmlFor="clients-search-input">
             Search Clients
           </label>
-          <div className="search-row">
+          <div className="search-row clients-search-row">
             <Input
               id="clients-search-input"
               placeholder="Client, manager, phone, email, notes, company"
@@ -550,6 +550,7 @@ export default function ClientsPage() {
             <Button
               type="button"
               variant={isMoreFiltersOpen ? "secondary" : "ghost"}
+              className="clients-more-btn"
               onClick={() => setIsMoreFiltersOpen((previous) => !previous)}
               aria-expanded={isMoreFiltersOpen}
               aria-controls="clients-advanced-filters"
@@ -560,19 +561,42 @@ export default function ClientsPage() {
         </div>
 
         {isMoreFiltersOpen ? (
-          <div id="clients-advanced-filters">
-            <div className="filters-grid-react">
-              <div className="filter-field filter-field--full">
-                <label className="cb-checkbox-row" htmlFor="clients-hide-writeoff-checkbox">
+          <div id="clients-advanced-filters" className="clients-advanced-filters">
+            <div className="clients-advanced-filters__toolbar">
+              <label className="clients-toggle-row" htmlFor="clients-hide-writeoff-checkbox">
+                <span className="clients-toggle-row__control">
                   <input
                     id="clients-hide-writeoff-checkbox"
                     type="checkbox"
                     checked={hideWrittenOffByDefault}
                     onChange={(event) => setHideWrittenOffByDefault(event.target.checked)}
                   />
-                  Show all clients except write-off
-                </label>
-              </div>
+                </span>
+                <span>Show all clients except write-off</span>
+              </label>
+
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="clients-reset-btn"
+                onClick={() => {
+                  setSalesFilter(SALES_FILTER_ALL);
+                  setClientManagerFilter(MANAGER_FILTER_ALL);
+                  setStatusFilter("all");
+                  setContractSignedFilter("all");
+                  setInWorkFilter("all");
+                  setHideWrittenOffByDefault(true);
+                  setContractDateFrom("");
+                  setContractDateTo("");
+                }}
+                disabled={!hasActiveStructuredFilters}
+              >
+                Reset Filters
+              </Button>
+            </div>
+
+            <div className="clients-filters-grid">
 
               <div className="filter-field">
                 <label htmlFor="clients-contract-date-from-input">Contract Date From</label>
@@ -668,27 +692,6 @@ export default function ClientsPage() {
                   <option value="not-in-work">Not In Work</option>
                 </Select>
               </div>
-            </div>
-
-            <div className="cb-page-header-toolbar">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setSalesFilter(SALES_FILTER_ALL);
-                  setClientManagerFilter(MANAGER_FILTER_ALL);
-                  setStatusFilter("all");
-                  setContractSignedFilter("all");
-                  setInWorkFilter("all");
-                  setHideWrittenOffByDefault(true);
-                  setContractDateFrom("");
-                  setContractDateTo("");
-                }}
-                disabled={!hasActiveStructuredFilters}
-              >
-                Reset Filters
-              </Button>
             </div>
           </div>
         ) : null}
