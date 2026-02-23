@@ -52,6 +52,9 @@ jobs:
       - name: Install webapp dependencies
         run: npm --prefix webapp ci
 
+      - name: Architecture guardrails
+        run: npm run guard:architecture
+
       - name: Lint (no warnings)
         run: npm --prefix webapp run lint -- --max-warnings=0
 
@@ -84,6 +87,9 @@ jobs:
 
       - name: Install webapp dependencies
         run: npm --prefix webapp ci
+
+      - name: Architecture guardrails
+        run: npm run guard:architecture
 
       - name: Mini App | Backend tests
         run: node --test tests/mini-*.test.js
