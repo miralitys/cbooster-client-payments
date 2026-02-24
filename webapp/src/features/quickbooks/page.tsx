@@ -143,6 +143,7 @@ export default function QuickBooksPage() {
   const [search, setSearch] = useState("");
   const [refundOnly, setRefundOnly] = useState(false);
   const [uncategorizedOnly, setUncategorizedOnly] = useState(false);
+  const [selectedOutgoingCategoryFilter, setSelectedOutgoingCategoryFilter] = useState("");
   const [selectedOutgoingKeys, setSelectedOutgoingKeys] = useState<string[]>([]);
   const [bulkExpenseCategory, setBulkExpenseCategory] = useState("");
   const [savedExpenseCategories, setSavedExpenseCategories] = useState<string[]>(() =>
@@ -162,16 +163,27 @@ export default function QuickBooksPage() {
   const allTransactions = activeTab === "incoming" ? incomingTransactions : outgoingTransactions;
   const showOnlyRefunds = activeTab === "incoming" && refundOnly;
   const showOnlyUncategorized = activeTab === "outgoing" && uncategorizedOnly;
+  const normalizedSelectedOutgoingCategory = useMemo(
+    () => (activeTab === "outgoing" ? normalizeQuickBooksExpenseCategoryLabel(selectedOutgoingCategoryFilter) : ""),
+    [activeTab, selectedOutgoingCategoryFilter],
+  );
 
   const filteredTransactions = useMemo(() => {
-    const baseTransactions = filterTransactions(allTransactions, search, showOnlyRefunds);
-    if (!showOnlyUncategorized) {
-      return baseTransactions;
+    let nextTransactions = filterTransactions(allTransactions, search, showOnlyRefunds);
+    if (activeTab === "outgoing" && normalizedSelectedOutgoingCategory) {
+      nextTransactions = nextTransactions.filter((item) =>
+        isQuickBooksOutgoingRowInCategory(item, normalizedSelectedOutgoingCategory, expenseCategoryMap),
+      );
     }
-    return baseTransactions.filter((item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap));
+    if (showOnlyUncategorized) {
+      nextTransactions = nextTransactions.filter((item) => !resolveQuickBooksExpenseCategoryForRow(item, expenseCategoryMap));
+    }
+    return nextTransactions;
   }, [
+    activeTab,
     allTransactions,
     expenseCategoryMap,
+    normalizedSelectedOutgoingCategory,
     search,
     showOnlyRefunds,
     showOnlyUncategorized,
@@ -306,6 +318,18 @@ export default function QuickBooksPage() {
     setSelectedOutgoingKeys([]);
   }, [activeTab]);
 
+  useEffect(() => {
+    if (!normalizedSelectedOutgoingCategory || activeTab !== "outgoing") {
+      return;
+    }
+    const categoryIsPresent = expenseCategorySummaryRows.some(
+      (summaryRow) => normalizeQuickBooksExpenseCategoryLabel(summaryRow.category) === normalizedSelectedOutgoingCategory,
+    );
+    if (!categoryIsPresent) {
+      setSelectedOutgoingCategoryFilter("");
+    }
+  }, [activeTab, expenseCategorySummaryRows, normalizedSelectedOutgoingCategory]);
+
   const setQuickBooksExpenseCategory = useCallback((row: QuickBooksViewRow, rawValue: string) => {
     const transactionId = sanitizeQuickBooksTransactionId(row?.transactionId);
     if (!transactionId) {
@@ -427,6 +451,21 @@ export default function QuickBooksPage() {
       setQuickBooksExpenseCategory(row, nextCategory);
     }
   }, [bulkExpenseCategory, outgoingTransactions, selectedOutgoingKeys, setQuickBooksExpenseCategory]);
+
+  const toggleOutgoingCategoryFilter = useCallback((rawCategory: string) => {
+    const normalizedCategory = normalizeQuickBooksExpenseCategoryLabel(rawCategory);
+    if (!normalizedCategory) {
+      return;
+    }
+    setUncategorizedOnly(false);
+    setSelectedOutgoingCategoryFilter((previousCategory) => {
+      const normalizedPreviousCategory = normalizeQuickBooksExpenseCategoryLabel(previousCategory);
+      if (normalizedPreviousCategory === normalizedCategory) {
+        return "";
+      }
+      return normalizedCategory;
+    });
+  }, []);
 
   const confirmSuggestedQuickBooksExpenseCategory = useCallback((row: QuickBooksViewRow) => {
     const suggestedCategory = resolveQuickBooksSuggestedExpenseCategoryForRow(
@@ -920,6 +959,7 @@ export default function QuickBooksPage() {
         showOnlyUncategorized,
         lastLoadPrefix,
         activeTab,
+        normalizedSelectedOutgoingCategory,
       ),
     );
   }, [
@@ -927,6 +967,7 @@ export default function QuickBooksPage() {
     allTransactions.length,
     filteredTransactions.length,
     lastLoadPrefix,
+    normalizedSelectedOutgoingCategory,
     search,
     showOnlyRefunds,
     showOnlyUncategorized,
@@ -1205,7 +1246,13 @@ export default function QuickBooksPage() {
                   id="quickbooks-uncategorized-only"
                   type="checkbox"
                   checked={uncategorizedOnly}
-                  onChange={(event) => setUncategorizedOnly(event.target.checked)}
+                  onChange={(event) => {
+                    const nextChecked = event.target.checked;
+                    setUncategorizedOnly(nextChecked);
+                    if (nextChecked) {
+                      setSelectedOutgoingCategoryFilter("");
+                    }
+                  }}
                 />
                 <span>Только без категории</span>
               </label>
@@ -1217,14 +1264,35 @@ export default function QuickBooksPage() {
           <div className="quickbooks-outgoing-layout">
             <aside className="quickbooks-outgoing-layout__sidebar">
               <div className="quickbooks-expense-summary">
-                <p className="quickbooks-expense-summary__title">Expense Categories</p>
+                <div className="quickbooks-expense-summary__header">
+                  <p className="quickbooks-expense-summary__title">Expense Categories</p>
+                  {normalizedSelectedOutgoingCategory ? (
+                    <button
+                      type="button"
+                      className="quickbooks-expense-summary__clear"
+                      onClick={() => setSelectedOutgoingCategoryFilter("")}
+                    >
+                      Clear filter
+                    </button>
+                  ) : null}
+                </div>
                 <div className="quickbooks-expense-summary__rows">
-                  {expenseCategorySummaryRows.map((summaryRow) => (
-                    <div key={summaryRow.category} className="quickbooks-expense-summary__row">
-                      <span>{summaryRow.category}</span>
-                      <strong>{CURRENCY_FORMATTER.format(summaryRow.totalAmount)}</strong>
-                    </div>
-                  ))}
+                  {expenseCategorySummaryRows.map((summaryRow) => {
+                    const normalizedSummaryCategory = normalizeQuickBooksExpenseCategoryLabel(summaryRow.category);
+                    const isSelected = normalizedSummaryCategory === normalizedSelectedOutgoingCategory;
+                    return (
+                      <button
+                        key={summaryRow.category}
+                        type="button"
+                        className={`quickbooks-expense-summary__row${isSelected ? " is-active" : ""}`.trim()}
+                        onClick={() => toggleOutgoingCategoryFilter(summaryRow.category)}
+                        aria-pressed={isSelected}
+                      >
+                        <span>{summaryRow.category}</span>
+                        <strong>{CURRENCY_FORMATTER.format(summaryRow.totalAmount)}</strong>
+                      </button>
+                    );
+                  })}
                 </div>
                 <div className="quickbooks-expense-summary__totals">
                   <div className="quickbooks-expense-summary__total">
@@ -1481,6 +1549,22 @@ function resolveQuickBooksExpenseCategoryForRow(
   return "";
 }
 
+function isQuickBooksOutgoingRowInCategory(
+  row: QuickBooksPaymentRow,
+  category: string,
+  categoryMap: QuickBooksExpenseCategoryMap,
+): boolean {
+  const normalizedCategory = normalizeQuickBooksExpenseCategoryLabel(category);
+  if (!normalizedCategory) {
+    return true;
+  }
+  const resolvedCategory = resolveQuickBooksExpenseCategoryForRow(row, categoryMap);
+  if (normalizedCategory === QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL) {
+    return !resolvedCategory;
+  }
+  return resolvedCategory === normalizedCategory;
+}
+
 function resolveQuickBooksSuggestedExpenseCategoryForRow(
   row: QuickBooksPaymentRow,
   categoryMap: QuickBooksExpenseCategoryMap,
@@ -1598,10 +1682,12 @@ function buildQuickBooksExpenseCategorySummaryRows(
   if ((totals.get(QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL) || 0) > 0) {
     normalizedOrderedCategories.push(QUICKBOOKS_EXPENSE_UNCATEGORIZED_LABEL);
   }
-  return normalizedOrderedCategories.map((category) => ({
-    category,
-    totalAmount: totals.get(category) || 0,
-  }));
+  return normalizedOrderedCategories
+    .map((category) => ({
+      category,
+      totalAmount: totals.get(category) || 0,
+    }))
+    .filter((row) => Number.isFinite(row.totalAmount) && row.totalAmount > 0);
 }
 
 function buildFilterStatusMessage(
@@ -1612,19 +1698,38 @@ function buildFilterStatusMessage(
   showOnlyUncategorized = false,
   prefix = "",
   tab: QuickBooksTab = "incoming",
+  selectedOutgoingCategory = "",
 ): string {
   const normalizedQuery = query.trim();
   const normalizedPrefix = prefix.trim();
 
   if (tab === "outgoing") {
-    const nounPhrase = showOnlyUncategorized ? "uncategorized expense transaction" : "expense transaction";
+    const normalizedCategoryFilter = normalizeQuickBooksExpenseCategoryLabel(selectedOutgoingCategory);
+    const hasCategoryFilter = Boolean(normalizedCategoryFilter);
+    const nounPhrase = showOnlyUncategorized
+      ? "uncategorized expense transaction"
+      : hasCategoryFilter
+        ? `${normalizedCategoryFilter} expense transaction`
+        : "expense transaction";
     let outgoingMessage = "";
     if (!normalizedQuery) {
       outgoingMessage = `Loaded ${totalCount} ${nounPhrase}${totalCount === 1 ? "" : "s"}.`;
     } else if (visibleCount === 0) {
-      outgoingMessage = `No ${showOnlyUncategorized ? "uncategorized expense" : "expense"} transactions found for "${normalizedQuery}".`;
+      outgoingMessage = `No ${
+        showOnlyUncategorized
+          ? "uncategorized expense"
+          : hasCategoryFilter
+            ? `${normalizedCategoryFilter} expense`
+            : "expense"
+      } transactions found for "${normalizedQuery}".`;
     } else {
-      outgoingMessage = `Showing ${visibleCount} of ${totalCount} ${showOnlyUncategorized ? "uncategorized expense" : "expense"} transactions for "${normalizedQuery}".`;
+      outgoingMessage = `Showing ${visibleCount} of ${totalCount} ${
+        showOnlyUncategorized
+          ? "uncategorized expense"
+          : hasCategoryFilter
+            ? `${normalizedCategoryFilter} expense`
+            : "expense"
+      } transactions for "${normalizedQuery}".`;
     }
     return normalizedPrefix ? `${normalizedPrefix} ${outgoingMessage}` : outgoingMessage;
   }

@@ -2303,6 +2303,30 @@ a {
   color: var(--color-text-muted);
 }
 
+.quickbooks-expense-summary__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.quickbooks-expense-summary__clear {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  min-height: 26px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.quickbooks-expense-summary__clear:hover {
+  color: var(--color-text);
+}
+
 .quickbooks-expense-summary__rows {
   display: grid;
   gap: 6px;
@@ -2313,6 +2337,29 @@ a {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.quickbooks-expense-summary__row:hover {
+  background: var(--color-surface);
+}
+
+.quickbooks-expense-summary__row:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.quickbooks-expense-summary__row.is-active {
+  border-color: var(--color-border);
+  background: var(--color-surface);
 }
 
 .quickbooks-expense-summary__row strong {
