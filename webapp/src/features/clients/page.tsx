@@ -37,7 +37,7 @@ const SALES_FILTER_UNASSIGNED = "__unassigned_sales__";
 const MANAGER_FILTER_ALL = "__all_managers__";
 const MANAGER_FILTER_UNASSIGNED = "__unassigned_managers__";
 
-type ClientsStatusFilter = "all" | "new" | "active" | "overdue" | "written-off" | "fully-paid" | "after-result";
+type ClientsStatusFilter = "all" | "new" | "active" | "inactive" | "overdue" | "written-off" | "fully-paid" | "after-result";
 type ContractSignedFilter = "all" | "signed" | "unsigned";
 type InWorkFilter = "all" | "in-work" | "not-in-work";
 
@@ -45,6 +45,7 @@ const STATUS_FILTER_OPTIONS: Array<{ key: ClientsStatusFilter; label: string }> 
   { key: "all", label: "All Statuses" },
   { key: "new", label: "New" },
   { key: "active", label: "Active" },
+  { key: "inactive", label: "Inactive" },
   { key: "overdue", label: "Overdue" },
   { key: "written-off", label: "Written Off" },
   { key: "fully-paid", label: "Fully Paid" },
@@ -230,6 +231,7 @@ export default function ClientsPage() {
       const managerNames = splitClientManagerLabel(managerLabel);
       const contractDateTimestamp = parseDateValue(record.payment1Date);
       const isContractSigned = resolveContractSigned(record);
+      const isContractCompleted = resolveContractCompleted(record);
       const isInWork = resolveStartedInWork(record);
 
       if (query && !matchesClientsSearchQuery(record, query, queryDigits)) {
@@ -256,11 +258,11 @@ export default function ClientsPage() {
         }
       }
 
-      if (hideWrittenOffByDefault && getRecordStatusFlags(record).isWrittenOff) {
+      if (hideWrittenOffByDefault && (getRecordStatusFlags(record).isWrittenOff || isContractCompleted)) {
         return false;
       }
 
-      if (!matchesStatusFilter(record, statusFilter, isContractSigned)) {
+      if (!matchesStatusFilter(record, statusFilter, isContractSigned, isContractCompleted)) {
         return false;
       }
 
@@ -560,7 +562,7 @@ export default function ClientsPage() {
                     onChange={(event) => setHideWrittenOffByDefault(event.target.checked)}
                   />
                 </span>
-                <span>Show all clients except write-off</span>
+                <span>Show all clients except write-off and inactive</span>
               </label>
 
               <Button
@@ -920,16 +922,25 @@ function resolveScoreDisplay(score: ClientScoreResult | undefined): {
   };
 }
 
-function matchesStatusFilter(record: ClientRecord, statusFilter: ClientsStatusFilter, isContractSigned: boolean): boolean {
+function matchesStatusFilter(
+  record: ClientRecord,
+  statusFilter: ClientsStatusFilter,
+  isContractSigned: boolean,
+  isContractCompleted: boolean,
+): boolean {
   if (statusFilter === "all") {
     return true;
   }
 
-  if (statusFilter === "new") {
-    return !isContractSigned;
+  if (statusFilter === "inactive") {
+    return isContractCompleted;
   }
 
-  if (!isContractSigned) {
+  if (statusFilter === "new") {
+    return !isContractSigned && !isContractCompleted;
+  }
+
+  if (!isContractSigned || isContractCompleted) {
     return false;
   }
 
@@ -954,6 +965,14 @@ function resolvePrimaryStatusBadge(record: ClientRecord): {
   label: string;
   tone: "neutral" | "success" | "info" | "warning" | "danger";
 } {
+  const isContractCompleted = resolveContractCompleted(record);
+  if (isContractCompleted) {
+    return {
+      label: "Inactive",
+      tone: "neutral",
+    };
+  }
+
   const isContractSigned = resolveContractSigned(record);
   if (!isContractSigned) {
     return {
@@ -1043,6 +1062,29 @@ function resolveStartedInWork(record: ClientRecord): boolean {
   return false;
 }
 
+function resolveContractCompleted(record: ClientRecord): boolean {
+  const directFieldValue = parseOptionalBoolean(record.contractCompleted);
+  if (directFieldValue !== null) {
+    return directFieldValue;
+  }
+
+  const rawContractCompletedValues: unknown[] = [
+    getOptionalUnknownRecordValue(record, "isContractCompleted"),
+    getOptionalUnknownRecordValue(record, "contractIsCompleted"),
+    getOptionalUnknownRecordValue(record, "completedContract"),
+    getOptionalUnknownRecordValue(record, "contractStatus"),
+  ];
+
+  for (const rawValue of rawContractCompletedValues) {
+    const parsed = parseOptionalBoolean(rawValue);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  return false;
+}
+
 function getOptionalUnknownRecordValue(record: ClientRecord, key: string): unknown {
   return (record as unknown as Record<string, unknown>)[key];
 }
@@ -1061,7 +1103,7 @@ function parseOptionalBoolean(value: unknown): boolean | null {
     return true;
   }
 
-  if (["false", "no", "0", "off", "unsigned", "not signed", "pending"].includes(normalized)) {
+  if (["false", "no", "0", "off", "unsigned", "not signed", "pending", "not completed", "no completed"].includes(normalized)) {
     return false;
   }
 

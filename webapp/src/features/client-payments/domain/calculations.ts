@@ -97,6 +97,7 @@ export interface RecordStatusFlags {
   isAfterResult: boolean;
   isWrittenOff: boolean;
   isFullyPaid: boolean;
+  isContractCompleted: boolean;
   isOverdue: boolean;
   overdueRange: OverdueRangeFilter;
   overdueDays: number;
@@ -187,6 +188,7 @@ export function createEmptyRecord(): ClientRecord {
     closedBy: "",
     companyName: "",
     ownerCompany: "Credit Booster",
+    contractCompleted: "",
     serviceType: "",
     purchasedService: "",
     address: "",
@@ -239,12 +241,13 @@ export function applyDerivedRecordState(record: ClientRecord, previousRecord?: C
 export function getRecordStatusFlags(record: ClientRecord): RecordStatusFlags {
   const isAfterResult = isAfterResultEnabled(record.afterResult) || AFTER_RESULT_CLIENT_NAMES.has(normalizeClientName(record.clientName));
   const isWrittenOff = isWrittenOffEnabled(record.writtenOff) || WRITTEN_OFF_CLIENT_NAMES.has(normalizeClientName(record.clientName));
+  const isContractCompleted = isContractCompletedEnabled(record.contractCompleted);
 
   const futureAmount = computeFuturePaymentsAmount(record);
-  const isFullyPaid = !isWrittenOff && futureAmount !== null && futureAmount <= ZERO_TOLERANCE;
+  const isFullyPaid = !isWrittenOff && !isContractCompleted && futureAmount !== null && futureAmount <= ZERO_TOLERANCE;
 
   const latestPaymentDate = getLatestPaymentDateTimestamp(record);
-  const overdueDays = !isAfterResult && !isWrittenOff && !isFullyPaid && latestPaymentDate !== null
+  const overdueDays = !isAfterResult && !isWrittenOff && !isFullyPaid && !isContractCompleted && latestPaymentDate !== null
     ? getDaysSinceDate(latestPaymentDate)
     : 0;
   const overdueRange = getOverdueRangeLabel(overdueDays);
@@ -254,6 +257,7 @@ export function getRecordStatusFlags(record: ClientRecord): RecordStatusFlags {
     isAfterResult,
     isWrittenOff,
     isFullyPaid,
+    isContractCompleted,
     isOverdue,
     overdueRange,
     overdueDays,
@@ -416,7 +420,7 @@ export function normalizeFormRecord(input: Partial<ClientRecord>): ClientRecord 
   for (const field of FIELD_DEFINITIONS) {
     const key = field.key;
     if (field.type === "checkbox") {
-      nextRecord[key] = isAfterResultEnabled(nextRecord[key]) || isWrittenOffEnabled(nextRecord[key]) ? "Yes" : "";
+      nextRecord[key] = isCheckboxEnabled(nextRecord[key]) ? "Yes" : "";
       continue;
     }
 
@@ -658,6 +662,16 @@ function isAfterResultEnabled(value: unknown): boolean {
 function isWrittenOffEnabled(value: unknown): boolean {
   const normalized = sanitizeText(value).toLowerCase();
   return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
+}
+
+function isContractCompletedEnabled(value: unknown): boolean {
+  const normalized = sanitizeText(value).toLowerCase();
+  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on" || normalized === "completed";
+}
+
+function isCheckboxEnabled(value: unknown): boolean {
+  const normalized = sanitizeText(value).toLowerCase();
+  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on" || normalized === "completed";
 }
 
 function isRecordWrittenOff(record: ClientRecord): boolean {

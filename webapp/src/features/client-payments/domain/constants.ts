@@ -75,6 +75,7 @@ export const FIELD_DEFINITIONS: FieldDefinition[] = [
   { key: "clientName", label: "Client Name", type: "text", required: true },
   { key: "closedBy", label: "Closed By", type: "text" },
   { key: "companyName", label: "Company Name", type: "text" },
+  { key: "contractCompleted", label: "Contract", type: "checkbox" },
   { key: "serviceType", label: "Service Type", type: "text" },
   { key: "purchasedService", label: "Purchased Service", type: "text" },
   { key: "address", label: "Address", type: "text" },

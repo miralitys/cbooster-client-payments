@@ -5,6 +5,7 @@ export interface ClientRecord {
   closedBy: string;
   companyName: string;
   ownerCompany: string;
+  contractCompleted: string;
   serviceType: string;
   purchasedService: string;
   address: string;

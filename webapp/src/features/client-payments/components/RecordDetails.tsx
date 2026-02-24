@@ -1113,6 +1113,10 @@ function hasCommunicationDocuments(item: GhlClientCommunicationItem): boolean {
 function resolveStatusBadge(record: ClientRecord): BadgeMeta {
   const status = getRecordStatusFlags(record);
 
+  if (status.isContractCompleted) {
+    return { label: "Status: Inactive", tone: "neutral" };
+  }
+
   if (status.isWrittenOff) {
     return { label: "Status: Written Off", tone: "danger" };
   }
@@ -1137,6 +1141,10 @@ function formatFieldValue(
   type: "text" | "textarea" | "checkbox" | "date",
   rawValue: string,
 ): string {
+  if (key === "contractCompleted") {
+    return rawValue ? "Completed" : "No completed";
+  }
+
   if (type === "checkbox") {
     return rawValue ? "Yes" : "No";
   }

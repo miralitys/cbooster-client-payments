@@ -40,7 +40,13 @@ export function RecordEditorForm({ draft, onChange }: RecordEditorFormProps) {
         }
 
         if (field.type === "checkbox") {
-          const checked = value === "Yes" || value === "true" || value === "1";
+          const normalizedValue = value.toLowerCase();
+          const checked =
+            normalizedValue === "yes" ||
+            normalizedValue === "true" ||
+            normalizedValue === "1" ||
+            normalizedValue === "on" ||
+            normalizedValue === "completed";
           return (
             <label key={field.key} className="cb-checkbox-row" htmlFor={`field-${field.key}`}>
               <input
