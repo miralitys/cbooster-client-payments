@@ -271,4 +271,83 @@ describe("calculations", () => {
 
     expect(filtered.map((item) => item.id)).toEqual(["match-payment2"]);
   });
+
+  it("searches only by clientName/email/phone/ssn and ignores company/closedBy/serviceType", () => {
+    const records: ClientRecord[] = [
+      makeRecord({
+        id: "name-hit",
+        clientName: "Ramis Yaparov",
+      }),
+      makeRecord({
+        id: "email-hit",
+        clientEmailAddress: "ramis@creditbooster.com",
+      }),
+      makeRecord({
+        id: "company-only",
+        companyName: "Ramis Holdings LLC",
+      }),
+      makeRecord({
+        id: "closed-by-only",
+        closedBy: "Ramis Manager",
+      }),
+      makeRecord({
+        id: "service-only",
+        serviceType: "Ramis Special Plan",
+      }),
+    ];
+
+    const filtered = filterRecords(records, {
+      search: "ramis",
+      status: "all",
+      overdueRange: "",
+      closedBy: "",
+      createdAtRange: { from: "", to: "" },
+      paymentDateRange: { from: "", to: "" },
+      writtenOffDateRange: { from: "", to: "" },
+      fullyPaidDateRange: { from: "", to: "" },
+    });
+
+    expect(filtered.map((item) => item.id)).toEqual(["name-hit", "email-hit"]);
+  });
+
+  it("searches phone and SSN by digits regardless of formatting", () => {
+    const records: ClientRecord[] = [
+      makeRecord({
+        id: "phone-hit",
+        clientPhoneNumber: "+1(773)848-2663",
+      }),
+      makeRecord({
+        id: "ssn-hit",
+        ssn: "123-45-6789",
+      }),
+      makeRecord({
+        id: "no-hit",
+        clientName: "Another Client",
+      }),
+    ];
+
+    const phoneFiltered = filterRecords(records, {
+      search: "7738482663",
+      status: "all",
+      overdueRange: "",
+      closedBy: "",
+      createdAtRange: { from: "", to: "" },
+      paymentDateRange: { from: "", to: "" },
+      writtenOffDateRange: { from: "", to: "" },
+      fullyPaidDateRange: { from: "", to: "" },
+    });
+    expect(phoneFiltered.map((item) => item.id)).toEqual(["phone-hit"]);
+
+    const ssnFiltered = filterRecords(records, {
+      search: "123456789",
+      status: "all",
+      overdueRange: "",
+      closedBy: "",
+      createdAtRange: { from: "", to: "" },
+      paymentDateRange: { from: "", to: "" },
+      writtenOffDateRange: { from: "", to: "" },
+      fullyPaidDateRange: { from: "", to: "" },
+    });
+    expect(ssnFiltered.map((item) => item.id)).toEqual(["ssn-hit"]);
+  });
 });

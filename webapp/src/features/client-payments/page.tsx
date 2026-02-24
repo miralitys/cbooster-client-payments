@@ -557,14 +557,14 @@ export default function ClientPaymentsPage() {
           {!filtersCollapsed ? (
             <div className="filters-panel__content">
               <label className="search-label" htmlFor="records-search-input">
-                Search by client or company
+                Search by name, email, phone, or SSN
               </label>
               <div className="search-row">
                 <Input
                   id="records-search-input"
                   value={filters.search}
                   onChange={(event) => updateFilter("search", event.target.value)}
-                  placeholder="For example: John Smith or ACME Logistics"
+                  placeholder="For example: John Smith, john@email.com, +1(555)555-5555, 123-45-6789"
                 />
                 <Button type="button" variant="secondary" size="sm" onClick={clearAllFilters}>
                   Reset

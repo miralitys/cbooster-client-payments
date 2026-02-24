@@ -844,8 +844,30 @@ function matchesSearchQuery(record: ClientRecord, query: string): boolean {
     return true;
   }
 
-  const searchable = `${record.clientName} ${record.companyName} ${record.closedBy} ${record.serviceType}`.toLowerCase();
-  return searchable.includes(query);
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  const searchableFields = [
+    record.clientName,
+    record.clientEmailAddress,
+    record.clientPhoneNumber,
+    record.ssn,
+  ];
+
+  if (searchableFields.some((value) => String(value || "").toLowerCase().includes(normalizedQuery))) {
+    return true;
+  }
+
+  const queryDigits = String(query || "").replace(/\D/g, "");
+  if (!queryDigits) {
+    return false;
+  }
+
+  const phoneDigits = String(record.clientPhoneNumber || "").replace(/\D/g, "");
+  const ssnDigits = String(record.ssn || "").replace(/\D/g, "");
+  return phoneDigits.includes(queryDigits) || ssnDigits.includes(queryDigits);
 }
 
 function hasAnyPaymentDateWithinRange(record: ClientRecord, fromDate: number | null, toDate: number | null): boolean {
