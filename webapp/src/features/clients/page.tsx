@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
+import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
 import {
   formatDate,
   formatMoney,
   getRecordStatusFlags,
+  normalizeFormRecord,
   normalizeRecords,
   parseDateValue,
   parseMoneyValue,
@@ -78,14 +80,15 @@ export default function ClientsPage() {
   const [contractDateTo, setContractDateTo] = useState("");
   const [selectedRecordId, setSelectedRecordId] = useState("");
   const [recordsUpdatedAt, setRecordsUpdatedAt] = useState<string | null>(null);
-  const [isSavingClientFlags, setIsSavingClientFlags] = useState(false);
-  const [saveClientFlagsError, setSaveClientFlagsError] = useState("");
+  const [isEditingSelectedRecord, setIsEditingSelectedRecord] = useState(false);
+  const [selectedRecordDraft, setSelectedRecordDraft] = useState<ClientRecord | null>(null);
+  const [isSavingSelectedRecordEdit, setIsSavingSelectedRecordEdit] = useState(false);
+  const [saveSelectedRecordEditError, setSaveSelectedRecordEditError] = useState("");
   const [clientManagersByClientName, setClientManagersByClientName] = useState<Map<string, string>>(new Map());
 
   const loadClients = useCallback(async () => {
     setIsLoading(true);
     setLoadError("");
-    setSaveClientFlagsError("");
 
     try {
       const payload = await getRecords();
@@ -324,48 +327,77 @@ export default function ClientsPage() {
     [records, selectedRecordId],
   );
 
-  const selectedContractSigned = selectedRecord ? resolveContractSigned(selectedRecord) : false;
-  const selectedStartedInWork = selectedRecord ? resolveStartedInWork(selectedRecord) : false;
+  const selectedRecordClientManagerLabel = useMemo(
+    () => (selectedRecord ? resolveClientManagerLabel(selectedRecord, clientManagersByClientName) : undefined),
+    [clientManagersByClientName, selectedRecord],
+  );
 
   useEffect(() => {
-    setSaveClientFlagsError("");
+    setSaveSelectedRecordEditError("");
+    setIsEditingSelectedRecord(false);
+    setSelectedRecordDraft(null);
   }, [selectedRecordId]);
 
-  const updateSelectedRecordFlags = useCallback(
-    async (changes: Pick<ClientRecord, "contractSigned" | "startedInWork">) => {
-      if (!selectedRecord) {
-        return;
-      }
+  const startEditSelectedRecord = useCallback(() => {
+    if (!selectedRecord) {
+      return;
+    }
 
-      setIsSavingClientFlags(true);
-      setSaveClientFlagsError("");
+    setSaveSelectedRecordEditError("");
+    setSelectedRecordDraft({ ...selectedRecord });
+    setIsEditingSelectedRecord(true);
+  }, [selectedRecord]);
 
-      try {
-        const payload = await patchRecords(
-          [
-            {
-              type: "upsert",
-              id: selectedRecord.id,
-              record: changes,
-            },
-          ],
-          recordsUpdatedAt,
-        );
+  const updateSelectedRecordDraftField = useCallback((key: keyof ClientRecord, value: string) => {
+    setSaveSelectedRecordEditError("");
+    setSelectedRecordDraft((previous) => (previous ? { ...previous, [key]: value } : previous));
+  }, []);
 
-        setRecords((previous) =>
-          previous.map((record) => (record.id === selectedRecord.id ? { ...record, ...changes } : record)),
-        );
-        setRecordsUpdatedAt(normalizeRevisionTimestamp(payload.updatedAt) || recordsUpdatedAt);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to update client status.";
-        setSaveClientFlagsError(message);
-        await loadClients();
-      } finally {
-        setIsSavingClientFlags(false);
-      }
-    },
-    [loadClients, recordsUpdatedAt, selectedRecord],
-  );
+  const saveSelectedRecordDraft = useCallback(async () => {
+    if (!selectedRecord || !selectedRecordDraft) {
+      return;
+    }
+
+    setIsSavingSelectedRecordEdit(true);
+    setSaveSelectedRecordEditError("");
+
+    try {
+      const normalizedDraft = normalizeFormRecord(selectedRecordDraft);
+      const nextRecord: ClientRecord = {
+        ...normalizedDraft,
+        id: selectedRecord.id,
+        createdAt: selectedRecord.createdAt,
+      };
+
+      const payload = await patchRecords(
+        [
+          {
+            type: "upsert",
+            id: selectedRecord.id,
+            record: nextRecord,
+          },
+        ],
+        recordsUpdatedAt,
+      );
+
+      setRecords((previous) => previous.map((record) => (record.id === selectedRecord.id ? nextRecord : record)));
+      setRecordsUpdatedAt(normalizeRevisionTimestamp(payload.updatedAt) || recordsUpdatedAt);
+      setIsEditingSelectedRecord(false);
+      setSelectedRecordDraft(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to save client changes.";
+      setSaveSelectedRecordEditError(message);
+    } finally {
+      setIsSavingSelectedRecordEdit(false);
+    }
+  }, [recordsUpdatedAt, selectedRecord, selectedRecordDraft]);
+
+  const closeSelectedRecordModal = useCallback(() => {
+    setSelectedRecordId("");
+    setIsEditingSelectedRecord(false);
+    setSelectedRecordDraft(null);
+    setSaveSelectedRecordEditError("");
+  }, []);
 
   const totalContractAmount = useMemo(
     () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.contractTotals) || 0), 0),
@@ -711,51 +743,39 @@ export default function ClientsPage() {
       <Modal
         open={Boolean(selectedRecord)}
         title={selectedRecord?.clientName || "Client Details"}
-        onClose={() => setSelectedRecordId("")}
+        onClose={closeSelectedRecordModal}
         footer={
-          <Button type="button" variant="secondary" onClick={() => setSelectedRecordId("")}>
-            Close
-          </Button>
+          <div className="client-payments__modal-actions">
+            <Button type="button" variant="secondary" size="sm" onClick={closeSelectedRecordModal}>
+              Close
+            </Button>
+            {selectedRecord && !isEditingSelectedRecord ? (
+              <Button type="button" size="sm" onClick={startEditSelectedRecord}>
+                Edit
+              </Button>
+            ) : null}
+            {selectedRecord && isEditingSelectedRecord ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => void saveSelectedRecordDraft()}
+                isLoading={isSavingSelectedRecordEdit}
+              >
+                Save
+              </Button>
+            ) : null}
+          </div>
         }
       >
-        {selectedRecord ? (
-          <div className="clients-record-flags">
-            <label className="cb-checkbox-row" htmlFor="clients-contract-signed-checkbox">
-              <input
-                id="clients-contract-signed-checkbox"
-                type="checkbox"
-                checked={selectedContractSigned}
-                disabled={isSavingClientFlags}
-                onChange={(event) =>
-                  void updateSelectedRecordFlags({
-                    contractSigned: toStatusCheckboxValue(event.target.checked),
-                    startedInWork: toStatusCheckboxValue(selectedStartedInWork),
-                  })
-                }
-              />
-              Contract Signed
-            </label>
-
-            <label className="cb-checkbox-row" htmlFor="clients-started-in-work-checkbox">
-              <input
-                id="clients-started-in-work-checkbox"
-                type="checkbox"
-                checked={selectedStartedInWork}
-                disabled={isSavingClientFlags}
-                onChange={(event) =>
-                  void updateSelectedRecordFlags({
-                    contractSigned: toStatusCheckboxValue(selectedContractSigned),
-                    startedInWork: toStatusCheckboxValue(event.target.checked),
-                  })
-                }
-              />
-              {selectedStartedInWork ? "In Work" : "Not In Work"}
-            </label>
-
-            {saveClientFlagsError ? <p className="dashboard-message error">{saveClientFlagsError}</p> : null}
-          </div>
+        {selectedRecord && !isEditingSelectedRecord ? (
+          <RecordDetails record={selectedRecord} clientManagerLabel={selectedRecordClientManagerLabel} />
         ) : null}
-        {selectedRecord ? <RecordDetails record={selectedRecord} /> : null}
+        {selectedRecord && isEditingSelectedRecord && selectedRecordDraft ? (
+          <>
+            {saveSelectedRecordEditError ? <p className="dashboard-message error">{saveSelectedRecordEditError}</p> : null}
+            <RecordEditorForm draft={selectedRecordDraft} onChange={updateSelectedRecordDraftField} />
+          </>
+        ) : null}
       </Modal>
     </PageShell>
   );
@@ -1108,10 +1128,6 @@ function parseOptionalBoolean(value: unknown): boolean | null {
   }
 
   return null;
-}
-
-function toStatusCheckboxValue(value: boolean): string {
-  return value ? "Yes" : "No";
 }
 
 function normalizeRevisionTimestamp(rawValue: string | null | undefined): string | null {
