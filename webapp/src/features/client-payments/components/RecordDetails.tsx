@@ -60,6 +60,14 @@ const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
 const MAX_RENDERED_COMMUNICATION_ITEMS = 120;
 const COMMUNICATIONS_PAGE_SIZE = 5;
 const TRANSCRIPT_NORMALIZE_BATCH_LIMIT = 240;
+const DEFAULT_OWNER_COMPANY_LABEL = "Credit Booster";
+const OWNER_COMPANY_FIELD_ALIASES = [
+  "portfolioCompany",
+  "boosterCompany",
+  "agencyCompany",
+  "companyBrand",
+  "baseCompany",
+];
 type CommunicationFilter = "all" | "sms" | "calls" | "documents";
 type SpeakerRole = "manager" | "client";
 
@@ -113,6 +121,7 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
     return getOptionalRecordText(record, "clientManager") || "-";
   }, [clientManagerLabel, record]);
   const companyDisplay = useMemo(() => (record.companyName || "").trim() || "-", [record.companyName]);
+  const ownerCompanyDisplay = useMemo(() => resolveOwnerCompanyLabel(record), [record]);
   const avatarSource = useMemo(() => resolveAvatarSource(record, ghlBasicNote), [ghlBasicNote, record]);
   const avatarInitials = useMemo(() => buildAvatarInitials(normalizedClientName), [normalizedClientName]);
   const scoreResult = useMemo(() => evaluateClientScore(record), [record]);
@@ -538,6 +547,7 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
                   <div className="record-profile-header__chips">
                     <Badge tone={scoreResult.tone}>Score: {scoreResult.displayScore === null ? "N/A" : scoreResult.displayScore}</Badge>
                     <Badge tone={statusBadge.tone}>{statusBadge.label}</Badge>
+                    <Badge tone="info">{ownerCompanyDisplay} Clients</Badge>
                   </div>
                 </div>
                 <p className="record-profile-header__summary-line">
@@ -923,6 +933,42 @@ function formatMoneyCell(rawValue: string): string {
     return rawValue || "-";
   }
   return formatMoney(amount);
+}
+
+function resolveOwnerCompanyLabel(record: ClientRecord): string {
+  const directValue = normalizeKnownOwnerCompanyName((record.ownerCompany || "").toString().trim());
+  if (directValue) {
+    return directValue;
+  }
+
+  for (const alias of OWNER_COMPANY_FIELD_ALIASES) {
+    const candidate = normalizeKnownOwnerCompanyName(getOptionalRecordText(record, alias));
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return DEFAULT_OWNER_COMPANY_LABEL;
+}
+
+function normalizeKnownOwnerCompanyName(rawValue: string): string {
+  const value = (rawValue || "").toString().trim();
+  if (!value) {
+    return "";
+  }
+
+  const normalized = value.toLowerCase().replace(/\s+/g, " ");
+  if (normalized === "credit booster") {
+    return "Credit Booster";
+  }
+  if (normalized === "ramis booster") {
+    return "Ramis Booster";
+  }
+  if (normalized === "wolfowich" || normalized === "wolfovich") {
+    return "Wolfowich";
+  }
+
+  return value;
 }
 
 function formatOptionalDate(rawValue: string): string {

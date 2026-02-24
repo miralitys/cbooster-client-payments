@@ -186,6 +186,7 @@ export function createEmptyRecord(): ClientRecord {
     clientName: "",
     closedBy: "",
     companyName: "",
+    ownerCompany: "Credit Booster",
     serviceType: "",
     purchasedService: "",
     address: "",
