@@ -44,6 +44,14 @@ const PROFILE_SUMMARY_FIELD_KEYS = new Set<keyof ClientRecord>([
   "clientPhoneNumber",
   "clientEmailAddress",
 ]);
+const WORKFLOW_SUMMARY_FIELD_KEYS = new Set<keyof ClientRecord>([
+  "closedBy",
+  "contractCompleted",
+  "afterResult",
+  "writtenOff",
+  "dateWhenFullyPaid",
+  "notes",
+]);
 
 interface RequestedClientField {
   label: string;
@@ -53,6 +61,12 @@ interface RequestedClientField {
 interface BadgeMeta {
   label: string;
   tone: "neutral" | "success" | "warning" | "danger" | "info";
+}
+
+interface WorkflowSummaryField {
+  key: string;
+  label: string;
+  value: string;
 }
 
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
@@ -133,7 +147,8 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
         (field) =>
           !HEADER_FIELD_KEYS.has(field.key) &&
           !PAYMENT_FIELD_KEYS.has(field.key) &&
-          !PROFILE_SUMMARY_FIELD_KEYS.has(field.key),
+          !PROFILE_SUMMARY_FIELD_KEYS.has(field.key) &&
+          !WORKFLOW_SUMMARY_FIELD_KEYS.has(field.key),
       ),
     [],
   );
@@ -511,12 +526,35 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
             getOptionalRecordText(record, "servicePurchased") ||
             (record.serviceType || "").trim(),
         },
-      ].map((field) => ({
-        ...field,
-        value: field.value || "-",
-      })),
+      ].filter((field) => Boolean((field.value || "").trim())),
     [record],
   );
+  const workflowSummaryFields = useMemo<WorkflowSummaryField[]>(
+    () => [
+      {
+        key: "contract-completed",
+        label: "Contract",
+        value: formatFieldValue("contractCompleted", "checkbox", record.contractCompleted || ""),
+      },
+      {
+        key: "after-result",
+        label: "After Result",
+        value: formatFieldValue("afterResult", "checkbox", record.afterResult || ""),
+      },
+      {
+        key: "written-off",
+        label: "Written Off",
+        value: formatFieldValue("writtenOff", "checkbox", record.writtenOff || ""),
+      },
+      {
+        key: "date-fully-paid",
+        label: "Date When Fully Paid",
+        value: formatDate(record.dateWhenFullyPaid || ""),
+      },
+    ],
+    [record.afterResult, record.contractCompleted, record.dateWhenFullyPaid, record.writtenOff],
+  );
+  const workflowNotes = useMemo(() => getOptionalRecordText(record, "notes"), [record]);
   const paymentScheduleRows = useMemo(
     () =>
       PAYMENT_PAIRS.map(([paymentField, paymentDateField], index) => ({
@@ -527,6 +565,14 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
       })),
     [record],
   );
+  const visiblePaymentScheduleRows = useMemo(() => {
+    const rowsWithValues = paymentScheduleRows.filter((payment) => payment.amount !== "-" || payment.date !== "-");
+    if (rowsWithValues.length) {
+      return rowsWithValues;
+    }
+    return paymentScheduleRows.slice(0, 1);
+  }, [paymentScheduleRows]);
+  const hiddenPaymentRowsCount = Math.max(0, paymentScheduleRows.length - visiblePaymentScheduleRows.length);
 
   return (
     <div className="record-details-stack">
@@ -588,23 +634,40 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
                 <strong className="record-profile-header__contact-value">{companyDisplay}</strong>
               </div>
             </div>
+
+            <div className="record-workflow-summary">
+              {workflowSummaryFields.map((field) => (
+                <div key={field.key} className="record-workflow-summary__item">
+                  <span className="record-workflow-summary__label">{field.label}</span>
+                  <strong className="record-workflow-summary__value">{field.value || "-"}</strong>
+                </div>
+              ))}
+              {workflowNotes ? (
+                <div className="record-workflow-summary__item record-workflow-summary__item--note">
+                  <span className="record-workflow-summary__label">Notes</span>
+                  <strong className="record-workflow-summary__value">{workflowNotes}</strong>
+                </div>
+              ) : null}
+            </div>
           </section>
 
-          <section className="record-details-grid record-details-grid--requested">
-            {requestedClientFields.map((field) => (
-              <div key={field.label} className="record-details-grid__item">
-                <span className="record-details-grid__label">{field.label}</span>
-                <strong className="record-details-grid__value">{field.value}</strong>
-              </div>
-            ))}
-          </section>
+          {requestedClientFields.length ? (
+            <section className="record-details-grid record-details-grid--requested">
+              {requestedClientFields.map((field) => (
+                <div key={field.label} className="record-details-grid__item">
+                  <span className="record-details-grid__label">{field.label}</span>
+                  <strong className="record-details-grid__value">{field.value}</strong>
+                </div>
+              ))}
+            </section>
+          ) : null}
 
           <section className="record-payments-panel">
             <div className="record-payments-panel__header">
               <h4 className="record-payments-panel__title">Payments</h4>
             </div>
             <div className="record-payments-panel__rows" role="list">
-              {paymentScheduleRows.map((payment) => (
+              {visiblePaymentScheduleRows.map((payment) => (
                 <div key={payment.id} className="record-payments-panel__row" role="listitem">
                   <span className="record-payments-panel__label">{payment.label}</span>
                   <span className="record-payments-panel__amount">{payment.amount}</span>
@@ -612,6 +675,9 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
                 </div>
               ))}
             </div>
+            {hiddenPaymentRowsCount > 0 ? (
+              <p className="react-user-footnote">Hidden empty payment rows: {hiddenPaymentRowsCount}</p>
+            ) : null}
           </section>
 
           <section className="record-details-grid">

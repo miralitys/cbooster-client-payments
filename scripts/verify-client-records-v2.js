@@ -10,6 +10,7 @@ const {
   normalizeLegacyRecordsSnapshot,
   sanitizeTextValue,
 } = require("../client-records-v2-utils");
+const { createPgSslConfig } = require("../server/shared/db/pool");
 
 function parseArgs(argv) {
   const options = {
@@ -50,11 +51,6 @@ function parseArgs(argv) {
   }
 
   return options;
-}
-
-function shouldUseSsl() {
-  const mode = (process.env.PGSSLMODE || "").toLowerCase();
-  return mode !== "disable";
 }
 
 function buildLimitedList(items, maxItems) {
@@ -163,7 +159,7 @@ function compareSnapshots(legacyRows, v2Rows, maxDiffItems) {
 
     const pool = new Pool({
       connectionString: databaseUrl,
-      ssl: shouldUseSsl() ? { rejectUnauthorized: false } : false,
+      ssl: createPgSslConfig({}, process.env),
     });
 
     try {

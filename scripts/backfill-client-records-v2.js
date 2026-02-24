@@ -10,6 +10,7 @@ const {
   normalizeLegacyRecordsSnapshot,
   sanitizeTextValue,
 } = require("../client-records-v2-utils");
+const { createPgSslConfig } = require("../server/shared/db/pool");
 
 function parseArgs(argv) {
   const options = {
@@ -46,11 +47,6 @@ function parseArgs(argv) {
   }
 
   return options;
-}
-
-function shouldUseSsl() {
-  const mode = (process.env.PGSSLMODE || "").toLowerCase();
-  return mode !== "disable";
 }
 
 async function backfillClientRecordsV2(pool, options) {
@@ -206,7 +202,7 @@ async function backfillClientRecordsV2(pool, options) {
 
     const pool = new Pool({
       connectionString: databaseUrl,
-      ssl: shouldUseSsl() ? { rejectUnauthorized: false } : false,
+      ssl: createPgSslConfig({}, process.env),
     });
 
     try {

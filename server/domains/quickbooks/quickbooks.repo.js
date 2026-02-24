@@ -1,5 +1,7 @@
 "use strict";
 
+const { createQuickBooksRefreshTokenCrypto } = require("./quickbooks-token-crypto");
+
 function createQuickBooksRepo(dependencies = {}) {
   const { db, ensureDatabaseReady, tables, constants, helpers } = dependencies;
 
@@ -37,9 +39,37 @@ function createQuickBooksRepo(dependencies = {}) {
   const QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE = Math.max(1, Number(constants?.quickBooksCacheUpsertBatchSize) || 100);
   const QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT = Math.max(0.0001, Number(constants?.quickBooksMinVisibleAbsAmount) || 0.0001);
   const QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS = Math.max(1, Number(constants?.quickBooksZeroReconcileMaxRows) || 500);
+  const quickBooksRefreshTokenCrypto = createQuickBooksRefreshTokenCrypto({
+    encryptionKey: constants?.quickBooksRefreshTokenEncryptionKey,
+    encryptionKeyId: constants?.quickBooksRefreshTokenEncryptionKeyId,
+  });
+
+  function prepareRefreshTokenForStorage(rawTokenValue) {
+    const normalizedToken = sanitizeTextValue(rawTokenValue, 6000);
+    if (!normalizedToken) {
+      return "";
+    }
+    if (!quickBooksRefreshTokenCrypto.isConfigured()) {
+      const error = new Error(
+        "QuickBooks refresh token encryption key is required to persist token. Set QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY.",
+      );
+      error.code = "quickbooks_refresh_token_encryption_key_missing";
+      throw error;
+    }
+    return quickBooksRefreshTokenCrypto.encrypt(normalizedToken);
+  }
+
+  function restoreRefreshTokenFromStorage(rawStoredValue) {
+    const normalizedStoredValue = sanitizeTextValue(rawStoredValue, 12000);
+    if (!normalizedStoredValue) {
+      return "";
+    }
+    return sanitizeTextValue(quickBooksRefreshTokenCrypto.decrypt(normalizedStoredValue), 6000);
+  }
 
   async function ensureQuickBooksSchema(options = {}) {
     const initialRefreshToken = sanitizeTextValue(options.initialRefreshToken, 6000);
+    const initialRefreshTokenForStorage = prepareRefreshTokenForStorage(initialRefreshToken);
 
     await query(`
       CREATE TABLE IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE} (
@@ -110,7 +140,7 @@ function createQuickBooksRepo(dependencies = {}) {
         VALUES ($1, $2)
         ON CONFLICT (id) DO NOTHING
       `,
-      [QUICKBOOKS_AUTH_STATE_ROW_ID, initialRefreshToken],
+      [QUICKBOOKS_AUTH_STATE_ROW_ID, initialRefreshTokenForStorage],
     );
 
     if (initialRefreshToken) {
@@ -122,7 +152,7 @@ function createQuickBooksRepo(dependencies = {}) {
           WHERE id = $1
             AND COALESCE(refresh_token, '') = ''
         `,
-        [QUICKBOOKS_AUTH_STATE_ROW_ID, initialRefreshToken],
+        [QUICKBOOKS_AUTH_STATE_ROW_ID, initialRefreshTokenForStorage],
       );
     }
 
@@ -137,7 +167,7 @@ function createQuickBooksRepo(dependencies = {}) {
     );
 
     return {
-      storedRefreshToken: sanitizeTextValue(quickBooksAuthStateResult.rows[0]?.refresh_token, 6000),
+      storedRefreshToken: restoreRefreshTokenFromStorage(quickBooksAuthStateResult.rows[0]?.refresh_token),
     };
   }
 
@@ -146,6 +176,7 @@ function createQuickBooksRepo(dependencies = {}) {
     if (!normalizedToken) {
       return;
     }
+    const refreshTokenForStorage = prepareRefreshTokenForStorage(normalizedToken);
 
     const normalizedRefreshTokenExpiresAt = sanitizeTextValue(refreshTokenExpiresAtIso, 80) || null;
     await ensureReady();
@@ -164,7 +195,7 @@ function createQuickBooksRepo(dependencies = {}) {
           refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
           updated_at = NOW()
       `,
-      [QUICKBOOKS_AUTH_STATE_ROW_ID, normalizedToken, normalizedRefreshTokenExpiresAt],
+      [QUICKBOOKS_AUTH_STATE_ROW_ID, refreshTokenForStorage, normalizedRefreshTokenExpiresAt],
     );
   }
 
@@ -179,7 +210,7 @@ function createQuickBooksRepo(dependencies = {}) {
       `,
       [QUICKBOOKS_AUTH_STATE_ROW_ID],
     );
-    return sanitizeTextValue(quickBooksAuthStateResult.rows[0]?.refresh_token, 6000);
+    return restoreRefreshTokenFromStorage(quickBooksAuthStateResult.rows[0]?.refresh_token);
   }
 
   async function listCachedQuickBooksCustomerContacts(customerIds) {

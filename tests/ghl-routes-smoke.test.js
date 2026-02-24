@@ -132,8 +132,15 @@ async function stopServer(child) {
   }
 }
 
-async function withServer(callback) {
-  const server = await startServer();
+async function withServer(envOverridesOrCallback, maybeCallback) {
+  const envOverrides =
+    typeof envOverridesOrCallback === "function" || envOverridesOrCallback === undefined ? {} : envOverridesOrCallback;
+  const callback = typeof envOverridesOrCallback === "function" ? envOverridesOrCallback : maybeCallback;
+  if (typeof callback !== "function") {
+    throw new Error("withServer requires callback.");
+  }
+
+  const server = await startServer(envOverrides);
   try {
     await callback(server);
   } finally {
@@ -199,8 +206,11 @@ async function loginApi(baseUrl) {
   assert.equal(response.status, 200, `Login failed: ${JSON.stringify(body)}`);
   assert.equal(body?.ok, true);
   const cookies = buildCookieJar(response);
+  const csrfToken = String(cookies.get("cbooster_auth_csrf") || "").trim();
+  assert.ok(csrfToken, "Login response must include CSRF cookie.");
   return {
     cookieHeader: buildCookieHeader(cookies),
+    csrfToken,
   };
 }
 
@@ -249,4 +259,91 @@ test("GHL routes smoke: routes respond and keep stable status envelope", async (
       }
     }
   });
+});
+
+test("GHL contract archive ingest auth: query/body token channels are rejected", async () => {
+  await withServer(
+    {
+      GHL_CONTRACT_ARCHIVE_INGEST_TOKEN: "ingest-secret-smoke",
+    },
+    async ({ baseUrl }) => {
+      const auth = await loginApi(baseUrl);
+      const queryTokenResponse = await fetch(`${baseUrl}/api/ghl/client-contracts/archive?token=ingest-secret-smoke`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Cookie: auth.cookieHeader,
+          "X-CSRF-Token": auth.csrfToken,
+        },
+        body: JSON.stringify({
+          clientName: "Smoke Client",
+          contractUrl: "https://example.com/contract.pdf",
+        }),
+      });
+      assert.equal(queryTokenResponse.status, 401);
+      const queryTokenBody = await queryTokenResponse.json();
+      assert.match(String(queryTokenBody?.error || ""), /Unauthorized ingest request/i);
+
+      const bodyTokenResponse = await fetch(`${baseUrl}/api/ghl/client-contracts/archive`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Cookie: auth.cookieHeader,
+          "X-CSRF-Token": auth.csrfToken,
+        },
+        body: JSON.stringify({
+          token: "ingest-secret-smoke",
+          clientName: "Smoke Client",
+          contractUrl: "https://example.com/contract.pdf",
+        }),
+      });
+      assert.equal(bodyTokenResponse.status, 401);
+      const bodyTokenPayload = await bodyTokenResponse.json();
+      assert.match(String(bodyTokenPayload?.error || ""), /Unauthorized ingest request/i);
+    },
+  );
+});
+
+test("GHL contract archive ingest auth: header and bearer channels are accepted", async () => {
+  await withServer(
+    {
+      GHL_CONTRACT_ARCHIVE_INGEST_TOKEN: "ingest-secret-smoke",
+    },
+    async ({ baseUrl }) => {
+      const auth = await loginApi(baseUrl);
+      const headerResponse = await fetch(`${baseUrl}/api/ghl/client-contracts/archive`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Cookie: auth.cookieHeader,
+          "X-CSRF-Token": auth.csrfToken,
+          "x-ghl-contract-archive-token": "ingest-secret-smoke",
+        },
+        body: JSON.stringify({}),
+      });
+      assert.notEqual(headerResponse.status, 401);
+      assert.equal(headerResponse.status, 400);
+      const headerBody = await headerResponse.json();
+      assert.match(String(headerBody?.error || ""), /missing clientName/i);
+
+      const bearerResponse = await fetch(`${baseUrl}/api/ghl/client-contracts/archive`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Cookie: auth.cookieHeader,
+          "X-CSRF-Token": auth.csrfToken,
+          Authorization: "Bearer ingest-secret-smoke",
+        },
+        body: JSON.stringify({}),
+      });
+      assert.notEqual(bearerResponse.status, 401);
+      assert.equal(bearerResponse.status, 400);
+      const bearerBody = await bearerResponse.json();
+      assert.match(String(bearerBody?.error || ""), /missing clientName/i);
+    },
+  );
 });

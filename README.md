@@ -24,6 +24,8 @@ npm start
 
 Если `DATABASE_URL` не задан, интерфейс продолжит работать только с `localStorage`.
 
+Если вы подключаетесь к локальному Postgres без TLS, задайте `PGSSLMODE=disable`.
+
 ## Деплой на Render + Supabase
 
 1. Создайте проект в Supabase.
@@ -52,6 +54,8 @@ npm start
    - `QUICKBOOKS_CLIENT_ID` = QuickBooks OAuth Client ID;
    - `QUICKBOOKS_CLIENT_SECRET` = QuickBooks OAuth Client Secret;
    - `QUICKBOOKS_REFRESH_TOKEN` = QuickBooks OAuth Refresh Token;
+   - `QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY` = 32-byte ключ для шифрования refresh token в БД (hex-64, base64, или plain 32-char);
+   - `QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID` = key id для зашифрованного payload (по умолчанию `default`);
    - `QUICKBOOKS_REALM_ID` = QuickBooks Company Realm ID;
    - `QUICKBOOKS_REDIRECT_URI` = Redirect URI (опционально, но рекомендовано хранить рядом с OAuth-настройками);
    - `QUICKBOOKS_API_BASE_URL` = API base URL (по умолчанию `https://quickbooks.api.intuit.com`);
@@ -72,6 +76,10 @@ npm start
    - `ELEVENLABS_OUTPUT_FORMAT` = формат аудио ответа (по умолчанию `mp3_44100_128`);
    - `ELEVENLABS_TTS_TIMEOUT_MS` = timeout TTS-запроса к ElevenLabs в ms (по умолчанию `15000`);
    - `DATABASE_URL` = строка подключения Supabase;
+   - `PGSSLMODE` = `disable` для локального Postgres без SSL, иначе SSL включается со строгой валидацией сертификата;
+   - `PGSSLROOTCERT` = абсолютный путь к CA-файлу (опционально, если нужен кастомный CA);
+   - `PGSSL_CA_CERT` = CA сертификат в PEM (строкой, `\n` поддерживается) — опционально;
+   - `PGSSL_CA_CERT_BASE64` = тот же CA в base64 — опционально;
    - `DB_TABLE_NAME` = `client_records_state`;
    - `DB_MODERATION_TABLE_NAME` = `mini_client_submissions`;
    - `DB_MODERATION_FILES_TABLE_NAME` = `mini_submission_files`;
@@ -85,6 +93,19 @@ npm start
    - `TELEGRAM_NOTIFY_THREAD_ID` = id топика в группе (опционально, только для group topics).
 5. Deploy.
 
+### PostgreSQL TLS (строгий режим)
+
+- По умолчанию при `PGSSLMODE != disable` используется SSL с проверкой сертификата сервера (`rejectUnauthorized=true`).
+- Insecure-режим с `rejectUnauthorized=false` не используется.
+- Если провайдер требует доверенный CA, передайте его через `PGSSLROOTCERT` или `PGSSL_CA_CERT`/`PGSSL_CA_CERT_BASE64`.
+
+### QuickBooks refresh token encryption
+
+- Refresh token в таблице `quickbooks_auth_state.refresh_token` сохраняется в формате `enc:v1:...` (AES-256-GCM).
+- Для QuickBooks в production переменная `QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY` обязательна.
+- Legacy plaintext токены читаются для обратной совместимости, но при следующем `persist` записываются уже в encrypted-формате.
+- Не храните `QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY` в репозитории или логах.
+
 Сервис поднимает API:
 - `GET /api/auth/session`
 - `GET /api/auth/access-model`
@@ -95,6 +116,7 @@ npm start
 - `GET /api/quickbooks/payments/recent/sync-jobs/:jobId`
 - `GET /api/ghl/client-managers`
 - `POST /api/ghl/client-managers/refresh` (body: `{ refresh: "incremental" | "full" }`)
+- `POST /api/ghl/client-contracts/archive` (ingest auth only via `x-ghl-contract-archive-token` header or `Authorization: Bearer <token>`)
 - `GET /api/ghl/client-basic-note?clientName=...` (cache read-only)
 - `POST /api/ghl/client-basic-note/refresh` (body: `{ clientName, writtenOff? }`)
 - `GET /api/health`
@@ -220,6 +242,19 @@ npm start
 - Разрешены любые файлы, кроме скриптов и HTML (`.js`, `.ts`, `.py`, `.sh`, `.html`, и т.д.).
 - Ограничение: до 10 MB на файл и до 40 MB суммарно на заявку.
 - На этапе премодерации вложения доступны в карточке заявки: просмотр (для изображений/PDF) и скачивание.
+
+## Mobile Audit Gate Policy (CI)
+
+- Workflow: `.github/workflows/mobile-security-audit.yml`
+- Gate script: `scripts/mobile-audit-gate.js`
+- По умолчанию CI падает, если:
+  - `critical > 0`, или
+  - `high > 0`.
+- Временный override только для `high`:
+  - `MOBILE_AUDIT_ALLOW_HIGH=true`
+  - при override скрипт пишет явный warning в лог.
+- `critical` уязвимости override не обходит.
+- Если `npm audit --json` не удалось распарсить, gate работает в fail-closed режиме (job падает).
 
 ## Дополнительные поля Mini App
 

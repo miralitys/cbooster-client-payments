@@ -407,6 +407,12 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
 const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY = (process.env.QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY || "").toString().trim();
+const QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID = (
+  process.env.QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID || "default"
+)
+  .toString()
+  .trim();
 const QUICKBOOKS_REALM_ID = (process.env.QUICKBOOKS_REALM_ID || "").toString().trim();
 const QUICKBOOKS_REDIRECT_URI = (process.env.QUICKBOOKS_REDIRECT_URI || "").toString().trim();
 const QUICKBOOKS_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
@@ -21789,6 +21795,8 @@ const quickBooksRepo = createQuickBooksRepo({
     quickBooksCacheUpsertBatchSize: QUICKBOOKS_CACHE_UPSERT_BATCH_SIZE,
     quickBooksMinVisibleAbsAmount: QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT,
     quickBooksZeroReconcileMaxRows: QUICKBOOKS_ZERO_RECONCILE_MAX_ROWS,
+    quickBooksRefreshTokenEncryptionKey: QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY,
+    quickBooksRefreshTokenEncryptionKeyId: QUICKBOOKS_REFRESH_TOKEN_ENCRYPTION_KEY_ID,
   },
   helpers: {
     sanitizeTextValue,
@@ -30199,12 +30207,7 @@ function resolveGhlContractArchiveIngestTokenFromRequest(req) {
     return sanitizeTextValue(bearerMatch[1], 2000);
   }
 
-  const queryToken = sanitizeTextValue(req?.query?.token, 2000);
-  if (queryToken) {
-    return queryToken;
-  }
-
-  return sanitizeTextValue(req?.body?.token, 2000);
+  return "";
 }
 
 function isGhlContractArchiveIngestAuthorized(req) {
@@ -34335,7 +34338,7 @@ const handleGhlClientContractsArchivePost = async (req, res) => {
 
   if (!isGhlContractArchiveIngestAuthorized(req)) {
     res.status(401).json({
-      error: `Unauthorized ingest request. Provide token via '${GHL_CONTRACT_ARCHIVE_INGEST_TOKEN_HEADER_NAME}' header, Bearer auth, or ?token=...`,
+      error: `Unauthorized ingest request. Provide token via '${GHL_CONTRACT_ARCHIVE_INGEST_TOKEN_HEADER_NAME}' header or Authorization: Bearer <token>.`,
     });
     return;
   }
