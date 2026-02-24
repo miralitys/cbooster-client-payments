@@ -61,16 +61,6 @@ interface SalesFilterOptions {
   hasUnassigned: boolean;
 }
 
-const SEARCH_FIELDS: Array<keyof ClientRecord> = [
-  "clientName",
-  "closedBy",
-  "notes",
-  "clientPhoneNumber",
-  "clientEmailAddress",
-  "companyName",
-  "serviceType",
-];
-
 export default function ClientsPage() {
   const [records, setRecords] = useState<ClientRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -228,6 +218,7 @@ export default function ClientsPage() {
 
   const filteredRecords = useMemo(() => {
     const query = normalizeSearchTerm(search);
+    const queryDigits = normalizeDigits(search);
     const selectedSalesComparable = normalizeComparableClientName(salesFilter);
     const selectedManagerComparable = normalizeComparableClientName(clientManagerFilter);
     const contractDateFromTimestamp = parseDateValue(contractDateFrom);
@@ -241,11 +232,8 @@ export default function ClientsPage() {
       const isContractSigned = resolveContractSigned(record);
       const isInWork = resolveStartedInWork(record);
 
-      if (query) {
-        const searchable = [...SEARCH_FIELDS.map((field) => (record[field] || "").toString()), managerLabel].join(" ");
-        if (!normalizeSearchTerm(searchable).includes(query)) {
-          return false;
-        }
+      if (query && !matchesClientsSearchQuery(record, query, queryDigits)) {
+        return false;
       }
 
       if (salesFilter === SALES_FILTER_UNASSIGNED) {
@@ -537,12 +525,12 @@ export default function ClientsPage() {
       <Panel title="Clients Database">
         <div>
           <label className="search-label" htmlFor="clients-search-input">
-            Search Clients
+            Search Clients (Name / Email / Phone / SSN)
           </label>
           <div className="search-row clients-search-row">
             <Input
               id="clients-search-input"
-              placeholder="Client, manager, phone, email, notes, company"
+              placeholder="For example: John Smith, john@email.com, +1(555)555-5555, 123-45-6789"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               autoComplete="off"
@@ -773,6 +761,29 @@ export default function ClientsPage() {
 
 function normalizeSearchTerm(value: unknown): string {
   return (value || "").toString().trim().toLowerCase();
+}
+
+function normalizeDigits(value: unknown): string {
+  return (value || "").toString().replace(/\D/g, "");
+}
+
+function matchesClientsSearchQuery(record: ClientRecord, query: string, queryDigits: string): boolean {
+  const searchableFields = [
+    record.clientName,
+    record.clientEmailAddress,
+    record.clientPhoneNumber,
+    record.ssn,
+  ];
+
+  if (searchableFields.some((value) => normalizeSearchTerm(value).includes(query))) {
+    return true;
+  }
+
+  if (!queryDigits) {
+    return false;
+  }
+
+  return [record.clientPhoneNumber, record.ssn].some((value) => normalizeDigits(value).includes(queryDigits));
 }
 
 function resolveCreatedAtTimestamp(record: ClientRecord): number {
