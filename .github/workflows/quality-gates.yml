@@ -55,6 +55,9 @@ jobs:
       - name: Architecture guardrails
         run: npm run guard:architecture
 
+      - name: Sensitive artifacts guardrails
+        run: npm run guard:sensitive-artifacts
+
       - name: Lint (no warnings)
         run: npm --prefix webapp run lint -- --max-warnings=0
 
@@ -90,6 +93,9 @@ jobs:
 
       - name: Architecture guardrails
         run: npm run guard:architecture
+
+      - name: Sensitive artifacts guardrails
+        run: npm run guard:sensitive-artifacts
 
       - name: Mini App | Backend tests
         run: node --test tests/mini-*.test.js

@@ -9,6 +9,7 @@
     "test:backend": "node --test tests/*.test.js",
     "test:smoke": "node --test tests/api-baseline-smoke.test.js",
     "guard:architecture": "bash scripts/architecture-guards.sh",
+    "guard:sensitive-artifacts": "bash scripts/sensitive-artifacts-guard.sh",
     "build": "npm --prefix webapp run build",
     "lint": "npm --prefix webapp run lint",
     "quality:gate": "npm --prefix webapp run lint -- --max-warnings=0 && npm --prefix webapp run test && npm --prefix webapp run build",
