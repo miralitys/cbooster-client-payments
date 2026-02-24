@@ -5,6 +5,8 @@ import type {
   GhlClientCommunicationsPayload,
 } from "@/shared/types/ghlCommunications";
 
+const GHL_TRANSCRIPT_REQUEST_TIMEOUT_MS = 60_000;
+
 export async function getGhlClientCommunications(
   clientName: string,
   options: { signal?: AbortSignal } = {},
@@ -27,6 +29,7 @@ export async function postGhlClientCommunicationTranscript(
   const normalizedMessageId = (messageId || "").toString().trim();
   return apiRequest<GhlClientCommunicationTranscriptPayload>("/api/ghl/client-communications/transcript", {
     method: "POST",
+    timeoutMs: GHL_TRANSCRIPT_REQUEST_TIMEOUT_MS,
     headers: {
       "Content-Type": "application/json",
     },
