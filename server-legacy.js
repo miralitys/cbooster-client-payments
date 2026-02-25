@@ -58,6 +58,21 @@ const { createRecordsRepo } = require("./server/domains/records/records.repo");
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
 const IS_PRODUCTION = (process.env.NODE_ENV || "").toString().trim().toLowerCase() === "production";
+const HEALTH_CHECK_API_KEY = sanitizeTextValue(process.env.HEALTH_CHECK_API_KEY, 4000);
+const HEALTH_CHECK_API_KEY_HEADER_NAME = "x-health-check-key";
+const PERMISSIONS_POLICY_HEADER_VALUE = [
+  "accelerometer=()",
+  "autoplay=()",
+  "camera=()",
+  "display-capture=()",
+  "geolocation=()",
+  "gyroscope=()",
+  "magnetometer=()",
+  "microphone=()",
+  "payment=()",
+  "publickey-credentials-get=()",
+  "usb=()",
+].join(", ");
 const SIMULATE_SLOW_RECORDS_REQUESTED = resolveOptionalBoolean(process.env.SIMULATE_SLOW_RECORDS) === true;
 const SIMULATE_SLOW_RECORDS = SIMULATE_SLOW_RECORDS_REQUESTED && !IS_PRODUCTION;
 const SIMULATE_SLOW_RECORDS_DELAY_MS = 35_000;
@@ -1659,6 +1674,10 @@ app.use(
     },
   }),
 );
+app.use((_req, res, next) => {
+  res.setHeader("Permissions-Policy", PERMISSIONS_POLICY_HEADER_VALUE);
+  next();
+});
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use(
@@ -25161,6 +25180,12 @@ function handleWebLogout(req, res) {
   res.redirect(302, "/login");
 }
 
+function handleWebLogoutMethodNotAllowed(_req, res) {
+  res.setHeader("Allow", "POST");
+  res.setHeader("Cache-Control", "no-store, private");
+  res.status(405).type("text/plain").send("Method Not Allowed");
+}
+
 registerAuthPublicRoutes({
   app,
   requireWebApiCsrf,
@@ -25169,6 +25194,7 @@ registerAuthPublicRoutes({
     handleWebLoginSubmit,
     handleApiAuthLogin,
     handleApiAuthLogout,
+    handleWebLogoutMethodNotAllowed,
     handleWebLogout,
   },
 });
@@ -29296,7 +29322,44 @@ const handleIdentityIqCreditScorePost = async (req, res) => {
   }
 };
 
-const handleHealthGet = async (_req, res) => {
+function resolveHealthCheckTokenFromRequest(req) {
+  const headerToken = sanitizeTextValue(req?.headers?.[HEALTH_CHECK_API_KEY_HEADER_NAME], 4000);
+  if (headerToken) {
+    return headerToken;
+  }
+
+  const authorizationValue = sanitizeTextValue(req?.headers?.authorization, 4000);
+  const bearerMatch = authorizationValue.match(/^Bearer\s+(.+)$/i);
+  if (bearerMatch?.[1]) {
+    return sanitizeTextValue(bearerMatch[1], 4000);
+  }
+
+  return "";
+}
+
+function canAccessDetailedHealthStatus(req) {
+  if (!HEALTH_CHECK_API_KEY) {
+    return false;
+  }
+
+  const providedToken = resolveHealthCheckTokenFromRequest(req);
+  if (!providedToken) {
+    return false;
+  }
+
+  return safeEqual(providedToken, HEALTH_CHECK_API_KEY);
+}
+
+const handleHealthGet = async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+
+  if (!canAccessDetailedHealthStatus(req)) {
+    res.status(200).json({
+      ok: true,
+    });
+    return;
+  }
+
   if (!pool) {
     res.status(503).json({
       ok: false,
@@ -29308,7 +29371,7 @@ const handleHealthGet = async (_req, res) => {
   try {
     await ensureDatabaseReady();
     await sharedDbQuery("SELECT 1");
-    res.json({
+    res.status(200).json({
       ok: true,
       status: "healthy",
     });

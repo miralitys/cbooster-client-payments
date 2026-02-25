@@ -15,7 +15,7 @@ function registerAuthPublicRoutes(context) {
   app.post("/api/mobile/auth/login", handlers.handleApiAuthLogin);
   app.post("/api/mobile/auth/logout", requireWebApiCsrf, handlers.handleApiAuthLogout);
 
-  app.get("/logout", handlers.handleWebLogout);
+  app.get("/logout", handlers.handleWebLogoutMethodNotAllowed);
   app.post("/logout", handlers.handleWebLogout);
 }
 

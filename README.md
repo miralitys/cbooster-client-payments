@@ -119,7 +119,7 @@ npm start
 - `POST /api/ghl/client-contracts/archive` (ingest auth only via `x-ghl-contract-archive-token` header or `Authorization: Bearer <token>`)
 - `GET /api/ghl/client-basic-note?clientName=...` (cache read-only)
 - `POST /api/ghl/client-basic-note/refresh` (body: `{ clientName, writtenOff? }`)
-- `GET /api/health`
+- `GET /api/health` (анонимно возвращает минимальный `{ ok: true }`; подробный DB-статус только при `HEALTH_CHECK_API_KEY` через `x-health-check-key` или `Authorization: Bearer ...`)
 - `GET /api/records`
 - `PUT /api/records`
 - `POST /api/assistant/chat`
@@ -148,7 +148,7 @@ npm start
   - страница полной таблицы клиентов `/Client_Payments`;
   - отдельная тестовая страница QuickBooks `/quickbooks-payments`.
   - страница модели прав `/access-control` (включая регистрацию пользователей для Owner через кнопку `Add New User`).
-- Выход: `/logout`.
+- Выход: только `POST /logout` (`GET /logout` возвращает `405 Method Not Allowed`).
 - Mini App маршруты (`/mini`, `/api/mini/*`) защищаются подписью Telegram `initData`.
 
 ## Global Access Control (RBAC)

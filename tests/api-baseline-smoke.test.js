@@ -231,7 +231,7 @@ test("phase-0 smoke: public/unauth critical endpoints keep expected route/status
     const healthBody = await parseJsonBody(healthResponse);
     assert.equal(healthResponse.status, 200);
     assert.equal(healthBody?.ok, true);
-    assert.equal(healthBody?.status, "healthy");
+    assert.equal(Object.prototype.hasOwnProperty.call(healthBody || {}, "status"), false);
 
     const appResponse = await fetch(`${baseUrl}/app/client-payments`, {
       redirect: "manual",

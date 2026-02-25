@@ -201,6 +201,20 @@ function buildCookieHeader(cookieJar) {
     .join("; ");
 }
 
+function assertCoreSecurityHeaders(response, routeLabel) {
+  const permissionsPolicy = String(response.headers.get("permissions-policy") || "").trim();
+  assert.ok(permissionsPolicy, `${routeLabel} must include Permissions-Policy header.`);
+
+  const xFrameOptions = String(response.headers.get("x-frame-options") || "").trim();
+  assert.ok(xFrameOptions, `${routeLabel} must include X-Frame-Options header.`);
+
+  const xContentTypeOptions = String(response.headers.get("x-content-type-options") || "").trim();
+  assert.ok(xContentTypeOptions, `${routeLabel} must include X-Content-Type-Options header.`);
+
+  const referrerPolicy = String(response.headers.get("referrer-policy") || "").trim();
+  assert.ok(referrerPolicy, `${routeLabel} must include Referrer-Policy header.`);
+}
+
 async function loginApi(baseUrl, credentials) {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
@@ -282,6 +296,68 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       const validCsrfBody = await validCsrfResponse.json();
       assert.equal(validCsrfResponse.status, 200);
       assert.equal(validCsrfBody?.ok, true);
+    });
+
+    await t.test("GET /logout is blocked with 405 and allows POST only", async () => {
+      const response = await fetch(`${baseUrl}/logout`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+
+      assert.equal(response.status, 405);
+      assert.equal(String(response.headers.get("allow") || "").toUpperCase(), "POST");
+      assertCoreSecurityHeaders(response, "GET /logout");
+    });
+
+    await t.test("security headers are consistent on /login, /api/*, 401/404/302 responses", async () => {
+      const loginResponse = await fetch(`${baseUrl}/login`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+      assert.equal(loginResponse.status, 200);
+      assertCoreSecurityHeaders(loginResponse, "GET /login");
+
+      const unauthorizedApiResponse = await fetch(`${baseUrl}/api/records`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "application/json",
+        },
+      });
+      assert.equal(unauthorizedApiResponse.status, 401);
+      assertCoreSecurityHeaders(unauthorizedApiResponse, "GET /api/records (unauth)");
+
+      const ownerLogin = await loginApi(baseUrl, {
+        username: TEST_OWNER_USERNAME,
+        password: TEST_OWNER_PASSWORD,
+      });
+
+      const notFoundApiResponse = await fetch(`${baseUrl}/api/this-route-does-not-exist`, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Cookie: ownerLogin.cookieHeader,
+        },
+      });
+      assert.equal(notFoundApiResponse.status, 404);
+      assertCoreSecurityHeaders(notFoundApiResponse, "GET /api/this-route-does-not-exist");
+
+      const redirectResponse = await fetch(`${baseUrl}/dashboard`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+      assert.equal(redirectResponse.status, 302);
+      assert.equal(String(redirectResponse.headers.get("location") || ""), "/login?next=%2Fdashboard");
+      assertCoreSecurityHeaders(redirectResponse, "GET /dashboard redirect");
     });
 
     await t.test("RBAC: /api/auth/access-model is blocked for non-admin and allowed for owner", async () => {

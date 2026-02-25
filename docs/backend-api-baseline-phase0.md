@@ -30,9 +30,18 @@ Unauthenticated behavior baseline:
 ## 1) Health
 
 - Method/Path: `GET /api/health`
-- Auth: no auth required
+- Auth: no auth required для минимального ответа
 
-200 (healthy):
+200 (public minimal):
+```json
+{
+  "ok": true
+}
+```
+
+`HEALTH_CHECK_API_KEY` (header `x-health-check-key` или `Authorization: Bearer ...`) включает подробный режим:
+
+200 (detailed healthy):
 ```json
 {
   "ok": true,
@@ -40,7 +49,7 @@ Unauthenticated behavior baseline:
 }
 ```
 
-503 (unhealthy / db unavailable):
+503 (detailed unhealthy / db unavailable):
 ```json
 {
   "ok": false,

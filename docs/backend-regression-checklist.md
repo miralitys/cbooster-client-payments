@@ -22,7 +22,7 @@ npm run test:backend
 ## Manual Sanity (local)
 
 1. Start server locally.
-2. `GET /api/health` returns `200` with `{ ok: true }` in healthy local setup.
+2. `GET /api/health` (без ключа) returns `200` with minimal `{ ok: true }` and no detailed DB fields.
 3. Open `/app/client-payments` as unauth user:
    - must **not** return `404`.
    - expected redirect/login behavior is preserved.
