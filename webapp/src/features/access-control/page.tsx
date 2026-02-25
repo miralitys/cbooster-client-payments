@@ -94,6 +94,17 @@ export default function AccessControlPage() {
 
   const departments = useMemo(() => model?.departments || [], [model]);
   const users = useMemo(() => model?.users || [], [model]);
+  const sortedUsers = useMemo(() => {
+    return [...users].sort((left, right) => {
+      const leftDisplayName = (left?.displayName || left?.username || "").trim();
+      const rightDisplayName = (right?.displayName || right?.username || "").trim();
+      const byDisplayName = leftDisplayName.localeCompare(rightDisplayName, "en-US", { sensitivity: "base" });
+      if (byDisplayName !== 0) {
+        return byDisplayName;
+      }
+      return (left?.username || "").localeCompare(right?.username || "", "en-US", { sensitivity: "base" });
+    });
+  }, [users]);
   const rolesByDepartment = useMemo(() => {
     const mapping = new Map<string, AccessControlDepartmentRole[]>();
     for (const department of departments) {
@@ -856,7 +867,7 @@ export default function AccessControlPage() {
             <Table
               className="access-control-users-table-wrap-react"
               columns={userColumns}
-              rows={users}
+              rows={sortedUsers}
               rowKey={(item) => item.username}
               density="compact"
             />
