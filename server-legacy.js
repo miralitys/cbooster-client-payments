@@ -1896,6 +1896,7 @@ const miniAttachmentsUploadDiskMiddleware = ATTACHMENTS_STREAMING_ENABLED
 
 let dbReadyPromise = null;
 let webAuthUsersDirectoryHydrationPromise = null;
+let webAuthUsersDirectoryStorageReadyPromise = null;
 let webAuthUsersDirectoryPersistPromise = Promise.resolve();
 let quickBooksSyncQueue = Promise.resolve();
 const quickBooksSyncJobsById = new Map();
@@ -12323,7 +12324,7 @@ async function persistWebAuthUsersDirectoryToDatabase(reason = "unspecified") {
     return false;
   }
 
-  await ensureDatabaseReady();
+  await ensureWebAuthUsersDirectoryStorageReady();
   await sharedDbQuery(
     `
       INSERT INTO ${WEB_AUTH_USERS_DIRECTORY_TABLE} (id, users, updated_at)
@@ -12335,6 +12336,35 @@ async function persistWebAuthUsersDirectoryToDatabase(reason = "unspecified") {
   );
 
   return true;
+}
+
+async function ensureWebAuthUsersDirectoryStorageReady() {
+  if (!pool || !sharedDbQuery) {
+    return false;
+  }
+
+  if (!webAuthUsersDirectoryStorageReadyPromise) {
+    webAuthUsersDirectoryStorageReadyPromise = (async () => {
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${WEB_AUTH_USERS_DIRECTORY_TABLE} (
+          id BIGINT PRIMARY KEY,
+          users JSONB NOT NULL DEFAULT '[]'::jsonb,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${WEB_AUTH_USERS_DIRECTORY_TABLE_NAME}_updated_at_idx
+        ON ${WEB_AUTH_USERS_DIRECTORY_TABLE} (updated_at DESC)
+      `);
+      return true;
+    })().catch((error) => {
+      webAuthUsersDirectoryStorageReadyPromise = null;
+      throw error;
+    });
+  }
+
+  return webAuthUsersDirectoryStorageReadyPromise;
 }
 
 function queueWebAuthUsersDirectoryPersist(reason = "unspecified") {
@@ -12358,7 +12388,7 @@ async function ensureWebAuthUsersDirectoryHydratedFromDb() {
 
   if (!webAuthUsersDirectoryHydrationPromise) {
     webAuthUsersDirectoryHydrationPromise = (async () => {
-      await ensureDatabaseReady();
+      await ensureWebAuthUsersDirectoryStorageReady();
       const result = await sharedDbQuery(
         `
           SELECT users
@@ -24424,7 +24454,12 @@ function scheduleDualReadCompareForLegacyRecords(records, options = {}) {
 
   const recordsSnapshot = Array.isArray(records) ? records.slice() : [];
   setImmediate(() => {
-    void runDualReadCompareForLegacyRecords(recordsSnapshot, options);
+    void runDualReadCompareForLegacyRecords(recordsSnapshot, options).catch((error) => {
+      console.warn(
+        "[records dual-read] compare failed:",
+        sanitizeTextValue(error?.message, 320) || "unknown error",
+      );
+    });
   });
 }
 
@@ -26409,10 +26444,28 @@ function startAssistantReviewRetentionSweepScheduler() {
     return true;
   }
 
+  const runSweepSafe = (source = "scheduler_tick") => {
+    if (assistantReviewRetentionSweepInFlight) {
+      return;
+    }
+
+    assistantReviewRetentionSweepInFlight = true;
+    void runAssistantReviewRetentionSweep()
+      .catch((error) => {
+        console.error(
+          `[assistant retention] Sweep failed (${source}):`,
+          sanitizeTextValue(error?.message, 500) || error,
+        );
+      })
+      .finally(() => {
+        assistantReviewRetentionSweepInFlight = false;
+      });
+  };
+
   assistantReviewRetentionSweepIntervalId = setInterval(() => {
-    void runAssistantReviewRetentionSweep();
+    runSweepSafe("scheduler_tick");
   }, ASSISTANT_REVIEW_RETENTION_SWEEP_INTERVAL_MS);
-  void runAssistantReviewRetentionSweep();
+  runSweepSafe("startup");
   return true;
 }
 
