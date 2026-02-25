@@ -437,6 +437,15 @@ export default function ClientPaymentsPage() {
             case "collection":
               return formatMoneyCell(record.collection);
             default:
+              if (typeof column === "string") {
+                const match = column.match(PAYMENT_COLUMN_MATCH);
+                if (match) {
+                  const isDate = Boolean(match[2]);
+                  return isDate
+                    ? formatDate((record[column as keyof ClientRecord] || "").toString())
+                    : formatMoneyCell(record[column as keyof ClientRecord]);
+                }
+              }
               return "";
           }
         },
