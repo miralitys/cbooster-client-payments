@@ -220,6 +220,67 @@ function assertCoreSecurityHeaders(response, routeLabel) {
   assert.ok(referrerPolicy, `${routeLabel} must include Referrer-Policy header.`);
 }
 
+function parseCspDirectives(cspHeader) {
+  const directives = new Map();
+  const rawCsp = String(cspHeader || "");
+  for (const chunk of rawCsp.split(";")) {
+    const normalized = chunk.trim();
+    if (!normalized) {
+      continue;
+    }
+    const [directiveName, ...sources] = normalized.split(/\s+/);
+    if (!directiveName) {
+      continue;
+    }
+    directives.set(directiveName.toLowerCase(), sources);
+  }
+  return directives;
+}
+
+function assertCspHeader(response, routeLabel) {
+  const csp = String(response.headers.get("content-security-policy") || "").trim();
+  assert.ok(csp, `${routeLabel} must include Content-Security-Policy header.`);
+  return csp;
+}
+
+function assertNoInlineStylesInCsp(cspHeader, routeLabel) {
+  const directives = parseCspDirectives(cspHeader);
+  const styleSources = directives.get("style-src") || [];
+  assert.ok(styleSources.length > 0, `${routeLabel} must include style-src directive.`);
+  assert.equal(
+    styleSources.includes("'unsafe-inline'"),
+    false,
+    `${routeLabel} style-src must not include unsafe-inline.`,
+  );
+}
+
+function assertStrictConnectSrcInCsp(cspHeader, routeLabel) {
+  const directives = parseCspDirectives(cspHeader);
+  const connectSources = directives.get("connect-src") || [];
+  assert.ok(connectSources.length > 0, `${routeLabel} must include connect-src directive.`);
+  assert.ok(connectSources.includes("'self'"), `${routeLabel} connect-src must include 'self'.`);
+
+  const expectedConnectSources = new Set([
+    "'self'",
+    "https://telegram.org",
+    "https://web.telegram.org",
+    "https://api.telegram.org",
+    "wss://web.telegram.org",
+  ]);
+  for (const source of expectedConnectSources) {
+    assert.ok(connectSources.includes(source), `${routeLabel} connect-src must allow ${source}.`);
+  }
+
+  assert.equal(connectSources.includes("https:"), false, `${routeLabel} connect-src must not include https: wildcard.`);
+  assert.equal(connectSources.includes("wss:"), false, `${routeLabel} connect-src must not include wss: wildcard.`);
+  assert.equal(connectSources.includes("http:"), false, `${routeLabel} connect-src must not include http: wildcard.`);
+  assert.equal(
+    connectSources.some((source) => source.includes("*")),
+    false,
+    `${routeLabel} connect-src must not include wildcard hosts.`,
+  );
+}
+
 async function loginApi(baseUrl, credentials) {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
@@ -403,9 +464,9 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       });
 
       assert.equal(response.status, 200);
-      const csp = String(response.headers.get("content-security-policy") || "");
-      assert.ok(csp.length > 0, "Expected CSP header on /login.");
-      assert.doesNotMatch(csp, /style-src[^;]*unsafe-inline/i);
+      const csp = assertCspHeader(response, "GET /login");
+      assertNoInlineStylesInCsp(csp, "GET /login");
+      assertStrictConnectSrcInCsp(csp, "GET /login");
       const nonceMatch = csp.match(/style-src[^;]*'nonce-([^']+)'/i);
       assert.ok(nonceMatch && nonceMatch[1], "Expected nonce in style-src directive.");
 
@@ -436,7 +497,7 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       assert.match(setCookies, /cbooster_auth_csrf=[^\n]*;\s*SameSite=Strict/i);
     });
 
-    await t.test("security headers are consistent on /login, /api/*, 401/404/302 responses", async () => {
+    await t.test("security headers and CSP are consistent on /login, /, /api/*, 401/404/302 responses", async () => {
       const loginResponse = await fetch(`${baseUrl}/login`, {
         method: "GET",
         redirect: "manual",
@@ -446,6 +507,23 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       });
       assert.equal(loginResponse.status, 200);
       assertCoreSecurityHeaders(loginResponse, "GET /login");
+      const loginCsp = assertCspHeader(loginResponse, "GET /login");
+      assertNoInlineStylesInCsp(loginCsp, "GET /login");
+      assertStrictConnectSrcInCsp(loginCsp, "GET /login");
+
+      const rootResponse = await fetch(`${baseUrl}/`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+      assert.equal(rootResponse.status, 302);
+      assert.equal(String(rootResponse.headers.get("location") || ""), "/login?next=%2F");
+      assertCoreSecurityHeaders(rootResponse, "GET /");
+      const rootCsp = assertCspHeader(rootResponse, "GET /");
+      assertNoInlineStylesInCsp(rootCsp, "GET /");
+      assertStrictConnectSrcInCsp(rootCsp, "GET /");
 
       const unauthorizedApiResponse = await fetch(`${baseUrl}/api/records`, {
         method: "GET",
@@ -456,6 +534,25 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       });
       assert.equal(unauthorizedApiResponse.status, 401);
       assertCoreSecurityHeaders(unauthorizedApiResponse, "GET /api/records (unauth)");
+      const unauthorizedApiCsp = assertCspHeader(unauthorizedApiResponse, "GET /api/records (unauth)");
+      assertNoInlineStylesInCsp(unauthorizedApiCsp, "GET /api/records (unauth)");
+      assertStrictConnectSrcInCsp(unauthorizedApiCsp, "GET /api/records (unauth)");
+
+      const healthApiResponse = await fetch(`${baseUrl}/api/health`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "application/json",
+        },
+      });
+      assert.ok(
+        healthApiResponse.status === 200 || healthApiResponse.status === 503,
+        `Unexpected /api/health status: ${healthApiResponse.status}`,
+      );
+      assertCoreSecurityHeaders(healthApiResponse, "GET /api/health");
+      const healthApiCsp = assertCspHeader(healthApiResponse, "GET /api/health");
+      assertNoInlineStylesInCsp(healthApiCsp, "GET /api/health");
+      assertStrictConnectSrcInCsp(healthApiCsp, "GET /api/health");
 
       const ownerLogin = await loginApi(baseUrl, {
         username: TEST_OWNER_USERNAME,
@@ -471,6 +568,9 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       });
       assert.equal(notFoundApiResponse.status, 404);
       assertCoreSecurityHeaders(notFoundApiResponse, "GET /api/this-route-does-not-exist");
+      const notFoundApiCsp = assertCspHeader(notFoundApiResponse, "GET /api/this-route-does-not-exist");
+      assertNoInlineStylesInCsp(notFoundApiCsp, "GET /api/this-route-does-not-exist");
+      assertStrictConnectSrcInCsp(notFoundApiCsp, "GET /api/this-route-does-not-exist");
 
       const redirectResponse = await fetch(`${baseUrl}/dashboard`, {
         method: "GET",
@@ -482,6 +582,9 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       assert.equal(redirectResponse.status, 302);
       assert.equal(String(redirectResponse.headers.get("location") || ""), "/login?next=%2Fdashboard");
       assertCoreSecurityHeaders(redirectResponse, "GET /dashboard redirect");
+      const redirectCsp = assertCspHeader(redirectResponse, "GET /dashboard redirect");
+      assertNoInlineStylesInCsp(redirectCsp, "GET /dashboard redirect");
+      assertStrictConnectSrcInCsp(redirectCsp, "GET /dashboard redirect");
     });
 
     await t.test("RBAC: /api/auth/access-model is blocked for non-admin and allowed for owner", async () => {
