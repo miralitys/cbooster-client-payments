@@ -25,6 +25,7 @@ const PUSH_URL_PARAM_NOTIFICATION_ID = "openNotificationId";
 const PUSH_URL_PARAM_CLIENT_NAME = "openNotificationClient";
 const PUSH_URL_PARAM_LINK_HREF = "openNotificationLink";
 const PUSH_OPEN_MESSAGE_TYPE = "cbooster-notification-open";
+const PUSH_VAPID_PUBLIC_KEY_STORAGE_KEY = "cbooster_push_vapid_public_key_v1";
 
 interface PushOpenPayload {
   notificationId: string;
@@ -133,15 +134,22 @@ export function NotificationCenter() {
 
       try {
         const registration = await registerPushServiceWorker();
-        const subscription = await ensurePushSubscription(registration, config.publicKey);
+        const { subscription, rotated, previousEndpoint } = await ensurePushSubscription(registration, config.publicKey);
         const payload = normalizePushSubscriptionPayload(subscription);
         if (!payload) {
           setPushSubscribed(false);
           return false;
         }
 
+        if (rotated && previousEndpoint) {
+          await unsubscribeNotificationsPush(previousEndpoint).catch(() => false);
+        }
+
         const subscribed = await subscribeNotificationsPush(payload);
         setPushSubscribed(subscribed);
+        if (subscribed) {
+          persistActivePushPublicKey(config.publicKey);
+        }
         return subscribed;
       } catch {
         setPushSubscribed(false);
@@ -577,16 +585,39 @@ async function registerPushServiceWorker(): Promise<ServiceWorkerRegistration> {
 async function ensurePushSubscription(
   registration: ServiceWorkerRegistration,
   applicationServerKey: string,
-): Promise<PushSubscription> {
+): Promise<{ subscription: PushSubscription; rotated: boolean; previousEndpoint: string }> {
   const existingSubscription = await registration.pushManager.getSubscription();
-  if (existingSubscription) {
-    return existingSubscription;
+  const previousPublicKey = readPersistedPushPublicKey();
+  const normalizedPublicKey = String(applicationServerKey || "").trim();
+  const shouldRotateSubscription = Boolean(existingSubscription && previousPublicKey && previousPublicKey !== normalizedPublicKey);
+  const previousEndpoint = String(existingSubscription?.endpoint || "").trim();
+
+  if (existingSubscription && !shouldRotateSubscription) {
+    return {
+      subscription: existingSubscription,
+      rotated: false,
+      previousEndpoint: "",
+    };
   }
 
-  return registration.pushManager.subscribe({
+  if (existingSubscription && shouldRotateSubscription) {
+    try {
+      await existingSubscription.unsubscribe();
+    } catch {
+      // Continue with a new subscription attempt.
+    }
+  }
+
+  const nextSubscription = await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: decodeBase64UrlToArrayBuffer(applicationServerKey),
   });
+
+  return {
+    subscription: nextSubscription,
+    rotated: shouldRotateSubscription,
+    previousEndpoint: shouldRotateSubscription ? previousEndpoint : "",
+  };
 }
 
 function normalizePushSubscriptionPayload(subscription: PushSubscription | null): PushSubscriptionPayload | null {
@@ -694,4 +725,33 @@ function normalizeInternalLinkHref(rawValue: unknown): string {
     return href;
   }
   return "";
+}
+
+function readPersistedPushPublicKey(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  try {
+    return String(window.localStorage.getItem(PUSH_VAPID_PUBLIC_KEY_STORAGE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function persistActivePushPublicKey(publicKey: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const normalizedPublicKey = String(publicKey || "").trim();
+  if (!normalizedPublicKey) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(PUSH_VAPID_PUBLIC_KEY_STORAGE_KEY, normalizedPublicKey);
+  } catch {
+    // Ignore storage errors in privacy-restricted browser modes.
+  }
 }
