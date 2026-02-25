@@ -136,6 +136,7 @@ const WEB_AUTH_SESSION_COOKIE_NAME = "cbooster_auth_session";
 const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
 const WEB_AUTH_LOGIN_CSRF_COOKIE_NAME = "cbooster_login_csrf";
 const WEB_AUTH_CSRF_HEADER_NAME = "x-csrf-token";
+const WEB_AUTH_LOGIN_STEP_UP_HEADER_NAME = "x-cbooster-login-step-up-token";
 const WEB_AUTH_MOBILE_SESSION_HEADER = "x-cbooster-session";
 const WEB_AUTH_MOBILE_DEVICE_HEADER = "x-cbooster-device-id";
 const WEB_AUTH_MOBILE_REQUEST_ID_HEADER = "x-cbooster-request-id";
@@ -263,6 +264,45 @@ const LOGIN_FAILURE_IP_ACCOUNT_POLICY = Object.freeze({
     24 * 60 * 60,
   ) * 1000,
 });
+const LOGIN_FAILURE_DEVICE_ACCOUNT_POLICY = Object.freeze({
+  windowMs: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_DEVICE_ACCOUNT_WINDOW_SEC, 10 * 60), 60),
+    24 * 60 * 60,
+  ) * 1000,
+  maxFailures: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_DEVICE_ACCOUNT_MAX_FAILURES, 6), 3),
+    100,
+  ),
+  lockMs: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_DEVICE_ACCOUNT_LOCK_SEC, 20 * 60), 30),
+    24 * 60 * 60,
+  ) * 1000,
+});
+const LOGIN_STEP_UP_ENABLED = resolveOptionalBoolean(process.env.WEB_AUTH_LOGIN_STEP_UP_ENABLED) !== false;
+const LOGIN_STEP_UP_TOKEN_TTL_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_STEP_UP_TOKEN_TTL_SEC, 10 * 60), 30),
+  24 * 60 * 60,
+);
+const LOGIN_STEP_UP_ACCOUNT_FAILURES_THRESHOLD = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_FAILURES, 6), 2),
+  100,
+);
+const LOGIN_STEP_UP_IP_ACCOUNT_FAILURES_THRESHOLD = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_STEP_UP_IP_ACCOUNT_FAILURES, 4), 2),
+  100,
+);
+const LOGIN_STEP_UP_DEVICE_ACCOUNT_FAILURES_THRESHOLD = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_STEP_UP_DEVICE_ACCOUNT_FAILURES, 4), 2),
+  100,
+);
+const LOGIN_STEP_UP_ACCOUNT_UNIQUE_IPS_THRESHOLD = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_UNIQUE_IPS, 3), 2),
+  50,
+);
+const LOGIN_STEP_UP_ACCOUNT_UNIQUE_DEVICES_THRESHOLD = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_UNIQUE_DEVICES, 3), 2),
+  50,
+);
 const LOGIN_FAILURE_PROGRESSIVE_DELAY_BASE_MS = Math.min(
   Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_DELAY_BASE_MS, 250), 0),
   15_000,
@@ -361,22 +401,22 @@ const WEB_AUTH_DEPARTMENT_DEFINITIONS = [
   {
     id: WEB_AUTH_DEPARTMENT_ACCOUNTING,
     name: "Accounting Department",
-    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER, WEB_AUTH_ROLE_ADMIN],
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
   },
   {
     id: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     name: "Client Service Department",
-    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MIDDLE_MANAGER, WEB_AUTH_ROLE_MANAGER, WEB_AUTH_ROLE_ADMIN],
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MIDDLE_MANAGER, WEB_AUTH_ROLE_MANAGER],
   },
   {
     id: WEB_AUTH_DEPARTMENT_SALES,
     name: "Sales Department",
-    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER, WEB_AUTH_ROLE_ADMIN],
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
   },
   {
     id: WEB_AUTH_DEPARTMENT_COLLECTION,
     name: "Collection Department",
-    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER, WEB_AUTH_ROLE_ADMIN],
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
   },
 ];
 const WEB_AUTH_BOOTSTRAP_USERS = [
@@ -1807,6 +1847,8 @@ let rateLimitSweepCounter = 0;
 const rateLimitRequestBuckets = new Map();
 const loginFailureByAccountKey = new Map();
 const loginFailureByIpAccountKey = new Map();
+const loginFailureByDeviceAccountKey = new Map();
+const loginStepUpTokenReplayByKey = new Map();
 const authProtectionAnomalyWindowByKey = new Map();
 let authProtectionAlertQueueDepth = 0;
 let authProtectionAlertQueue = Promise.resolve();
@@ -6486,6 +6528,10 @@ function getWebAuthDepartmentName(departmentId) {
 }
 
 function isWebAuthRoleSupportedByDepartment(roleId, departmentId) {
+  if (roleId === WEB_AUTH_ROLE_ADMIN) {
+    return true;
+  }
+
   const department = WEB_AUTH_DEPARTMENT_DEFINITION_BY_ID.get(departmentId);
   if (!department) {
     return false;
@@ -11483,14 +11529,19 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     roleId = WEB_AUTH_ROLE_OWNER;
     departmentId = "";
   } else {
-    if (!departmentId) {
-      departmentId = WEB_AUTH_DEPARTMENT_SALES;
-    }
     if (!roleId || roleId === WEB_AUTH_ROLE_OWNER) {
       roleId = WEB_AUTH_ROLE_MANAGER;
     }
-    if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
-      roleId = WEB_AUTH_ROLE_MANAGER;
+
+    if (roleId === WEB_AUTH_ROLE_ADMIN) {
+      departmentId = "";
+    } else {
+      if (!departmentId) {
+        departmentId = WEB_AUTH_DEPARTMENT_SALES;
+      }
+      if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
+        roleId = WEB_AUTH_ROLE_MANAGER;
+      }
     }
   }
 
@@ -11535,14 +11586,19 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   const mustChangePassword = !isOwner && resolveOptionalBoolean(rawUser?.mustChangePassword) === true;
 
   if (!isOwner) {
-    if (!departmentId) {
-      departmentId = WEB_AUTH_DEPARTMENT_SALES;
-    }
     if (!roleId || roleId === WEB_AUTH_ROLE_OWNER) {
       roleId = WEB_AUTH_ROLE_MANAGER;
     }
-    if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
-      roleId = WEB_AUTH_ROLE_MANAGER;
+
+    if (roleId === WEB_AUTH_ROLE_ADMIN) {
+      departmentId = "";
+    } else {
+      if (!departmentId) {
+        departmentId = WEB_AUTH_DEPARTMENT_SALES;
+      }
+      if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
+        roleId = WEB_AUTH_ROLE_MANAGER;
+      }
     }
   }
 
@@ -11771,15 +11827,20 @@ function buildWebAuthPublicUser(userProfile) {
     };
   }
 
+  const departmentId = sanitizeTextValue(userProfile.departmentId, 80);
+  const roleId = sanitizeTextValue(userProfile.roleId, 80);
+  const normalizedRoleId = normalizeWebAuthRoleId(roleId, departmentId);
+  const isProjectAdmin = normalizedRoleId === WEB_AUTH_ROLE_ADMIN;
+
   return {
     username: sanitizeTextValue(userProfile.username, 200),
     displayName: sanitizeTextValue(userProfile.displayName, 200),
-    roleId: sanitizeTextValue(userProfile.roleId, 80),
+    roleId,
     roleName: sanitizeTextValue(userProfile.roleName, 140),
-    departmentId: sanitizeTextValue(userProfile.departmentId, 80),
-    departmentName: sanitizeTextValue(userProfile.departmentName, 140),
+    departmentId: isProjectAdmin ? "" : departmentId,
+    departmentName: isProjectAdmin ? "All Departments" : sanitizeTextValue(userProfile.departmentName, 140),
     isOwner: Boolean(userProfile.isOwner),
-    teamUsernames: normalizeWebAuthTeamUsernames(userProfile.teamUsernames),
+    teamUsernames: normalizedRoleId === WEB_AUTH_ROLE_MIDDLE_MANAGER ? normalizeWebAuthTeamUsernames(userProfile.teamUsernames) : [],
     mustChangePassword: !userProfile.isOwner && resolveOptionalBoolean(userProfile.mustChangePassword) === true,
     totpEnabled: isWebAuthTwoFactorEnabled(userProfile),
   };
@@ -11808,14 +11869,15 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
     password = generateWebAuthTemporaryPassword();
   }
 
-  const departmentId = normalizeWebAuthDepartmentId(payload.departmentId || payload.department);
-  if (!departmentId) {
-    throw createHttpError("Department is required.", 400);
-  }
-
-  const roleId = normalizeWebAuthRoleId(payload.roleId || payload.role, departmentId);
+  const requestedDepartmentId = normalizeWebAuthDepartmentId(payload.departmentId || payload.department);
+  const roleId = normalizeWebAuthRoleId(payload.roleId || payload.role, requestedDepartmentId);
   if (!roleId || roleId === WEB_AUTH_ROLE_OWNER) {
     throw createHttpError("Role is required.", 400);
+  }
+
+  const departmentId = roleId === WEB_AUTH_ROLE_ADMIN ? "" : requestedDepartmentId;
+  if (roleId !== WEB_AUTH_ROLE_ADMIN && !departmentId) {
+    throw createHttpError("Department is required.", 400);
   }
 
   if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
@@ -11907,18 +11969,20 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
     Object.prototype.hasOwnProperty.call(payload, "twoFactorEnabled") ||
     Object.prototype.hasOwnProperty.call(payload, "requireTotp");
 
-  const departmentId = hasDepartmentInPayload
+  const requestedDepartmentId = hasDepartmentInPayload
     ? normalizeWebAuthDepartmentId(payload.departmentId || payload.department)
     : normalizeWebAuthDepartmentId(existing.departmentId);
-  if (!departmentId) {
-    throw createHttpError("Department is required.", 400);
-  }
 
   const roleId = hasRoleInPayload
-    ? normalizeWebAuthRoleId(payload.roleId || payload.role, departmentId)
-    : normalizeWebAuthRoleId(existing.roleId, departmentId);
+    ? normalizeWebAuthRoleId(payload.roleId || payload.role, requestedDepartmentId)
+    : normalizeWebAuthRoleId(existing.roleId, requestedDepartmentId);
   if (!roleId || roleId === WEB_AUTH_ROLE_OWNER) {
     throw createHttpError("Role is required.", 400);
+  }
+
+  const departmentId = roleId === WEB_AUTH_ROLE_ADMIN ? "" : requestedDepartmentId;
+  if (roleId !== WEB_AUTH_ROLE_ADMIN && !departmentId) {
+    throw createHttpError("Department is required.", 400);
   }
 
   if (!isWebAuthRoleSupportedByDepartment(roleId, departmentId)) {
@@ -12268,6 +12332,25 @@ function normalizeRateLimitUsername(rawValue) {
   return normalizeWebAuthUsername(rawValue || "");
 }
 
+function resolveLoginDeviceFingerprint(req) {
+  const explicitDeviceId = normalizeWebAuthMobileDeviceId(req?.headers?.[WEB_AUTH_MOBILE_DEVICE_HEADER]);
+  const userAgent = sanitizeTextValue(req?.headers?.["user-agent"], 260);
+  const acceptLanguage = sanitizeTextValue(req?.headers?.["accept-language"], 120);
+  const clientHintsUa = sanitizeTextValue(req?.headers?.["sec-ch-ua"], 220);
+  const clientHintsPlatform = sanitizeTextValue(req?.headers?.["sec-ch-ua-platform"], 120);
+  const source =
+    explicitDeviceId ||
+    [userAgent, acceptLanguage, clientHintsUa, clientHintsPlatform]
+      .filter(Boolean)
+      .join("|");
+
+  if (!source) {
+    return "unknown";
+  }
+
+  return crypto.createHash("sha256").update(source).digest("hex").slice(0, 24);
+}
+
 function buildRateLimitRetryAfterSeconds(retryAfterMs) {
   const normalizedMs = Number.isFinite(retryAfterMs) ? Math.max(0, retryAfterMs) : 0;
   return Math.max(1, Math.ceil(normalizedMs / 1000));
@@ -12304,12 +12387,12 @@ function sanitizeAuthProtectionEventMeta(rawMeta = {}) {
 
   const ip = sanitizeTextValue(meta.ip, 120);
   if (ip) {
-    sanitized.ip = ip;
+    sanitized.ip = maskAuthProtectionAlertIp(ip);
   }
 
   const username = normalizeRateLimitUsername(meta.username || "");
   if (username) {
-    sanitized.username = username;
+    sanitized.username = maskAuthProtectionAlertUsername(username);
   }
 
   const code = sanitizeTextValue(meta.code, 80);
@@ -12542,6 +12625,19 @@ function maybeSweepRateLimitStores(nowMs = Date.now()) {
     }
   }
 
+  for (const [key, entry] of loginFailureByDeviceAccountKey) {
+    const staleWindowMs = Math.max(entry.windowMs || 0, entry.lockMs || 0, failureEntryExpiryFloorMs);
+    if ((entry.lastAttemptMs || 0) + staleWindowMs < nowMs && (entry.lockedUntilMs || 0) < nowMs) {
+      loginFailureByDeviceAccountKey.delete(key);
+    }
+  }
+
+  for (const [key, expiresAtMs] of loginStepUpTokenReplayByKey) {
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+      loginStepUpTokenReplayByKey.delete(key);
+    }
+  }
+
   for (const [key, entry] of authProtectionAnomalyWindowByKey) {
     if ((entry.firstSeenMs || 0) + AUTH_PROTECTION_ALERT_WINDOW_MS < nowMs) {
       authProtectionAnomalyWindowByKey.delete(key);
@@ -12551,6 +12647,8 @@ function maybeSweepRateLimitStores(nowMs = Date.now()) {
   trimRateLimitStore(rateLimitRequestBuckets);
   trimRateLimitStore(loginFailureByAccountKey);
   trimRateLimitStore(loginFailureByIpAccountKey);
+  trimRateLimitStore(loginFailureByDeviceAccountKey);
+  trimRateLimitStore(loginStepUpTokenReplayByKey);
   trimRateLimitStore(authProtectionAnomalyWindowByKey);
 }
 
@@ -13011,6 +13109,276 @@ function readActiveLoginFailures(entry, nowMs, policy) {
   return Math.max(0, Number.parseInt(entry.failures, 10) || 0);
 }
 
+function countActiveLoginFailureEntriesByPrefix(store, keyPrefix, nowMs, policy) {
+  if (!(store instanceof Map) || !keyPrefix || !policy) {
+    return 0;
+  }
+
+  let activeCount = 0;
+  for (const [key, entry] of store.entries()) {
+    if (!String(key).startsWith(keyPrefix)) {
+      continue;
+    }
+    if (readActiveLoginFailures(entry, nowMs, policy) > 0) {
+      activeCount += 1;
+    }
+  }
+
+  return activeCount;
+}
+
+function sanitizeLoginStepUpReasonCodes(rawReasonCodes = []) {
+  const source = Array.isArray(rawReasonCodes) ? rawReasonCodes : [];
+  return source
+    .map((reasonCode) => sanitizeTextValue(reasonCode, 80).toLowerCase())
+    .filter(Boolean);
+}
+
+function createLoginStepUpToken(req, username, rawReasonCodes = []) {
+  const normalizedUsername = normalizeRateLimitUsername(username);
+  if (!normalizedUsername) {
+    return "";
+  }
+
+  const deviceFingerprint = resolveLoginDeviceFingerprint(req);
+  if (!deviceFingerprint) {
+    return "";
+  }
+
+  const nonce = createRandomUrlSafeToken(12);
+  const expiresAt = Date.now() + LOGIN_STEP_UP_TOKEN_TTL_SEC * 1000;
+  const reasonCodes = sanitizeLoginStepUpReasonCodes(rawReasonCodes);
+  const reasonsPayload = reasonCodes.length ? reasonCodes.join(",") : "risk";
+  const payload = `login_step_up:${expiresAt}:${normalizedUsername}:${deviceFingerprint}:${nonce}:${reasonsPayload}`;
+  const signature = signWebAuthPayload(payload);
+  return `${payload}:${signature}`;
+}
+
+function parseLoginStepUpToken(rawToken) {
+  const token = sanitizeTextValue(rawToken, 1600);
+  if (!token) {
+    return null;
+  }
+
+  const segments = token.split(":");
+  if (segments.length < 7) {
+    return null;
+  }
+
+  const prefix = sanitizeTextValue(segments[0], 40).toLowerCase();
+  if (prefix !== "login_step_up") {
+    return null;
+  }
+
+  const expiresAt = Number.parseInt(segments[1], 10);
+  const username = normalizeRateLimitUsername(segments[2]);
+  const deviceFingerprint = sanitizeTextValue(segments[3], 120);
+  const nonce = sanitizeTextValue(segments[4], 120);
+  const signature = sanitizeTextValue(segments[segments.length - 1], 200).toLowerCase();
+  const reasonsPayload = sanitizeTextValue(segments.slice(5, -1).join(":"), 500);
+  const payload = segments.slice(0, -1).join(":");
+  const expectedSignature = signWebAuthPayload(payload);
+
+  if (
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= Date.now() ||
+    !username ||
+    !deviceFingerprint ||
+    !nonce ||
+    !signature ||
+    !safeEqual(signature, expectedSignature)
+  ) {
+    return null;
+  }
+
+  return {
+    token,
+    expiresAt,
+    username,
+    deviceFingerprint,
+    nonce,
+    reasonCodes: sanitizeLoginStepUpReasonCodes(reasonsPayload.split(",")),
+  };
+}
+
+function resolveProvidedLoginStepUpToken(req) {
+  return (
+    sanitizeTextValue(req?.body?.stepUpToken, 1600) ||
+    sanitizeTextValue(req?.headers?.[WEB_AUTH_LOGIN_STEP_UP_HEADER_NAME], 1600)
+  );
+}
+
+function validateAndConsumeLoginStepUpToken(req, username, rawToken) {
+  const normalizedUsername = normalizeRateLimitUsername(username);
+  if (!normalizedUsername) {
+    return {
+      ok: false,
+      code: "login_step_up_username_invalid",
+      reason: "username_invalid",
+    };
+  }
+
+  const parsedToken = parseLoginStepUpToken(rawToken);
+  if (!parsedToken) {
+    return {
+      ok: false,
+      code: "login_step_up_token_invalid",
+      reason: "token_invalid",
+    };
+  }
+
+  if (parsedToken.username !== normalizedUsername) {
+    return {
+      ok: false,
+      code: "login_step_up_token_username_mismatch",
+      reason: "username_mismatch",
+    };
+  }
+
+  const requestFingerprint = resolveLoginDeviceFingerprint(req);
+  if (!requestFingerprint || !safeEqual(requestFingerprint, parsedToken.deviceFingerprint)) {
+    return {
+      ok: false,
+      code: "login_step_up_token_fingerprint_mismatch",
+      reason: "fingerprint_mismatch",
+    };
+  }
+
+  const replayKey = `${parsedToken.username}:${parsedToken.nonce}`;
+  const nowMs = Date.now();
+  const replayReservedUntil = Number(loginStepUpTokenReplayByKey.get(replayKey) || 0);
+  if (Number.isFinite(replayReservedUntil) && replayReservedUntil > nowMs) {
+    return {
+      ok: false,
+      code: "login_step_up_token_replayed",
+      reason: "token_replay",
+    };
+  }
+
+  loginStepUpTokenReplayByKey.set(replayKey, parsedToken.expiresAt);
+  return {
+    ok: true,
+    reasonCodes: parsedToken.reasonCodes,
+  };
+}
+
+function resolveLoginStepUpAssessment(req, username, nowMs = Date.now()) {
+  const normalizedUsername = normalizeRateLimitUsername(username);
+  if (!LOGIN_STEP_UP_ENABLED || !normalizedUsername) {
+    return {
+      required: false,
+      reasonCodes: [],
+      reason: "",
+    };
+  }
+
+  const ip = resolveRateLimitClientIp(req);
+  const fingerprint = resolveLoginDeviceFingerprint(req);
+  const accountKey = `account:${normalizedUsername}`;
+  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const deviceAccountKey = `account-device:${normalizedUsername}:${fingerprint}`;
+  const accountFailures = readActiveLoginFailures(
+    loginFailureByAccountKey.get(accountKey),
+    nowMs,
+    LOGIN_FAILURE_ACCOUNT_POLICY,
+  );
+  const ipAccountFailures = readActiveLoginFailures(
+    loginFailureByIpAccountKey.get(ipAccountKey),
+    nowMs,
+    LOGIN_FAILURE_IP_ACCOUNT_POLICY,
+  );
+  const deviceAccountFailures = readActiveLoginFailures(
+    loginFailureByDeviceAccountKey.get(deviceAccountKey),
+    nowMs,
+    LOGIN_FAILURE_DEVICE_ACCOUNT_POLICY,
+  );
+  const uniqueIpTargets = countActiveLoginFailureEntriesByPrefix(
+    loginFailureByIpAccountKey,
+    `account-ip:${normalizedUsername}:`,
+    nowMs,
+    LOGIN_FAILURE_IP_ACCOUNT_POLICY,
+  );
+  const uniqueDeviceTargets = countActiveLoginFailureEntriesByPrefix(
+    loginFailureByDeviceAccountKey,
+    `account-device:${normalizedUsername}:`,
+    nowMs,
+    LOGIN_FAILURE_DEVICE_ACCOUNT_POLICY,
+  );
+
+  const reasonCodes = [];
+  if (accountFailures >= LOGIN_STEP_UP_ACCOUNT_FAILURES_THRESHOLD) {
+    reasonCodes.push("account_failures");
+  }
+  if (ipAccountFailures >= LOGIN_STEP_UP_IP_ACCOUNT_FAILURES_THRESHOLD) {
+    reasonCodes.push("ip_failures");
+  }
+  if (deviceAccountFailures >= LOGIN_STEP_UP_DEVICE_ACCOUNT_FAILURES_THRESHOLD) {
+    reasonCodes.push("device_failures");
+  }
+  if (uniqueIpTargets >= LOGIN_STEP_UP_ACCOUNT_UNIQUE_IPS_THRESHOLD) {
+    reasonCodes.push("multi_ip_targeting");
+  }
+  if (uniqueDeviceTargets >= LOGIN_STEP_UP_ACCOUNT_UNIQUE_DEVICES_THRESHOLD) {
+    reasonCodes.push("multi_device_targeting");
+  }
+
+  const uniqueReasonCodes = [...new Set(reasonCodes)];
+  return {
+    required: uniqueReasonCodes.length > 0,
+    reasonCodes: uniqueReasonCodes,
+    reason: uniqueReasonCodes.join(",") || "",
+    accountFailures,
+    ipAccountFailures,
+    deviceAccountFailures,
+    uniqueIpTargets,
+    uniqueDeviceTargets,
+  };
+}
+
+function sendLoginStepUpRequiredResponse(req, res, options = {}) {
+  const normalizedUsername = normalizeRateLimitUsername(options.username || req?.body?.username || "");
+  const reasonCodes = sanitizeLoginStepUpReasonCodes(options.reasonCodes || []);
+  const reason = reasonCodes.join(",") || "risk";
+  const stepUpToken = createLoginStepUpToken(req, normalizedUsername, reasonCodes);
+  const path = normalizeRequestPathname(req, 260);
+  const ip = resolveRateLimitClientIp(req);
+  const eventMeta = {
+    path,
+    method: req.method,
+    ip,
+    username: normalizedUsername,
+    code: "login_step_up_required",
+    reason,
+  };
+
+  logAuthProtectionEvent("warn", "login_step_up_required", eventMeta);
+  trackAuthProtectionAnomaly("login_step_up_required", eventMeta);
+  enqueueAuthProtectionAlert("login_step_up_required", eventMeta);
+  res.setHeader("Cache-Control", "no-store, private");
+
+  if ((req.path || "") === "/login" && !String(req.headers?.accept || "").includes("application/json")) {
+    const nextPath = resolveSafeNextPath(options.nextPath || req.body?.next || req.query.next);
+    const csrfToken = ensureWebAuthLoginCsrfCookie(req, res);
+    res.status(403).type("html").send(
+      buildWebLoginPageHtml({
+        nextPath,
+        errorMessage: "Additional verification required. Submit sign-in once more from this device.",
+        csrfToken,
+        styleNonce: resolveCspStyleNonceFromResponse(res),
+        stepUpToken,
+      }),
+    );
+    return;
+  }
+
+  res.status(403).json({
+    error: "Additional verification is required. Retry login from the same device.",
+    code: "login_step_up_required",
+    stepUpRequired: true,
+    stepUpToken,
+  });
+}
+
 function resolveLoginProgressiveDelayMs(req, username) {
   if (!RATE_LIMIT_ENABLED || LOGIN_FAILURE_PROGRESSIVE_DELAY_BASE_MS <= 0) {
     return 0;
@@ -13024,13 +13392,20 @@ function resolveLoginProgressiveDelayMs(req, username) {
   maybeSweepRateLimitStores();
   const nowMs = Date.now();
   const ip = resolveRateLimitClientIp(req);
+  const deviceFingerprint = resolveLoginDeviceFingerprint(req);
   const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const deviceAccountKey = `account-device:${normalizedUsername}:${deviceFingerprint}`;
   const ipAccountFailures = readActiveLoginFailures(
     loginFailureByIpAccountKey.get(ipAccountKey),
     nowMs,
     LOGIN_FAILURE_IP_ACCOUNT_POLICY,
   );
-  const failures = ipAccountFailures;
+  const deviceAccountFailures = readActiveLoginFailures(
+    loginFailureByDeviceAccountKey.get(deviceAccountKey),
+    nowMs,
+    LOGIN_FAILURE_DEVICE_ACCOUNT_POLICY,
+  );
+  const failures = Math.max(ipAccountFailures, deviceAccountFailures);
   if (failures <= 1) {
     return 0;
   }
@@ -13064,6 +13439,7 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
 
   const normalizedUsername = normalizeRateLimitUsername(username);
   const ip = resolveRateLimitClientIp(req);
+  const deviceFingerprint = resolveLoginDeviceFingerprint(req);
 
   const isRateAllowed = enforceRateLimit(req, res, {
     scope: "login",
@@ -13085,13 +13461,19 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   const nowMs = Date.now();
   const accountKey = `account:${normalizedUsername}`;
   const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const deviceAccountKey = `account-device:${normalizedUsername}:${deviceFingerprint}`;
   const accountLockMs = readLoginFailureLock(loginFailureByAccountKey.get(accountKey), nowMs, LOGIN_FAILURE_ACCOUNT_POLICY);
   const ipAccountLockMs = readLoginFailureLock(
     loginFailureByIpAccountKey.get(ipAccountKey),
     nowMs,
     LOGIN_FAILURE_IP_ACCOUNT_POLICY,
   );
-  if (accountLockMs > 0 && ipAccountLockMs <= 0) {
+  const deviceAccountLockMs = readLoginFailureLock(
+    loginFailureByDeviceAccountKey.get(deviceAccountKey),
+    nowMs,
+    LOGIN_FAILURE_DEVICE_ACCOUNT_POLICY,
+  );
+  if (accountLockMs > 0 && ipAccountLockMs <= 0 && deviceAccountLockMs <= 0) {
     const softRiskMeta = {
       path: normalizeRequestPathname(req, 260),
       method: req.method,
@@ -13104,15 +13486,20 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
     trackAuthProtectionAnomaly("login_account_risk_detected", softRiskMeta);
   }
 
-  const retryAfterMs = ipAccountLockMs;
+  const retryAfterMs = Math.max(ipAccountLockMs, deviceAccountLockMs);
 
   if (retryAfterMs > 0) {
+    const lockReason =
+      ipAccountLockMs >= deviceAccountLockMs
+        ? "ip_account_lock"
+        : "device_account_lock";
     const eventMeta = {
       path: normalizeRequestPathname(req, 260),
       method: req.method,
       ip,
       username: normalizedUsername,
       code: "login_locked",
+      reason: lockReason,
       retryAfterSec: buildRateLimitRetryAfterSeconds(retryAfterMs),
       lockSec: Math.max(1, Math.ceil(retryAfterMs / 1000)),
     };
@@ -13122,10 +13509,25 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
       retryAfterMs,
       message: "Too many failed login attempts. Please wait before trying again.",
       code: "login_locked",
+      reason: lockReason,
       username: normalizedUsername,
       nextPath,
     });
     return false;
+  }
+
+  const stepUpAssessment = resolveLoginStepUpAssessment(req, normalizedUsername, nowMs);
+  if (stepUpAssessment.required) {
+    const providedStepUpToken = resolveProvidedLoginStepUpToken(req);
+    const validatedStepUpToken = validateAndConsumeLoginStepUpToken(req, normalizedUsername, providedStepUpToken);
+    if (!validatedStepUpToken.ok) {
+      sendLoginStepUpRequiredResponse(req, res, {
+        username: normalizedUsername,
+        nextPath,
+        reasonCodes: stepUpAssessment.reasonCodes,
+      });
+      return false;
+    }
   }
 
   return true;
@@ -13144,15 +13546,34 @@ function registerFailedLoginAttempt(req, username) {
   maybeSweepRateLimitStores();
   const nowMs = Date.now();
   const ip = resolveRateLimitClientIp(req);
+  const deviceFingerprint = resolveLoginDeviceFingerprint(req);
   const accountKey = `account:${normalizedUsername}`;
   const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const deviceAccountKey = `account-device:${normalizedUsername}:${deviceFingerprint}`;
 
   const accountEntry = recordLoginFailureEntry(loginFailureByAccountKey, accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
   const ipAccountEntry = recordLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey, LOGIN_FAILURE_IP_ACCOUNT_POLICY, nowMs);
-  const maxFailures = Math.max(accountEntry?.failures || 0, ipAccountEntry?.failures || 0);
+  const deviceAccountEntry = recordLoginFailureEntry(
+    loginFailureByDeviceAccountKey,
+    deviceAccountKey,
+    LOGIN_FAILURE_DEVICE_ACCOUNT_POLICY,
+    nowMs,
+  );
+  const maxFailures = Math.max(
+    accountEntry?.failures || 0,
+    ipAccountEntry?.failures || 0,
+    deviceAccountEntry?.failures || 0,
+  );
   const accountLockMs = Math.max(0, (accountEntry?.lockedUntilMs || 0) - nowMs);
   const ipAccountLockMs = Math.max(0, (ipAccountEntry?.lockedUntilMs || 0) - nowMs);
-  const maxLockMs = ipAccountLockMs;
+  const deviceAccountLockMs = Math.max(0, (deviceAccountEntry?.lockedUntilMs || 0) - nowMs);
+  const maxLockMs = Math.max(ipAccountLockMs, deviceAccountLockMs);
+  const lockReason =
+    maxLockMs <= 0
+      ? ""
+      : ipAccountLockMs >= deviceAccountLockMs
+        ? "ip_account_lock"
+        : "device_account_lock";
   const eventMeta = {
     path: normalizeRequestPathname(req, 260),
     method: req.method,
@@ -13161,6 +13582,7 @@ function registerFailedLoginAttempt(req, username) {
     failures: maxFailures,
     lockSec: Math.max(0, Math.ceil(maxLockMs / 1000)),
     code: maxLockMs > 0 ? "login_locked" : "login_failed",
+    reason: lockReason || "invalid_credentials",
   };
   logAuthProtectionEvent("warn", "login_failed", eventMeta);
   trackAuthProtectionAnomaly("login_failed", eventMeta);
@@ -13168,11 +13590,12 @@ function registerFailedLoginAttempt(req, username) {
     logAuthProtectionEvent("warn", "login_locked", eventMeta);
     trackAuthProtectionAnomaly("login_locked", eventMeta);
   }
-  if (accountLockMs > 0 && ipAccountLockMs <= 0) {
+  if (accountLockMs > 0 && ipAccountLockMs <= 0 && deviceAccountLockMs <= 0) {
     const accountRiskMeta = {
       ...eventMeta,
       code: "login_account_risk",
       lockSec: Math.max(1, Math.ceil(accountLockMs / 1000)),
+      reason: "account_only_lock_signal",
     };
     logAuthProtectionEvent("warn", "login_account_risk_detected", accountRiskMeta);
     trackAuthProtectionAnomaly("login_account_risk_detected", accountRiskMeta);
@@ -13181,6 +13604,7 @@ function registerFailedLoginAttempt(req, username) {
   return {
     accountEntry,
     ipAccountEntry,
+    deviceAccountEntry,
     maxFailures,
     maxLockMs,
   };
@@ -13197,15 +13621,34 @@ function clearFailedLoginAttempts(req, username) {
   }
 
   const ip = resolveRateLimitClientIp(req);
+  const deviceFingerprint = resolveLoginDeviceFingerprint(req);
   const accountKey = `account:${normalizedUsername}`;
   const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const deviceAccountKey = `account-device:${normalizedUsername}:${deviceFingerprint}`;
   const accountEntry = loginFailureByAccountKey.get(accountKey);
   const ipAccountEntry = loginFailureByIpAccountKey.get(ipAccountKey);
+  const deviceAccountEntry = loginFailureByDeviceAccountKey.get(deviceAccountKey);
+  const ipAccountPrefix = `account-ip:${normalizedUsername}:`;
+  const deviceAccountPrefix = `account-device:${normalizedUsername}:`;
   clearLoginFailureEntry(loginFailureByAccountKey, accountKey);
   clearLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey);
+  clearLoginFailureEntry(loginFailureByDeviceAccountKey, deviceAccountKey);
+
+  for (const key of loginFailureByIpAccountKey.keys()) {
+    if (String(key).startsWith(ipAccountPrefix)) {
+      loginFailureByIpAccountKey.delete(key);
+    }
+  }
+  for (const key of loginFailureByDeviceAccountKey.keys()) {
+    if (String(key).startsWith(deviceAccountPrefix)) {
+      loginFailureByDeviceAccountKey.delete(key);
+    }
+  }
+
   const clearedFailures = Math.max(
     Number.parseInt(accountEntry?.failures, 10) || 0,
     Number.parseInt(ipAccountEntry?.failures, 10) || 0,
+    Number.parseInt(deviceAccountEntry?.failures, 10) || 0,
   );
   if (clearedFailures > 0) {
     logAuthProtectionEvent("log", "login_failure_state_cleared", {

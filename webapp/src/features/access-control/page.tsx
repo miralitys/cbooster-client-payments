@@ -44,6 +44,8 @@ const ASSISTANT_REVIEW_LIMIT = 80;
 const DEFAULT_TOTP_ISSUER = "Credit Booster";
 const DEFAULT_TOTP_PERIOD_SEC = 30;
 const DEFAULT_TOTP_DIGITS = 6;
+const ADMIN_ROLE_ID = "admin";
+const MIDDLE_MANAGER_ROLE_ID = "middle_manager";
 
 interface MiddleManagerTeamOption {
   username: string;
@@ -91,11 +93,20 @@ export default function AccessControlPage() {
   const users = useMemo(() => model?.users || [], [model]);
   const rolesByDepartment = useMemo(() => {
     const mapping = new Map<string, AccessControlDepartmentRole[]>();
+    const adminRoleDefinition = (model?.roles || []).find((role) => role.id === ADMIN_ROLE_ID) || null;
     for (const department of departments) {
-      mapping.set(department.id, Array.isArray(department.roles) ? department.roles : []);
+      const departmentRoles = Array.isArray(department.roles) ? [...department.roles] : [];
+      if (adminRoleDefinition && !departmentRoles.some((role) => role.id === adminRoleDefinition.id)) {
+        departmentRoles.push({
+          id: adminRoleDefinition.id,
+          name: adminRoleDefinition.name,
+          members: [],
+        });
+      }
+      mapping.set(department.id, departmentRoles);
     }
     return mapping;
-  }, [departments]);
+  }, [departments, model?.roles]);
 
   const createRoleOptions = useMemo(
     () => rolesByDepartment.get(createForm.departmentId) || [],
@@ -804,7 +815,7 @@ export default function AccessControlPage() {
                   setCreateForm((previous) => ({
                     ...previous,
                     roleId: nextRole,
-                    teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : [],
+                    teamUsernames: nextRole === MIDDLE_MANAGER_ROLE_ID ? previous.teamUsernames : [],
                   }));
                 }}
                 disabled={isCreating}
@@ -817,7 +828,7 @@ export default function AccessControlPage() {
               </Select>
             </Field>
 
-            {createForm.roleId === "middle_manager" ? (
+            {createForm.roleId === MIDDLE_MANAGER_ROLE_ID ? (
               <MiddleManagerTeamField
                 className="access-control-form-span-2-react"
                 idPrefix="access-create-team"
@@ -1189,7 +1200,7 @@ export default function AccessControlPage() {
                     setEditForm((previous) => ({
                       ...previous,
                       roleId: nextRole,
-                      teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : [],
+                      teamUsernames: nextRole === MIDDLE_MANAGER_ROLE_ID ? previous.teamUsernames : [],
                     }));
                   }}
                   disabled={isEditBusy}
@@ -1202,7 +1213,7 @@ export default function AccessControlPage() {
                 </Select>
               </Field>
 
-              {editForm.roleId === "middle_manager" ? (
+              {editForm.roleId === MIDDLE_MANAGER_ROLE_ID ? (
                 <MiddleManagerTeamField
                   className="access-control-edit-span-2-react"
                   idPrefix="access-edit-team"
@@ -1479,7 +1490,7 @@ function ensureFormDefaults(form: UserFormState, departments: AccessControlDepar
     ? form.departmentId
     : normalizedDepartments[0].id;
   const roleOptions = normalizedDepartments.find((department) => department.id === departmentId)?.roles || [];
-  const roleId = roleOptions.some((role) => role.id === form.roleId)
+  const roleId = form.roleId === ADMIN_ROLE_ID || roleOptions.some((role) => role.id === form.roleId)
     ? form.roleId
     : roleOptions[0]?.id || "";
 
@@ -1487,16 +1498,16 @@ function ensureFormDefaults(form: UserFormState, departments: AccessControlDepar
     ...form,
     departmentId,
     roleId,
-    teamUsernames: roleId === "middle_manager" ? normalizeTeamUsernames(form.teamUsernames) : [],
+    teamUsernames: roleId === MIDDLE_MANAGER_ROLE_ID ? normalizeTeamUsernames(form.teamUsernames) : [],
   };
 }
 
 function buildUpsertPayload(form: UserFormState): UpsertUserPayload {
   const payload: UpsertUserPayload = {
     displayName: form.displayName.trim(),
-    departmentId: form.departmentId,
+    departmentId: form.roleId === ADMIN_ROLE_ID ? "" : form.departmentId,
     roleId: form.roleId,
-    teamUsernames: form.roleId === "middle_manager" ? normalizeTeamUsernames(form.teamUsernames) : [],
+    teamUsernames: form.roleId === MIDDLE_MANAGER_ROLE_ID ? normalizeTeamUsernames(form.teamUsernames) : [],
     totpEnabled: Boolean(form.totpEnabled),
   };
 
