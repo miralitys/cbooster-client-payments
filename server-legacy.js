@@ -37,6 +37,7 @@ const { normalizeAuthUsernameForScopeKey } = require("./assistant-session-scope-
 const { registerCustomDashboardModule } = require("./custom-dashboard-module");
 const { registerAuthPublicRoutes, registerAuthProtectedRoutes } = require("./server/routes/auth.routes");
 const { registerRecordsRoutes } = require("./server/routes/records.routes");
+const { registerNotificationsRoutes } = require("./server/routes/notifications.routes");
 const { registerAssistantRoutes } = require("./server/routes/assistant.routes");
 const { registerGhlRoutes } = require("./server/routes/ghl.routes");
 const { registerQuickBooksRoutes } = require("./server/routes/quickbooks.routes");
@@ -54,6 +55,9 @@ const { createRecordsValidation } = require("./server/domains/records/records.va
 const { createRecordsService } = require("./server/domains/records/records.service");
 const { createRecordsController } = require("./server/domains/records/records.controller");
 const { createRecordsRepo } = require("./server/domains/records/records.repo");
+const { createNotificationsRepo } = require("./server/domains/notifications/notifications.repo");
+const { createNotificationsService } = require("./server/domains/notifications/notifications.service");
+const { createNotificationsController } = require("./server/domains/notifications/notifications.controller");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
@@ -855,6 +859,11 @@ const WEB_AUTH_USERS_DIRECTORY_TABLE_NAME = resolveTableName(
   process.env.DB_WEB_AUTH_USERS_DIRECTORY_TABLE_NAME,
   DEFAULT_WEB_AUTH_USERS_DIRECTORY_TABLE_NAME,
 );
+const DEFAULT_WEB_NOTIFICATIONS_TABLE_NAME = "web_notifications";
+const WEB_NOTIFICATIONS_TABLE_NAME = resolveTableName(
+  process.env.DB_WEB_NOTIFICATIONS_TABLE_NAME,
+  DEFAULT_WEB_NOTIFICATIONS_TABLE_NAME,
+);
 const MINI_RUNTIME_STATE_STORE = resolveMiniRuntimeStateStore(process.env.MINI_RUNTIME_STATE_STORE);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
@@ -873,6 +882,7 @@ const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABL
 const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESSION_SCOPE_TABLE_NAME);
 const MINI_RUNTIME_STATE_TABLE = qualifyTableName(DB_SCHEMA, MINI_RUNTIME_STATE_TABLE_NAME);
 const WEB_AUTH_USERS_DIRECTORY_TABLE = qualifyTableName(DB_SCHEMA, WEB_AUTH_USERS_DIRECTORY_TABLE_NAME);
+const WEB_NOTIFICATIONS_TABLE = qualifyTableName(DB_SCHEMA, WEB_NOTIFICATIONS_TABLE_NAME);
 const MINI_RUNTIME_STATE_USE_POSTGRES = MINI_RUNTIME_STATE_STORE === "postgres" && Boolean(DATABASE_URL);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const WEB_AUTH_USERS_DIRECTORY_ROW_ID = 1;
@@ -11841,6 +11851,335 @@ function listWebAuthUsers() {
   return [...WEB_AUTH_USERS_BY_USERNAME.values()].sort((left, right) =>
     left.username.localeCompare(right.username, "en-US", { sensitivity: "base" }),
   );
+}
+
+function createWebNotificationId() {
+  if (typeof crypto?.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now().toString(36)}_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+function normalizePaymentClientNameForLookup(rawValue) {
+  return normalizeAssistantComparableText(rawValue, 300);
+}
+
+function splitPaymentClientManagerNames(rawValue) {
+  const value = sanitizeTextValue(rawValue, 2000);
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .replace(/\n+/g, ",")
+    .split(/[|,;/]+/)
+    .map((item) => sanitizeTextValue(item, 240))
+    .filter((item) => {
+      if (!item) {
+        return false;
+      }
+      const normalized = item.toLowerCase();
+      return normalized !== "-" && normalized !== "unassigned" && normalized !== "no manager";
+    });
+}
+
+function extractPaymentClientManagerNamesFromRecord(record) {
+  if (!record || typeof record !== "object") {
+    return [];
+  }
+
+  const candidates = [
+    record?.clientManager,
+    record?.assignedManager,
+    record?.manager,
+    record?.managerName,
+    record?.["Client Manager"],
+    record?.client_manager,
+  ];
+  const names = [];
+  for (const candidate of candidates) {
+    names.push(...splitPaymentClientManagerNames(candidate));
+  }
+  return [...new Set(names)];
+}
+
+function extractPaymentClientManagerNamesFromCacheRow(row) {
+  const names = [];
+  const managers = Array.isArray(row?.managers) ? row.managers : [];
+  for (const managerName of managers) {
+    names.push(...splitPaymentClientManagerNames(managerName));
+  }
+
+  if (!names.length) {
+    const managersLabel = row?.managersLabel || row?.managers_label;
+    names.push(...splitPaymentClientManagerNames(managersLabel));
+  }
+
+  return [...new Set(names)];
+}
+
+function buildPaymentClientManagerNamesByClientKey(rows) {
+  const namesByClientKey = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const clientName = sanitizeTextValue(row?.clientName || row?.client_name, 300);
+    if (!clientName) {
+      continue;
+    }
+
+    const clientKey = normalizePaymentClientNameForLookup(clientName);
+    if (!clientKey) {
+      continue;
+    }
+
+    const nextNames = extractPaymentClientManagerNamesFromCacheRow(row);
+    if (!nextNames.length) {
+      continue;
+    }
+
+    const currentNames = namesByClientKey.get(clientKey) || [];
+    namesByClientKey.set(clientKey, [...new Set([...currentNames, ...nextNames])]);
+  }
+
+  return namesByClientKey;
+}
+
+async function listPaymentClientManagerNamesByClientKey(events) {
+  if (!pool) {
+    return new Map();
+  }
+
+  const clientNames = [];
+  const seenClientNames = new Set();
+  for (const event of Array.isArray(events) ? events : []) {
+    const record = event?.record && typeof event.record === "object" ? event.record : {};
+    const clientName = sanitizeTextValue(event?.clientName || record?.clientName, 300);
+    if (!clientName || seenClientNames.has(clientName)) {
+      continue;
+    }
+    seenClientNames.add(clientName);
+    clientNames.push(clientName);
+  }
+
+  if (!clientNames.length) {
+    return new Map();
+  }
+
+  try {
+    const cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
+    return buildPaymentClientManagerNamesByClientKey(cachedRows);
+  } catch (error) {
+    console.warn(
+      `[records notifications] Failed to read client-manager cache for payment notifications: ${
+        sanitizeTextValue(error?.message, 320) || "unknown error"
+      }`,
+    );
+    return new Map();
+  }
+}
+
+function buildPaymentNotificationRecipientContext(users = [], clientManagerNamesByClientKey = new Map()) {
+  const accountingUsernames = new Set();
+  const managerUsers = [];
+
+  for (const user of Array.isArray(users) ? users : []) {
+    if (!user || user.isOwner) {
+      continue;
+    }
+
+    const username = normalizeWebAuthUsername(user.username);
+    if (!username) {
+      continue;
+    }
+
+    const departmentId = normalizeWebAuthDepartmentId(user.departmentId);
+    if (departmentId === WEB_AUTH_DEPARTMENT_ACCOUNTING) {
+      accountingUsernames.add(username);
+    }
+
+    const roleId = normalizeWebAuthRoleId(user.roleId, departmentId);
+    if (roleId !== WEB_AUTH_ROLE_MANAGER) {
+      continue;
+    }
+
+    const identitySet = buildWebAuthIdentityMatchSet(getWebAuthPrincipalIdentityValues(user));
+    if (!identitySet.size) {
+      continue;
+    }
+
+    managerUsers.push({
+      username,
+      identitySet,
+    });
+  }
+
+  return {
+    accountingUsernames: [...accountingUsernames],
+    managerUsers,
+    clientManagerNamesByClientKey,
+  };
+}
+
+function resolvePaymentClientManagerNames(record, clientNameHint, context = {}) {
+  const clientName = sanitizeTextValue(clientNameHint || record?.clientName, 300);
+  const clientKey = normalizePaymentClientNameForLookup(clientName);
+  const namesFromCache = clientKey ? context?.clientManagerNamesByClientKey?.get(clientKey) : null;
+  if (Array.isArray(namesFromCache) && namesFromCache.length) {
+    return namesFromCache;
+  }
+
+  return extractPaymentClientManagerNamesFromRecord(record);
+}
+
+function doesManagerNameMatchIdentitySet(managerName, identitySet) {
+  const normalized = normalizeWebAuthIdentityText(managerName);
+  if (normalized && identitySet.has(normalized)) {
+    return true;
+  }
+
+  const comparable = normalizeWebAuthComparableIdentityText(managerName);
+  if (comparable && identitySet.has(comparable)) {
+    return true;
+  }
+
+  return false;
+}
+
+function resolvePaymentNotificationRecipientUsernames(record, clientNameHint, context = {}) {
+  const recipientUsernames = new Set(Array.isArray(context?.accountingUsernames) ? context.accountingUsernames : []);
+  const managerNames = resolvePaymentClientManagerNames(record, clientNameHint, context);
+  if (!managerNames.length) {
+    return [...recipientUsernames];
+  }
+
+  const managerUsers = Array.isArray(context?.managerUsers) ? context.managerUsers : [];
+  for (const managerUser of managerUsers) {
+    if (!managerUser?.username || !(managerUser?.identitySet instanceof Set) || !managerUser.identitySet.size) {
+      continue;
+    }
+
+    if (managerNames.some((managerName) => doesManagerNameMatchIdentitySet(managerName, managerUser.identitySet))) {
+      recipientUsernames.add(managerUser.username);
+    }
+  }
+
+  return [...recipientUsernames];
+}
+
+function normalizeNotificationTone(rawValue) {
+  const tone = sanitizeTextValue(rawValue, 24).toLowerCase();
+  if (tone === "success" || tone === "warning" || tone === "error" || tone === "info") {
+    return tone;
+  }
+
+  return "info";
+}
+
+async function buildPaymentNotificationEntries(events) {
+  const entries = [];
+  const users = listWebAuthUsers();
+  const clientManagerNamesByClientKey = await listPaymentClientManagerNamesByClientKey(events);
+  const recipientContext = buildPaymentNotificationRecipientContext(users, clientManagerNamesByClientKey);
+  for (const event of Array.isArray(events) ? events : []) {
+    if (!event || typeof event !== "object") {
+      continue;
+    }
+
+    const record = event.record && typeof event.record === "object" ? event.record : {};
+    const clientName = sanitizeTextValue(event.clientName || record.clientName, 300);
+    const recipients = resolvePaymentNotificationRecipientUsernames(record, clientName, recipientContext);
+    if (!recipients.length) {
+      continue;
+    }
+
+    const title = sanitizeTextValue(event.title, 260) || (clientName ? `Payment received from ${clientName}` : "Payment received");
+    const message = sanitizeTextValue(event.message, 2000);
+    const linkHref = sanitizeTextValue(event.linkHref, 1200) || "/app/client-payments";
+    const linkLabel = sanitizeTextValue(event.linkLabel, 80) || "Open";
+    const paymentSlot = Number.parseInt(String(event.paymentSlot ?? ""), 10);
+    const paymentAmount = sanitizeTextValue(event.paymentAmount, 220);
+    const paymentDate = sanitizeTextValue(event.paymentDate, 80);
+    const recordId = sanitizeTextValue(record?.id, 180);
+
+    for (const recipientUsername of recipients) {
+      entries.push({
+        id: createWebNotificationId(),
+        recipientUsername,
+        type: "client_payment_received",
+        title,
+        message,
+        tone: normalizeNotificationTone(event.tone),
+        clientName,
+        linkHref,
+        linkLabel,
+        payload: {
+          clientName,
+          recordId,
+          paymentSlot: Number.isFinite(paymentSlot) && paymentSlot > 0 ? paymentSlot : null,
+          paymentAmount,
+          paymentDate,
+        },
+      });
+    }
+  }
+
+  return entries;
+}
+
+function resolveClientManagersDepartmentHeadUsernames() {
+  const recipientUsernames = new Set();
+  const users = listWebAuthUsers();
+
+  for (const user of users) {
+    if (!user || user.isOwner) {
+      continue;
+    }
+
+    const username = normalizeWebAuthUsername(user.username);
+    if (!username) {
+      continue;
+    }
+
+    const departmentId = normalizeWebAuthDepartmentId(user.departmentId);
+    const roleId = normalizeWebAuthRoleId(user.roleId, departmentId);
+    if (departmentId !== WEB_AUTH_DEPARTMENT_CLIENT_SERVICE || roleId !== WEB_AUTH_ROLE_DEPARTMENT_HEAD) {
+      continue;
+    }
+
+    recipientUsernames.add(username);
+  }
+
+  return [...recipientUsernames];
+}
+
+function buildMiniSubmissionNotificationEntries(record, submission) {
+  const recipients = resolveClientManagersDepartmentHeadUsernames();
+  if (!recipients.length) {
+    return [];
+  }
+
+  const clientName = sanitizeTextValue(record?.clientName, 300);
+  const submissionId = sanitizeTextValue(submission?.id, 180);
+  const title = clientName ? `New client from Mini App: ${clientName}` : "New client from Mini App";
+  const message = submissionId
+    ? `Client was added to New Clients from Mini App. Submission ID: ${submissionId}.`
+    : "Client was added to New Clients from Mini App.";
+
+  return recipients.map((recipientUsername) => ({
+    id: createWebNotificationId(),
+    recipientUsername,
+    type: "mini_client_submission_pending",
+    title,
+    message,
+    tone: "info",
+    linkHref: "/app/dashboard",
+    linkLabel: "Open",
+    payload: {
+      source: "mini_app",
+      submissionId,
+      clientName,
+    },
+  }));
 }
 
 function buildWebAuthDirectoryUserStorageItem(userProfile) {
@@ -22840,6 +23179,33 @@ async function ensureDatabaseReady() {
         ON ${WEB_AUTH_USERS_DIRECTORY_TABLE} (updated_at DESC)
       `);
 
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${WEB_NOTIFICATIONS_TABLE} (
+          id TEXT PRIMARY KEY,
+          recipient_username TEXT NOT NULL,
+          type TEXT NOT NULL DEFAULT 'generic',
+          title TEXT NOT NULL,
+          message TEXT NOT NULL DEFAULT '',
+          tone TEXT NOT NULL DEFAULT 'info',
+          client_name TEXT NOT NULL DEFAULT '',
+          link_href TEXT NOT NULL DEFAULT '',
+          link_label TEXT NOT NULL DEFAULT 'Open',
+          payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+          read_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${WEB_NOTIFICATIONS_TABLE_NAME}_recipient_created_idx
+        ON ${WEB_NOTIFICATIONS_TABLE} (recipient_username, created_at DESC, id DESC)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${WEB_NOTIFICATIONS_TABLE_NAME}_recipient_read_created_idx
+        ON ${WEB_NOTIFICATIONS_TABLE} (recipient_username, read_at, created_at DESC, id DESC)
+      `);
+
       await sharedDbQuery(
         `
           INSERT INTO ${STATE_TABLE} (id, records)
@@ -23405,6 +23771,30 @@ const recordsRepo = createRecordsRepo({
   },
   performanceObservability,
   logger: console,
+});
+
+const notificationsRepo = createNotificationsRepo({
+  db: {
+    query: sharedDbQuery,
+  },
+  ensureDatabaseReady,
+  tables: {
+    notificationsTable: WEB_NOTIFICATIONS_TABLE,
+  },
+  helpers: {
+    sanitizeTextValue,
+  },
+});
+
+const notificationsService = createNotificationsService({
+  notificationsRepo,
+  sanitizeTextValue,
+});
+
+const notificationsController = createNotificationsController({
+  notificationsService,
+  sanitizeTextValue,
+  buildPublicErrorPayload,
 });
 
 const assistantRepo = createAssistantRepo({
@@ -25485,6 +25875,19 @@ async function queueClientSubmission(record, submittedBy, miniData = {}, attachm
     }
 
     await txQuery("COMMIT");
+
+    try {
+      const notificationEntries = buildMiniSubmissionNotificationEntries(record, {
+        id: result.rows[0]?.id || submissionId,
+      });
+      if (notificationEntries.length) {
+        await notificationsService.createNotifications(notificationEntries);
+      }
+    } catch (notificationError) {
+      console.warn(
+        `[mini notifications] Failed to store new-client notification: ${sanitizeTextValue(notificationError?.message, 320) || "unknown error"}`,
+      );
+    }
 
     return {
       id: result.rows[0]?.id || submissionId,
@@ -31560,6 +31963,24 @@ const recordsService = createRecordsService({
   sanitizeTextValue,
   saveStoredRecords,
   saveStoredRecordsPatch,
+  publishPaymentReceivedEvents: async (events) => {
+    if (!pool) {
+      return;
+    }
+
+    const entries = await buildPaymentNotificationEntries(events);
+    if (!entries.length) {
+      return;
+    }
+
+    try {
+      await notificationsService.createNotifications(entries);
+    } catch (error) {
+      console.warn(
+        `[records notifications] Failed to store payment notifications: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`,
+      );
+    }
+  },
   logWarn: (message) => {
     console.warn(message);
   },
@@ -31593,6 +32014,19 @@ registerRecordsRoutes({
     handleRecordsGet: recordsController.handleRecordsGet,
     handleRecordsPut: recordsController.handleRecordsPut,
     handleRecordsPatch: recordsController.handleRecordsPatch,
+  },
+});
+
+registerNotificationsRoutes({
+  app,
+  requireWebPermission,
+  permissionKeys: {
+    WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS,
+  },
+  handlers: {
+    handleNotificationsGet: notificationsController.handleNotificationsGet,
+    handleNotificationsMarkReadPost: notificationsController.handleNotificationsMarkReadPost,
+    handleNotificationsMarkAllReadPost: notificationsController.handleNotificationsMarkAllReadPost,
   },
 });
 

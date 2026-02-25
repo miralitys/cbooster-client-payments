@@ -1,5 +1,6 @@
 export { ApiError, apiRequest } from "@/shared/api/fetcher";
 export { getSession } from "@/shared/api/session";
+export { getNotificationsFeed, markAllNotificationsRead, markNotificationRead } from "@/shared/api/notifications";
 export { getRecords, patchRecords, putRecords } from "@/shared/api/records";
 export { getClients, patchClients, putClients } from "@/shared/api/clients";
 export { queueAssistantSessionContextResetBeacon, resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api/assistant";

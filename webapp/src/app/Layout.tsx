@@ -4,7 +4,6 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { AssistantWidget } from "@/features/assistant/AssistantWidget";
 import { getSession } from "@/shared/api/session";
 import { isOwnerOrAdminSession } from "@/shared/lib/access";
-import { getNotifications, pushNotification } from "@/shared/lib/notifications";
 import { ModalStackProvider, NotificationCenter, ToastHost } from "@/shared/ui";
 
 interface NavigationItem {
@@ -26,8 +25,6 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/leads", label: "Leads" },
   { to: "/access-control", label: "Access Control" },
 ];
-const DEMO_PAYMENT_CLIENT_NAME = "Michail Aleshchenko";
-const DEMO_PAYMENT_TITLE = "Payment received from Michail Aleshchenko";
 
 function resolvePageTitle(pathname: string): string {
   if (pathname.startsWith("/dashboard")) {
@@ -76,6 +73,7 @@ export function Layout() {
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [canViewQuickBooks, setCanViewQuickBooks] = useState(false);
+  const [canViewNotifications, setCanViewNotifications] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const pageTitle = resolvePageTitle(location.pathname);
 
@@ -115,15 +113,14 @@ export function Layout() {
         }
         const ownerOrAdmin = isOwnerOrAdminSession(payload);
         setCanViewQuickBooks(ownerOrAdmin);
-        if (ownerOrAdmin) {
-          maybeShowDemoPaymentNotification();
-        }
+        setCanViewNotifications(Boolean(payload?.permissions?.view_client_payments));
       })
       .catch(() => {
         if (!active) {
           return;
         }
         setCanViewQuickBooks(false);
+        setCanViewNotifications(false);
       });
 
     return () => {
@@ -142,7 +139,7 @@ export function Layout() {
             </div>
 
             <div className="page-header__controls">
-              {canViewQuickBooks ? <NotificationCenter /> : null}
+              {canViewNotifications ? <NotificationCenter /> : null}
 
               <div ref={menuRef} className={`account-menu ${menuOpen ? "is-open" : ""}`.trim()}>
                 <button
@@ -203,24 +200,4 @@ export function Layout() {
       </main>
     </ModalStackProvider>
   );
-}
-
-function maybeShowDemoPaymentNotification(): void {
-  const hasDemoNotification = getNotifications().some(
-    (notification) => notification.clientName === DEMO_PAYMENT_CLIENT_NAME && notification.title === DEMO_PAYMENT_TITLE,
-  );
-  if (hasDemoNotification) {
-    return;
-  }
-
-  pushNotification({
-    title: DEMO_PAYMENT_TITLE,
-    message: "Demo event: incoming payment was posted.",
-    tone: "success",
-    clientName: DEMO_PAYMENT_CLIENT_NAME,
-    link: {
-      href: "/app/client-payments",
-      label: "Open",
-    },
-  });
 }

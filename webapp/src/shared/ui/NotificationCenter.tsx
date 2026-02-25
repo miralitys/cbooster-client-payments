@@ -1,12 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  getNotifications,
-  getUnreadNotificationsCount,
-  markAllNotificationsRead,
-  markNotificationRead,
-  subscribeNotifications,
-} from "@/shared/lib/notifications";
+  getNotificationsFeed,
+  markAllNotificationsRead as markAllNotificationsReadRequest,
+  markNotificationRead as markNotificationReadRequest,
+} from "@/shared/api/notifications";
 import { requestOpenClientCard } from "@/shared/lib/openClientCard";
 import type { AppNotification } from "@/shared/types/notifications";
 
@@ -14,17 +12,46 @@ const notificationDateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "short",
   timeStyle: "short",
 });
+const NOTIFICATIONS_POLL_INTERVAL_MS = 30_000;
 
 export function NotificationCenter() {
   const [isOpen, setIsOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"active" | "archive">("active");
-  const [notifications, setNotifications] = useState<AppNotification[]>(() => getNotifications());
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const unreadCount = useMemo(() => getUnreadNotificationsCount(notifications), [notifications]);
   const activeNotifications = useMemo(() => notifications.filter((item) => !item.read), [notifications]);
   const displayedNotifications = viewMode === "active" ? activeNotifications : notifications;
 
-  useEffect(() => subscribeNotifications((next) => setNotifications(next)), []);
+  const loadNotifications = useCallback(async () => {
+    try {
+      const nextNotifications = await getNotificationsFeed();
+      setNotifications(nextNotifications);
+    } catch {
+      // Keep existing notifications snapshot on transient API failures.
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshNotifications() {
+      if (cancelled) {
+        return;
+      }
+      await loadNotifications();
+    }
+
+    void refreshNotifications();
+    const pollTimer = window.setInterval(() => {
+      void refreshNotifications();
+    }, NOTIFICATIONS_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollTimer);
+    };
+  }, [loadNotifications]);
 
   useEffect(() => {
     function onPointerDown(event: MouseEvent) {
@@ -51,6 +78,46 @@ export function NotificationCenter() {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, []);
+
+  function markNotificationRead(notificationId: string): void {
+    setNotifications((currentNotifications) =>
+      currentNotifications.map((notification) => {
+        if (notification.id !== notificationId || notification.read) {
+          return notification;
+        }
+        return {
+          ...notification,
+          read: true,
+        };
+      }),
+    );
+
+    void markNotificationReadRequest(notificationId).catch(() => {
+      void loadNotifications();
+    });
+  }
+
+  function markAllNotificationsRead(): void {
+    if (!unreadCount) {
+      return;
+    }
+
+    setNotifications((currentNotifications) =>
+      currentNotifications.map((notification) => {
+        if (notification.read) {
+          return notification;
+        }
+        return {
+          ...notification,
+          read: true,
+        };
+      }),
+    );
+
+    void markAllNotificationsReadRequest().catch(() => {
+      void loadNotifications();
+    });
+  }
 
   function handleOpenNotification(notification: AppNotification): void {
     markNotificationRead(notification.id);
@@ -203,4 +270,14 @@ function formatNotificationDate(value: string): string {
   }
 
   return notificationDateFormatter.format(timestamp);
+}
+
+function getUnreadNotificationsCount(notifications: AppNotification[]): number {
+  let unreadCount = 0;
+  for (const notification of notifications) {
+    if (!notification.read) {
+      unreadCount += 1;
+    }
+  }
+  return unreadCount;
 }
