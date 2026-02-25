@@ -97,6 +97,9 @@ export interface ClientRecord {
   writtenOff: string;
   contractSigned: string;
   startedInWork: string;
+  cachedScore: string;
+  cachedScoreTone: string;
+  scoreUpdatedAt: string;
   notes: string;
   collection: string;
   dateOfCollection: string;

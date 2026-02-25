@@ -1002,6 +1002,41 @@ const GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_BASIC_NOTE_MANUAL_REFRESH_ERROR_PREVIEW_LIMIT, 20), 1),
   100,
 );
+const SCORE_CACHE_SYNC_ENABLED = resolveOptionalBoolean(process.env.SCORE_CACHE_SYNC_ENABLED) !== false;
+const SCORE_CACHE_SYNC_TIME_ZONE = sanitizeTextValue(process.env.SCORE_CACHE_SYNC_TIME_ZONE, 80) || "America/Chicago";
+const SCORE_CACHE_SYNC_HOUR = Math.min(
+  Math.max(parsePositiveInteger(process.env.SCORE_CACHE_SYNC_HOUR, 2), 0),
+  23,
+);
+const SCORE_CACHE_SYNC_MINUTE = Math.min(
+  Math.max(parsePositiveInteger(process.env.SCORE_CACHE_SYNC_MINUTE, 35), 0),
+  59,
+);
+const SCORE_CACHE_SYNC_TRIGGER_WINDOW_MINUTES = Math.min(
+  Math.max(parsePositiveInteger(process.env.SCORE_CACHE_SYNC_TRIGGER_WINDOW_MINUTES, 12), 1),
+  59,
+);
+const SCORE_CACHE_SYNC_TICK_INTERVAL_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.SCORE_CACHE_SYNC_TICK_INTERVAL_MS, 10 * 60 * 1000), 60 * 1000),
+  3 * 60 * 60 * 1000,
+);
+const SCORE_CACHE_UPDATE_RETRIES = Math.min(
+  Math.max(parsePositiveInteger(process.env.SCORE_CACHE_UPDATE_RETRIES, 3), 1),
+  8,
+);
+const SCORE_CACHE_UPDATE_RETRY_DELAY_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.SCORE_CACHE_UPDATE_RETRY_DELAY_MS, 400), 100),
+  5000,
+);
+const SCORE_CACHE_SYNC_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: SCORE_CACHE_SYNC_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 const GHL_CLIENT_COMMUNICATION_LOOKUP_MAX_CONTACTS = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_COMMUNICATION_LOOKUP_MAX_CONTACTS, 6), 1),
   20,
@@ -1281,6 +1316,9 @@ const RECORD_TEXT_FIELDS = [
   "serviceType",
   "contractSigned",
   "startedInWork",
+  "cachedScore",
+  "cachedScoreTone",
+  "scoreUpdatedAt",
   "contractTotals",
   "totalPayments",
   "payment1",
@@ -1389,6 +1427,9 @@ const RECORDS_PUT_FIELD_MAX_LENGTH = Object.freeze({
   writtenOff: 10,
   contractSigned: 10,
   startedInWork: 10,
+  cachedScore: 12,
+  cachedScoreTone: 24,
+  scoreUpdatedAt: 80,
   notes: 8000,
   collection: 120,
   dateOfCollection: 40,
@@ -1856,6 +1897,9 @@ const quickBooksHttpCircuitState = {
 let quickBooksAutoSyncIntervalId = null;
 let quickBooksAutoSyncInFlightSlotKey = "";
 let quickBooksAutoSyncLastCompletedSlotKey = "";
+let scoreCacheSyncIntervalId = null;
+let scoreCacheSyncInFlightSlotKey = "";
+let scoreCacheSyncLastCompletedSlotKey = "";
 let ghlBasicNoteAutoRefreshIntervalId = null;
 let ghlBasicNoteAutoRefreshInFlight = false;
 let ghlBasicNoteManualRefreshState = createInitialGhlBasicNoteManualRefreshState();
@@ -25062,6 +25106,537 @@ function enqueueQuickBooksSyncJob(range, options = {}) {
   };
 }
 
+const SCORE_CACHE_PAYMENT_SLOTS = Object.freeze(
+  Array.from({ length: 7 }, (_, index) => ({
+    amountKey: `payment${index + 1}`,
+    dateKey: `payment${index + 1}Date`,
+  })),
+);
+const SCORE_CACHE_TOTAL_PAYMENT_FIELDS = Object.freeze(
+  Array.from({ length: 36 }, (_, index) => `payment${index + 1}`),
+);
+const SCORE_CACHE_DAY_IN_MS = 24 * 60 * 60 * 1000;
+const SCORE_CACHE_RECENT_WINDOW_DAYS = 90;
+const SCORE_CACHE_WINDOW_MONTHS = 12;
+const SCORE_CACHE_START = 100;
+const SCORE_CACHE_MIN = 0;
+const SCORE_CACHE_MAX = 110;
+const SCORE_CACHE_EARLY_BONUS_DAYS = 10;
+const SCORE_CACHE_BONUS_POINTS = 5;
+const SCORE_CACHE_RECOVERY_POINTS = 5;
+const SCORE_CACHE_LATE_GRACE_DAYS = 3;
+const SCORE_CACHE_EPSILON = 0.0001;
+const SCORE_CACHE_ZERO_TOLERANCE = 0.005;
+
+function isScoreCacheTruthyFlag(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 30).toLowerCase();
+  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
+}
+
+function isScoreCacheContractCompletedEnabled(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 30).toLowerCase();
+  return (
+    normalized === "yes" ||
+    normalized === "true" ||
+    normalized === "1" ||
+    normalized === "on" ||
+    normalized === "completed"
+  );
+}
+
+function parseScoreCacheMoneyValue(rawValue) {
+  return parseAssistantMoneyValue(rawValue);
+}
+
+function parseScoreCacheDateValue(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 120);
+  if (!normalized) {
+    return null;
+  }
+
+  const parsedDirect = parseDateValue(normalized);
+  if (parsedDirect !== null) {
+    return parsedDirect;
+  }
+
+  const timestamp = Date.parse(normalized);
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  const date = new Date(timestamp);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function computeScoreCacheTotalPayments(record) {
+  let total = 0;
+  let hasAny = false;
+
+  for (const field of SCORE_CACHE_TOTAL_PAYMENT_FIELDS) {
+    const amount = parseScoreCacheMoneyValue(record?.[field]);
+    if (amount === null) {
+      continue;
+    }
+    hasAny = true;
+    total += amount;
+  }
+
+  if (hasAny) {
+    return total;
+  }
+
+  const fallbackTotal = parseScoreCacheMoneyValue(record?.totalPayments);
+  return fallbackTotal === null ? 0 : fallbackTotal;
+}
+
+function computeScoreCacheFutureAmount(record, options = {}) {
+  if (options.isWrittenOff === true) {
+    return 0;
+  }
+
+  const contractTotal = parseScoreCacheMoneyValue(record?.contractTotals);
+  if (contractTotal === null) {
+    return null;
+  }
+
+  return contractTotal - computeScoreCacheTotalPayments(record);
+}
+
+function getScoreCacheRecordStatus(record) {
+  const normalizedClientName = normalizeAssistantComparableText(record?.clientName, 220);
+  const isAfterResult =
+    isScoreCacheTruthyFlag(record?.afterResult) || ASSISTANT_AFTER_RESULT_CLIENT_NAMES.has(normalizedClientName);
+  const isWrittenOff =
+    isScoreCacheTruthyFlag(record?.writtenOff) || ASSISTANT_WRITTEN_OFF_CLIENT_NAMES.has(normalizedClientName);
+  const isContractCompleted = isScoreCacheContractCompletedEnabled(record?.contractCompleted);
+  const futureAmount = computeScoreCacheFutureAmount(record, {
+    isWrittenOff,
+  });
+  const isFullyPaid =
+    !isWrittenOff &&
+    !isContractCompleted &&
+    futureAmount !== null &&
+    futureAmount <= SCORE_CACHE_ZERO_TOLERANCE;
+
+  return {
+    isAfterResult,
+    isWrittenOff,
+    isContractCompleted,
+    isFullyPaid,
+  };
+}
+
+function scoreCacheClampNumber(value, minValue, maxValue) {
+  return Math.min(maxValue, Math.max(minValue, value));
+}
+
+function scoreCacheUtcDayStart(timestamp) {
+  const value = new Date(timestamp);
+  return Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
+}
+
+function scoreCacheShiftUtcMonths(baseUtc, deltaMonths, pinnedDay) {
+  const baseDate = new Date(baseUtc);
+  const day = Number.isFinite(pinnedDay) ? pinnedDay : baseDate.getUTCDate();
+  const firstDayTargetMonth = Date.UTC(baseDate.getUTCFullYear(), baseDate.getUTCMonth() + deltaMonths, 1);
+  const targetMonthDate = new Date(firstDayTargetMonth);
+  const daysInTargetMonth = new Date(
+    Date.UTC(targetMonthDate.getUTCFullYear(), targetMonthDate.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  const safeDay = Math.min(Math.max(1, day), daysInTargetMonth);
+
+  return Date.UTC(targetMonthDate.getUTCFullYear(), targetMonthDate.getUTCMonth(), safeDay);
+}
+
+function collectScoreCachePaymentEvents(record, asOfUtc) {
+  const events = [];
+
+  for (const slot of SCORE_CACHE_PAYMENT_SLOTS) {
+    const amount = parseScoreCacheMoneyValue(record?.[slot.amountKey]);
+    const dateUtc = parseScoreCacheDateValue(record?.[slot.dateKey]);
+    if (amount === null || dateUtc === null || amount <= 0 || dateUtc > asOfUtc) {
+      continue;
+    }
+
+    events.push({
+      amount,
+      dateUtc,
+    });
+  }
+
+  events.sort((left, right) => left.dateUtc - right.dateUtc);
+  return events;
+}
+
+function buildScoreCacheCumulativeEvents(events) {
+  let cumulativePaid = 0;
+  return events.map((event) => {
+    cumulativePaid += event.amount;
+    return {
+      dateUtc: event.dateUtc,
+      cumulativePaid,
+    };
+  });
+}
+
+function findScoreCacheCatchUpDate(cumulativeEvents, plannedCumulative) {
+  if (plannedCumulative <= 0) {
+    return cumulativeEvents[0]?.dateUtc || null;
+  }
+
+  for (const event of cumulativeEvents) {
+    if (event.cumulativePaid + SCORE_CACHE_EPSILON >= plannedCumulative) {
+      return event.dateUtc;
+    }
+  }
+
+  return null;
+}
+
+function scoreCachePenaltyForDelay(delayDays) {
+  if (delayDays <= SCORE_CACHE_LATE_GRACE_DAYS) {
+    return 0;
+  }
+
+  if (delayDays < 30) {
+    return delayDays;
+  }
+
+  if (delayDays < 60) {
+    return 50;
+  }
+
+  if (delayDays < 90) {
+    return 70;
+  }
+
+  return 90;
+}
+
+function evaluateScoreCacheMilestones(record, contractTotal, firstDueUtc, asOfUtc, scoreWindowStartUtc, paymentEvents) {
+  const totalMilestones = SCORE_CACHE_PAYMENT_SLOTS.length;
+  const downPayment = parseScoreCacheMoneyValue(record?.payment1);
+  const hasPositiveDownPayment = downPayment !== null && downPayment > 0;
+  const firstPlannedAmount = hasPositiveDownPayment
+    ? scoreCacheClampNumber(downPayment, 0, contractTotal)
+    : contractTotal / totalMilestones;
+  const recurringAmount =
+    totalMilestones > 1
+      ? hasPositiveDownPayment
+        ? Math.max(0, (contractTotal - firstPlannedAmount) / (totalMilestones - 1))
+        : contractTotal / totalMilestones
+      : contractTotal;
+  const dueDayOfMonth = new Date(firstDueUtc).getUTCDate();
+  const cumulativeByEvent = buildScoreCacheCumulativeEvents(paymentEvents);
+
+  return Array.from({ length: totalMilestones }, (_, index) => {
+    const milestoneIndex = index + 1;
+    const dueUtc = scoreCacheShiftUtcMonths(firstDueUtc, index, dueDayOfMonth);
+    const plannedCumulative =
+      milestoneIndex === totalMilestones
+        ? contractTotal
+        : firstPlannedAmount + recurringAmount * Math.max(0, milestoneIndex - 1);
+    const catchUpUtc = findScoreCacheCatchUpDate(cumulativeByEvent, plannedCumulative);
+    const effectiveCatchUpUtc = catchUpUtc === null ? asOfUtc : catchUpUtc;
+    const delayDays = effectiveCatchUpUtc > dueUtc ? Math.floor((effectiveCatchUpUtc - dueUtc) / SCORE_CACHE_DAY_IN_MS) : 0;
+    const consideredInScoreWindow = dueUtc <= asOfUtc && dueUtc >= scoreWindowStartUtc;
+    const penaltyPoints = consideredInScoreWindow ? scoreCachePenaltyForDelay(delayDays) : 0;
+    const isOpenDebt = catchUpUtc === null && dueUtc <= asOfUtc;
+    const isEarlyCoverage =
+      catchUpUtc !== null && catchUpUtc <= dueUtc - SCORE_CACHE_EARLY_BONUS_DAYS * SCORE_CACHE_DAY_IN_MS;
+
+    return {
+      dueUtc,
+      delayDays,
+      penaltyPoints,
+      consideredInScoreWindow,
+      isOpenDebt,
+      isEarlyCoverage,
+    };
+  });
+}
+
+function resolveScoreCacheTone(scoreValue) {
+  if (!Number.isFinite(scoreValue)) {
+    return "neutral";
+  }
+
+  if (scoreValue >= 95) {
+    return "success";
+  }
+  if (scoreValue >= 80) {
+    return "info";
+  }
+  if (scoreValue >= 60) {
+    return "warning";
+  }
+  return "danger";
+}
+
+function scoreCacheToDisplayScore(internalScore) {
+  const capped = scoreCacheClampNumber(internalScore, SCORE_CACHE_MIN, SCORE_CACHE_START);
+  if (capped <= 0) {
+    return 0;
+  }
+  return Math.ceil(capped / 10) * 10;
+}
+
+function evaluateScoreCacheRecord(record, asOfDate = new Date()) {
+  const status = getScoreCacheRecordStatus(record);
+  if (status.isContractCompleted || status.isWrittenOff || status.isAfterResult || status.isFullyPaid) {
+    return {
+      displayScore: null,
+      tone: "neutral",
+    };
+  }
+
+  const contractTotal = parseScoreCacheMoneyValue(record?.contractTotals);
+  if (contractTotal === null || contractTotal <= 0) {
+    return {
+      displayScore: null,
+      tone: "neutral",
+    };
+  }
+
+  const firstDueUtc = parseScoreCacheDateValue(record?.payment1Date);
+  if (firstDueUtc === null) {
+    return {
+      displayScore: null,
+      tone: "neutral",
+    };
+  }
+
+  const asOfUtc = scoreCacheUtcDayStart(asOfDate.getTime());
+  const scoreWindowStartUtc = scoreCacheShiftUtcMonths(asOfUtc, -SCORE_CACHE_WINDOW_MONTHS);
+  const paymentEvents = collectScoreCachePaymentEvents(record, asOfUtc);
+  const milestones = evaluateScoreCacheMilestones(
+    record,
+    contractTotal,
+    firstDueUtc,
+    asOfUtc,
+    scoreWindowStartUtc,
+    paymentEvents,
+  );
+
+  const consideredMilestones = milestones.filter((item) => item.consideredInScoreWindow);
+  const penaltyPoints = consideredMilestones.reduce((sum, item) => sum + item.penaltyPoints, 0);
+  const recentWindowStartUtc = asOfUtc - SCORE_CACHE_RECENT_WINDOW_DAYS * SCORE_CACHE_DAY_IN_MS;
+  const recentMilestones = milestones.filter((item) => item.dueUtc <= asOfUtc && item.dueUtc >= recentWindowStartUtc);
+  const recentMilestonesOnTime =
+    recentMilestones.length > 0 &&
+    recentMilestones.every((item) => item.delayDays <= SCORE_CACHE_LATE_GRACE_DAYS);
+  const hasOlderDelay = milestones.some(
+    (item) => item.dueUtc < recentWindowStartUtc && item.delayDays > SCORE_CACHE_LATE_GRACE_DAYS,
+  );
+  const hasEarlyCoverage = milestones.some((item) => item.isEarlyCoverage);
+
+  const bonusPoints = hasEarlyCoverage && recentMilestonesOnTime ? SCORE_CACHE_BONUS_POINTS : 0;
+  const recoveryPoints =
+    penaltyPoints > 0 && recentMilestonesOnTime && hasOlderDelay ? SCORE_CACHE_RECOVERY_POINTS : 0;
+  const rawScore = SCORE_CACHE_START - penaltyPoints + bonusPoints + recoveryPoints;
+  const internalScore = scoreCacheClampNumber(Math.round(rawScore), SCORE_CACHE_MIN, SCORE_CACHE_MAX);
+  const displayScore = scoreCacheToDisplayScore(internalScore);
+
+  return {
+    displayScore,
+    tone: resolveScoreCacheTone(displayScore),
+  };
+}
+
+function buildScoreCacheRecordSnapshot(record, asOfDate, scoreUpdatedAt) {
+  const snapshot = evaluateScoreCacheRecord(record, asOfDate);
+  const nextCachedScore = snapshot.displayScore === null ? "" : String(snapshot.displayScore);
+  const nextCachedScoreTone = sanitizeTextValue(snapshot.tone, 24) || "neutral";
+  return {
+    ...record,
+    cachedScore: nextCachedScore,
+    cachedScoreTone: nextCachedScoreTone,
+    scoreUpdatedAt,
+  };
+}
+
+function normalizeScoreCacheSavedUpdatedAt(saveResult) {
+  if (typeof saveResult === "string") {
+    const parsed = Date.parse(saveResult);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+  }
+
+  const candidate = sanitizeTextValue(saveResult?.updatedAt, 120);
+  if (!candidate) {
+    return null;
+  }
+  const parsed = Date.parse(candidate);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+async function refreshNightlyScoreCacheSnapshot(options = {}) {
+  const asOfDate = options.asOfDate instanceof Date ? options.asOfDate : new Date();
+  const source = sanitizeTextValue(options.source, 120) || "score_cache_scheduler";
+  const maxRetries = Number.isFinite(options.maxRetries)
+    ? Math.max(1, Math.trunc(options.maxRetries))
+    : SCORE_CACHE_UPDATE_RETRIES;
+
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    attempt += 1;
+
+    const state = await getStoredRecords();
+    const currentRecords = Array.isArray(state?.records) ? state.records : [];
+    const expectedUpdatedAt = Object.prototype.hasOwnProperty.call(state || {}, "updatedAt")
+      ? state.updatedAt
+      : null;
+    const scoreUpdatedAt = new Date().toISOString();
+
+    if (!currentRecords.length) {
+      return {
+        total: 0,
+        updatedCount: 0,
+        updatedAt: expectedUpdatedAt,
+        attempt,
+      };
+    }
+
+    const nextRecords = currentRecords.map((record) => {
+      if (!record || typeof record !== "object" || Array.isArray(record)) {
+        return record;
+      }
+      return buildScoreCacheRecordSnapshot(record, asOfDate, scoreUpdatedAt);
+    });
+
+    try {
+      const saveResult = await saveStoredRecords(nextRecords, {
+        expectedUpdatedAt,
+        source,
+      });
+      return {
+        total: currentRecords.length,
+        updatedCount: currentRecords.length,
+        updatedAt: normalizeScoreCacheSavedUpdatedAt(saveResult),
+        attempt,
+      };
+    } catch (error) {
+      const errorCode = sanitizeTextValue(error?.code, 80);
+      if (errorCode === "records_conflict" && attempt < maxRetries) {
+        await delayMs(SCORE_CACHE_UPDATE_RETRY_DELAY_MS * attempt);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw createHttpError("Score cache refresh failed due to repeated record conflicts.", 409, "records_conflict");
+}
+
+function getScoreCacheSyncClockParts(dateValue = new Date()) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  const values = {};
+  for (const part of SCORE_CACHE_SYNC_DATE_TIME_FORMATTER.formatToParts(date)) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+
+  const fallbackYear = String(date.getUTCFullYear());
+  const fallbackMonth = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const fallbackDay = String(date.getUTCDate()).padStart(2, "0");
+  const rawHour = Number.parseInt(values.hour || "0", 10);
+  const rawMinute = Number.parseInt(values.minute || "0", 10);
+  const normalizedHour = Number.isFinite(rawHour) ? ((rawHour % 24) + 24) % 24 : 0;
+  const normalizedMinute = Number.isFinite(rawMinute) ? Math.max(0, Math.min(rawMinute, 59)) : 0;
+
+  return {
+    year: values.year || fallbackYear,
+    month: values.month || fallbackMonth,
+    day: values.day || fallbackDay,
+    hour: normalizedHour,
+    minute: normalizedMinute,
+  };
+}
+
+function buildScoreCacheSyncSlotKey(clockParts) {
+  if (!clockParts || typeof clockParts !== "object") {
+    return "";
+  }
+  const year = sanitizeTextValue(clockParts.year, 4);
+  const month = sanitizeTextValue(clockParts.month, 2);
+  const day = sanitizeTextValue(clockParts.day, 2);
+  if (!year || !month || !day) {
+    return "";
+  }
+  return `${year}-${month}-${day}`;
+}
+
+function isScoreCacheSyncWindow(clockParts) {
+  if (!clockParts || typeof clockParts !== "object") {
+    return false;
+  }
+
+  if (clockParts.hour !== SCORE_CACHE_SYNC_HOUR) {
+    return false;
+  }
+
+  const windowEndMinute = Math.min(59, SCORE_CACHE_SYNC_MINUTE + SCORE_CACHE_SYNC_TRIGGER_WINDOW_MINUTES);
+  return clockParts.minute >= SCORE_CACHE_SYNC_MINUTE && clockParts.minute <= windowEndMinute;
+}
+
+async function runScoreCacheSyncTick(options = {}) {
+  if (!SCORE_CACHE_SYNC_ENABLED || !pool) {
+    return;
+  }
+
+  const force = options.force === true;
+  const now = new Date();
+  const clockParts = getScoreCacheSyncClockParts(now);
+  if (!force && !isScoreCacheSyncWindow(clockParts)) {
+    return;
+  }
+
+  const slotKey = buildScoreCacheSyncSlotKey(clockParts);
+  if (!slotKey) {
+    return;
+  }
+
+  if (!force && (scoreCacheSyncInFlightSlotKey === slotKey || scoreCacheSyncLastCompletedSlotKey === slotKey)) {
+    return;
+  }
+  if (scoreCacheSyncInFlightSlotKey) {
+    return;
+  }
+
+  scoreCacheSyncInFlightSlotKey = slotKey;
+  try {
+    const result = await refreshNightlyScoreCacheSnapshot({
+      asOfDate: now,
+      source: `score_cache_scheduler:${slotKey}`,
+    });
+    scoreCacheSyncLastCompletedSlotKey = slotKey;
+    console.log(
+      `[Score Cache Sync] ${slotKey} (${SCORE_CACHE_SYNC_TIME_ZONE}): updated ${result.updatedCount}/${result.total} clients (attempt ${result.attempt}).`,
+    );
+  } catch (error) {
+    console.error("[Score Cache Sync] Nightly refresh failed:", error);
+  } finally {
+    if (scoreCacheSyncInFlightSlotKey === slotKey) {
+      scoreCacheSyncInFlightSlotKey = "";
+    }
+  }
+}
+
+function startScoreCacheSyncScheduler() {
+  if (!SCORE_CACHE_SYNC_ENABLED || !pool) {
+    return false;
+  }
+  if (scoreCacheSyncIntervalId) {
+    return true;
+  }
+
+  scoreCacheSyncIntervalId = setInterval(() => {
+    void runScoreCacheSyncTick();
+  }, SCORE_CACHE_SYNC_TICK_INTERVAL_MS);
+  void runScoreCacheSyncTick();
+  return true;
+}
+
 function getQuickBooksAutoSyncClockParts(dateValue = new Date()) {
   const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
   const values = {};
@@ -37828,6 +38403,15 @@ function logServerStartupSummary(port) {
   } else if (startQuickBooksAutoSyncScheduler()) {
     console.log(
       `QuickBooks auto sync scheduler started: hourly from ${String(QUICKBOOKS_AUTO_SYNC_START_HOUR).padStart(2, "0")}:00 to ${String(QUICKBOOKS_AUTO_SYNC_END_HOUR).padStart(2, "0")}:00 (${QUICKBOOKS_AUTO_SYNC_TIME_ZONE}).`,
+    );
+  }
+  if (!SCORE_CACHE_SYNC_ENABLED) {
+    console.warn("Nightly score cache scheduler is disabled (SCORE_CACHE_SYNC_ENABLED=false).");
+  } else if (!pool) {
+    console.warn("Nightly score cache scheduler is disabled because DATABASE_URL is missing.");
+  } else if (startScoreCacheSyncScheduler()) {
+    console.log(
+      `Nightly score cache scheduler started: daily at ${String(SCORE_CACHE_SYNC_HOUR).padStart(2, "0")}:${String(SCORE_CACHE_SYNC_MINUTE).padStart(2, "0")} (${SCORE_CACHE_SYNC_TIME_ZONE}), window ${SCORE_CACHE_SYNC_TRIGGER_WINDOW_MINUTES} min, tick every ${Math.round(SCORE_CACHE_SYNC_TICK_INTERVAL_MS / (60 * 1000))} min.`,
     );
   }
   const ghlConfigured = isGhlConfigured();

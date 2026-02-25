@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
 import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
@@ -11,7 +11,6 @@ import {
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
-import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
 import { patchRecords, getClientManagers, getRecords } from "@/shared/api";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
 import type { ClientRecord } from "@/shared/types/records";
@@ -38,10 +37,17 @@ const SALES_FILTER_ALL = "__all_sales__";
 const SALES_FILTER_UNASSIGNED = "__unassigned_sales__";
 const MANAGER_FILTER_ALL = "__all_managers__";
 const MANAGER_FILTER_UNASSIGNED = "__unassigned_managers__";
+const CLIENTS_PAGE_SIZE = 100;
 
 type ClientsStatusFilter = "all" | "new" | "active" | "inactive" | "overdue" | "written-off" | "fully-paid" | "after-result";
 type ContractSignedFilter = "all" | "signed" | "unsigned";
 type InWorkFilter = "all" | "in-work" | "not-in-work";
+type ScoreTone = "neutral" | "success" | "info" | "warning" | "danger";
+
+interface CachedScoreDisplay {
+  displayScore: number | null;
+  tone: ScoreTone;
+}
 
 const STATUS_FILTER_OPTIONS: Array<{ key: ClientsStatusFilter; label: string }> = [
   { key: "all", label: "All Statuses" },
@@ -80,11 +86,13 @@ export default function ClientsPage() {
   const [contractDateTo, setContractDateTo] = useState("");
   const [selectedRecordId, setSelectedRecordId] = useState("");
   const [recordsUpdatedAt, setRecordsUpdatedAt] = useState<string | null>(null);
+  const [visibleRowsCount, setVisibleRowsCount] = useState(CLIENTS_PAGE_SIZE);
   const [isEditingSelectedRecord, setIsEditingSelectedRecord] = useState(false);
   const [selectedRecordDraft, setSelectedRecordDraft] = useState<ClientRecord | null>(null);
   const [isSavingSelectedRecordEdit, setIsSavingSelectedRecordEdit] = useState(false);
   const [saveSelectedRecordEditError, setSaveSelectedRecordEditError] = useState("");
   const [clientManagersByClientName, setClientManagersByClientName] = useState<Map<string, string>>(new Map());
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
   const loadClients = useCallback(async () => {
     setIsLoading(true);
@@ -212,10 +220,9 @@ export default function ClientsPage() {
   }, [clientManagerFilter, managerFilterOptions]);
 
   const scoreByRecordId = useMemo(() => {
-    const asOfDate = new Date();
-    const scores = new Map<string, ClientScoreResult>();
+    const scores = new Map<string, CachedScoreDisplay>();
     for (const record of records) {
-      scores.set(record.id, evaluateClientScore(record, asOfDate));
+      scores.set(record.id, resolveCachedScoreDisplay(record));
     }
     return scores;
   }, [records]);
@@ -321,6 +328,54 @@ export default function ClientsPage() {
     search,
     statusFilter,
   ]);
+
+  const visibleFilteredRecords = useMemo(
+    () => filteredRecords.slice(0, Math.max(CLIENTS_PAGE_SIZE, visibleRowsCount)),
+    [filteredRecords, visibleRowsCount],
+  );
+  const hasMoreFilteredRecords = visibleFilteredRecords.length < filteredRecords.length;
+
+  useEffect(() => {
+    setVisibleRowsCount(CLIENTS_PAGE_SIZE);
+  }, [
+    search,
+    salesFilter,
+    clientManagerFilter,
+    statusFilter,
+    contractSignedFilter,
+    inWorkFilter,
+    contractDateFrom,
+    contractDateTo,
+    hideWrittenOffByDefault,
+  ]);
+
+  useEffect(() => {
+    if (!hasMoreFilteredRecords) {
+      return;
+    }
+
+    const sentinelElement = loadMoreSentinelRef.current;
+    if (!sentinelElement) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) {
+          return;
+        }
+        setVisibleRowsCount((current) => Math.min(current + CLIENTS_PAGE_SIZE, filteredRecords.length));
+      },
+      {
+        root: null,
+        rootMargin: "360px 0px",
+        threshold: 0.01,
+      },
+    );
+
+    observer.observe(sentinelElement);
+    return () => observer.disconnect();
+  }, [filteredRecords.length, hasMoreFilteredRecords]);
 
   const selectedRecord = useMemo(
     () => records.find((record) => record.id === selectedRecordId) || null,
@@ -728,15 +783,26 @@ export default function ClientsPage() {
           />
         ) : null}
         {!isLoading && !loadError ? (
-          <Table
-            columns={columns}
-            rows={filteredRecords}
-            rowKey={(record, index) => record.id || `client-${index}`}
-            onRowClick={(record) => setSelectedRecordId(record.id)}
-            emptyState={
-              <EmptyState title="No clients found" description="Try changing search filters or refresh Client Payments data." />
-            }
-          />
+          <>
+            <Table
+              columns={columns}
+              rows={visibleFilteredRecords}
+              rowKey={(record, index) => record.id || `client-${index}`}
+              onRowClick={(record) => setSelectedRecordId(record.id)}
+              emptyState={
+                <EmptyState title="No clients found" description="Try changing search filters or refresh Client Payments data." />
+              }
+            />
+            {hasMoreFilteredRecords ? (
+              <div className="clients-pagination-progress" aria-live="polite">
+                <p className="react-user-footnote">
+                  Showing {visibleFilteredRecords.length} of {filteredRecords.length} clients. Scroll down to load next{" "}
+                  {CLIENTS_PAGE_SIZE}.
+                </p>
+                <div ref={loadMoreSentinelRef} className="clients-load-more-sentinel" aria-hidden="true" />
+              </div>
+            ) : null}
+          </>
         ) : null}
       </Panel>
 
@@ -928,9 +994,9 @@ function getOptionalRecordText(record: ClientRecord, key: string): string {
   return rawValue.trim();
 }
 
-function resolveScoreDisplay(score: ClientScoreResult | undefined): {
+function resolveScoreDisplay(score: CachedScoreDisplay | undefined): {
   value: string;
-  tone: "neutral" | "success" | "info" | "warning" | "danger";
+  tone: ScoreTone;
 } {
   if (!score || score.displayScore === null) {
     return { value: "N/A", tone: "neutral" };
@@ -940,6 +1006,57 @@ function resolveScoreDisplay(score: ClientScoreResult | undefined): {
     value: String(score.displayScore),
     tone: score.tone,
   };
+}
+
+function resolveCachedScoreDisplay(record: ClientRecord): CachedScoreDisplay {
+  const displayScore = parseCachedScoreValue(record.cachedScore);
+  const tone = resolveCachedScoreTone(record.cachedScoreTone, displayScore);
+  return {
+    displayScore,
+    tone,
+  };
+}
+
+function parseCachedScoreValue(rawValue: string): number | null {
+  const normalized = (rawValue || "").toString().trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  const rounded = Math.round(parsed);
+  if (rounded < 0 || rounded > 100) {
+    return null;
+  }
+  return rounded;
+}
+
+function resolveCachedScoreTone(rawValue: string, displayScore: number | null): ScoreTone {
+  const normalizedTone = (rawValue || "").toString().trim().toLowerCase();
+  if (normalizedTone === "success" || normalizedTone === "info" || normalizedTone === "warning" || normalizedTone === "danger") {
+    return normalizedTone;
+  }
+  if (normalizedTone === "neutral") {
+    return "neutral";
+  }
+
+  if (displayScore === null) {
+    return "neutral";
+  }
+  if (displayScore >= 95) {
+    return "success";
+  }
+  if (displayScore >= 80) {
+    return "info";
+  }
+  if (displayScore >= 60) {
+    return "warning";
+  }
+  return "danger";
 }
 
 function matchesStatusFilter(
