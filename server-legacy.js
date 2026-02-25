@@ -1264,6 +1264,10 @@ const RECORDS_PUT_MAX_TOTAL_CHARS = Math.min(
   Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_TOTAL_CHARS, 2500000), 10000),
   20000000,
 );
+const RECORDS_PAYMENT_MAX_ABS_CENTS = Math.min(
+  Math.max(parsePositiveInteger(process.env.RECORDS_PAYMENT_MAX_ABS_CENTS, 10_000_000_000), 1000),
+  1_000_000_000_000,
+);
 const RECORDS_PATCH_MAX_OPERATIONS = Math.min(
   Math.max(parsePositiveInteger(process.env.RECORDS_PATCH_MAX_OPERATIONS, 1000), 1),
   20000,
@@ -30455,6 +30459,7 @@ const recordsValidation = createRecordsValidation({
   recordsPatchMaxOperations: RECORDS_PATCH_MAX_OPERATIONS,
   patchOperationUpsert: PATCH_OPERATION_UPSERT,
   patchOperationDelete: PATCH_OPERATION_DELETE,
+  recordsMoneyMaxAbsoluteCents: RECORDS_PAYMENT_MAX_ABS_CENTS,
   sanitizeTextValue,
   toCheckboxValue,
   normalizeDateForStorage,
@@ -30934,6 +30939,27 @@ function isAllowedGhlContractDownloadUrl(rawUrl) {
   }
 
   return false;
+}
+
+const GHL_CONTRACT_DOWNLOAD_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const GHL_CONTRACT_DOWNLOAD_MAX_REDIRECTS = 4;
+
+function resolveGhlContractDownloadRedirectUrl(currentUrl, locationHeader) {
+  const current = resolveAbsoluteGhlContractDownloadUrl(currentUrl);
+  const locationValue = sanitizeTextValue(locationHeader, 2000);
+  if (!current || !locationValue) {
+    return null;
+  }
+
+  try {
+    const redirected = new URL(locationValue, current);
+    if (!isAllowedGhlContractDownloadUrl(redirected.toString())) {
+      return null;
+    }
+    return redirected;
+  } catch {
+    return null;
+  }
 }
 
 function parseFileNameFromContentDisposition(rawValue) {
@@ -34990,27 +35016,63 @@ async function fetchGhlContractFileForDownload(contractUrl, options = {}) {
       controller.abort();
     }, requestTimeoutMs);
 
+    let requestUrl = new URL(resolvedUrl.toString());
     let response;
+    let redirected = false;
+
     try {
-      response = await fetch(resolvedUrl, {
-        method: "GET",
-        headers: attempt.headers,
-        signal: controller.signal,
-      });
+      for (let redirectIndex = 0; redirectIndex <= GHL_CONTRACT_DOWNLOAD_MAX_REDIRECTS; redirectIndex += 1) {
+        response = await fetch(requestUrl, {
+          method: "GET",
+          headers: attempt.headers,
+          signal: controller.signal,
+          redirect: "manual",
+        });
+
+        if (!GHL_CONTRACT_DOWNLOAD_REDIRECT_STATUSES.has(response.status)) {
+          break;
+        }
+
+        redirected = true;
+        const redirectTarget = resolveGhlContractDownloadRedirectUrl(
+          requestUrl.toString(),
+          response.headers.get("location"),
+        );
+        if (!redirectTarget) {
+          throw createHttpError("Contract download redirect target is not allowed.", 400, "ghl_contract_redirect_not_allowed");
+        }
+
+        if (redirectIndex >= GHL_CONTRACT_DOWNLOAD_MAX_REDIRECTS) {
+          throw createHttpError(
+            `Contract download exceeded maximum redirects (${GHL_CONTRACT_DOWNLOAD_MAX_REDIRECTS}).`,
+            400,
+            "ghl_contract_redirect_limit",
+          );
+        }
+
+        requestUrl = redirectTarget;
+      }
     } catch (error) {
       clearTimeout(timeoutId);
       if (error?.name === "AbortError") {
         lastErrorMessage = `Download request timed out after ${requestTimeoutMs}ms.`;
+      } else if (error?.httpStatus) {
+        throw error;
       } else {
         lastErrorMessage = sanitizeTextValue(error?.message, 300) || "network error";
       }
       continue;
+    } finally {
+      clearTimeout(timeoutId);
     }
 
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorPreview = sanitizeTextValue(await response.text().catch(() => ""), 300);
-      lastErrorMessage = `HTTP ${response.status}${errorPreview ? `: ${errorPreview}` : ""}`;
+    if (!response?.ok) {
+      let responseText = "";
+      if (response && typeof response.text === "function") {
+        responseText = await response.text().catch(() => "");
+      }
+      const errorPreview = sanitizeTextValue(responseText, 300);
+      lastErrorMessage = `HTTP ${response?.status || "unknown"}${errorPreview ? `: ${errorPreview}` : ""}`;
       continue;
     }
 
@@ -35037,19 +35099,20 @@ async function fetchGhlContractFileForDownload(contractUrl, options = {}) {
     const mimeType = normalizeAttachmentMimeType(response.headers.get("content-type"));
     const isPdfBySignature = fileBuffer.length >= 4 && fileBuffer.subarray(0, 4).toString() === "%PDF";
     const isPdfByMime = mimeType.includes("pdf");
-    const isPdfByUrl = isLikelyGhlPdfUrl(resolvedUrl.toString());
+    const isPdfByUrl = isLikelyGhlPdfUrl(requestUrl.toString());
     if (!isPdfBySignature && !isPdfByMime && !isPdfByUrl) {
       lastErrorMessage = `Downloaded file is not PDF (content-type: ${mimeType || "unknown"}).`;
       continue;
     }
 
     const headerFileName = parseFileNameFromContentDisposition(response.headers.get("content-disposition"));
-    const urlFileName = extractGhlFileNameFromUrl(resolvedUrl.toString());
+    const urlFileName = extractGhlFileNameFromUrl(requestUrl.toString());
 
     return {
       buffer: fileBuffer,
       fileName: headerFileName || urlFileName || "contract.pdf",
       contentType: isPdfByMime ? mimeType : "application/pdf",
+      redirected,
     };
   }
 
