@@ -940,6 +940,13 @@ a {
   box-shadow: inset 0 0 0 1px var(--color-focus-ring);
 }
 
+.cb-table__spacer-row .cb-table__spacer-cell {
+  padding: 0 !important;
+  border-bottom: 0;
+  background: transparent;
+  pointer-events: none;
+}
+
 .cb-table--compact th,
 .cb-table--compact td,
 .cb-table--compact .cb-table__head-cell,

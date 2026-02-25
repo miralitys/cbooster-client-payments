@@ -262,6 +262,34 @@ export default function ClientPaymentsPage() {
   }, [clientManagersState.byClientName, managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
+  const summedColumnValues = useMemo(() => {
+    const totals = new Map<keyof ClientRecord, number | null>();
+    const runningTotals = new Map<keyof ClientRecord, number>();
+    const populatedColumns = new Set<keyof ClientRecord>();
+
+    for (const column of SUMMABLE_TABLE_COLUMNS) {
+      runningTotals.set(column, 0);
+      totals.set(column, null);
+    }
+
+    for (const record of filteredRecords) {
+      for (const column of SUMMABLE_TABLE_COLUMNS) {
+        const amount = parseMoneyValue(record[column]);
+        if (amount === null) {
+          continue;
+        }
+
+        populatedColumns.add(column);
+        runningTotals.set(column, (runningTotals.get(column) || 0) + amount);
+      }
+    }
+
+    for (const column of SUMMABLE_TABLE_COLUMNS) {
+      totals.set(column, populatedColumns.has(column) ? runningTotals.get(column) || 0 : null);
+    }
+
+    return totals;
+  }, [filteredRecords]);
   const managerStatusText = useMemo(() => {
     if (isManagersLoading) {
       if (managersRefreshMode === "full") {
@@ -849,6 +877,10 @@ export default function ClientPaymentsPage() {
               rows={scoredVisibleRecords}
               rowKey={(row) => row.record.id}
               density="compact"
+              virtualizeRows
+              virtualRowHeight={52}
+              virtualOverscan={10}
+              virtualThreshold={80}
               onRowActivate={(row) => openRecordModal(row.record)}
               footer={
                 <tr>
@@ -874,7 +906,7 @@ export default function ClientPaymentsPage() {
                     }
 
                     if (SUMMABLE_TABLE_COLUMNS.has(column)) {
-                      const sum = sumFieldValues(filteredRecords, column);
+                      const sum = summedColumnValues.get(column as keyof ClientRecord) ?? null;
                       return (
                         <td key={column} className={getColumnAlign(column) === "right" ? "cb-table__cell--align-right" : undefined}>
                           {sum === null ? "-" : formatMoney(sum)}
@@ -1128,23 +1160,6 @@ function formatMoneyCell(rawValue: string): string {
     return "-";
   }
   return formatMoney(amount);
-}
-
-function sumFieldValues(records: ClientRecord[], key: keyof ClientRecord): number | null {
-  let hasAnyValue = false;
-  let sum = 0;
-
-  for (const record of records) {
-    const amount = parseMoneyValue(record[key]);
-    if (amount === null) {
-      continue;
-    }
-
-    hasAnyValue = true;
-    sum += amount;
-  }
-
-  return hasAnyValue ? sum : null;
 }
 
 function TableLoadingSkeleton({ columnCount }: { columnCount: number }) {
