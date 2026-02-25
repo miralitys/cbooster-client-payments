@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
 import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
@@ -92,7 +92,6 @@ export default function ClientsPage() {
   const [isSavingSelectedRecordEdit, setIsSavingSelectedRecordEdit] = useState(false);
   const [saveSelectedRecordEditError, setSaveSelectedRecordEditError] = useState("");
   const [clientManagersByClientName, setClientManagersByClientName] = useState<Map<string, string>>(new Map());
-  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
   const loadClients = useCallback(async () => {
     setIsLoading(true);
@@ -354,27 +353,23 @@ export default function ClientsPage() {
       return;
     }
 
-    const sentinelElement = loadMoreSentinelRef.current;
-    if (!sentinelElement) {
+    const tableWrapElement = document.querySelector<HTMLDivElement>(".clients-react-page .clients-table-wrap");
+    if (!tableWrapElement) {
       return;
     }
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((entry) => entry.isIntersecting)) {
-          return;
-        }
-        setVisibleRowsCount((current) => Math.min(current + CLIENTS_PAGE_SIZE, filteredRecords.length));
-      },
-      {
-        root: null,
-        rootMargin: "360px 0px",
-        threshold: 0.01,
-      },
-    );
+    const loadMoreIfNeeded = () => {
+      const remaining = tableWrapElement.scrollHeight - tableWrapElement.scrollTop - tableWrapElement.clientHeight;
+      if (remaining > 64) {
+        return;
+      }
 
-    observer.observe(sentinelElement);
-    return () => observer.disconnect();
+      setVisibleRowsCount((current) => Math.min(current + CLIENTS_PAGE_SIZE, filteredRecords.length));
+    };
+
+    loadMoreIfNeeded();
+    tableWrapElement.addEventListener("scroll", loadMoreIfNeeded, { passive: true });
+    return () => tableWrapElement.removeEventListener("scroll", loadMoreIfNeeded);
   }, [filteredRecords.length, hasMoreFilteredRecords]);
 
   const selectedRecord = useMemo(
@@ -787,6 +782,7 @@ export default function ClientsPage() {
             <Table
               columns={columns}
               rows={visibleFilteredRecords}
+              className="clients-table-wrap"
               rowKey={(record, index) => record.id || `client-${index}`}
               onRowClick={(record) => setSelectedRecordId(record.id)}
               emptyState={
@@ -796,10 +792,9 @@ export default function ClientsPage() {
             {hasMoreFilteredRecords ? (
               <div className="clients-pagination-progress" aria-live="polite">
                 <p className="react-user-footnote">
-                  Showing {visibleFilteredRecords.length} of {filteredRecords.length} clients. Scroll down to load next{" "}
-                  {CLIENTS_PAGE_SIZE}.
+                  Showing {visibleFilteredRecords.length} of {filteredRecords.length} clients. Scroll to the bottom of the
+                  table to load next {CLIENTS_PAGE_SIZE}.
                 </p>
-                <div ref={loadMoreSentinelRef} className="clients-load-more-sentinel" aria-hidden="true" />
               </div>
             ) : null}
           </>
