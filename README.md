@@ -53,6 +53,13 @@ npm start
    - `RATE_LIMIT_STORE_MODE` = `postgres` или `memory` (по умолчанию `postgres`, если задан `DATABASE_URL`);
    - `RATE_LIMIT_STORE_MAX_KEYS` = лимит in-memory ключей rate-limit (по умолчанию `60000`);
    - `RATE_LIMIT_DB_ERROR_COOLDOWN_MS` = cooldown при ошибках shared rate-limit store (по умолчанию `30000`);
+   - `WEB_AUTH_LOGIN_FAILURE_ACCOUNT_*` = window/max/lock для сигналов по account (участвует в risk scoring и step-up, без жесткого account-only lockout);
+   - `WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_*` = window/max/lock для жёсткого throttling по связке IP+account (возвращает `429 + Retry-After`);
+   - `WEB_AUTH_LOGIN_FAILURE_DEVICE_ACCOUNT_*` = window/max/lock для mobile device-bound throttling (если передан `X-CBooster-Device-Id`);
+   - `WEB_AUTH_LOGIN_STEP_UP_ENABLED` = включает adaptive step-up challenge после порога риска;
+   - `WEB_AUTH_LOGIN_STEP_UP_TOKEN_TTL_SEC` = TTL step-up токена (по умолчанию `600`);
+   - `WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_FAILURES` / `WEB_AUTH_LOGIN_STEP_UP_IP_ACCOUNT_FAILURES` / `WEB_AUTH_LOGIN_STEP_UP_DEVICE_ACCOUNT_FAILURES` = пороги step-up;
+   - `WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_UNIQUE_IPS` / `WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_UNIQUE_DEVICES` = anti-targeted-lockout пороги по распределению атак;
    - `AUTH_PROTECTION_ALERT_WINDOW_SEC` = окно агрегации auth-anomaly (по умолчанию `600`);
    - `AUTH_PROTECTION_ALERT_THRESHOLD` = порог событий в окне для алерта (по умолчанию `12`);
    - `AUTH_PROTECTION_ALERT_WEBHOOK_URL` = webhook URL для security-алертов по auth-anomaly (опционально);

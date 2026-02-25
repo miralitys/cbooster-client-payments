@@ -6519,7 +6519,18 @@ function isWebAuthOwnerOrAdminProfile(userProfile) {
   return normalizeWebAuthRoleId(userProfile.roleId, departmentId) === WEB_AUTH_ROLE_ADMIN;
 }
 
-function getWebAuthRoleName(roleId) {
+function getWebAuthRoleName(roleId, departmentId = "") {
+  if (roleId === WEB_AUTH_ROLE_MANAGER) {
+    const normalizedDepartmentId = normalizeWebAuthDepartmentId(departmentId);
+    if (normalizedDepartmentId === WEB_AUTH_DEPARTMENT_SALES) {
+      return "Sales Manager";
+    }
+    if (normalizedDepartmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
+      return "Client Manager";
+    }
+    return "Manager";
+  }
+
   return WEB_AUTH_ROLE_DEFINITION_BY_ID.get(roleId)?.name || "Unknown Role";
 }
 
@@ -11686,7 +11697,7 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     departmentId,
     departmentName: getWebAuthDepartmentName(departmentId),
     roleId,
-    roleName: getWebAuthRoleName(roleId),
+    roleName: getWebAuthRoleName(roleId, departmentId),
     teamUsernames: !isOwner && roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER ? teamUsernames : [],
     mustChangePassword,
     totpEnabled,
@@ -12297,7 +12308,7 @@ function buildWebAuthAccessModel() {
     name: department.name,
     roles: department.roles.map((roleId) => ({
       id: roleId,
-      name: getWebAuthRoleName(roleId),
+      name: getWebAuthRoleName(roleId, department.id),
       members: [...(usersByDepartmentRole.get(`${department.id}:${roleId}`) || [])]
         .sort((left, right) =>
           left.displayName.localeCompare(right.displayName, "en-US", { sensitivity: "base" }),

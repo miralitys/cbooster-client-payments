@@ -628,3 +628,147 @@ test("web auth integration: repeated invalid logins trigger 429 lock with Retry-
     },
   );
 });
+
+test("web auth integration: adaptive step-up challenge is required at risk threshold and bound to device fingerprint", async () => {
+  await withServer(
+    {
+      WEB_AUTH_LOGIN_FAILURE_ACCOUNT_MAX_FAILURES: "99",
+      WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_MAX_FAILURES: "99",
+      WEB_AUTH_LOGIN_FAILURE_DEVICE_ACCOUNT_MAX_FAILURES: "99",
+      WEB_AUTH_LOGIN_FAILURE_DELAY_BASE_MS: "0",
+      WEB_AUTH_LOGIN_FAILURE_DELAY_MAX_MS: "0",
+      WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_FAILURES: "2",
+      WEB_AUTH_LOGIN_STEP_UP_IP_ACCOUNT_FAILURES: "2",
+      WEB_AUTH_LOGIN_STEP_UP_DEVICE_ACCOUNT_FAILURES: "2",
+      WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_UNIQUE_IPS: "9",
+      WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_UNIQUE_DEVICES: "9",
+    },
+    async ({ baseUrl }) => {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const response = await fetch(`${baseUrl}/api/auth/login`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "integration-stepup-device-a",
+            "X-Forwarded-For": "198.51.100.70",
+          },
+          body: JSON.stringify({
+            username: TEST_OWNER_USERNAME,
+            password: "WrongPassword!123",
+          }),
+        });
+        assert.equal(response.status, 401);
+      }
+
+      const challengeResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "integration-stepup-device-a",
+          "X-Forwarded-For": "198.51.100.70",
+        },
+        body: JSON.stringify({
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+        }),
+      });
+      const challengeBody = await challengeResponse.json();
+      assert.equal(challengeResponse.status, 403);
+      assert.equal(challengeBody?.code, "login_step_up_required");
+      assert.equal(challengeBody?.stepUpRequired, true);
+      assert.equal(typeof challengeBody?.stepUpToken, "string");
+      assert.ok(challengeBody.stepUpToken.length > 20);
+
+      const mismatchedDeviceResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "integration-stepup-device-b",
+          "X-Forwarded-For": "198.51.100.70",
+        },
+        body: JSON.stringify({
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+          stepUpToken: challengeBody.stepUpToken,
+        }),
+      });
+      const mismatchedDeviceBody = await mismatchedDeviceResponse.json();
+      assert.equal(mismatchedDeviceResponse.status, 403);
+      assert.equal(mismatchedDeviceBody?.code, "login_step_up_required");
+
+      const solvedResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "integration-stepup-device-a",
+          "X-Forwarded-For": "198.51.100.70",
+          "x-cbooster-login-step-up-token": challengeBody.stepUpToken,
+        },
+        body: JSON.stringify({
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+        }),
+      });
+      const solvedBody = await solvedResponse.json();
+      assert.equal(solvedResponse.status, 200, JSON.stringify(solvedBody));
+      assert.equal(solvedBody?.ok, true);
+    },
+  );
+});
+
+test("web auth integration: attacker IP lock does not force 429 lockout for the same username from another IP", async () => {
+  await withServer(
+    {
+      WEB_AUTH_LOGIN_FAILURE_ACCOUNT_MAX_FAILURES: "3",
+      WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_MAX_FAILURES: "3",
+      WEB_AUTH_LOGIN_FAILURE_DEVICE_ACCOUNT_MAX_FAILURES: "99",
+      WEB_AUTH_LOGIN_FAILURE_ACCOUNT_WINDOW_SEC: "300",
+      WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_WINDOW_SEC: "300",
+      WEB_AUTH_LOGIN_FAILURE_ACCOUNT_LOCK_SEC: "120",
+      WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_LOCK_SEC: "120",
+      WEB_AUTH_LOGIN_FAILURE_DELAY_BASE_MS: "0",
+      WEB_AUTH_LOGIN_FAILURE_DELAY_MAX_MS: "0",
+      WEB_AUTH_LOGIN_STEP_UP_ACCOUNT_FAILURES: "99",
+      WEB_AUTH_LOGIN_STEP_UP_IP_ACCOUNT_FAILURES: "99",
+      WEB_AUTH_LOGIN_STEP_UP_DEVICE_ACCOUNT_FAILURES: "99",
+    },
+    async ({ baseUrl }) => {
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        await fetch(`${baseUrl}/api/auth/login`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "X-Forwarded-For": "198.51.100.90",
+            "User-Agent": "attack-device",
+          },
+          body: JSON.stringify({
+            username: TEST_OWNER_USERNAME,
+            password: "WrongPassword!123",
+          }),
+        });
+      }
+
+      const victimResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "198.51.100.91",
+          "User-Agent": "victim-device",
+        },
+        body: JSON.stringify({
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+        }),
+      });
+      const victimBody = await victimResponse.json();
+      assert.equal(victimResponse.status, 200, `Expected victim login to avoid targeted lockout: ${JSON.stringify(victimBody)}`);
+      assert.equal(victimBody?.ok, true);
+    },
+  );
+});
