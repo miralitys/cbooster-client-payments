@@ -11,6 +11,7 @@ const compression = require("compression");
 const helmet = require("helmet");
 const multer = require("multer");
 const QRCode = require("qrcode");
+const webPush = require("web-push");
 const { createDbPool } = require("./server/shared/db/pool");
 const { createDbQuery } = require("./server/shared/db/query");
 const { createDbTx } = require("./server/shared/db/tx");
@@ -124,6 +125,10 @@ const MINI_TELEGRAM_NOTIFICATION_QUEUE_MAX_PENDING = Math.min(
   Math.max(parsePositiveInteger(process.env.MINI_TELEGRAM_NOTIFICATION_QUEUE_MAX_PENDING, 200), 10),
   5000,
 );
+const WEB_PUSH_VAPID_PUBLIC_KEY = sanitizeTextValue(process.env.WEB_PUSH_VAPID_PUBLIC_KEY, 500);
+const WEB_PUSH_VAPID_PRIVATE_KEY = sanitizeTextValue(process.env.WEB_PUSH_VAPID_PRIVATE_KEY, 500);
+const WEB_PUSH_VAPID_SUBJECT =
+  sanitizeTextValue(process.env.WEB_PUSH_VAPID_SUBJECT, 320) || "mailto:security@creditbooster.com";
 const DEFAULT_WEB_AUTH_USERNAME = "owner";
 const DEFAULT_WEB_AUTH_PASSWORD = "ChangeMe!12345";
 const DEFAULT_WEB_AUTH_OWNER_USERNAME = "owner";
@@ -864,6 +869,11 @@ const WEB_NOTIFICATIONS_TABLE_NAME = resolveTableName(
   process.env.DB_WEB_NOTIFICATIONS_TABLE_NAME,
   DEFAULT_WEB_NOTIFICATIONS_TABLE_NAME,
 );
+const DEFAULT_WEB_PUSH_SUBSCRIPTIONS_TABLE_NAME = "web_push_subscriptions";
+const WEB_PUSH_SUBSCRIPTIONS_TABLE_NAME = resolveTableName(
+  process.env.DB_WEB_PUSH_SUBSCRIPTIONS_TABLE_NAME,
+  DEFAULT_WEB_PUSH_SUBSCRIPTIONS_TABLE_NAME,
+);
 const MINI_RUNTIME_STATE_STORE = resolveMiniRuntimeStateStore(process.env.MINI_RUNTIME_STATE_STORE);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
@@ -883,6 +893,7 @@ const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESS
 const MINI_RUNTIME_STATE_TABLE = qualifyTableName(DB_SCHEMA, MINI_RUNTIME_STATE_TABLE_NAME);
 const WEB_AUTH_USERS_DIRECTORY_TABLE = qualifyTableName(DB_SCHEMA, WEB_AUTH_USERS_DIRECTORY_TABLE_NAME);
 const WEB_NOTIFICATIONS_TABLE = qualifyTableName(DB_SCHEMA, WEB_NOTIFICATIONS_TABLE_NAME);
+const WEB_PUSH_SUBSCRIPTIONS_TABLE = qualifyTableName(DB_SCHEMA, WEB_PUSH_SUBSCRIPTIONS_TABLE_NAME);
 const MINI_RUNTIME_STATE_USE_POSTGRES = MINI_RUNTIME_STATE_STORE === "postgres" && Boolean(DATABASE_URL);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
 const WEB_AUTH_USERS_DIRECTORY_ROW_ID = 1;
@@ -23250,6 +23261,45 @@ async function ensureDatabaseReady() {
         ON ${WEB_NOTIFICATIONS_TABLE} (recipient_username, read_at, created_at DESC, id DESC)
       `);
 
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${WEB_PUSH_SUBSCRIPTIONS_TABLE} (
+          endpoint TEXT PRIMARY KEY,
+          recipient_username TEXT NOT NULL,
+          p256dh_key TEXT NOT NULL,
+          auth_key TEXT NOT NULL,
+          expiration_time BIGINT,
+          user_agent TEXT NOT NULL DEFAULT '',
+          last_error TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        ALTER TABLE ${WEB_PUSH_SUBSCRIPTIONS_TABLE}
+        ADD COLUMN IF NOT EXISTS user_agent TEXT NOT NULL DEFAULT ''
+      `);
+
+      await sharedDbQuery(`
+        ALTER TABLE ${WEB_PUSH_SUBSCRIPTIONS_TABLE}
+        ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT ''
+      `);
+
+      await sharedDbQuery(`
+        ALTER TABLE ${WEB_PUSH_SUBSCRIPTIONS_TABLE}
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${WEB_PUSH_SUBSCRIPTIONS_TABLE_NAME}_recipient_idx
+        ON ${WEB_PUSH_SUBSCRIPTIONS_TABLE} (recipient_username)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${WEB_PUSH_SUBSCRIPTIONS_TABLE_NAME}_updated_at_idx
+        ON ${WEB_PUSH_SUBSCRIPTIONS_TABLE} (updated_at DESC)
+      `);
+
       await sharedDbQuery(
         `
           INSERT INTO ${STATE_TABLE} (id, records)
@@ -23824,6 +23874,7 @@ const notificationsRepo = createNotificationsRepo({
   ensureDatabaseReady,
   tables: {
     notificationsTable: WEB_NOTIFICATIONS_TABLE,
+    pushSubscriptionsTable: WEB_PUSH_SUBSCRIPTIONS_TABLE,
   },
   helpers: {
     sanitizeTextValue,
@@ -23833,6 +23884,13 @@ const notificationsRepo = createNotificationsRepo({
 const notificationsService = createNotificationsService({
   notificationsRepo,
   sanitizeTextValue,
+  webPushClient: webPush,
+  pushPublicKey: WEB_PUSH_VAPID_PUBLIC_KEY,
+  pushPrivateKey: WEB_PUSH_VAPID_PRIVATE_KEY,
+  pushSubject: WEB_PUSH_VAPID_SUBJECT,
+  logWarn: (message) => {
+    console.warn(message);
+  },
 });
 
 const notificationsController = createNotificationsController({
@@ -27623,9 +27681,15 @@ function setWebAppStaticHeaders(res, filePath) {
   const relativePath = path.relative(webAppDistRoot, normalizedFilePath);
   const normalizedRelativePath = relativePath.split(path.sep).join("/");
   const isInsideAssetsDir = normalizedRelativePath.startsWith("assets/");
+  const isServiceWorkerScript = normalizedRelativePath === "push-sw.js";
 
   if (isInsideAssetsDir) {
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    return;
+  }
+
+  if (isServiceWorkerScript) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     return;
   }
 
@@ -32600,6 +32664,9 @@ registerNotificationsRoutes({
   },
   handlers: {
     handleNotificationsGet: notificationsController.handleNotificationsGet,
+    handleNotificationsPushPublicKeyGet: notificationsController.handleNotificationsPushPublicKeyGet,
+    handleNotificationsPushSubscribePost: notificationsController.handleNotificationsPushSubscribePost,
+    handleNotificationsPushUnsubscribePost: notificationsController.handleNotificationsPushUnsubscribePost,
     handleNotificationsMarkReadPost: notificationsController.handleNotificationsMarkReadPost,
     handleNotificationsMarkAllReadPost: notificationsController.handleNotificationsMarkAllReadPost,
   },

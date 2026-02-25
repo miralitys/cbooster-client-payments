@@ -15,6 +15,7 @@ function createNotificationsRepo(dependencies = {}) {
           throw new Error("Notifications repository query function is not configured.");
         };
   const notificationsTable = tables?.notificationsTable;
+  const pushSubscriptionsTable = tables?.pushSubscriptionsTable;
   const sanitizeTextValue =
     typeof helpers?.sanitizeTextValue === "function"
       ? helpers.sanitizeTextValue
@@ -26,6 +27,9 @@ function createNotificationsRepo(dependencies = {}) {
 
   if (!notificationsTable) {
     throw new Error("createNotificationsRepo requires tables.notificationsTable.");
+  }
+  if (!pushSubscriptionsTable) {
+    throw new Error("createNotificationsRepo requires tables.pushSubscriptionsTable.");
   }
 
   function normalizeUsername(rawValue) {
@@ -53,6 +57,32 @@ function createNotificationsRepo(dependencies = {}) {
       return {};
     }
     return rawValue;
+  }
+
+  function normalizePushSubscription(rawSubscription) {
+    if (!rawSubscription || typeof rawSubscription !== "object" || Array.isArray(rawSubscription)) {
+      return null;
+    }
+
+    const endpoint = sanitizeTextValue(rawSubscription.endpoint, 2000);
+    const keys = rawSubscription.keys && typeof rawSubscription.keys === "object" ? rawSubscription.keys : {};
+    const p256dhKey = sanitizeTextValue(keys.p256dh, 400);
+    const authKey = sanitizeTextValue(keys.auth, 220);
+    if (!endpoint || !p256dhKey || !authKey) {
+      return null;
+    }
+
+    const hasExpirationTime =
+      rawSubscription.expirationTime !== null &&
+      rawSubscription.expirationTime !== undefined &&
+      String(rawSubscription.expirationTime).trim() !== "";
+    const expirationTime = hasExpirationTime ? Number(rawSubscription.expirationTime) : Number.NaN;
+    return {
+      endpoint,
+      p256dhKey,
+      authKey,
+      expirationTime: hasExpirationTime && Number.isFinite(expirationTime) ? Math.trunc(expirationTime) : null,
+    };
   }
 
   function normalizeNotificationEntry(rawEntry) {
@@ -129,7 +159,7 @@ function createNotificationsRepo(dependencies = {}) {
       .map((entry) => normalizeNotificationEntry(entry))
       .filter(Boolean);
     if (!normalizedEntries.length) {
-      return 0;
+      return [];
     }
 
     await ensureDatabaseReady();
@@ -152,7 +182,7 @@ function createNotificationsRepo(dependencies = {}) {
       return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}::jsonb, $${base + 11})`;
     });
 
-    await query(
+    const result = await query(
       `
         INSERT INTO ${notificationsTable} (
           id,
@@ -169,11 +199,23 @@ function createNotificationsRepo(dependencies = {}) {
         )
         VALUES ${placeholders.join(", ")}
         ON CONFLICT (id) DO NOTHING
+        RETURNING
+          id,
+          recipient_username,
+          type,
+          title,
+          message,
+          tone,
+          client_name,
+          link_href,
+          link_label,
+          payload,
+          created_at
       `,
       values,
     );
 
-    return normalizedEntries.length;
+    return Array.isArray(result?.rows) ? result.rows : [];
   }
 
   async function markNotificationRead(recipientUsername, notificationId) {
@@ -217,11 +259,116 @@ function createNotificationsRepo(dependencies = {}) {
     return Number(result?.rowCount || 0);
   }
 
+  async function listPushSubscriptionsByRecipients(recipientUsernames) {
+    const normalizedRecipients = [...new Set((Array.isArray(recipientUsernames) ? recipientUsernames : []).map(normalizeUsername).filter(Boolean))];
+    if (!normalizedRecipients.length) {
+      return [];
+    }
+
+    await ensureDatabaseReady();
+    const result = await query(
+      `
+        SELECT
+          endpoint,
+          recipient_username,
+          p256dh_key,
+          auth_key,
+          expiration_time
+        FROM ${pushSubscriptionsTable}
+        WHERE recipient_username = ANY($1::text[])
+      `,
+      [normalizedRecipients],
+    );
+    return Array.isArray(result?.rows) ? result.rows : [];
+  }
+
+  async function upsertPushSubscription(recipientUsername, subscription, options = {}) {
+    const normalizedRecipientUsername = normalizeUsername(recipientUsername);
+    const normalizedSubscription = normalizePushSubscription(subscription);
+    if (!normalizedRecipientUsername || !normalizedSubscription) {
+      return false;
+    }
+
+    const userAgent = sanitizeTextValue(options.userAgent, 900);
+    await ensureDatabaseReady();
+    const result = await query(
+      `
+        INSERT INTO ${pushSubscriptionsTable} (
+          endpoint,
+          recipient_username,
+          p256dh_key,
+          auth_key,
+          expiration_time,
+          user_agent
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (endpoint)
+        DO UPDATE SET
+          recipient_username = EXCLUDED.recipient_username,
+          p256dh_key = EXCLUDED.p256dh_key,
+          auth_key = EXCLUDED.auth_key,
+          expiration_time = EXCLUDED.expiration_time,
+          user_agent = EXCLUDED.user_agent,
+          updated_at = NOW(),
+          last_error = ''
+      `,
+      [
+        normalizedSubscription.endpoint,
+        normalizedRecipientUsername,
+        normalizedSubscription.p256dhKey,
+        normalizedSubscription.authKey,
+        normalizedSubscription.expirationTime,
+        userAgent,
+      ],
+    );
+    return Number(result?.rowCount || 0) > 0;
+  }
+
+  async function deletePushSubscriptionForRecipient(recipientUsername, endpoint) {
+    const normalizedRecipientUsername = normalizeUsername(recipientUsername);
+    const normalizedEndpoint = sanitizeTextValue(endpoint, 2000);
+    if (!normalizedRecipientUsername || !normalizedEndpoint) {
+      return false;
+    }
+
+    await ensureDatabaseReady();
+    const result = await query(
+      `
+        DELETE FROM ${pushSubscriptionsTable}
+        WHERE recipient_username = $1
+          AND endpoint = $2
+      `,
+      [normalizedRecipientUsername, normalizedEndpoint],
+    );
+    return Number(result?.rowCount || 0) > 0;
+  }
+
+  async function deletePushSubscriptionByEndpoint(endpoint) {
+    const normalizedEndpoint = sanitizeTextValue(endpoint, 2000);
+    if (!normalizedEndpoint) {
+      return false;
+    }
+
+    await ensureDatabaseReady();
+    const result = await query(
+      `
+        DELETE FROM ${pushSubscriptionsTable}
+        WHERE endpoint = $1
+      `,
+      [normalizedEndpoint],
+    );
+    return Number(result?.rowCount || 0) > 0;
+  }
+
   return {
     listNotificationsByRecipient,
     insertNotifications,
     markNotificationRead,
     markAllNotificationsRead,
+    listPushSubscriptionsByRecipients,
+    upsertPushSubscription,
+    deletePushSubscriptionForRecipient,
+    deletePushSubscriptionByEndpoint,
   };
 }
 

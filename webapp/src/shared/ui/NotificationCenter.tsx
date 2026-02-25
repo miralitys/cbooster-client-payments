@@ -2,8 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   getNotificationsFeed,
+  getNotificationsPushPublicKey,
   markAllNotificationsRead as markAllNotificationsReadRequest,
   markNotificationRead as markNotificationReadRequest,
+  subscribeNotificationsPush,
+  unsubscribeNotificationsPush,
+  type PushPublicKeyConfig,
+  type PushSubscriptionPayload,
 } from "@/shared/api/notifications";
 import { requestOpenClientCard } from "@/shared/lib/openClientCard";
 import type { AppNotification } from "@/shared/types/notifications";
@@ -12,21 +17,35 @@ const notificationDateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "short",
   timeStyle: "short",
 });
+
 const NOTIFICATIONS_POLL_INTERVAL_MS = 30_000;
-const MAX_BROWSER_NOTIFICATIONS_PER_POLL = 3;
-const BROWSER_NOTIFICATION_FALLBACK_MESSAGE = "Open the notification center to view details.";
+const PUSH_SERVICE_WORKER_URL = "/app/push-sw.js";
+const PUSH_SERVICE_WORKER_SCOPE = "/app/";
+const PUSH_URL_PARAM_NOTIFICATION_ID = "openNotificationId";
+const PUSH_URL_PARAM_CLIENT_NAME = "openNotificationClient";
+const PUSH_URL_PARAM_LINK_HREF = "openNotificationLink";
+const PUSH_OPEN_MESSAGE_TYPE = "cbooster-notification-open";
+
+interface PushOpenPayload {
+  notificationId: string;
+  clientName: string;
+  linkHref: string;
+}
 
 export function NotificationCenter() {
   const [isOpen, setIsOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"active" | "archive">("active");
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const isBrowserNotificationsSupported = supportsBrowserNotifications();
-  const [browserNotificationPermission, setBrowserNotificationPermission] = useState<NotificationPermission>(() =>
-    isBrowserNotificationsSupported ? Notification.permission : "default",
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>(() =>
+    supportsBrowserNotifications() ? Notification.permission : "default",
   );
+  const [pushServerEnabled, setPushServerEnabled] = useState<boolean | null>(null);
+  const [pushSubscribed, setPushSubscribed] = useState(false);
+  const [isPushSyncing, setIsPushSyncing] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const knownNotificationIdsRef = useRef<Set<string>>(new Set());
-  const hasLoadedInitialSnapshotRef = useRef(false);
+  const hasHandledPushUrlRef = useRef(false);
+
+  const isPushSupported = supportsPushNotifications();
   const unreadCount = useMemo(() => getUnreadNotificationsCount(notifications), [notifications]);
   const activeNotifications = useMemo(() => notifications.filter((item) => !item.read), [notifications]);
   const displayedNotifications = viewMode === "active" ? activeNotifications : notifications;
@@ -34,25 +53,126 @@ export function NotificationCenter() {
   const loadNotifications = useCallback(async () => {
     try {
       const nextNotifications = await getNotificationsFeed();
-      const knownNotificationIds = knownNotificationIdsRef.current;
-
-      if (hasLoadedInitialSnapshotRef.current && isBrowserNotificationsSupported && browserNotificationPermission === "granted") {
-        const newUnreadNotifications = nextNotifications
-          .filter((notification) => !notification.read && !knownNotificationIds.has(notification.id))
-          .slice(0, MAX_BROWSER_NOTIFICATIONS_PER_POLL);
-
-        for (const notification of newUnreadNotifications) {
-          showBrowserNotification(notification);
-        }
-      }
-
-      knownNotificationIdsRef.current = new Set(nextNotifications.map((notification) => notification.id));
-      hasLoadedInitialSnapshotRef.current = true;
       setNotifications(nextNotifications);
     } catch {
       // Keep existing notifications snapshot on transient API failures.
     }
-  }, [browserNotificationPermission, isBrowserNotificationsSupported]);
+  }, []);
+
+  const markNotificationRead = useCallback(
+    (notificationId: string): void => {
+      const normalizedId = String(notificationId || "").trim();
+      if (!normalizedId) {
+        return;
+      }
+
+      setNotifications((currentNotifications) =>
+        currentNotifications.map((notification) => {
+          if (notification.id !== normalizedId || notification.read) {
+            return notification;
+          }
+          return {
+            ...notification,
+            read: true,
+          };
+        }),
+      );
+
+      void markNotificationReadRequest(normalizedId).catch(() => {
+        void loadNotifications();
+      });
+    },
+    [loadNotifications],
+  );
+
+  const openNotificationByPayload = useCallback(
+    (payload: PushOpenPayload): void => {
+      if (payload.notificationId) {
+        markNotificationRead(payload.notificationId);
+      }
+
+      if (payload.clientName) {
+        requestOpenClientCard(payload.clientName, {
+          fallbackHref: payload.linkHref || undefined,
+        });
+        return;
+      }
+
+      if (payload.linkHref) {
+        window.location.assign(payload.linkHref);
+      }
+    },
+    [markNotificationRead],
+  );
+
+  const syncPushSubscription = useCallback(
+    async (knownConfig: PushPublicKeyConfig | null = null): Promise<boolean> => {
+      if (!isPushSupported) {
+        setPushServerEnabled(false);
+        setPushSubscribed(false);
+        return false;
+      }
+
+      const config =
+        knownConfig ||
+        (await getNotificationsPushPublicKey().catch(() => ({
+          enabled: false,
+          publicKey: "",
+        })));
+      const isEnabled = Boolean(config?.enabled && config?.publicKey);
+      setPushServerEnabled(isEnabled);
+      if (!isEnabled) {
+        setPushSubscribed(false);
+        return false;
+      }
+
+      if (Notification.permission !== "granted") {
+        setPushSubscribed(false);
+        return false;
+      }
+
+      try {
+        const registration = await registerPushServiceWorker();
+        const subscription = await ensurePushSubscription(registration, config.publicKey);
+        const payload = normalizePushSubscriptionPayload(subscription);
+        if (!payload) {
+          setPushSubscribed(false);
+          return false;
+        }
+
+        const subscribed = await subscribeNotificationsPush(payload);
+        setPushSubscribed(subscribed);
+        return subscribed;
+      } catch {
+        setPushSubscribed(false);
+        return false;
+      }
+    },
+    [isPushSupported],
+  );
+
+  const unsubscribePush = useCallback(async (): Promise<void> => {
+    if (!isPushSupported) {
+      setPushSubscribed(false);
+      return;
+    }
+
+    try {
+      const registration = await navigator.serviceWorker.getRegistration(PUSH_SERVICE_WORKER_SCOPE);
+      const subscription = await registration?.pushManager.getSubscription();
+      const endpoint = String(subscription?.endpoint || "").trim();
+      if (endpoint) {
+        await unsubscribeNotificationsPush(endpoint).catch(() => false);
+      }
+      if (subscription) {
+        await subscription.unsubscribe().catch(() => false);
+      }
+    } catch {
+      // Best-effort unsubscribe.
+    }
+
+    setPushSubscribed(false);
+  }, [isPushSupported]);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,12 +196,39 @@ export function NotificationCenter() {
   }, [loadNotifications]);
 
   useEffect(() => {
-    if (!isBrowserNotificationsSupported) {
+    if (!isPushSupported) {
+      return;
+    }
+
+    let cancelled = false;
+    async function bootstrapPushConfig() {
+      const config = await getNotificationsPushPublicKey().catch(() => ({
+        enabled: false,
+        publicKey: "",
+      }));
+      if (cancelled) {
+        return;
+      }
+      setPushServerEnabled(config.enabled === true && Boolean(config.publicKey));
+
+      if (Notification.permission === "granted") {
+        await syncPushSubscription(config);
+      }
+    }
+
+    void bootstrapPushConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, [isPushSupported, syncPushSubscription]);
+
+  useEffect(() => {
+    if (!isPushSupported) {
       return;
     }
 
     function syncPermission(): void {
-      setBrowserNotificationPermission(Notification.permission);
+      setPushPermission(Notification.permission);
     }
 
     syncPermission();
@@ -91,7 +238,56 @@ export function NotificationCenter() {
       window.removeEventListener("focus", syncPermission);
       document.removeEventListener("visibilitychange", syncPermission);
     };
-  }, [isBrowserNotificationsSupported]);
+  }, [isPushSupported]);
+
+  useEffect(() => {
+    if (!isPushSupported) {
+      return;
+    }
+
+    if (pushPermission === "granted") {
+      void syncPushSubscription();
+      return;
+    }
+
+    if (pushPermission === "denied") {
+      void unsubscribePush();
+    }
+  }, [isPushSupported, pushPermission, syncPushSubscription, unsubscribePush]);
+
+  useEffect(() => {
+    if (!isPushSupported) {
+      return;
+    }
+
+    function onPushMessage(event: MessageEvent<unknown>) {
+      const payload = parsePushOpenPayload(event.data);
+      if (!payload) {
+        return;
+      }
+      openNotificationByPayload(payload);
+    }
+
+    navigator.serviceWorker.addEventListener("message", onPushMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener("message", onPushMessage);
+    };
+  }, [isPushSupported, openNotificationByPayload]);
+
+  useEffect(() => {
+    if (hasHandledPushUrlRef.current) {
+      return;
+    }
+    hasHandledPushUrlRef.current = true;
+
+    const payload = parsePushOpenPayloadFromCurrentUrl();
+    if (!payload) {
+      return;
+    }
+
+    clearPushOpenPayloadFromCurrentUrl();
+    openNotificationByPayload(payload);
+  }, [openNotificationByPayload]);
 
   useEffect(() => {
     function onPointerDown(event: MouseEvent) {
@@ -118,24 +314,6 @@ export function NotificationCenter() {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, []);
-
-  function markNotificationRead(notificationId: string): void {
-    setNotifications((currentNotifications) =>
-      currentNotifications.map((notification) => {
-        if (notification.id !== notificationId || notification.read) {
-          return notification;
-        }
-        return {
-          ...notification,
-          read: true,
-        };
-      }),
-    );
-
-    void markNotificationReadRequest(notificationId).catch(() => {
-      void loadNotifications();
-    });
-  }
 
   function markAllNotificationsRead(): void {
     if (!unreadCount) {
@@ -184,16 +362,24 @@ export function NotificationCenter() {
     markNotificationRead(notification.id);
   }
 
-  async function handleEnableBrowserNotificationsClick(): Promise<void> {
-    if (!isBrowserNotificationsSupported) {
+  async function handleEnableChromeAlertsClick(): Promise<void> {
+    if (!isPushSupported) {
       return;
     }
 
+    setIsPushSyncing(true);
     try {
-      const nextPermission = await Notification.requestPermission();
-      setBrowserNotificationPermission(nextPermission);
-    } catch {
-      setBrowserNotificationPermission(Notification.permission);
+      let nextPermission = Notification.permission;
+      if (nextPermission !== "granted") {
+        nextPermission = await Notification.requestPermission();
+      }
+      setPushPermission(nextPermission);
+
+      if (nextPermission === "granted") {
+        await syncPushSubscription();
+      }
+    } finally {
+      setIsPushSyncing(false);
     }
   }
 
@@ -230,27 +416,32 @@ export function NotificationCenter() {
           <p className="notification-center__count">{unreadCount} unread</p>
         </header>
 
-        {isBrowserNotificationsSupported ? (
+        {isPushSupported ? (
           <div className="notification-center__browser">
-            {browserNotificationPermission === "default" ? (
+            {pushServerEnabled === false ? (
+              <p className="notification-center__browser-note">Chrome alerts are unavailable on the server.</p>
+            ) : null}
+
+            {pushServerEnabled !== false && pushPermission === "default" ? (
               <button
                 type="button"
                 className="notification-center__toolbar-btn"
+                disabled={isPushSyncing}
                 onClick={() => {
-                  void handleEnableBrowserNotificationsClick();
+                  void handleEnableChromeAlertsClick();
                 }}
               >
                 Enable Chrome alerts
               </button>
             ) : null}
 
-            {browserNotificationPermission === "granted" ? (
+            {pushServerEnabled && pushPermission === "granted" ? (
               <p className="notification-center__browser-note notification-center__browser-note--enabled">
-                Chrome alerts enabled
+                {pushSubscribed ? "Chrome alerts enabled" : "Chrome alerts connecting..."}
               </p>
             ) : null}
 
-            {browserNotificationPermission === "denied" ? (
+            {pushServerEnabled && pushPermission === "denied" ? (
               <p className="notification-center__browser-note">
                 Chrome alerts are blocked in browser settings for this site.
               </p>
@@ -367,37 +558,140 @@ function supportsBrowserNotifications(): boolean {
   return typeof window !== "undefined" && "Notification" in window;
 }
 
-function showBrowserNotification(notification: AppNotification): void {
-  if (!supportsBrowserNotifications() || Notification.permission !== "granted") {
+function supportsPushNotifications(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    supportsBrowserNotifications() &&
+    window.isSecureContext &&
+    "serviceWorker" in navigator &&
+    "PushManager" in window
+  );
+}
+
+async function registerPushServiceWorker(): Promise<ServiceWorkerRegistration> {
+  return navigator.serviceWorker.register(PUSH_SERVICE_WORKER_URL, {
+    scope: PUSH_SERVICE_WORKER_SCOPE,
+  });
+}
+
+async function ensurePushSubscription(
+  registration: ServiceWorkerRegistration,
+  applicationServerKey: string,
+): Promise<PushSubscription> {
+  const existingSubscription = await registration.pushManager.getSubscription();
+  if (existingSubscription) {
+    return existingSubscription;
+  }
+
+  return registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: decodeBase64UrlToArrayBuffer(applicationServerKey),
+  });
+}
+
+function normalizePushSubscriptionPayload(subscription: PushSubscription | null): PushSubscriptionPayload | null {
+  if (!subscription) {
+    return null;
+  }
+
+  const serialized = subscription.toJSON();
+  const endpoint = String(serialized.endpoint || subscription.endpoint || "").trim();
+  const p256dh = String(serialized.keys?.p256dh || "").trim();
+  const auth = String(serialized.keys?.auth || "").trim();
+  if (!endpoint || !p256dh || !auth) {
+    return null;
+  }
+
+  return {
+    endpoint,
+    expirationTime: serialized.expirationTime ?? null,
+    keys: {
+      p256dh,
+      auth,
+    },
+  };
+}
+
+function decodeBase64UrlToArrayBuffer(value: string): ArrayBuffer {
+  const normalizedValue = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padding = "=".repeat((4 - (normalizedValue.length % 4)) % 4);
+  const base64 = normalizedValue + padding;
+  const decoded = atob(base64);
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index += 1) {
+    bytes[index] = decoded.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
+function parsePushOpenPayload(rawValue: unknown): PushOpenPayload | null {
+  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+    return null;
+  }
+
+  const messageType = String((rawValue as { type?: unknown }).type || "").trim();
+  if (messageType !== PUSH_OPEN_MESSAGE_TYPE) {
+    return null;
+  }
+
+  const notificationId = String((rawValue as { notificationId?: unknown }).notificationId || "").trim();
+  const clientName = String((rawValue as { clientName?: unknown }).clientName || "").trim();
+  const linkHref = normalizeInternalLinkHref((rawValue as { linkHref?: unknown }).linkHref);
+  if (!notificationId && !clientName && !linkHref) {
+    return null;
+  }
+
+  return {
+    notificationId,
+    clientName,
+    linkHref,
+  };
+}
+
+function parsePushOpenPayloadFromCurrentUrl(): PushOpenPayload | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const url = new URL(window.location.href);
+  const notificationId = String(url.searchParams.get(PUSH_URL_PARAM_NOTIFICATION_ID) || "").trim();
+  const clientName = String(url.searchParams.get(PUSH_URL_PARAM_CLIENT_NAME) || "").trim();
+  const linkHref = normalizeInternalLinkHref(url.searchParams.get(PUSH_URL_PARAM_LINK_HREF) || "");
+  if (!notificationId && !clientName && !linkHref) {
+    return null;
+  }
+
+  return {
+    notificationId,
+    clientName,
+    linkHref,
+  };
+}
+
+function clearPushOpenPayloadFromCurrentUrl(): void {
+  if (typeof window === "undefined") {
     return;
   }
 
-  try {
-    const popup = new Notification(notification.title, {
-      body: notification.message || BROWSER_NOTIFICATION_FALLBACK_MESSAGE,
-      tag: `cbooster-notification-${notification.id}`,
-    });
-
-    popup.onclick = () => {
-      try {
-        window.focus();
-      } catch {
-        // Browser may reject focus in some contexts.
-      }
-
-      void markNotificationReadRequest(notification.id).catch(() => {});
-
-      if (notification.clientName) {
-        requestOpenClientCard(notification.clientName, {
-          fallbackHref: notification.link?.href,
-        });
-      } else if (notification.link?.href) {
-        window.location.assign(notification.link.href);
-      }
-
-      popup.close();
-    };
-  } catch {
-    // Ignore browser notification API errors.
+  const url = new URL(window.location.href);
+  const hadParams =
+    url.searchParams.has(PUSH_URL_PARAM_NOTIFICATION_ID) ||
+    url.searchParams.has(PUSH_URL_PARAM_CLIENT_NAME) ||
+    url.searchParams.has(PUSH_URL_PARAM_LINK_HREF);
+  if (!hadParams) {
+    return;
   }
+
+  url.searchParams.delete(PUSH_URL_PARAM_NOTIFICATION_ID);
+  url.searchParams.delete(PUSH_URL_PARAM_CLIENT_NAME);
+  url.searchParams.delete(PUSH_URL_PARAM_LINK_HREF);
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function normalizeInternalLinkHref(rawValue: unknown): string {
+  const href = String(rawValue || "").trim();
+  if (href.startsWith("/")) {
+    return href;
+  }
+  return "";
 }
