@@ -58,6 +58,7 @@ const { createRecordsRepo } = require("./server/domains/records/records.repo");
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
 const IS_PRODUCTION = (process.env.NODE_ENV || "").toString().trim().toLowerCase() === "production";
+const STARTUP_REQUIRE_DATABASE_URL_OVERRIDE = resolveOptionalBoolean(process.env.STARTUP_REQUIRE_DATABASE_URL);
 const HEALTH_CHECK_API_KEY = sanitizeTextValue(process.env.HEALTH_CHECK_API_KEY, 4000);
 const HEALTH_CHECK_API_KEY_HEADER_NAME = "x-health-check-key";
 const PERMISSIONS_POLICY_HEADER_VALUE = [
@@ -30062,37 +30063,74 @@ function canAccessDetailedHealthStatus(req) {
   return safeEqual(providedToken, HEALTH_CHECK_API_KEY);
 }
 
-const handleHealthGet = async (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
+function isDatabaseRequiredOnStartup() {
+  if (STARTUP_REQUIRE_DATABASE_URL_OVERRIDE === true) {
+    return true;
+  }
+  if (STARTUP_REQUIRE_DATABASE_URL_OVERRIDE === false) {
+    return false;
+  }
 
-  if (!canAccessDetailedHealthStatus(req)) {
-    res.status(200).json({
-      ok: true,
-    });
+  const currentNodeEnv = (process.env.NODE_ENV || "").toString().trim().toLowerCase();
+  return currentNodeEnv !== "test";
+}
+
+function assertStartupCriticalEnvironment() {
+  if (!isDatabaseRequiredOnStartup()) {
     return;
   }
 
+  if (!DATABASE_URL) {
+    const startupError =
+      "DATABASE_URL is required at startup. Set DATABASE_URL (and PGSSLMODE/PGSSLROOTCERT for TLS) before running the server.";
+    throw new Error(startupError);
+  }
+}
+
+const handleHealthGet = async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+
+  const allowDetailedStatus = canAccessDetailedHealthStatus(req);
+
   if (!pool) {
-    res.status(503).json({
-      ok: false,
-      status: "unhealthy",
-    });
+    res.status(503).json(
+      allowDetailedStatus
+        ? {
+            ok: false,
+            status: "unhealthy",
+          }
+        : {
+            ok: false,
+          },
+    );
     return;
   }
 
   try {
     await ensureDatabaseReady();
     await sharedDbQuery("SELECT 1");
-    res.status(200).json({
-      ok: true,
-      status: "healthy",
-    });
+    res.status(200).json(
+      allowDetailedStatus
+        ? {
+            ok: true,
+            status: "healthy",
+          }
+        : {
+            ok: true,
+          },
+    );
   } catch (error) {
     console.error("GET /api/health failed:", error);
-    res.status(resolveDbHttpStatus(error, 503)).json({
-      ok: false,
-      status: "unhealthy",
-    });
+    res.status(resolveDbHttpStatus(error, 503)).json(
+      allowDetailedStatus
+        ? {
+            ok: false,
+            status: "unhealthy",
+          }
+        : {
+            ok: false,
+          },
+    );
   }
 };
 
@@ -36345,6 +36383,7 @@ function logServerStartupSummary(port) {
 }
 
 function startServer(port = PORT) {
+  assertStartupCriticalEnvironment();
   return app.listen(port, () => {
     logServerStartupSummary(port);
   });
