@@ -43,6 +43,10 @@ npm start
    - `WEB_AUTH_SESSION_COOKIE_SAMESITE` = `strict|lax|none` (по умолчанию `strict`);
    - `WEB_AUTH_CSRF_COOKIE_SAMESITE` = `strict|lax|none` (по умолчанию наследует `WEB_AUTH_SESSION_COOKIE_SAMESITE`);
    - `WEB_AUTH_LOGIN_CSRF_COOKIE_SAMESITE` = `strict|lax|none` (по умолчанию наследует `WEB_AUTH_CSRF_COOKIE_SAMESITE`);
+   - `SECURITY_TXT_CONTACT` = контакт для coordinated disclosure (например `mailto:security@creditbooster.com`);
+   - `SECURITY_TXT_POLICY` = URL политики disclosure;
+   - `SECURITY_TXT_PREFERRED_LANGUAGES` = языки для disclosure (по умолчанию `en, ru`);
+   - `SECURITY_TXT_EXPIRES` = optional ISO datetime для `/.well-known/security.txt` (`Expires`); если не задан, сервер выставляет `now + 180 days`;
    - `WEB_AUTH_TOTP_ISSUER` = issuer-имя для Authenticator-приложений (по умолчанию `Credit Booster`);
    - `WEB_AUTH_TOTP_PERIOD_SEC` = шаг TOTP в секундах (по умолчанию `30`);
    - `WEB_AUTH_TOTP_WINDOW_STEPS` = допустимое окно шагов TOTP (по умолчанию `1`, т.е. ±1 шаг);

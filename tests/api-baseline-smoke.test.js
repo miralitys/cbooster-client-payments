@@ -225,6 +225,20 @@ function assertStatusIn(response, expectedStatuses, routeLabel) {
 
 test("phase-0 smoke: public/unauth critical endpoints keep expected route/status behavior", async () => {
   await withServer(async ({ baseUrl }) => {
+    const securityTxtResponse = await fetch(`${baseUrl}/.well-known/security.txt`, {
+      redirect: "manual",
+      headers: { Accept: "text/plain" },
+    });
+    const securityTxtBody = await securityTxtResponse.text();
+    assert.equal(securityTxtResponse.status, 200);
+    assert.match(String(securityTxtResponse.headers.get("content-type") || ""), /text\/plain/i);
+    assert.equal(String(securityTxtResponse.headers.get("location") || ""), "");
+    assert.match(securityTxtBody, /^Contact:\s+\S+/m);
+    assert.match(securityTxtBody, /^Policy:\s+\S+/m);
+    assert.match(securityTxtBody, /^Preferred-Languages:\s+.+/m);
+    assert.match(securityTxtBody, /^Expires:\s+.+/m);
+    assert.doesNotMatch(securityTxtBody, /(password|token|secret|database_url|private[_\s-]?key)/i);
+
     const healthResponse = await fetch(`${baseUrl}/api/health`, {
       headers: { Accept: "application/json" },
     });

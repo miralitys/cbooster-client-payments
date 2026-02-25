@@ -176,6 +176,12 @@ const WEB_AUTH_LOGIN_CSRF_COOKIE_SAME_SITE = resolveWebAuthCookieSameSite(
   process.env.WEB_AUTH_LOGIN_CSRF_COOKIE_SAMESITE,
   WEB_AUTH_CSRF_COOKIE_SAME_SITE,
 );
+const SECURITY_TXT_CONTACT =
+  sanitizeTextValue(process.env.SECURITY_TXT_CONTACT, 320) || "mailto:security@creditbooster.com";
+const SECURITY_TXT_POLICY =
+  sanitizeTextValue(process.env.SECURITY_TXT_POLICY, 500) || "https://cbooster-client-payments.onrender.com/security-policy";
+const SECURITY_TXT_PREFERRED_LANGUAGES = sanitizeTextValue(process.env.SECURITY_TXT_PREFERRED_LANGUAGES, 120) || "en, ru";
+const SECURITY_TXT_EXPIRES = sanitizeTextValue(process.env.SECURITY_TXT_EXPIRES, 120);
 const WEB_AUTH_SESSION_SECRET_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_SESSION_SECRET);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW);
 const RATE_LIMIT_ENABLED = resolveOptionalBoolean(process.env.RATE_LIMIT_ENABLED) !== false;
@@ -26908,6 +26914,38 @@ function handleWebLogoutMethodNotAllowed(_req, res) {
   res.status(405).type("text/plain").send("Method Not Allowed");
 }
 
+function resolveSecurityTxtExpiresValue(rawValue) {
+  const normalizedRaw = sanitizeTextValue(rawValue, 120);
+  if (normalizedRaw) {
+    const parsed = Date.parse(normalizedRaw);
+    if (Number.isFinite(parsed)) {
+      const parsedDate = new Date(parsed);
+      if (!Number.isNaN(parsedDate.getTime())) {
+        return parsedDate.toISOString();
+      }
+    }
+  }
+
+  const fallbackDate = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000);
+  return fallbackDate.toISOString();
+}
+
+function buildSecurityTxtContent() {
+  const expires = resolveSecurityTxtExpiresValue(SECURITY_TXT_EXPIRES);
+  return [
+    `Contact: ${SECURITY_TXT_CONTACT}`,
+    `Policy: ${SECURITY_TXT_POLICY}`,
+    `Preferred-Languages: ${SECURITY_TXT_PREFERRED_LANGUAGES}`,
+    `Expires: ${expires}`,
+    "",
+  ].join("\n");
+}
+
+function handleSecurityTxtGet(_req, res) {
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.status(200).type("text/plain; charset=utf-8").send(buildSecurityTxtContent());
+}
+
 registerAuthPublicRoutes({
   app,
   requireWebApiCsrf,
@@ -26917,6 +26955,7 @@ registerAuthPublicRoutes({
     handleWebLoginSubmit,
     handleApiAuthLogin,
     handleApiAuthLogout,
+    handleSecurityTxtGet,
     handleWebLogoutMethodNotAllowed,
     handleWebLogout,
   },
