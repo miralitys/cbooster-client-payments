@@ -52,6 +52,9 @@ jobs:
       - name: Install webapp dependencies
         run: npm --prefix webapp ci
 
+      - name: Webapp audit gate (fail-closed, block high/critical)
+        run: npm run guard:webapp-audit
+
       - name: Architecture guardrails
         run: npm run guard:architecture
 
