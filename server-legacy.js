@@ -163,6 +163,14 @@ const WEB_AUTH_MOBILE_REPLAY_MAX_KEYS = Math.min(
   500000,
 );
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
+const WEB_AUTH_SESSION_COOKIE_SAME_SITE = resolveWebAuthCookieSameSite(
+  process.env.WEB_AUTH_SESSION_COOKIE_SAMESITE,
+  "strict",
+);
+const WEB_AUTH_CSRF_COOKIE_SAME_SITE = resolveWebAuthCookieSameSite(
+  process.env.WEB_AUTH_CSRF_COOKIE_SAMESITE,
+  WEB_AUTH_SESSION_COOKIE_SAME_SITE,
+);
 const WEB_AUTH_SESSION_SECRET_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_SESSION_SECRET);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW);
 const RATE_LIMIT_ENABLED = resolveOptionalBoolean(process.env.RATE_LIMIT_ENABLED) !== false;
@@ -172,11 +180,6 @@ const RATE_LIMIT_PROFILE_LOGIN_IP = Object.freeze({
   windowMs: 10 * 60 * 1000,
   maxHits: 40,
   blockMs: 15 * 60 * 1000,
-});
-const RATE_LIMIT_PROFILE_LOGIN_ACCOUNT = Object.freeze({
-  windowMs: 10 * 60 * 1000,
-  maxHits: 12,
-  blockMs: 20 * 60 * 1000,
 });
 const RATE_LIMIT_PROFILE_API_EXPENSIVE = Object.freeze({
   windowMs: 60 * 1000,
@@ -278,6 +281,15 @@ const AUTH_PROTECTION_ALERT_WINDOW_MS = Math.min(
 const AUTH_PROTECTION_ALERT_THRESHOLD = Math.min(
   Math.max(parsePositiveInteger(process.env.AUTH_PROTECTION_ALERT_THRESHOLD, 12), 2),
   1000,
+);
+const AUTH_PROTECTION_ALERT_WEBHOOK_URL = sanitizeTextValue(process.env.AUTH_PROTECTION_ALERT_WEBHOOK_URL, 2000);
+const AUTH_PROTECTION_ALERT_WEBHOOK_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.AUTH_PROTECTION_ALERT_WEBHOOK_TIMEOUT_MS, 4000), 500),
+  20000,
+);
+const AUTH_PROTECTION_ALERT_WEBHOOK_MAX_PENDING = Math.min(
+  Math.max(parsePositiveInteger(process.env.AUTH_PROTECTION_ALERT_WEBHOOK_MAX_PENDING, 250), 20),
+  5000,
 );
 const WEB_AUTH_BCRYPT_COST = Math.min(Math.max(parsePositiveInteger(process.env.WEB_AUTH_BCRYPT_COST, 12), 10), 15);
 const WEB_AUTH_TOTP_ISSUER =
@@ -1692,6 +1704,11 @@ startPerformanceObservabilityMonitor(performanceObservability);
 const app = express();
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+app.use((_req, res, next) => {
+  res.locals = res.locals || {};
+  res.locals.cspStyleNonce = createCspNonceValue();
+  next();
+});
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -1699,9 +1716,9 @@ app.use(
       directives: {
         defaultSrc: ["'self'"],
         scriptSrc: ["'self'", "https://telegram.org", "https://*.telegram.org"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", (_req, res) => `'nonce-${resolveCspStyleNonceFromResponse(res)}'`],
         imgSrc: ["'self'", "data:", "blob:", "https:"],
-        connectSrc: ["'self'", "https:", "wss:"],
+        connectSrc: ["'self'", "https://telegram.org", "https://*.telegram.org"],
         fontSrc: ["'self'", "data:"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
@@ -1791,6 +1808,8 @@ const rateLimitRequestBuckets = new Map();
 const loginFailureByAccountKey = new Map();
 const loginFailureByIpAccountKey = new Map();
 const authProtectionAnomalyWindowByKey = new Map();
+let authProtectionAlertQueueDepth = 0;
+let authProtectionAlertQueue = Promise.resolve();
 const webAuthMobileSessionById = new Map();
 const webAuthMobileReplayByKey = new Map();
 let miniUploadParseInFlight = 0;
@@ -3200,6 +3219,19 @@ function resolveOptionalBoolean(rawValue) {
   }
 
   return null;
+}
+
+function resolveWebAuthCookieSameSite(rawValue, fallbackValue = "strict") {
+  const fallback = sanitizeTextValue(fallbackValue, 12).toLowerCase();
+  const normalizedFallback =
+    fallback === "none" || fallback === "lax" || fallback === "strict" ? fallback : "strict";
+
+  const normalized = sanitizeTextValue(rawValue, 12).toLowerCase();
+  if (normalized === "none" || normalized === "lax" || normalized === "strict") {
+    return normalized;
+  }
+
+  return normalizedFallback;
 }
 
 function resolveWebAuthSessionSecret(rawSecret) {
@@ -5686,6 +5718,25 @@ function isSecureCookieRequired(req) {
   return false;
 }
 
+function createCspNonceValue(sizeBytes = 18) {
+  const normalizedSize = Math.min(Math.max(Number.parseInt(sizeBytes, 10) || 18, 12), 48);
+  return crypto.randomBytes(normalizedSize).toString("base64");
+}
+
+function resolveCspStyleNonceFromResponse(res) {
+  const existingNonce = sanitizeTextValue(res?.locals?.cspStyleNonce, 160);
+  if (existingNonce) {
+    return existingNonce;
+  }
+
+  const nextNonce = createCspNonceValue();
+  if (res && typeof res === "object") {
+    res.locals = res.locals || {};
+    res.locals.cspStyleNonce = nextNonce;
+  }
+  return nextNonce;
+}
+
 function createWebAuthCsrfToken(username, sessionToken) {
   const normalizedUsername = normalizeWebAuthUsername(username);
   const normalizedSessionToken = sanitizeTextValue(sessionToken, 1200);
@@ -5787,7 +5838,7 @@ function setWebAuthCsrfCookie(req, res, csrfToken) {
 
   res.cookie(WEB_AUTH_CSRF_COOKIE_NAME, normalizedCsrfToken, {
     httpOnly: false,
-    sameSite: "lax",
+    sameSite: WEB_AUTH_CSRF_COOKIE_SAME_SITE,
     secure: isSecureCookieRequired(req),
     maxAge: WEB_AUTH_SESSION_TTL_SEC * 1000,
     path: "/",
@@ -5799,7 +5850,7 @@ function setWebAuthSessionCookie(req, res, username, sessionToken = "") {
   const csrfToken = createWebAuthCsrfToken(username, token);
   res.cookie(WEB_AUTH_SESSION_COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: WEB_AUTH_SESSION_COOKIE_SAME_SITE,
     secure: isSecureCookieRequired(req),
     maxAge: WEB_AUTH_SESSION_TTL_SEC * 1000,
     path: "/",
@@ -5810,13 +5861,13 @@ function setWebAuthSessionCookie(req, res, username, sessionToken = "") {
 function clearWebAuthSessionCookie(req, res) {
   res.clearCookie(WEB_AUTH_SESSION_COOKIE_NAME, {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: WEB_AUTH_SESSION_COOKIE_SAME_SITE,
     secure: isSecureCookieRequired(req),
     path: "/",
   });
   res.clearCookie(WEB_AUTH_CSRF_COOKIE_NAME, {
     httpOnly: false,
-    sameSite: "lax",
+    sameSite: WEB_AUTH_CSRF_COOKIE_SAME_SITE,
     secure: isSecureCookieRequired(req),
     path: "/",
   });
@@ -6003,6 +6054,7 @@ function sendAuthProtectionForbidden(req, res, options = {}) {
         nextPath,
         errorMessage: message,
         csrfToken,
+        styleNonce: resolveCspStyleNonceFromResponse(res),
       }),
     );
     return;
@@ -12139,15 +12191,16 @@ function buildWebAuthAccessModel() {
   };
 }
 
-function buildWebPermissionDeniedPageHtml(message) {
+function buildWebPermissionDeniedPageHtml(message, options = {}) {
   const safeMessage = escapeHtml(sanitizeTextValue(message, 260) || "Access denied.");
+  const safeStyleNonce = sanitizeTextValue(options.styleNonce, 180);
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Access Denied</title>
-    <style>
+    <style nonce="${escapeHtml(safeStyleNonce)}">
       body { margin:0; min-height:100vh; display:grid; place-items:center; background:#f3f4f6; color:#0f172a; font-family:"Avenir Next","Segoe UI",sans-serif; padding:24px; }
       .card { width:min(560px,100%); background:#fff; border:1px solid #d6dde6; border-radius:16px; padding:24px; box-shadow:0 14px 34px -24px rgba(15,23,42,.42); display:grid; gap:12px; }
       h1 { margin:0; font-size:1.5rem; }
@@ -12174,7 +12227,11 @@ function denyWebPermission(req, res, message) {
     return;
   }
 
-  res.status(403).type("html").send(buildWebPermissionDeniedPageHtml(errorMessage));
+  res.status(403).type("html").send(
+    buildWebPermissionDeniedPageHtml(errorMessage, {
+      styleNonce: resolveCspStyleNonceFromResponse(res),
+    }),
+  );
 }
 
 function requireWebPermission(permissionKey, message = "Access denied.") {
@@ -12304,6 +12361,124 @@ function sanitizeAuthProtectionEventMeta(rawMeta = {}) {
   return sanitized;
 }
 
+function maskAuthProtectionAlertIp(rawIp) {
+  const ip = sanitizeTextValue(rawIp, 120);
+  if (!ip) {
+    return "";
+  }
+
+  if (ip.includes(".")) {
+    const parts = ip.split(".");
+    if (parts.length === 4) {
+      return `${parts[0]}.${parts[1]}.${parts[2]}.x`;
+    }
+  }
+
+  if (ip.includes(":")) {
+    const normalized = ip.replace(/:+$/, "");
+    const parts = normalized.split(":");
+    if (parts.length >= 2) {
+      return `${parts.slice(0, 2).join(":")}:*`;
+    }
+  }
+
+  return "masked";
+}
+
+function maskAuthProtectionAlertUsername(rawUsername) {
+  const username = normalizeRateLimitUsername(rawUsername || "");
+  if (!username) {
+    return "";
+  }
+
+  if (username.length <= 2) {
+    return `${username[0] || ""}*`;
+  }
+
+  return `${username.slice(0, 2)}***${username.slice(-1)}`;
+}
+
+async function sendAuthProtectionAlertWebhook(event, meta = {}) {
+  if (!AUTH_PROTECTION_ALERT_WEBHOOK_URL) {
+    return;
+  }
+
+  const normalizedEvent = sanitizeTextValue(event, 120) || "unknown";
+  const payloadMeta = sanitizeAuthProtectionEventMeta(meta);
+  const payload = {
+    source: "cbooster-client-payments",
+    category: "auth_protection",
+    event: normalizedEvent,
+    createdAt: new Date().toISOString(),
+    severity: normalizedEvent.includes("locked") ? "high" : "medium",
+    details: {
+      path: payloadMeta.path || "",
+      method: payloadMeta.method || "",
+      code: payloadMeta.code || "",
+      reason: payloadMeta.reason || "",
+      retryAfterSec: payloadMeta.retryAfterSec || 0,
+      failures: payloadMeta.failures || 0,
+      lockSec: payloadMeta.lockSec || 0,
+      delayAppliedMs: payloadMeta.delayAppliedMs || 0,
+      username: maskAuthProtectionAlertUsername(payloadMeta.username),
+      ip: maskAuthProtectionAlertIp(payloadMeta.ip),
+    },
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, AUTH_PROTECTION_ALERT_WEBHOOK_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(AUTH_PROTECTION_ALERT_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `[auth-protection-alert] webhook failed: status=${response.status} event=${normalizedEvent}`,
+      );
+    }
+  } catch (error) {
+    console.warn(
+      "[auth-protection-alert] webhook delivery failed:",
+      sanitizeTextValue(error?.message, 260) || "unknown_error",
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function enqueueAuthProtectionAlert(event, meta = {}) {
+  if (!AUTH_PROTECTION_ALERT_WEBHOOK_URL) {
+    return;
+  }
+
+  if (authProtectionAlertQueueDepth >= AUTH_PROTECTION_ALERT_WEBHOOK_MAX_PENDING) {
+    logAuthProtectionEvent("warn", "alert_queue_dropped", {
+      reason: "queue_full",
+      failures: authProtectionAlertQueueDepth,
+    });
+    return;
+  }
+
+  authProtectionAlertQueueDepth += 1;
+  authProtectionAlertQueue = authProtectionAlertQueue
+    .then(() => sendAuthProtectionAlertWebhook(event, meta))
+    .catch(() => {
+      // Errors are logged in sendAuthProtectionAlertWebhook; keep queue alive.
+    })
+    .finally(() => {
+      authProtectionAlertQueueDepth = Math.max(0, authProtectionAlertQueueDepth - 1);
+    });
+}
+
 function logAuthProtectionEvent(level, event, meta = {}) {
   const normalizedLevel = sanitizeTextValue(level, 20).toLowerCase();
   const logger = normalizedLevel === "warn" ? console.warn : normalizedLevel === "error" ? console.error : console.log;
@@ -12340,11 +12515,13 @@ function trackAuthProtectionAnomaly(event, meta = {}) {
     existing.count - existing.lastAlertCount >= AUTH_PROTECTION_ALERT_THRESHOLD;
   if (shouldAlert) {
     existing.lastAlertCount = existing.count;
-    logAuthProtectionEvent("warn", "anomaly_threshold_reached", {
+    const alertMeta = {
       ...meta,
       reason: normalizedEvent,
       failures: existing.count,
-    });
+    };
+    logAuthProtectionEvent("warn", "anomaly_threshold_reached", alertMeta);
+    enqueueAuthProtectionAlert("anomaly_threshold_reached", alertMeta);
   }
 }
 
@@ -12483,14 +12660,15 @@ function sendRateLimitResponse(req, res, options = {}) {
   res.setHeader("Cache-Control", "no-store, private");
 
   if (safeCode.startsWith("login_")) {
-    logAuthProtectionEvent("warn", "rate_limit_triggered", {
+    const eventMeta = {
       path,
       method: req.method,
       ip,
       username,
       code: safeCode,
       retryAfterSec,
-    });
+    };
+    logAuthProtectionEvent("warn", "rate_limit_triggered", eventMeta);
     trackAuthProtectionAnomaly("login_rate_limit", {
       path,
       ip,
@@ -12498,6 +12676,9 @@ function sendRateLimitResponse(req, res, options = {}) {
       code: safeCode,
       retryAfterSec,
     });
+    if (safeCode === "login_locked") {
+      enqueueAuthProtectionAlert("login_locked", eventMeta);
+    }
   }
 
   if ((req.path || "") === "/login" && !String(req.headers?.accept || "").includes("application/json")) {
@@ -12508,6 +12689,7 @@ function sendRateLimitResponse(req, res, options = {}) {
         nextPath,
         errorMessage: safeMessage,
         csrfToken,
+        styleNonce: resolveCspStyleNonceFromResponse(res),
       }),
     );
     return;
@@ -12858,19 +13040,13 @@ function resolveLoginProgressiveDelayMs(req, username) {
   maybeSweepRateLimitStores();
   const nowMs = Date.now();
   const ip = resolveRateLimitClientIp(req);
-  const accountKey = `account:${normalizedUsername}`;
   const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
-  const accountFailures = readActiveLoginFailures(
-    loginFailureByAccountKey.get(accountKey),
-    nowMs,
-    LOGIN_FAILURE_ACCOUNT_POLICY,
-  );
   const ipAccountFailures = readActiveLoginFailures(
     loginFailureByIpAccountKey.get(ipAccountKey),
     nowMs,
     LOGIN_FAILURE_IP_ACCOUNT_POLICY,
   );
-  const failures = Math.max(accountFailures, ipAccountFailures);
+  const failures = ipAccountFailures;
   if (failures <= 1) {
     return 0;
   }
@@ -12908,7 +13084,6 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   const isRateAllowed = enforceRateLimit(req, res, {
     scope: "login",
     ipProfile: RATE_LIMIT_PROFILE_LOGIN_IP,
-    userProfile: RATE_LIMIT_PROFILE_LOGIN_ACCOUNT,
     username: normalizedUsername,
     message: "Too many login attempts. Please try again later.",
     code: "login_rate_limited",
@@ -12932,7 +13107,20 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
     nowMs,
     LOGIN_FAILURE_IP_ACCOUNT_POLICY,
   );
-  const retryAfterMs = Math.max(accountLockMs, ipAccountLockMs);
+  if (accountLockMs > 0 && ipAccountLockMs <= 0) {
+    const softRiskMeta = {
+      path: normalizeRequestPathname(req, 260),
+      method: req.method,
+      ip,
+      username: normalizedUsername,
+      code: "login_account_risk",
+      lockSec: Math.max(1, Math.ceil(accountLockMs / 1000)),
+    };
+    logAuthProtectionEvent("warn", "login_account_risk_detected", softRiskMeta);
+    trackAuthProtectionAnomaly("login_account_risk_detected", softRiskMeta);
+  }
+
+  const retryAfterMs = ipAccountLockMs;
 
   if (retryAfterMs > 0) {
     const eventMeta = {
@@ -12978,10 +13166,9 @@ function registerFailedLoginAttempt(req, username) {
   const accountEntry = recordLoginFailureEntry(loginFailureByAccountKey, accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
   const ipAccountEntry = recordLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey, LOGIN_FAILURE_IP_ACCOUNT_POLICY, nowMs);
   const maxFailures = Math.max(accountEntry?.failures || 0, ipAccountEntry?.failures || 0);
-  const maxLockMs = Math.max(
-    Math.max(0, (accountEntry?.lockedUntilMs || 0) - nowMs),
-    Math.max(0, (ipAccountEntry?.lockedUntilMs || 0) - nowMs),
-  );
+  const accountLockMs = Math.max(0, (accountEntry?.lockedUntilMs || 0) - nowMs);
+  const ipAccountLockMs = Math.max(0, (ipAccountEntry?.lockedUntilMs || 0) - nowMs);
+  const maxLockMs = ipAccountLockMs;
   const eventMeta = {
     path: normalizeRequestPathname(req, 260),
     method: req.method,
@@ -12996,6 +13183,15 @@ function registerFailedLoginAttempt(req, username) {
   if (maxLockMs > 0) {
     logAuthProtectionEvent("warn", "login_locked", eventMeta);
     trackAuthProtectionAnomaly("login_locked", eventMeta);
+  }
+  if (accountLockMs > 0 && ipAccountLockMs <= 0) {
+    const accountRiskMeta = {
+      ...eventMeta,
+      code: "login_account_risk",
+      lockSec: Math.max(1, Math.ceil(accountLockMs / 1000)),
+    };
+    logAuthProtectionEvent("warn", "login_account_risk_detected", accountRiskMeta);
+    trackAuthProtectionAnomaly("login_account_risk_detected", accountRiskMeta);
   }
 
   return {
@@ -13101,10 +13297,11 @@ function resolveWebLoginErrorMessage(rawCode) {
   return "";
 }
 
-function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "", csrfToken = "" } = {}) {
+function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "", csrfToken = "", styleNonce = "" } = {}) {
   const safeNextPath = resolveSafeNextPath(nextPath);
   const safeError = sanitizeTextValue(errorMessage, 200);
   const safeCsrfToken = sanitizeTextValue(csrfToken, 500);
+  const safeStyleNonce = sanitizeTextValue(styleNonce, 180);
   const errorBlock = safeError
     ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
     : `<p class="auth-help">Use your account credentials. If 2FA is enabled, enter your Authenticator code.</p>`;
@@ -13115,7 +13312,7 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "", csrfToken = 
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sign In | Credit Booster</title>
-    <style>
+    <style nonce="${escapeHtml(safeStyleNonce)}">
       :root {
         color-scheme: light;
         --color-bg: #f3f4f6;
@@ -13286,9 +13483,10 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "", csrfToken = 
 </html>`;
 }
 
-function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "", totpSetup = null } = {}) {
+function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "", totpSetup = null, styleNonce = "" } = {}) {
   const safeNextPath = resolveSafeNextPath(nextPath);
   const safeError = sanitizeTextValue(errorMessage, 200);
+  const safeStyleNonce = sanitizeTextValue(styleNonce, 180);
   const messageBlock = safeError
     ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
     : `<p class="auth-help">For security, create a new password and complete Authenticator setup.</p>`;
@@ -13311,7 +13509,7 @@ function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "", totp
       ? `
       <label class="totp-label">
         Manual URI (optional)
-        <input type="text" value="${escapeHtml(totpUri)}" readonly onfocus="this.select()" />
+        <input type="text" value="${escapeHtml(totpUri)}" readonly />
       </label>`
       : "";
     const displaySecret = totpSecretDisplay || formatWebAuthTotpSecretForDisplay(normalizedTotpSecret);
@@ -13334,7 +13532,7 @@ function buildWebFirstPasswordPageHtml({ nextPath = "/", errorMessage = "", totp
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Set New Password | Credit Booster</title>
-    <style>
+    <style nonce="${escapeHtml(safeStyleNonce)}">
       :root {
         color-scheme: light;
         --color-bg: #f3f4f6;
@@ -25692,6 +25890,7 @@ const handleWebLoginPage = (req, res) => {
         nextPath,
         errorMessage: resolveWebLoginErrorMessage(errorCode),
         csrfToken,
+        styleNonce: resolveCspStyleNonceFromResponse(res),
       }),
     );
 };
@@ -25973,6 +26172,7 @@ const handleWebFirstPasswordPage = async (req, res) => {
         nextPath,
         errorMessage: "",
         totpSetup,
+        styleNonce: resolveCspStyleNonceFromResponse(res),
       }),
     );
   } catch (error) {
@@ -25981,6 +26181,7 @@ const handleWebFirstPasswordPage = async (req, res) => {
       buildWebFirstPasswordPageHtml({
         nextPath,
         errorMessage: "Failed to prepare authenticator setup. Please refresh the page.",
+        styleNonce: resolveCspStyleNonceFromResponse(res),
       }),
     );
   }
@@ -26026,6 +26227,7 @@ const handleWebFirstPasswordSubmit = async (req, res) => {
           nextPath,
           errorMessage: sanitizeTextValue(error?.message, 260) || "Failed to update password.",
           totpSetup,
+          styleNonce: resolveCspStyleNonceFromResponse(res),
         }),
       );
   }

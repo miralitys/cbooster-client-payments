@@ -7,6 +7,8 @@ Run architecture checks before opening a PR:
 ```bash
 npm run guard:architecture
 npm run guard:sensitive-artifacts
+npm run guard:backend-audit
+npm run guard:webapp-audit
 ```
 
 ## `tests/server-bootstrap.test.js`

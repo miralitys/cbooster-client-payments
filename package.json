@@ -10,6 +10,7 @@
     "test:smoke": "node --test tests/api-baseline-smoke.test.js",
     "guard:architecture": "bash scripts/architecture-guards.sh",
     "guard:sensitive-artifacts": "bash scripts/sensitive-artifacts-guard.sh",
+    "guard:backend-audit": "node scripts/backend-audit-gate.js",
     "guard:webapp-audit": "node scripts/webapp-audit-gate.js",
     "build": "npm --prefix webapp run build",
     "lint": "npm --prefix webapp run lint",

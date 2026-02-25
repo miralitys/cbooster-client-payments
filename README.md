@@ -40,6 +40,8 @@ npm start
    - `WEB_AUTH_SESSION_SECRET` = длинный случайный секрет для подписи cookie-сессии;
    - `WEB_AUTH_SESSION_TTL_SEC` = TTL сессии в секундах (по умолчанию `43200` = 12 часов);
    - `WEB_AUTH_COOKIE_SECURE` = `true`/`false` (опционально, принудительный secure-флаг cookie);
+   - `WEB_AUTH_SESSION_COOKIE_SAMESITE` = `strict|lax|none` (по умолчанию `strict`);
+   - `WEB_AUTH_CSRF_COOKIE_SAMESITE` = `strict|lax|none` (по умолчанию наследует `WEB_AUTH_SESSION_COOKIE_SAMESITE`);
    - `WEB_AUTH_TOTP_ISSUER` = issuer-имя для Authenticator-приложений (по умолчанию `Credit Booster`);
    - `WEB_AUTH_TOTP_PERIOD_SEC` = шаг TOTP в секундах (по умолчанию `30`);
    - `WEB_AUTH_TOTP_WINDOW_STEPS` = допустимое окно шагов TOTP (по умолчанию `1`, т.е. ±1 шаг);
@@ -51,6 +53,11 @@ npm start
    - `RATE_LIMIT_STORE_MODE` = `postgres` или `memory` (по умолчанию `postgres`, если задан `DATABASE_URL`);
    - `RATE_LIMIT_STORE_MAX_KEYS` = лимит in-memory ключей rate-limit (по умолчанию `60000`);
    - `RATE_LIMIT_DB_ERROR_COOLDOWN_MS` = cooldown при ошибках shared rate-limit store (по умолчанию `30000`);
+   - `AUTH_PROTECTION_ALERT_WINDOW_SEC` = окно агрегации auth-anomaly (по умолчанию `600`);
+   - `AUTH_PROTECTION_ALERT_THRESHOLD` = порог событий в окне для алерта (по умолчанию `12`);
+   - `AUTH_PROTECTION_ALERT_WEBHOOK_URL` = webhook URL для security-алертов по auth-anomaly (опционально);
+   - `AUTH_PROTECTION_ALERT_WEBHOOK_TIMEOUT_MS` = timeout отправки webhook-алерта (по умолчанию `4000`);
+   - `AUTH_PROTECTION_ALERT_WEBHOOK_MAX_PENDING` = максимум отложенных webhook-алертов в памяти (по умолчанию `250`);
    - `QUICKBOOKS_CLIENT_ID` = QuickBooks OAuth Client ID;
    - `QUICKBOOKS_CLIENT_SECRET` = QuickBooks OAuth Client Secret;
    - `QUICKBOOKS_REFRESH_TOKEN` = QuickBooks OAuth Refresh Token;

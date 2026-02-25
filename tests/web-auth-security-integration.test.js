@@ -26,6 +26,10 @@ function delay(ms) {
   });
 }
 
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function reserveFreePort() {
   return await new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -389,6 +393,49 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       assertCoreSecurityHeaders(response, "GET /logout");
     });
 
+    await t.test("login page CSP uses nonce-based style-src and no unsafe-inline", async () => {
+      const response = await fetch(`${baseUrl}/login`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+
+      assert.equal(response.status, 200);
+      const csp = String(response.headers.get("content-security-policy") || "");
+      assert.ok(csp.length > 0, "Expected CSP header on /login.");
+      assert.doesNotMatch(csp, /style-src[^;]*unsafe-inline/i);
+      const nonceMatch = csp.match(/style-src[^;]*'nonce-([^']+)'/i);
+      assert.ok(nonceMatch && nonceMatch[1], "Expected nonce in style-src directive.");
+
+      const body = await response.text();
+      assert.match(
+        body,
+        new RegExp(`<style nonce="${escapeRegex(nonceMatch[1])}">`, "i"),
+      );
+    });
+
+    await t.test("auth cookies default to SameSite=Strict", async () => {
+      const response = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+        }),
+      });
+
+      const body = await response.json();
+      assert.equal(response.status, 200, `Login failed: ${JSON.stringify(body)}`);
+      const setCookies = parseSetCookieHeaders(response).join("\n");
+      assert.match(setCookies, /cbooster_auth_session=[^\n]*;\s*HttpOnly[^\n]*;\s*SameSite=Strict/i);
+      assert.match(setCookies, /cbooster_auth_csrf=[^\n]*;\s*SameSite=Strict/i);
+    });
+
     await t.test("security headers are consistent on /login, /api/*, 401/404/302 responses", async () => {
       const loginResponse = await fetch(`${baseUrl}/login`, {
         method: "GET",
@@ -544,6 +591,7 @@ test("web auth integration: repeated invalid logins trigger 429 lock with Retry-
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
+            "X-Forwarded-For": "198.51.100.10",
           },
           body: JSON.stringify({
             username: TEST_OWNER_USERNAME,
@@ -558,6 +606,25 @@ test("web auth integration: repeated invalid logins trigger 429 lock with Retry-
       assert.equal(lastBody?.code, "login_locked");
       const retryAfterHeader = Number.parseInt(lastResponse.headers.get("retry-after") || "", 10);
       assert.ok(Number.isFinite(retryAfterHeader) && retryAfterHeader > 0, "Expected Retry-After header on lock response.");
+
+      const differentIpResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "198.51.100.11",
+        },
+        body: JSON.stringify({
+          username: TEST_OWNER_USERNAME,
+          password: "WrongPassword!123",
+        }),
+      });
+      const differentIpBody = await differentIpResponse.json();
+      assert.equal(
+        differentIpResponse.status,
+        401,
+        `Expected per-IP lock behavior (401 on different IP), got ${differentIpResponse.status} with ${JSON.stringify(differentIpBody)}`,
+      );
     },
   );
 });
