@@ -131,16 +131,18 @@ export function NotificationCenter() {
           </button>
         </div>
 
-        <div className="notification-center__toolbar">
-          <button
-            type="button"
-            className="notification-center__toolbar-btn"
-            disabled={!unreadCount}
-            onClick={() => markAllNotificationsRead()}
-          >
-            Mark all read
-          </button>
-        </div>
+        {viewMode === "active" ? (
+          <div className="notification-center__toolbar">
+            <button
+              type="button"
+              className="notification-center__toolbar-btn"
+              disabled={!unreadCount}
+              onClick={() => markAllNotificationsRead()}
+            >
+              Mark all read
+            </button>
+          </div>
+        ) : null}
 
         {displayedNotifications.length ? (
           <ul className="notification-center__list">
