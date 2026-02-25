@@ -61,6 +61,9 @@ jobs:
       - name: Sensitive artifacts guardrails
         run: npm run guard:sensitive-artifacts
 
+      - name: Backend security regression tests
+        run: npm run test:backend
+
       - name: Lint (no warnings)
         run: npm --prefix webapp run lint -- --max-warnings=0
 
