@@ -6538,7 +6538,7 @@ function getWebAuthRoleName(roleId, departmentId = "") {
       return "Sales Manager";
     }
     if (normalizedDepartmentId === WEB_AUTH_DEPARTMENT_COLLECTION) {
-      return "Коллектор";
+      return "Collector";
     }
     if (normalizedDepartmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
       return "Client Manager";
