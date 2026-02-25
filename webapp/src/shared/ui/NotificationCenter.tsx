@@ -110,39 +110,41 @@ export function NotificationCenter() {
           <p className="notification-center__count">{unreadCount} unread</p>
         </header>
 
-        <div className="notification-center__modes" role="tablist" aria-label="Notification views">
-          <button
-            type="button"
-            className={`notification-center__mode-btn ${viewMode === "active" ? "is-active" : ""}`.trim()}
-            role="tab"
-            aria-selected={viewMode === "active"}
-            onClick={() => setViewMode("active")}
-          >
-            Active
-          </button>
-          <button
-            type="button"
-            className={`notification-center__mode-btn ${viewMode === "archive" ? "is-active" : ""}`.trim()}
-            role="tab"
-            aria-selected={viewMode === "archive"}
-            onClick={() => setViewMode("archive")}
-          >
-            Archive
-          </button>
-        </div>
-
-        {viewMode === "active" ? (
-          <div className="notification-center__toolbar">
+        <div className="notification-center__controls">
+          <div className="notification-center__modes" role="tablist" aria-label="Notification views">
             <button
               type="button"
-              className="notification-center__toolbar-btn"
-              disabled={!unreadCount}
-              onClick={() => markAllNotificationsRead()}
+              className={`notification-center__mode-btn ${viewMode === "active" ? "is-active" : ""}`.trim()}
+              role="tab"
+              aria-selected={viewMode === "active"}
+              onClick={() => setViewMode("active")}
             >
-              Mark all read
+              Active
+            </button>
+            <button
+              type="button"
+              className={`notification-center__mode-btn ${viewMode === "archive" ? "is-active" : ""}`.trim()}
+              role="tab"
+              aria-selected={viewMode === "archive"}
+              onClick={() => setViewMode("archive")}
+            >
+              Archive
             </button>
           </div>
-        ) : null}
+
+          {viewMode === "active" ? (
+            <div className="notification-center__toolbar notification-center__toolbar--right">
+              <button
+                type="button"
+                className="notification-center__toolbar-btn"
+                disabled={!unreadCount}
+                onClick={() => markAllNotificationsRead()}
+              >
+                Mark all read
+              </button>
+            </div>
+          ) : null}
+        </div>
 
         {displayedNotifications.length ? (
           <ul className="notification-center__list">

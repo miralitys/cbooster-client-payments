@@ -275,10 +275,23 @@ a {
   gap: 6px;
 }
 
+.notification-center__controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .notification-center__toolbar {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.notification-center__toolbar--right {
+  margin-left: auto;
+  padding-left: 8px;
+  border-left: 1px solid var(--color-border);
 }
 
 .notification-center__mode-btn,
