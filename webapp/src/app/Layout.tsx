@@ -4,7 +4,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { AssistantWidget } from "@/features/assistant/AssistantWidget";
 import { getSession } from "@/shared/api/session";
 import { isOwnerOrAdminSession } from "@/shared/lib/access";
-import { ModalStackProvider, ToastHost } from "@/shared/ui";
+import { ModalStackProvider, NotificationCenter, ToastHost } from "@/shared/ui";
 
 interface NavigationItem {
   to: string;
@@ -134,53 +134,57 @@ export function Layout() {
               <h1>{pageTitle}</h1>
             </div>
 
-            <div ref={menuRef} className={`account-menu ${menuOpen ? "is-open" : ""}`.trim()}>
-              <button
-                type="button"
-                className="account-menu__toggle"
-                aria-haspopup="menu"
-                aria-expanded={menuOpen}
-                aria-controls="app-account-menu-panel"
-                aria-label="Open account menu"
-                onClick={() => setMenuOpen((prev) => !prev)}
-              >
-                <span className="account-menu__line" aria-hidden="true" />
-                <span className="account-menu__line" aria-hidden="true" />
-                <span className="account-menu__line" aria-hidden="true" />
-              </button>
+            <div className="page-header__controls">
+              <NotificationCenter />
 
-              <div id="app-account-menu-panel" className="account-menu__panel" role="menu" hidden={!menuOpen}>
-                {NAV_ITEMS.filter((item) => !item.ownerAdminOnly || canViewQuickBooks).map((item) => {
-                  if (item.external) {
+              <div ref={menuRef} className={`account-menu ${menuOpen ? "is-open" : ""}`.trim()}>
+                <button
+                  type="button"
+                  className="account-menu__toggle"
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  aria-controls="app-account-menu-panel"
+                  aria-label="Open account menu"
+                  onClick={() => setMenuOpen((prev) => !prev)}
+                >
+                  <span className="account-menu__line" aria-hidden="true" />
+                  <span className="account-menu__line" aria-hidden="true" />
+                  <span className="account-menu__line" aria-hidden="true" />
+                </button>
+
+                <div id="app-account-menu-panel" className="account-menu__panel" role="menu" hidden={!menuOpen}>
+                  {NAV_ITEMS.filter((item) => !item.ownerAdminOnly || canViewQuickBooks).map((item) => {
+                    if (item.external) {
+                      return (
+                        <a
+                          key={item.to}
+                          href={item.to}
+                          className="account-menu__item"
+                          role="menuitem"
+                          onClick={() => setMenuOpen(false)}
+                        >
+                          {item.label}
+                        </a>
+                      );
+                    }
+
                     return (
-                      <a
+                      <NavLink
                         key={item.to}
-                        href={item.to}
+                        to={item.to}
                         className="account-menu__item"
                         role="menuitem"
                         onClick={() => setMenuOpen(false)}
                       >
                         {item.label}
-                      </a>
+                      </NavLink>
                     );
-                  }
-
-                  return (
-                    <NavLink
-                      key={item.to}
-                      to={item.to}
-                      className="account-menu__item"
-                      role="menuitem"
-                      onClick={() => setMenuOpen(false)}
-                    >
-                      {item.label}
-                    </NavLink>
-                  );
-                })}
-                <div className="account-menu__divider" aria-hidden="true" />
-                <a href="/logout" className="account-menu__item" role="menuitem" onClick={() => setMenuOpen(false)}>
-                  Log Out
-                </a>
+                  })}
+                  <div className="account-menu__divider" aria-hidden="true" />
+                  <a href="/logout" className="account-menu__item" role="menuitem" onClick={() => setMenuOpen(false)}>
+                    Log Out
+                  </a>
+                </div>
               </div>
             </div>
           </header>

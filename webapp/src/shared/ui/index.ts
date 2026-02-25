@@ -19,3 +19,4 @@ export { ErrorState } from "@/shared/ui/ErrorState";
 export { PageShell } from "@/shared/ui/PageShell";
 export { PageHeader } from "@/shared/ui/PageHeader";
 export { Panel } from "@/shared/ui/Panel";
+export { NotificationCenter } from "@/shared/ui/NotificationCenter";
