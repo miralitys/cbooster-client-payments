@@ -3608,6 +3608,14 @@ a {
   background: color-mix(in srgb, var(--color-primary) 6%, var(--color-surface) 94%);
 }
 
+.access-control-team-option-react.is-disabled {
+  opacity: 0.62;
+}
+
+.access-control-team-option-react.is-disabled input {
+  cursor: not-allowed;
+}
+
 .access-control-team-option-text-react {
   display: grid;
   gap: 2px;
@@ -3806,6 +3814,33 @@ a {
   gap: 6px;
 }
 
+.access-control-team-clusters-react {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.access-control-team-cluster-react {
+  display: grid;
+  gap: 6px;
+  border: 1px dashed color-mix(in srgb, var(--color-border) 88%, var(--color-primary) 12%);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-surface) 96%, var(--color-primary) 4%);
+  padding: 8px 10px;
+}
+
+.access-control-team-cluster-react--unassigned {
+  background: color-mix(in srgb, var(--color-surface) 94%, #94a3b8 6%);
+}
+
+.access-control-team-cluster-title-react {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xxs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .access-control-member-chip-react {
   display: inline-flex;
   align-items: center;
@@ -3815,6 +3850,10 @@ a {
   color: var(--color-text);
   padding: 3px 8px;
   font-size: var(--font-size-xs);
+}
+
+.access-control-member-chip-react.is-fallback {
+  border-style: dashed;
 }
 
 .access-control-members-empty-react {

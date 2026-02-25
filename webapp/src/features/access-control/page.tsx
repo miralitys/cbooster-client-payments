@@ -46,12 +46,14 @@ const DEFAULT_TOTP_PERIOD_SEC = 30;
 const DEFAULT_TOTP_DIGITS = 6;
 const ADMIN_ROLE_ID = "admin";
 const MIDDLE_MANAGER_ROLE_ID = "middle_manager";
+const CLIENT_MANAGER_ROLE_ID = "manager";
 
 interface MiddleManagerTeamOption {
   username: string;
   displayName: string;
   helperText: string;
   isFallback: boolean;
+  isDisabled: boolean;
 }
 
 export default function AccessControlPage() {
@@ -118,17 +120,24 @@ export default function AccessControlPage() {
   );
   const createMiddleManagerTeamOptions = useMemo(
     () =>
-      buildMiddleManagerTeamOptions(users, createForm.departmentId, createForm.teamUsernames, [
-        createForm.username,
-      ]),
+      buildMiddleManagerTeamOptions(
+        users,
+        createForm.departmentId,
+        createForm.teamUsernames,
+        [createForm.username],
+        [createForm.username],
+      ),
     [createForm.departmentId, createForm.teamUsernames, createForm.username, users],
   );
   const editMiddleManagerTeamOptions = useMemo(
     () =>
-      buildMiddleManagerTeamOptions(users, editForm.departmentId, editForm.teamUsernames, [
-        editingOriginalUsername,
-        editForm.username,
-      ]),
+      buildMiddleManagerTeamOptions(
+        users,
+        editForm.departmentId,
+        editForm.teamUsernames,
+        [editingOriginalUsername, editForm.username],
+        [editingOriginalUsername, editForm.username],
+      ),
     [editForm.departmentId, editForm.teamUsernames, editForm.username, editingOriginalUsername, users],
   );
   const totpIssuer = useMemo(
@@ -868,7 +877,7 @@ export default function AccessControlPage() {
         ) : (
           <div className="access-control-departments-grid-react">
             {departments.map((department) => (
-              <DepartmentCard key={department.id} department={department} />
+              <DepartmentCard key={department.id} department={department} users={users} />
             ))}
           </div>
         )}
@@ -1231,8 +1240,77 @@ export default function AccessControlPage() {
   );
 }
 
-function DepartmentCard({ department }: { department: AccessControlDepartment }) {
+function DepartmentCard({
+  department,
+  users,
+}: {
+  department: AccessControlDepartment;
+  users: AuthUser[];
+}) {
   const rows = Array.isArray(department.roles) ? department.roles : [];
+  const middleManagerRole = rows.find((role) => role.id === MIDDLE_MANAGER_ROLE_ID) || null;
+  const clientManagerRole = rows.find((role) => role.id === CLIENT_MANAGER_ROLE_ID) || null;
+
+  const usersByUsername = new Map<string, AuthUser>();
+  for (const user of Array.isArray(users) ? users : []) {
+    const username = normalizeUsername(user?.username || "");
+    if (!username || usersByUsername.has(username)) {
+      continue;
+    }
+    usersByUsername.set(username, user);
+  }
+
+  const clientManagerMembers = Array.isArray(clientManagerRole?.members) ? clientManagerRole.members : [];
+  const clientManagerMembersByUsername = new Map<string, (typeof clientManagerMembers)[number]>();
+  for (const member of clientManagerMembers) {
+    const username = normalizeUsername(member?.username || "");
+    if (!username || clientManagerMembersByUsername.has(username)) {
+      continue;
+    }
+    clientManagerMembersByUsername.set(username, member);
+  }
+
+  const assignedClientManagerUsernames = new Set<string>();
+  const middleManagerTeamGroups = (Array.isArray(middleManagerRole?.members) ? middleManagerRole.members : [])
+    .map((middleManagerMember) => {
+      const middleManagerUsername = normalizeUsername(middleManagerMember?.username || "");
+      const middleManagerProfile = usersByUsername.get(middleManagerUsername);
+      const teamMembers = normalizeTeamUsernames(middleManagerProfile?.teamUsernames).map((teamUsername) => {
+        const normalizedTeamUsername = normalizeUsername(teamUsername);
+        const knownClientManager = clientManagerMembersByUsername.get(normalizedTeamUsername);
+        if (knownClientManager) {
+          assignedClientManagerUsernames.add(normalizedTeamUsername);
+          return {
+            username: knownClientManager.username,
+            displayName: knownClientManager.displayName || knownClientManager.username,
+            isFallback: false,
+          };
+        }
+        return {
+          username: teamUsername,
+          displayName: teamUsername,
+          isFallback: true,
+        };
+      });
+
+      return {
+        middleManager: middleManagerMember,
+        teamMembers,
+      };
+    })
+    .sort((left, right) =>
+      (left.middleManager.displayName || left.middleManager.username || "").localeCompare(
+        right.middleManager.displayName || right.middleManager.username || "",
+        "en-US",
+        { sensitivity: "base" },
+      ),
+    );
+
+  const unassignedClientManagers = clientManagerMembers.filter((member) => {
+    return !assignedClientManagerUsernames.has(normalizeUsername(member?.username || ""));
+  });
+  const showClientManagerTeams = Boolean(middleManagerTeamGroups.length);
+
   return (
     <article className="access-control-department-card-react">
       <h3 className="access-control-department-card-react__title">{department.name}</h3>
@@ -1250,7 +1328,52 @@ function DepartmentCard({ department }: { department: AccessControlDepartment })
                 <span className="access-control-role-pill-react">{role.name}</span>
               </td>
               <td className="access-control-members-cell-react">
-                {role.members.length ? (
+                {role.id === CLIENT_MANAGER_ROLE_ID && showClientManagerTeams ? (
+                  <div className="access-control-team-clusters-react">
+                    {middleManagerTeamGroups.map((group) => (
+                      <section
+                        key={`${department.id}-${group.middleManager.username}`}
+                        className="access-control-team-cluster-react"
+                      >
+                        <p className="access-control-team-cluster-title-react">
+                          {group.middleManager.displayName || group.middleManager.username}
+                        </p>
+                        {group.teamMembers.length ? (
+                          <div className="access-control-members-list-react">
+                            {group.teamMembers.map((member) => (
+                              <span
+                                key={`${group.middleManager.username}-${member.username}`}
+                                className={`access-control-member-chip-react ${member.isFallback ? "is-fallback" : ""}`.trim()}
+                                title={member.username}
+                              >
+                                {member.displayName || member.username}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="access-control-members-empty-react">No team assigned</span>
+                        )}
+                      </section>
+                    ))}
+
+                    {unassignedClientManagers.length ? (
+                      <section className="access-control-team-cluster-react access-control-team-cluster-react--unassigned">
+                        <p className="access-control-team-cluster-title-react">Without Middle Manager</p>
+                        <div className="access-control-members-list-react">
+                          {unassignedClientManagers.map((member) => (
+                            <span
+                              key={`unassigned-${member.username}`}
+                              className="access-control-member-chip-react"
+                              title={member.username}
+                            >
+                              {member.displayName || member.username}
+                            </span>
+                          ))}
+                        </div>
+                      </section>
+                    ) : null}
+                  </div>
+                ) : role.members.length ? (
                   <div className="access-control-members-list-react">
                     {role.members.map((member) => (
                       <span key={`${role.id}-${member.username}`} className="access-control-member-chip-react" title={member.username}>
@@ -1305,11 +1428,14 @@ function MiddleManagerTeamField({
         <div className="access-control-team-options-react">
           {options.map((option) => {
             const isSelected = selectedSet.has(option.username);
+            const isOptionDisabled = Boolean(disabled || (option.isDisabled && !isSelected));
             const optionId = `${idPrefix}-${encodeURIComponent(option.username).replace(/%/g, "")}`;
             return (
               <label
                 key={`${idPrefix}-${option.username}`}
-                className={`cb-checkbox-row access-control-team-option-react ${isSelected ? "is-selected" : ""}`.trim()}
+                className={`cb-checkbox-row access-control-team-option-react ${isSelected ? "is-selected" : ""} ${
+                  option.isDisabled ? "is-disabled" : ""
+                }`.trim()}
                 htmlFor={optionId}
               >
                 <input
@@ -1317,7 +1443,7 @@ function MiddleManagerTeamField({
                   type="checkbox"
                   checked={isSelected}
                   onChange={() => onToggle(option.username)}
-                  disabled={disabled}
+                  disabled={isOptionDisabled}
                 />
                 <span className="access-control-team-option-text-react">
                   <strong>{option.displayName || option.username}</strong>
@@ -1571,24 +1697,35 @@ function buildMiddleManagerTeamOptions(
   departmentId: string,
   selectedUsernames: string[],
   excludedUsernames: string[] = [],
+  activeMiddleManagerUsernames: string[] = [],
 ): MiddleManagerTeamOption[] {
   const normalizedUsers = Array.isArray(users) ? users : [];
   const excluded = new Set(normalizeTeamUsernames(excludedUsernames));
+  const activeMiddleManagers = new Set(normalizeTeamUsernames(activeMiddleManagerUsernames));
+  const selectedUsernamesSet = new Set(normalizeTeamUsernames(selectedUsernames));
+  const teamAssignments = buildMiddleManagerTeamAssignments(normalizedUsers, departmentId);
   const optionsByUsername = new Map<string, MiddleManagerTeamOption>();
 
   for (const user of normalizedUsers) {
-    if (user.isOwner || user.roleId !== "manager" || user.departmentId !== departmentId) {
+    if (user.isOwner || user.roleId !== CLIENT_MANAGER_ROLE_ID || user.departmentId !== departmentId) {
       continue;
     }
     const username = normalizeUsername(user.username || "");
     if (!username || excluded.has(username)) {
       continue;
     }
+    const assignment = teamAssignments.get(username);
+    const assignedToAnotherMiddleManager = Boolean(
+      assignment && !activeMiddleManagers.has(assignment.middleManagerUsername),
+    );
     optionsByUsername.set(username, {
       username,
       displayName: (user.displayName || user.username || username).trim(),
-      helperText: user.username || username,
+      helperText: assignedToAnotherMiddleManager
+        ? `${user.username || username} • Already in ${assignment?.middleManagerDisplayName} team`
+        : user.username || username,
       isFallback: false,
+      isDisabled: assignedToAnotherMiddleManager,
     });
   }
 
@@ -1596,11 +1733,18 @@ function buildMiddleManagerTeamOptions(
     if (excluded.has(selectedUsername) || optionsByUsername.has(selectedUsername)) {
       continue;
     }
+    const assignment = teamAssignments.get(selectedUsername);
+    const assignedToAnotherMiddleManager = Boolean(
+      assignment && !activeMiddleManagers.has(assignment.middleManagerUsername),
+    );
     optionsByUsername.set(selectedUsername, {
       username: selectedUsername,
       displayName: selectedUsername,
-      helperText: selectedUsername,
+      helperText: assignedToAnotherMiddleManager
+        ? `${selectedUsername} • Already in ${assignment?.middleManagerDisplayName} team`
+        : selectedUsername,
       isFallback: true,
+      isDisabled: assignedToAnotherMiddleManager && !selectedUsernamesSet.has(selectedUsername),
     });
   }
 
@@ -1610,6 +1754,37 @@ function buildMiddleManagerTeamOptions(
       left.username.localeCompare(right.username, "en-US", { sensitivity: "base" })
     );
   });
+}
+
+function buildMiddleManagerTeamAssignments(
+  users: AuthUser[],
+  departmentId: string,
+): Map<string, { middleManagerUsername: string; middleManagerDisplayName: string }> {
+  const assignments = new Map<string, { middleManagerUsername: string; middleManagerDisplayName: string }>();
+
+  for (const user of Array.isArray(users) ? users : []) {
+    if (user.isOwner || user.roleId !== MIDDLE_MANAGER_ROLE_ID || user.departmentId !== departmentId) {
+      continue;
+    }
+
+    const middleManagerUsername = normalizeUsername(user.username || "");
+    if (!middleManagerUsername) {
+      continue;
+    }
+
+    const middleManagerDisplayName = (user.displayName || user.username || middleManagerUsername).trim();
+    for (const teamUsername of normalizeTeamUsernames(user.teamUsernames)) {
+      if (!teamUsername || assignments.has(teamUsername)) {
+        continue;
+      }
+      assignments.set(teamUsername, {
+        middleManagerUsername,
+        middleManagerDisplayName,
+      });
+    }
+  }
+
+  return assignments;
 }
 
 function normalizeTotpSecretValue(rawValue: string): string {

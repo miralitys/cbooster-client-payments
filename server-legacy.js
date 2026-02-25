@@ -6561,6 +6561,73 @@ function normalizeWebAuthTeamUsernames(rawValue) {
   return normalized.slice(0, 80);
 }
 
+function collectWebAuthMiddleManagerTeamConflicts(teamUsernames, options = {}) {
+  const normalizedTeamUsernames = normalizeWebAuthTeamUsernames(teamUsernames);
+  if (!normalizedTeamUsernames.length) {
+    return [];
+  }
+
+  const departmentId = normalizeWebAuthDepartmentId(options.departmentId);
+  const excludedMiddleManagerUsernames = new Set(
+    normalizeWebAuthTeamUsernames(options.excludeMiddleManagerUsernames),
+  );
+  const requestedTeamUsernamesSet = new Set(normalizedTeamUsernames);
+  const conflicts = [];
+  const seenTeamUsernames = new Set();
+
+  for (const userProfile of WEB_AUTH_USERS_BY_USERNAME.values()) {
+    if (!userProfile || typeof userProfile !== "object" || userProfile.isOwner) {
+      continue;
+    }
+
+    const middleManagerDepartmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
+    const middleManagerRoleId = normalizeWebAuthRoleId(userProfile.roleId, middleManagerDepartmentId);
+    if (middleManagerRoleId !== WEB_AUTH_ROLE_MIDDLE_MANAGER) {
+      continue;
+    }
+
+    if (departmentId && middleManagerDepartmentId !== departmentId) {
+      continue;
+    }
+
+    const middleManagerUsername = normalizeWebAuthUsername(userProfile.username);
+    if (!middleManagerUsername || excludedMiddleManagerUsernames.has(middleManagerUsername)) {
+      continue;
+    }
+
+    const middleManagerTeam = normalizeWebAuthTeamUsernames(userProfile.teamUsernames);
+    for (const teamUsername of middleManagerTeam) {
+      if (!requestedTeamUsernamesSet.has(teamUsername) || seenTeamUsernames.has(teamUsername)) {
+        continue;
+      }
+
+      seenTeamUsernames.add(teamUsername);
+      conflicts.push({
+        teamUsername,
+        middleManagerUsername,
+        middleManagerDisplayName: sanitizeTextValue(userProfile.displayName, 140) || middleManagerUsername,
+      });
+    }
+  }
+
+  return conflicts;
+}
+
+function ensureWebAuthMiddleManagerTeamAvailability(teamUsernames, options = {}) {
+  const conflicts = collectWebAuthMiddleManagerTeamConflicts(teamUsernames, options);
+  if (!conflicts.length) {
+    return;
+  }
+
+  const firstConflict = conflicts[0];
+  const conflictUserProfile = getWebAuthUserByUsername(firstConflict.teamUsername);
+  const conflictUserDisplayName = sanitizeTextValue(conflictUserProfile?.displayName, 140) || firstConflict.teamUsername;
+  throw createHttpError(
+    `"${conflictUserDisplayName}" is already assigned to middle manager "${firstConflict.middleManagerDisplayName}".`,
+    409,
+  );
+}
+
 function buildWebAuthPermissionsForUser(userProfile) {
   const permissions = Object.fromEntries(WEB_AUTH_ALL_PERMISSION_KEYS.map((key) => [key, false]));
   if (!userProfile || typeof userProfile !== "object") {
@@ -11885,6 +11952,12 @@ function normalizeWebAuthRegistrationPayload(rawBody) {
   }
 
   const teamUsernames = normalizeWebAuthTeamUsernames(payload.teamUsernames || payload.team);
+  if (roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER && teamUsernames.length) {
+    ensureWebAuthMiddleManagerTeamAvailability(teamUsernames, {
+      departmentId,
+      excludeMiddleManagerUsernames: [username],
+    });
+  }
   const totpSecret = normalizeWebAuthTotpSecret(
     payload.totpSecret || payload.totp_secret || payload.twoFactorSecret || payload.otpSecret,
   );
@@ -11992,6 +12065,12 @@ function normalizeWebAuthUpdatePayload(rawBody, existingUser) {
   const teamUsernames = hasTeamInPayload
     ? normalizeWebAuthTeamUsernames(payload.teamUsernames || payload.team)
     : normalizeWebAuthTeamUsernames(existing.teamUsernames);
+  if (roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER && teamUsernames.length) {
+    ensureWebAuthMiddleManagerTeamAvailability(teamUsernames, {
+      departmentId,
+      excludeMiddleManagerUsernames: [existingUsername, username],
+    });
+  }
   let mustChangePassword = hasMustChangePasswordInPayload
     ? resolveOptionalBoolean(payload.mustChangePassword) === true
     : resolveOptionalBoolean(existing.mustChangePassword) === true;
@@ -12349,6 +12428,10 @@ function resolveLoginDeviceFingerprint(req) {
   }
 
   return crypto.createHash("sha256").update(source).digest("hex").slice(0, 24);
+}
+
+function hasStrongLoginDeviceBinding(req) {
+  return Boolean(normalizeWebAuthMobileDeviceId(req?.headers?.[WEB_AUTH_MOBILE_DEVICE_HEADER]));
 }
 
 function buildRateLimitRetryAfterSeconds(retryAfterMs) {
@@ -12737,6 +12820,7 @@ function sendRateLimitResponse(req, res, options = {}) {
   const path = normalizeRequestPathname(req, 260);
   const ip = resolveRateLimitClientIp(req);
   const username = normalizeRateLimitUsername(options.username || req.body?.username || req.webAuthUser || "");
+  const reason = sanitizeTextValue(options.reason, 180);
 
   res.setHeader("Retry-After", String(retryAfterSec));
   res.setHeader("Cache-Control", "no-store, private");
@@ -12748,6 +12832,7 @@ function sendRateLimitResponse(req, res, options = {}) {
       ip,
       username,
       code: safeCode,
+      reason,
       retryAfterSec,
     };
     logAuthProtectionEvent("warn", "rate_limit_triggered", eventMeta);
@@ -12756,6 +12841,7 @@ function sendRateLimitResponse(req, res, options = {}) {
       ip,
       username,
       code: safeCode,
+      reason,
       retryAfterSec,
     });
     if (safeCode === "login_locked") {
@@ -13393,6 +13479,7 @@ function resolveLoginProgressiveDelayMs(req, username) {
   const nowMs = Date.now();
   const ip = resolveRateLimitClientIp(req);
   const deviceFingerprint = resolveLoginDeviceFingerprint(req);
+  const hasStrongDeviceBinding = hasStrongLoginDeviceBinding(req);
   const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
   const deviceAccountKey = `account-device:${normalizedUsername}:${deviceFingerprint}`;
   const ipAccountFailures = readActiveLoginFailures(
@@ -13405,7 +13492,9 @@ function resolveLoginProgressiveDelayMs(req, username) {
     nowMs,
     LOGIN_FAILURE_DEVICE_ACCOUNT_POLICY,
   );
-  const failures = Math.max(ipAccountFailures, deviceAccountFailures);
+  const failures = hasStrongDeviceBinding
+    ? Math.max(ipAccountFailures, deviceAccountFailures)
+    : ipAccountFailures;
   if (failures <= 1) {
     return 0;
   }
@@ -13440,6 +13529,7 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   const normalizedUsername = normalizeRateLimitUsername(username);
   const ip = resolveRateLimitClientIp(req);
   const deviceFingerprint = resolveLoginDeviceFingerprint(req);
+  const hasStrongDeviceBinding = hasStrongLoginDeviceBinding(req);
 
   const isRateAllowed = enforceRateLimit(req, res, {
     scope: "login",
@@ -13486,11 +13576,13 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
     trackAuthProtectionAnomaly("login_account_risk_detected", softRiskMeta);
   }
 
-  const retryAfterMs = Math.max(ipAccountLockMs, deviceAccountLockMs);
+  const retryAfterMs = hasStrongDeviceBinding
+    ? Math.max(ipAccountLockMs, deviceAccountLockMs)
+    : ipAccountLockMs;
 
   if (retryAfterMs > 0) {
     const lockReason =
-      ipAccountLockMs >= deviceAccountLockMs
+      !hasStrongDeviceBinding || ipAccountLockMs >= deviceAccountLockMs
         ? "ip_account_lock"
         : "device_account_lock";
     const eventMeta = {
@@ -13721,17 +13813,24 @@ function resolveWebLoginErrorMessage(rawCode) {
   if (code === "two_factor_invalid") {
     return "Invalid verification code.";
   }
+  if (code === "step_up_required") {
+    return "Additional verification required. Submit sign-in once more from this device.";
+  }
   return "";
 }
 
-function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "", csrfToken = "", styleNonce = "" } = {}) {
+function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "", csrfToken = "", styleNonce = "", stepUpToken = "" } = {}) {
   const safeNextPath = resolveSafeNextPath(nextPath);
   const safeError = sanitizeTextValue(errorMessage, 200);
   const safeCsrfToken = sanitizeTextValue(csrfToken, 500);
   const safeStyleNonce = sanitizeTextValue(styleNonce, 180);
+  const safeStepUpToken = sanitizeTextValue(stepUpToken, 1600);
   const errorBlock = safeError
     ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
     : `<p class="auth-help">Use your account credentials. If 2FA is enabled, enter your Authenticator code.</p>`;
+  const stepUpTokenInput = safeStepUpToken
+    ? `<input type="hidden" name="stepUpToken" value="${escapeHtml(safeStepUpToken)}" />`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -13884,6 +13983,7 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "", csrfToken = 
       <form method="post" action="/login" novalidate>
         <input type="hidden" name="next" value="${escapeHtml(safeNextPath)}" />
         <input type="hidden" name="_csrf" value="${escapeHtml(safeCsrfToken)}" />
+        ${stepUpTokenInput}
         <label>
           Username
           <input type="text" name="username" autocomplete="username" required />
