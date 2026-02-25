@@ -172,6 +172,10 @@ const WEB_AUTH_CSRF_COOKIE_SAME_SITE = resolveWebAuthCookieSameSite(
   process.env.WEB_AUTH_CSRF_COOKIE_SAMESITE,
   WEB_AUTH_SESSION_COOKIE_SAME_SITE,
 );
+const WEB_AUTH_LOGIN_CSRF_COOKIE_SAME_SITE = resolveWebAuthCookieSameSite(
+  process.env.WEB_AUTH_LOGIN_CSRF_COOKIE_SAMESITE,
+  WEB_AUTH_CSRF_COOKIE_SAME_SITE,
+);
 const WEB_AUTH_SESSION_SECRET_RAW = normalizeWebAuthConfigValue(process.env.WEB_AUTH_SESSION_SECRET);
 const WEB_AUTH_SESSION_SECRET = resolveWebAuthSessionSecret(WEB_AUTH_SESSION_SECRET_RAW);
 const RATE_LIMIT_ENABLED = resolveOptionalBoolean(process.env.RATE_LIMIT_ENABLED) !== false;
@@ -5854,7 +5858,7 @@ function setWebAuthLoginCsrfCookie(req, res, csrfToken) {
 
   res.cookie(WEB_AUTH_LOGIN_CSRF_COOKIE_NAME, normalizedCsrfToken, {
     httpOnly: false,
-    sameSite: "strict",
+    sameSite: WEB_AUTH_LOGIN_CSRF_COOKIE_SAME_SITE,
     secure: isSecureCookieRequired(req),
     maxAge: WEB_AUTH_LOGIN_CSRF_TTL_SEC * 1000,
     path: "/",
@@ -5864,7 +5868,7 @@ function setWebAuthLoginCsrfCookie(req, res, csrfToken) {
 function clearWebAuthLoginCsrfCookie(req, res) {
   res.clearCookie(WEB_AUTH_LOGIN_CSRF_COOKIE_NAME, {
     httpOnly: false,
-    sameSite: "strict",
+    sameSite: WEB_AUTH_LOGIN_CSRF_COOKIE_SAME_SITE,
     secure: isSecureCookieRequired(req),
     path: "/",
   });

@@ -206,6 +206,16 @@ function buildCookieHeader(cookieJar) {
     .join("; ");
 }
 
+function findSetCookieHeaderByName(response, cookieName) {
+  const normalizedName = String(cookieName || "").trim();
+  const header = parseSetCookieHeaders(response).find((entry) => {
+    const normalized = String(entry || "").trim();
+    return normalized.toLowerCase().startsWith(`${normalizedName.toLowerCase()}=`);
+  });
+  assert.ok(header, `Expected Set-Cookie for ${normalizedName}.`);
+  return String(header);
+}
+
 function assertCoreSecurityHeaders(response, routeLabel) {
   const permissionsPolicy = String(response.headers.get("permissions-policy") || "").trim();
   assert.ok(permissionsPolicy, `${routeLabel} must include Permissions-Policy header.`);
@@ -492,9 +502,26 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
 
       const body = await response.json();
       assert.equal(response.status, 200, `Login failed: ${JSON.stringify(body)}`);
-      const setCookies = parseSetCookieHeaders(response).join("\n");
-      assert.match(setCookies, /cbooster_auth_session=[^\n]*;\s*HttpOnly[^\n]*;\s*SameSite=Strict/i);
-      assert.match(setCookies, /cbooster_auth_csrf=[^\n]*;\s*SameSite=Strict/i);
+      const sessionSetCookie = findSetCookieHeaderByName(response, "cbooster_auth_session");
+      const csrfSetCookie = findSetCookieHeaderByName(response, "cbooster_auth_csrf");
+      assert.match(sessionSetCookie, /;\s*HttpOnly(?:;|$)/i);
+      assert.match(sessionSetCookie, /;\s*SameSite=Strict(?:;|$)/i);
+      assert.match(csrfSetCookie, /;\s*SameSite=Strict(?:;|$)/i);
+      assert.doesNotMatch(csrfSetCookie, /;\s*HttpOnly(?:;|$)/i);
+    });
+
+    await t.test("login CSRF cookie defaults to SameSite=Strict", async () => {
+      const loginFormResponse = await fetch(`${baseUrl}/login`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+      assert.equal(loginFormResponse.status, 200);
+      const loginCsrfSetCookie = findSetCookieHeaderByName(loginFormResponse, WEB_AUTH_LOGIN_CSRF_COOKIE_NAME);
+      assert.match(loginCsrfSetCookie, /;\s*SameSite=Strict(?:;|$)/i);
+      assert.doesNotMatch(loginCsrfSetCookie, /;\s*HttpOnly(?:;|$)/i);
     });
 
     await t.test("security headers and CSP are consistent on /login, /, /api/*, 401/404/302 responses", async () => {
@@ -728,6 +755,92 @@ test("web auth integration: repeated invalid logins trigger 429 lock with Retry-
         401,
         `Expected per-IP lock behavior (401 on different IP), got ${differentIpResponse.status} with ${JSON.stringify(differentIpBody)}`,
       );
+    },
+  );
+});
+
+test("web auth integration: cookie policy keeps Secure/HttpOnly flags when secure mode is forced", async () => {
+  await withServer(
+    {
+      WEB_AUTH_COOKIE_SECURE: "true",
+    },
+    async ({ baseUrl }) => {
+      const loginFormResponse = await fetch(`${baseUrl}/login`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+      assert.equal(loginFormResponse.status, 200);
+      const loginCsrfSetCookie = findSetCookieHeaderByName(loginFormResponse, WEB_AUTH_LOGIN_CSRF_COOKIE_NAME);
+      assert.match(loginCsrfSetCookie, /;\s*Secure(?:;|$)/i);
+      assert.match(loginCsrfSetCookie, /;\s*SameSite=Strict(?:;|$)/i);
+      assert.doesNotMatch(loginCsrfSetCookie, /;\s*HttpOnly(?:;|$)/i);
+
+      const loginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+        }),
+      });
+      const loginBody = await loginResponse.json();
+      assert.equal(loginResponse.status, 200, `Login failed: ${JSON.stringify(loginBody)}`);
+
+      const sessionSetCookie = findSetCookieHeaderByName(loginResponse, "cbooster_auth_session");
+      const csrfSetCookie = findSetCookieHeaderByName(loginResponse, "cbooster_auth_csrf");
+      assert.match(sessionSetCookie, /;\s*HttpOnly(?:;|$)/i);
+      assert.match(sessionSetCookie, /;\s*Secure(?:;|$)/i);
+      assert.match(sessionSetCookie, /;\s*SameSite=Strict(?:;|$)/i);
+      assert.match(csrfSetCookie, /;\s*Secure(?:;|$)/i);
+      assert.match(csrfSetCookie, /;\s*SameSite=Strict(?:;|$)/i);
+      assert.doesNotMatch(csrfSetCookie, /;\s*HttpOnly(?:;|$)/i);
+    },
+  );
+});
+
+test("web auth integration: SameSite cookie overrides are applied when configured", async () => {
+  await withServer(
+    {
+      WEB_AUTH_SESSION_COOKIE_SAMESITE: "lax",
+      WEB_AUTH_CSRF_COOKIE_SAMESITE: "lax",
+      WEB_AUTH_LOGIN_CSRF_COOKIE_SAMESITE: "lax",
+    },
+    async ({ baseUrl }) => {
+      const loginFormResponse = await fetch(`${baseUrl}/login`, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+      assert.equal(loginFormResponse.status, 200);
+      const loginCsrfSetCookie = findSetCookieHeaderByName(loginFormResponse, WEB_AUTH_LOGIN_CSRF_COOKIE_NAME);
+      assert.match(loginCsrfSetCookie, /;\s*SameSite=Lax(?:;|$)/i);
+
+      const loginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+        }),
+      });
+      const loginBody = await loginResponse.json();
+      assert.equal(loginResponse.status, 200, `Login failed: ${JSON.stringify(loginBody)}`);
+
+      const sessionSetCookie = findSetCookieHeaderByName(loginResponse, "cbooster_auth_session");
+      const csrfSetCookie = findSetCookieHeaderByName(loginResponse, "cbooster_auth_csrf");
+      assert.match(sessionSetCookie, /;\s*SameSite=Lax(?:;|$)/i);
+      assert.match(csrfSetCookie, /;\s*SameSite=Lax(?:;|$)/i);
     },
   );
 });

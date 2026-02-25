@@ -42,6 +42,7 @@ npm start
    - `WEB_AUTH_COOKIE_SECURE` = `true`/`false` (опционально, принудительный secure-флаг cookie);
    - `WEB_AUTH_SESSION_COOKIE_SAMESITE` = `strict|lax|none` (по умолчанию `strict`);
    - `WEB_AUTH_CSRF_COOKIE_SAMESITE` = `strict|lax|none` (по умолчанию наследует `WEB_AUTH_SESSION_COOKIE_SAMESITE`);
+   - `WEB_AUTH_LOGIN_CSRF_COOKIE_SAMESITE` = `strict|lax|none` (по умолчанию наследует `WEB_AUTH_CSRF_COOKIE_SAMESITE`);
    - `WEB_AUTH_TOTP_ISSUER` = issuer-имя для Authenticator-приложений (по умолчанию `Credit Booster`);
    - `WEB_AUTH_TOTP_PERIOD_SEC` = шаг TOTP в секундах (по умолчанию `30`);
    - `WEB_AUTH_TOTP_WINDOW_STEPS` = допустимое окно шагов TOTP (по умолчанию `1`, т.е. ±1 шаг);
