@@ -840,6 +840,11 @@ const MINI_RUNTIME_STATE_TABLE_NAME = resolveTableName(
   process.env.DB_MINI_RUNTIME_STATE_TABLE_NAME,
   DEFAULT_MINI_RUNTIME_STATE_TABLE_NAME,
 );
+const DEFAULT_WEB_AUTH_USERS_DIRECTORY_TABLE_NAME = "web_auth_users_directory";
+const WEB_AUTH_USERS_DIRECTORY_TABLE_NAME = resolveTableName(
+  process.env.DB_WEB_AUTH_USERS_DIRECTORY_TABLE_NAME,
+  DEFAULT_WEB_AUTH_USERS_DIRECTORY_TABLE_NAME,
+);
 const MINI_RUNTIME_STATE_STORE = resolveMiniRuntimeStateStore(process.env.MINI_RUNTIME_STATE_STORE);
 const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
@@ -857,8 +862,10 @@ const GHL_CONTRACT_ARCHIVE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CONTRACT_ARCH
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
 const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESSION_SCOPE_TABLE_NAME);
 const MINI_RUNTIME_STATE_TABLE = qualifyTableName(DB_SCHEMA, MINI_RUNTIME_STATE_TABLE_NAME);
+const WEB_AUTH_USERS_DIRECTORY_TABLE = qualifyTableName(DB_SCHEMA, WEB_AUTH_USERS_DIRECTORY_TABLE_NAME);
 const MINI_RUNTIME_STATE_USE_POSTGRES = MINI_RUNTIME_STATE_STORE === "postgres" && Boolean(DATABASE_URL);
 const QUICKBOOKS_AUTH_STATE_ROW_ID = 1;
+const WEB_AUTH_USERS_DIRECTORY_ROW_ID = 1;
 const MODERATION_STATUSES = new Set(["pending", "approved", "rejected"]);
 const GHL_CLIENT_MANAGER_STATUSES = new Set(["assigned", "unassigned", "error"]);
 const GHL_CLIENT_CONTRACT_STATUSES = new Set(["found", "possible", "not_found", "error"]);
@@ -1755,10 +1762,10 @@ app.use(
       useDefaults: true,
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "https://telegram.org", "https://*.telegram.org"],
+        scriptSrc: ["'self'", "https://telegram.org"],
         styleSrc: ["'self'", (_req, res) => `'nonce-${resolveCspStyleNonceFromResponse(res)}'`],
         imgSrc: ["'self'", "data:", "blob:", "https:"],
-        connectSrc: ["'self'", "https://telegram.org", "https://*.telegram.org"],
+        connectSrc: ["'self'", "https://telegram.org", "https://web.telegram.org", "https://api.telegram.org", "wss://web.telegram.org"],
         fontSrc: ["'self'", "data:"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
@@ -1816,6 +1823,8 @@ const miniAttachmentsUploadDiskMiddleware = ATTACHMENTS_STREAMING_ENABLED
   : null;
 
 let dbReadyPromise = null;
+let webAuthUsersDirectoryHydrationPromise = null;
+let webAuthUsersDirectoryPersistPromise = Promise.resolve();
 let quickBooksSyncQueue = Promise.resolve();
 const quickBooksSyncJobsById = new Map();
 const quickBooksHttpCircuitState = {
@@ -6522,8 +6531,14 @@ function isWebAuthOwnerOrAdminProfile(userProfile) {
 function getWebAuthRoleName(roleId, departmentId = "") {
   if (roleId === WEB_AUTH_ROLE_MANAGER) {
     const normalizedDepartmentId = normalizeWebAuthDepartmentId(departmentId);
+    if (normalizedDepartmentId === WEB_AUTH_DEPARTMENT_ACCOUNTING) {
+      return "Accounting Manager";
+    }
     if (normalizedDepartmentId === WEB_AUTH_DEPARTMENT_SALES) {
       return "Sales Manager";
+    }
+    if (normalizedDepartmentId === WEB_AUTH_DEPARTMENT_COLLECTION) {
+      return "Коллектор";
     }
     if (normalizedDepartmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
       return "Client Manager";
@@ -11818,6 +11833,161 @@ function listWebAuthUsers() {
   );
 }
 
+function buildWebAuthDirectoryUserStorageItem(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return null;
+  }
+
+  const username = normalizeWebAuthUsername(userProfile.username);
+  const passwordHash = normalizeWebAuthPasswordHashValue(userProfile.passwordHash);
+  if (!username || !passwordHash) {
+    return null;
+  }
+
+  return {
+    username,
+    passwordHash,
+    displayName: sanitizeTextValue(userProfile.displayName, 140) || username,
+    isOwner: resolveOptionalBoolean(userProfile.isOwner) === true,
+    departmentId: sanitizeTextValue(userProfile.departmentId, 80),
+    roleId: sanitizeTextValue(userProfile.roleId, 80),
+    teamUsernames: normalizeWebAuthTeamUsernames(userProfile.teamUsernames),
+    mustChangePassword: resolveOptionalBoolean(userProfile.mustChangePassword) === true,
+    totpSecret: normalizeWebAuthTotpSecret(userProfile.totpSecret),
+    totpEnabled: resolveOptionalBooleanLoose(userProfile.totpEnabled) !== false,
+    passwordConfiguredAsPlaintext: false,
+    invalidPasswordHashConfigured: false,
+  };
+}
+
+function buildWebAuthUsersDirectoryStoragePayload() {
+  const payload = [];
+  for (const userProfile of WEB_AUTH_USERS_BY_USERNAME.values()) {
+    const serialized = buildWebAuthDirectoryUserStorageItem(userProfile);
+    if (serialized) {
+      payload.push(serialized);
+    }
+  }
+
+  payload.sort((left, right) => left.username.localeCompare(right.username, "en-US", { sensitivity: "base" }));
+  return payload;
+}
+
+function replaceWebAuthUsersDirectoryFromStorage(rawUsers) {
+  let parsedUsers = rawUsers;
+  if (typeof parsedUsers === "string") {
+    try {
+      parsedUsers = JSON.parse(parsedUsers);
+    } catch {
+      return 0;
+    }
+  }
+
+  if (!Array.isArray(parsedUsers)) {
+    return 0;
+  }
+
+  const nextUsersByUsername = new Map();
+  for (const rawUser of parsedUsers.slice(0, 500)) {
+    const finalized = finalizeWebAuthDirectoryUser(rawUser, WEB_AUTH_OWNER_USERNAME);
+    if (!finalized.username || !finalized.passwordHash) {
+      continue;
+    }
+    nextUsersByUsername.set(finalized.username, finalized);
+  }
+
+  if (!nextUsersByUsername.size) {
+    return 0;
+  }
+
+  WEB_AUTH_USERS_BY_USERNAME.clear();
+  for (const userProfile of nextUsersByUsername.values()) {
+    WEB_AUTH_USERS_BY_USERNAME.set(userProfile.username, userProfile);
+  }
+  return nextUsersByUsername.size;
+}
+
+async function persistWebAuthUsersDirectoryToDatabase(reason = "unspecified") {
+  if (!pool || !sharedDbQuery) {
+    return false;
+  }
+
+  const safeReason = sanitizeTextValue(reason, 120) || "unspecified";
+  const payload = buildWebAuthUsersDirectoryStoragePayload();
+  if (!payload.length) {
+    console.warn(`[web-auth] Skip persisting users directory (${safeReason}) because payload is empty.`);
+    return false;
+  }
+
+  await ensureDatabaseReady();
+  await sharedDbQuery(
+    `
+      INSERT INTO ${WEB_AUTH_USERS_DIRECTORY_TABLE} (id, users, updated_at)
+      VALUES ($1, $2::jsonb, NOW())
+      ON CONFLICT (id)
+      DO UPDATE SET users = EXCLUDED.users, updated_at = NOW()
+    `,
+    [WEB_AUTH_USERS_DIRECTORY_ROW_ID, JSON.stringify(payload)],
+  );
+
+  return true;
+}
+
+function queueWebAuthUsersDirectoryPersist(reason = "unspecified") {
+  if (!pool || !sharedDbQuery) {
+    return;
+  }
+
+  const safeReason = sanitizeTextValue(reason, 120) || "unspecified";
+  webAuthUsersDirectoryPersistPromise = webAuthUsersDirectoryPersistPromise
+    .catch(() => {})
+    .then(() => persistWebAuthUsersDirectoryToDatabase(safeReason))
+    .catch((error) => {
+      console.error(`[web-auth] Failed to persist users directory (${safeReason}):`, error);
+    });
+}
+
+async function ensureWebAuthUsersDirectoryHydratedFromDb() {
+  if (!pool || !sharedDbQuery) {
+    return false;
+  }
+
+  if (!webAuthUsersDirectoryHydrationPromise) {
+    webAuthUsersDirectoryHydrationPromise = (async () => {
+      await ensureDatabaseReady();
+      const result = await sharedDbQuery(
+        `
+          SELECT users
+          FROM ${WEB_AUTH_USERS_DIRECTORY_TABLE}
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [WEB_AUTH_USERS_DIRECTORY_ROW_ID],
+      );
+
+      if (!Array.isArray(result?.rows) || result.rows.length === 0) {
+        await persistWebAuthUsersDirectoryToDatabase("bootstrap_seed");
+        return true;
+      }
+
+      const restoredUsersCount = replaceWebAuthUsersDirectoryFromStorage(result.rows[0]?.users);
+      if (restoredUsersCount <= 0) {
+        console.warn(
+          "[web-auth] Stored users directory is empty or invalid. Using in-memory bootstrap users for this runtime.",
+        );
+        return false;
+      }
+
+      return true;
+    })().catch((error) => {
+      webAuthUsersDirectoryHydrationPromise = null;
+      throw error;
+    });
+  }
+
+  return webAuthUsersDirectoryHydrationPromise;
+}
+
 function upsertWebAuthUserInDirectory(rawUser) {
   const finalized = finalizeWebAuthDirectoryUser(rawUser, WEB_AUTH_OWNER_USERNAME);
   if (!finalized.username || !finalized.passwordHash) {
@@ -11825,6 +11995,7 @@ function upsertWebAuthUserInDirectory(rawUser) {
   }
 
   WEB_AUTH_USERS_BY_USERNAME.set(finalized.username, finalized);
+  queueWebAuthUsersDirectoryPersist("upsert");
   return finalized;
 }
 
@@ -12172,6 +12343,7 @@ function deleteWebAuthUserFromDirectory(existingUsername, options = {}) {
   }
 
   WEB_AUTH_USERS_BY_USERNAME.delete(normalizedExistingUsername);
+  queueWebAuthUsersDirectoryPersist("delete");
   return existingUser;
 }
 
@@ -12286,8 +12458,19 @@ function applyWebAuthFirstPasswordChange(userProfile, rawBody, options = {}) {
 function buildWebAuthAccessModel() {
   const users = listWebAuthUsers().map((item) => buildWebAuthPublicUser(item));
   const usersByDepartmentRole = new Map();
+  const adminMembers = [];
 
   for (const user of users) {
+    if (!user.isOwner && normalizeWebAuthRoleId(user.roleId, user.departmentId) === WEB_AUTH_ROLE_ADMIN) {
+      adminMembers.push({
+        username: user.username,
+        displayName: user.displayName || user.username,
+        roleId: user.roleId,
+        roleName: user.roleName,
+      });
+      continue;
+    }
+
     if (user.isOwner || !user.departmentId || !user.roleId) {
       continue;
     }
@@ -12315,6 +12498,19 @@ function buildWebAuthAccessModel() {
         ),
     })),
   }));
+  departments.push({
+    id: "project_admin",
+    name: "Admin Department",
+    roles: [
+      {
+        id: WEB_AUTH_ROLE_ADMIN,
+        name: getWebAuthRoleName(WEB_AUTH_ROLE_ADMIN, ""),
+        members: [...adminMembers].sort((left, right) =>
+          left.displayName.localeCompare(right.displayName, "en-US", { sensitivity: "base" }),
+        ),
+      },
+    ],
+  });
 
   return {
     ownerUsername: WEB_AUTH_OWNER_USERNAME,
@@ -14291,84 +14487,117 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function requireWebAuth(req, res, next) {
+function respondWithWebAuthDirectoryUnavailable(req, res, error) {
   const pathname = normalizeRequestPathname(req, 260) || "/";
-  const isApiPath = pathname.startsWith("/api/");
-  if (isPublicWebAuthPath(pathname)) {
-    next();
-    return;
-  }
+  const status = resolveDbHttpStatus(error, 503);
+  console.error(
+    `[web-auth] Failed to hydrate users directory for ${pathname}:`,
+    sanitizeTextValue(error?.message, 320) || error,
+  );
 
-  const sessionUsername = getRequestWebAuthUser(req);
-  if (sessionUsername) {
-    const userProfile = getWebAuthUserByUsername(sessionUsername);
-    if (!userProfile) {
-      clearWebAuthSessionCookie(req, res);
-      if (pathname.startsWith("/api/")) {
-        res.status(401).json({
-          error: "Authentication required.",
-        });
-        return;
-      }
-
-      const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
-      res.redirect(302, `/login?next=${encodeURIComponent(nextPath)}`);
-      return;
-    }
-
-    req.webAuthUser = userProfile.username;
-    req.webAuthProfile = userProfile;
-
-    const sessionCookieToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
-    const sessionCookieUsername = parseWebAuthSessionToken(sessionCookieToken);
-    if (sessionCookieToken && sessionCookieUsername === userProfile.username) {
-      const expectedCsrfToken = createWebAuthCsrfToken(userProfile.username, sessionCookieToken);
-      const currentCsrfCookie = sanitizeTextValue(getRequestCookie(req, WEB_AUTH_CSRF_COOKIE_NAME), 220);
-      if (!currentCsrfCookie || !safeEqual(currentCsrfCookie, expectedCsrfToken)) {
-        setWebAuthCsrfCookie(req, res, expectedCsrfToken);
-      }
-    }
-
-    if (isWebAuthPasswordChangeRequired(userProfile) && !isWebAuthPasswordChangeAllowedPath(pathname)) {
-      const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
-      if (pathname.startsWith("/api/")) {
-        res.status(403).json({
-          error: "Password change required.",
-          code: "password_change_required",
-          mustChangePassword: true,
-          next: `/first-password?next=${encodeURIComponent(nextPath)}`,
-        });
-        return;
-      }
-
-      res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
-      return;
-    }
-
-    next();
-    return;
-  }
-
-  if (isApiPath && req.webAuthMobileAuthError) {
-    const mobileAuthError = req.webAuthMobileAuthError;
-    res.status(mobileAuthError.status || 401).json({
-      error: sanitizeTextValue(mobileAuthError.error, 260) || "Authentication required.",
-      code: sanitizeTextValue(mobileAuthError.code, 80) || "mobile_auth_failed",
+  if (pathname.startsWith("/api/")) {
+    res.status(status).json({
+      error: "Authentication store is temporarily unavailable.",
     });
     return;
   }
 
-  clearWebAuthSessionCookie(req, res);
+  res.status(status).type("text/plain").send("Authentication store is temporarily unavailable.");
+}
 
-  if (isApiPath) {
-    res.status(401).json({
-      error: "Authentication required.",
-    });
+function requireWebAuth(req, res, next) {
+  const continueAuth = () => {
+    const pathname = normalizeRequestPathname(req, 260) || "/";
+    const isApiPath = pathname.startsWith("/api/");
+    if (isPublicWebAuthPath(pathname)) {
+      next();
+      return;
+    }
+
+    const sessionUsername = getRequestWebAuthUser(req);
+    if (sessionUsername) {
+      const userProfile = getWebAuthUserByUsername(sessionUsername);
+      if (!userProfile) {
+        clearWebAuthSessionCookie(req, res);
+        if (pathname.startsWith("/api/")) {
+          res.status(401).json({
+            error: "Authentication required.",
+          });
+          return;
+        }
+
+        const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
+        res.redirect(302, `/login?next=${encodeURIComponent(nextPath)}`);
+        return;
+      }
+
+      req.webAuthUser = userProfile.username;
+      req.webAuthProfile = userProfile;
+
+      const sessionCookieToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+      const sessionCookieUsername = parseWebAuthSessionToken(sessionCookieToken);
+      if (sessionCookieToken && sessionCookieUsername === userProfile.username) {
+        const expectedCsrfToken = createWebAuthCsrfToken(userProfile.username, sessionCookieToken);
+        const currentCsrfCookie = sanitizeTextValue(getRequestCookie(req, WEB_AUTH_CSRF_COOKIE_NAME), 220);
+        if (!currentCsrfCookie || !safeEqual(currentCsrfCookie, expectedCsrfToken)) {
+          setWebAuthCsrfCookie(req, res, expectedCsrfToken);
+        }
+      }
+
+      if (isWebAuthPasswordChangeRequired(userProfile) && !isWebAuthPasswordChangeAllowedPath(pathname)) {
+        const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
+        if (pathname.startsWith("/api/")) {
+          res.status(403).json({
+            error: "Password change required.",
+            code: "password_change_required",
+            mustChangePassword: true,
+            next: `/first-password?next=${encodeURIComponent(nextPath)}`,
+          });
+          return;
+        }
+
+        res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
+        return;
+      }
+
+      next();
+      return;
+    }
+
+    if (isApiPath && req.webAuthMobileAuthError) {
+      const mobileAuthError = req.webAuthMobileAuthError;
+      res.status(mobileAuthError.status || 401).json({
+        error: sanitizeTextValue(mobileAuthError.error, 260) || "Authentication required.",
+        code: sanitizeTextValue(mobileAuthError.code, 80) || "mobile_auth_failed",
+      });
+      return;
+    }
+
+    clearWebAuthSessionCookie(req, res);
+
+    if (isApiPath) {
+      res.status(401).json({
+        error: "Authentication required.",
+      });
+      return;
+    }
+
+    const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
+    res.redirect(302, `/login?next=${encodeURIComponent(nextPath)}`);
+  };
+
+  if (!pool) {
+    continueAuth();
     return;
   }
 
-  const nextPath = resolveSafeNextPath(req.originalUrl || pathname);
-  res.redirect(302, `/login?next=${encodeURIComponent(nextPath)}`);
+  ensureWebAuthUsersDirectoryHydratedFromDb()
+    .then(() => {
+      continueAuth();
+    })
+    .catch((error) => {
+      respondWithWebAuthDirectoryUnavailable(req, res, error);
+    });
 }
 
 function getActiveQuickBooksRefreshToken() {
@@ -22588,6 +22817,19 @@ async function ensureDatabaseReady() {
         )
       `);
 
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${WEB_AUTH_USERS_DIRECTORY_TABLE} (
+          id BIGINT PRIMARY KEY,
+          users JSONB NOT NULL DEFAULT '[]'::jsonb,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${WEB_AUTH_USERS_DIRECTORY_TABLE_NAME}_updated_at_idx
+        ON ${WEB_AUTH_USERS_DIRECTORY_TABLE} (updated_at DESC)
+      `);
+
       await sharedDbQuery(
         `
           INSERT INTO ${STATE_TABLE} (id, records)
@@ -26404,7 +26646,16 @@ function setWebAppStaticHeaders(res, filePath) {
   }
 }
 
-const handleWebLoginPage = (req, res) => {
+const handleWebLoginPage = async (req, res) => {
+  if (pool) {
+    try {
+      await ensureWebAuthUsersDirectoryHydratedFromDb();
+    } catch (error) {
+      respondWithWebAuthDirectoryUnavailable(req, res, error);
+      return;
+    }
+  }
+
   const nextPath = resolveSafeNextPath(req.query.next);
   const currentSessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
   const currentUser = getWebAuthUserByUsername(parseWebAuthSessionToken(currentSessionToken));
@@ -26434,6 +26685,15 @@ const handleWebLoginPage = (req, res) => {
 };
 
 const handleWebLoginSubmit = async (req, res) => {
+  if (pool) {
+    try {
+      await ensureWebAuthUsersDirectoryHydratedFromDb();
+    } catch (error) {
+      respondWithWebAuthDirectoryUnavailable(req, res, error);
+      return;
+    }
+  }
+
   const username = req.body?.username;
   const password = req.body?.password;
   const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
@@ -26481,6 +26741,15 @@ const handleWebLoginSubmit = async (req, res) => {
 };
 
 async function handleApiAuthLogin(req, res) {
+  if (pool) {
+    try {
+      await ensureWebAuthUsersDirectoryHydratedFromDb();
+    } catch (error) {
+      respondWithWebAuthDirectoryUnavailable(req, res, error);
+      return;
+    }
+  }
+
   const username = req.body?.username;
   const password = req.body?.password;
   const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
@@ -37124,6 +37393,14 @@ function logServerStartupSummary(port) {
 
 function startServer(port = PORT) {
   assertStartupCriticalEnvironment();
+  if (pool) {
+    void ensureWebAuthUsersDirectoryHydratedFromDb().catch((error) => {
+      console.error(
+        "[web-auth] Initial users directory hydration failed:",
+        sanitizeTextValue(error?.message, 320) || error,
+      );
+    });
+  }
   return app.listen(port, () => {
     logServerStartupSummary(port);
   });

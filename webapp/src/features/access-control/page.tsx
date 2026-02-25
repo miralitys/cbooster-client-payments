@@ -45,6 +45,7 @@ const DEFAULT_TOTP_ISSUER = "Credit Booster";
 const DEFAULT_TOTP_PERIOD_SEC = 30;
 const DEFAULT_TOTP_DIGITS = 6;
 const ADMIN_ROLE_ID = "admin";
+const ADMIN_DEPARTMENT_ID = "project_admin";
 const MIDDLE_MANAGER_ROLE_ID = "middle_manager";
 const CLIENT_MANAGER_ROLE_ID = "manager";
 
@@ -95,20 +96,12 @@ export default function AccessControlPage() {
   const users = useMemo(() => model?.users || [], [model]);
   const rolesByDepartment = useMemo(() => {
     const mapping = new Map<string, AccessControlDepartmentRole[]>();
-    const adminRoleDefinition = (model?.roles || []).find((role) => role.id === ADMIN_ROLE_ID) || null;
     for (const department of departments) {
       const departmentRoles = Array.isArray(department.roles) ? [...department.roles] : [];
-      if (adminRoleDefinition && !departmentRoles.some((role) => role.id === adminRoleDefinition.id)) {
-        departmentRoles.push({
-          id: adminRoleDefinition.id,
-          name: adminRoleDefinition.name,
-          members: [],
-        });
-      }
       mapping.set(department.id, departmentRoles);
     }
     return mapping;
-  }, [departments, model?.roles]);
+  }, [departments]);
 
   const createRoleOptions = useMemo(
     () => rolesByDepartment.get(createForm.departmentId) || [],
@@ -269,7 +262,7 @@ export default function AccessControlPage() {
           username: user.username || "",
           password: "",
           displayName: user.displayName || user.username || "",
-          departmentId: user.departmentId || "",
+          departmentId: user.roleId === ADMIN_ROLE_ID ? ADMIN_DEPARTMENT_ID : user.departmentId || "",
           roleId: user.roleId || "",
           teamUsernames: normalizeTeamUsernames(user.teamUsernames),
           totpSecret: "",
@@ -1612,11 +1605,12 @@ function ensureFormDefaults(form: UserFormState, departments: AccessControlDepar
     };
   }
 
-  const departmentId = normalizedDepartments.some((department) => department.id === form.departmentId)
-    ? form.departmentId
+  const requestedDepartmentId = form.roleId === ADMIN_ROLE_ID ? ADMIN_DEPARTMENT_ID : form.departmentId;
+  const departmentId = normalizedDepartments.some((department) => department.id === requestedDepartmentId)
+    ? requestedDepartmentId
     : normalizedDepartments[0].id;
   const roleOptions = normalizedDepartments.find((department) => department.id === departmentId)?.roles || [];
-  const roleId = form.roleId === ADMIN_ROLE_ID || roleOptions.some((role) => role.id === form.roleId)
+  const roleId = roleOptions.some((role) => role.id === form.roleId)
     ? form.roleId
     : roleOptions[0]?.id || "";
 
