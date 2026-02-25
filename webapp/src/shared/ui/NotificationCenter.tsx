@@ -69,6 +69,15 @@ export function NotificationCenter() {
     }
   }
 
+  function handleNotificationItemClick(notification: AppNotification): void {
+    if (notification.clientName || notification.link?.href) {
+      handleOpenNotification(notification);
+      return;
+    }
+
+    markNotificationRead(notification.id);
+  }
+
   return (
     <div ref={rootRef} className={`notification-center ${isOpen ? "is-open" : ""}`.trim()}>
       <button
@@ -154,7 +163,7 @@ export function NotificationCenter() {
                 <button
                   type="button"
                   className="notification-center__item-main notification-center__item-main-btn"
-                  onClick={() => markNotificationRead(notification.id)}
+                  onClick={() => handleNotificationItemClick(notification)}
                 >
                   <span className="notification-center__tone-dot" aria-hidden="true" />
                   <div className="notification-center__item-copy">
