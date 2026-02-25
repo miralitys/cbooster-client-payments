@@ -18,6 +18,7 @@ const TEST_FIRST_PASSWORD_USERNAME = "firstpass.integration@example.com";
 const TEST_FIRST_PASSWORD_PASSWORD = "Temp!Pass123";
 const TEST_WEB_AUTH_SESSION_SECRET =
   "integration-test-web-auth-session-secret-abcdefghijklmnopqrstuvwxyz-123456";
+const WEB_AUTH_LOGIN_CSRF_COOKIE_NAME = "cbooster_login_csrf";
 
 function delay(ms) {
   return new Promise((resolve) => {
@@ -243,6 +244,24 @@ async function loginApi(baseUrl, credentials) {
   };
 }
 
+async function fetchLoginFormCsrf(baseUrl) {
+  const response = await fetch(`${baseUrl}/login`, {
+    method: "GET",
+    redirect: "manual",
+    headers: {
+      Accept: "text/html",
+    },
+  });
+  assert.equal(response.status, 200, "Expected GET /login to return 200.");
+  const cookies = buildCookieJar(response);
+  const csrfToken = cookies.get(WEB_AUTH_LOGIN_CSRF_COOKIE_NAME) || "";
+  assert.ok(csrfToken, `Expected ${WEB_AUTH_LOGIN_CSRF_COOKIE_NAME} cookie from GET /login`);
+  return {
+    csrfToken,
+    cookieHeader: buildCookieHeader(cookies),
+  };
+}
+
 test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
   await withServer({}, async ({ baseUrl }) => {
     await t.test("GET /api/auth/session returns private no-store headers for authenticated user", async () => {
@@ -296,6 +315,64 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       const validCsrfBody = await validCsrfResponse.json();
       assert.equal(validCsrfResponse.status, 200);
       assert.equal(validCsrfBody?.ok, true);
+
+      const crossSiteLogoutResponse = await fetch(`${baseUrl}/api/auth/logout`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          Cookie: ownerLogin.cookieHeader,
+          "x-csrf-token": ownerLogin.csrfToken,
+          Origin: "https://evil.example",
+          Referer: "https://evil.example/attack",
+        },
+      });
+      const crossSiteLogoutBody = await crossSiteLogoutResponse.json();
+      assert.equal(crossSiteLogoutResponse.status, 403);
+      assert.ok(
+        crossSiteLogoutBody?.code === "csrf_origin_invalid" || crossSiteLogoutBody?.code === "csrf_referer_invalid",
+        `Unexpected CSRF origin code: ${String(crossSiteLogoutBody?.code || "")}`,
+      );
+    });
+
+    await t.test("POST /login requires CSRF token and blocks cross-site origin", async () => {
+      const loginForm = await fetchLoginFormCsrf(baseUrl);
+
+      const missingTokenResponse = await fetch(`${baseUrl}/login`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+          "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: loginForm.cookieHeader,
+          Origin: baseUrl,
+          Referer: `${baseUrl}/login`,
+        },
+        body: new URLSearchParams({
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+          next: "/dashboard",
+        }).toString(),
+      });
+      assert.equal(missingTokenResponse.status, 403);
+
+      const crossSiteResponse = await fetch(`${baseUrl}/login`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+          "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: loginForm.cookieHeader,
+          Origin: "https://evil.example",
+          Referer: "https://evil.example/attack",
+        },
+        body: new URLSearchParams({
+          _csrf: loginForm.csrfToken,
+          username: TEST_OWNER_USERNAME,
+          password: TEST_OWNER_PASSWORD,
+          next: "/dashboard",
+        }).toString(),
+      });
+      assert.equal(crossSiteResponse.status, 403);
     });
 
     await t.test("GET /logout is blocked with 405 and allows POST only", async () => {
@@ -443,4 +520,44 @@ test("web auth integration: csrf/rbac/cache/error scenarios", async (t) => {
       assert.equal(Object.prototype.hasOwnProperty.call(body, "dbHint"), false);
     });
   });
+});
+
+test("web auth integration: repeated invalid logins trigger 429 lock with Retry-After", async () => {
+  await withServer(
+    {
+      WEB_AUTH_LOGIN_FAILURE_ACCOUNT_MAX_FAILURES: "3",
+      WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_MAX_FAILURES: "3",
+      WEB_AUTH_LOGIN_FAILURE_ACCOUNT_WINDOW_SEC: "300",
+      WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_WINDOW_SEC: "300",
+      WEB_AUTH_LOGIN_FAILURE_ACCOUNT_LOCK_SEC: "120",
+      WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_LOCK_SEC: "120",
+      WEB_AUTH_LOGIN_FAILURE_DELAY_BASE_MS: "10",
+      WEB_AUTH_LOGIN_FAILURE_DELAY_MAX_MS: "30",
+    },
+    async ({ baseUrl }) => {
+      let lastResponse = null;
+      let lastBody = null;
+
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        lastResponse = await fetch(`${baseUrl}/api/auth/login`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            username: TEST_OWNER_USERNAME,
+            password: "WrongPassword!123",
+          }),
+        });
+        lastBody = await lastResponse.json();
+      }
+
+      assert.ok(lastResponse, "Expected a final login response.");
+      assert.equal(lastResponse.status, 429, `Expected lock response, got ${lastResponse.status} with ${JSON.stringify(lastBody)}`);
+      assert.equal(lastBody?.code, "login_locked");
+      const retryAfterHeader = Number.parseInt(lastResponse.headers.get("retry-after") || "", 10);
+      assert.ok(Number.isFinite(retryAfterHeader) && retryAfterHeader > 0, "Expected Retry-After header on lock response.");
+    },
+  );
 });

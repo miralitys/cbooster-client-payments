@@ -367,13 +367,29 @@ test("first login bypasses TOTP and first-password page includes QR setup", asyn
       assert.equal(firstApiLoginBody.mustChangePassword, true);
       assert.equal(firstApiLoginBody.passwordChangePath, "/first-password");
 
+      const loginPageResponse = await fetch(`${baseUrl}/login`, {
+        method: "GET",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+      assert.equal(loginPageResponse.status, 200);
+      const loginPageCookieHeader = buildCookieHeaderFromSetCookie(loginPageResponse);
+      const encodedLoginCsrfToken = getCookieValueFromSetCookie(loginPageResponse, "cbooster_login_csrf");
+      const loginCsrfToken = decodeURIComponent(encodedLoginCsrfToken || "");
+      assert.ok(loginCsrfToken, "Expected login CSRF cookie from GET /login.");
+
       const webLoginResponse = await fetch(`${baseUrl}/login`, {
         method: "POST",
         redirect: "manual",
         headers: {
+          Cookie: loginPageCookieHeader,
+          Origin: baseUrl,
+          Referer: `${baseUrl}/login`,
           "Content-Type": "application/x-www-form-urlencoded",
         },
         body: new URLSearchParams({
+          _csrf: loginCsrfToken,
           username: "new.user",
           password: "TempPass123!",
           next: "/app/dashboard",

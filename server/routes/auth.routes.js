@@ -4,19 +4,20 @@ function registerAuthPublicRoutes(context) {
   const {
     app,
     requireWebApiCsrf,
+    requireAuthStateChangeProtection,
     handlers,
   } = context;
 
   app.get("/login", handlers.handleWebLoginPage);
-  app.post("/login", handlers.handleWebLoginSubmit);
+  app.post("/login", requireAuthStateChangeProtection, handlers.handleWebLoginSubmit);
 
-  app.post("/api/auth/login", handlers.handleApiAuthLogin);
-  app.post("/api/auth/logout", requireWebApiCsrf, handlers.handleApiAuthLogout);
+  app.post("/api/auth/login", requireAuthStateChangeProtection, handlers.handleApiAuthLogin);
+  app.post("/api/auth/logout", requireAuthStateChangeProtection, requireWebApiCsrf, handlers.handleApiAuthLogout);
   app.post("/api/mobile/auth/login", handlers.handleApiAuthLogin);
   app.post("/api/mobile/auth/logout", requireWebApiCsrf, handlers.handleApiAuthLogout);
 
   app.get("/logout", handlers.handleWebLogoutMethodNotAllowed);
-  app.post("/logout", handlers.handleWebLogout);
+  app.post("/logout", requireAuthStateChangeProtection, handlers.handleWebLogout);
 }
 
 function registerAuthProtectedRoutes(context) {

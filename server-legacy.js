@@ -133,12 +133,18 @@ const WEB_AUTH_OWNER_USERNAME =
 const WEB_AUTH_USERS_JSON = (process.env.WEB_AUTH_USERS_JSON || "").toString().trim();
 const WEB_AUTH_SESSION_COOKIE_NAME = "cbooster_auth_session";
 const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
+const WEB_AUTH_LOGIN_CSRF_COOKIE_NAME = "cbooster_login_csrf";
 const WEB_AUTH_CSRF_HEADER_NAME = "x-csrf-token";
 const WEB_AUTH_MOBILE_SESSION_HEADER = "x-cbooster-session";
 const WEB_AUTH_MOBILE_DEVICE_HEADER = "x-cbooster-device-id";
 const WEB_AUTH_MOBILE_REQUEST_ID_HEADER = "x-cbooster-request-id";
 const WEB_AUTH_MOBILE_AUTHORIZATION_SCHEME = "bearer";
 const WEB_AUTH_SESSION_TTL_SEC = parsePositiveInteger(process.env.WEB_AUTH_SESSION_TTL_SEC, 12 * 60 * 60);
+const WEB_AUTH_LOGIN_CSRF_TTL_SEC = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_CSRF_TTL_SEC, 30 * 60), 60),
+  24 * 60 * 60,
+);
+const WEB_AUTH_ENFORCE_ORIGIN_CHECK = resolveOptionalBoolean(process.env.WEB_AUTH_ENFORCE_ORIGIN_CHECK) !== false;
 const WEB_AUTH_MOBILE_SESSION_TTL_SEC = Math.min(
   Math.max(parsePositiveInteger(process.env.WEB_AUTH_MOBILE_SESSION_TTL_SEC, 20 * 60), 60),
   WEB_AUTH_SESSION_TTL_SEC,
@@ -226,15 +232,52 @@ const RATE_LIMIT_PROFILE_API_RECORDS_WRITE = Object.freeze({
   blockMs: 2 * 60 * 1000,
 });
 const LOGIN_FAILURE_ACCOUNT_POLICY = Object.freeze({
-  windowMs: 15 * 60 * 1000,
-  maxFailures: 8,
-  lockMs: 30 * 60 * 1000,
+  windowMs: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_ACCOUNT_WINDOW_SEC, 15 * 60), 60),
+    24 * 60 * 60,
+  ) * 1000,
+  maxFailures: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_ACCOUNT_MAX_FAILURES, 8), 3),
+    100,
+  ),
+  lockMs: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_ACCOUNT_LOCK_SEC, 30 * 60), 30),
+    24 * 60 * 60,
+  ) * 1000,
 });
 const LOGIN_FAILURE_IP_ACCOUNT_POLICY = Object.freeze({
-  windowMs: 10 * 60 * 1000,
-  maxFailures: 6,
-  lockMs: 20 * 60 * 1000,
+  windowMs: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_WINDOW_SEC, 10 * 60), 60),
+    24 * 60 * 60,
+  ) * 1000,
+  maxFailures: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_MAX_FAILURES, 6), 3),
+    100,
+  ),
+  lockMs: Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_IP_ACCOUNT_LOCK_SEC, 20 * 60), 30),
+    24 * 60 * 60,
+  ) * 1000,
 });
+const LOGIN_FAILURE_PROGRESSIVE_DELAY_BASE_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_DELAY_BASE_MS, 250), 0),
+  15_000,
+);
+const LOGIN_FAILURE_PROGRESSIVE_DELAY_MAX_MS = Math.max(
+  LOGIN_FAILURE_PROGRESSIVE_DELAY_BASE_MS,
+  Math.min(
+    Math.max(parsePositiveInteger(process.env.WEB_AUTH_LOGIN_FAILURE_DELAY_MAX_MS, 4_000), 100),
+    60_000,
+  ),
+);
+const AUTH_PROTECTION_ALERT_WINDOW_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.AUTH_PROTECTION_ALERT_WINDOW_SEC, 10 * 60), 60),
+  24 * 60 * 60,
+) * 1000;
+const AUTH_PROTECTION_ALERT_THRESHOLD = Math.min(
+  Math.max(parsePositiveInteger(process.env.AUTH_PROTECTION_ALERT_THRESHOLD, 12), 2),
+  1000,
+);
 const WEB_AUTH_BCRYPT_COST = Math.min(Math.max(parsePositiveInteger(process.env.WEB_AUTH_BCRYPT_COST, 12), 10), 15);
 const WEB_AUTH_TOTP_ISSUER =
   sanitizeTextValue(process.env.WEB_AUTH_TOTP_ISSUER, 140) || "Credit Booster";
@@ -1742,6 +1785,7 @@ let rateLimitSweepCounter = 0;
 const rateLimitRequestBuckets = new Map();
 const loginFailureByAccountKey = new Map();
 const loginFailureByIpAccountKey = new Map();
+const authProtectionAnomalyWindowByKey = new Map();
 const webAuthMobileSessionById = new Map();
 const webAuthMobileReplayByKey = new Map();
 let miniUploadParseInFlight = 0;
@@ -5647,6 +5691,89 @@ function createWebAuthCsrfToken(username, sessionToken) {
   return signWebAuthPayload(`csrf:${normalizedUsername}:${normalizedSessionToken}`);
 }
 
+function createWebAuthLoginCsrfToken() {
+  const nonce = createRandomUrlSafeToken(18);
+  const expiresAt = Date.now() + WEB_AUTH_LOGIN_CSRF_TTL_SEC * 1000;
+  const payload = `login_csrf:${expiresAt}:${nonce}`;
+  const signature = signWebAuthPayload(payload);
+  return `${payload}:${signature}`;
+}
+
+function parseWebAuthLoginCsrfToken(rawToken) {
+  const token = sanitizeTextValue(rawToken, 500);
+  if (!token) {
+    return null;
+  }
+
+  const segments = token.split(":");
+  if (segments.length < 4) {
+    return null;
+  }
+
+  const prefix = sanitizeTextValue(segments[0], 30).toLowerCase();
+  if (prefix !== "login_csrf") {
+    return null;
+  }
+
+  const expiresAt = Number.parseInt(segments[1], 10);
+  const nonce = sanitizeTextValue(segments.slice(2, -1).join(":"), 180);
+  const signature = sanitizeTextValue(segments[segments.length - 1], 200).toLowerCase();
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || !nonce || !signature) {
+    return null;
+  }
+
+  const payload = `${prefix}:${expiresAt}:${nonce}`;
+  const expectedSignature = signWebAuthPayload(payload);
+  if (!safeEqual(signature, expectedSignature)) {
+    return null;
+  }
+
+  return {
+    token,
+    expiresAt,
+    nonce,
+  };
+}
+
+function isValidWebAuthLoginCsrfToken(rawToken) {
+  return Boolean(parseWebAuthLoginCsrfToken(rawToken));
+}
+
+function setWebAuthLoginCsrfCookie(req, res, csrfToken) {
+  const normalizedCsrfToken = sanitizeTextValue(csrfToken, 500);
+  if (!normalizedCsrfToken) {
+    return;
+  }
+
+  res.cookie(WEB_AUTH_LOGIN_CSRF_COOKIE_NAME, normalizedCsrfToken, {
+    httpOnly: false,
+    sameSite: "strict",
+    secure: isSecureCookieRequired(req),
+    maxAge: WEB_AUTH_LOGIN_CSRF_TTL_SEC * 1000,
+    path: "/",
+  });
+}
+
+function clearWebAuthLoginCsrfCookie(req, res) {
+  res.clearCookie(WEB_AUTH_LOGIN_CSRF_COOKIE_NAME, {
+    httpOnly: false,
+    sameSite: "strict",
+    secure: isSecureCookieRequired(req),
+    path: "/",
+  });
+}
+
+function ensureWebAuthLoginCsrfCookie(req, res) {
+  const existing = sanitizeTextValue(getRequestCookie(req, WEB_AUTH_LOGIN_CSRF_COOKIE_NAME), 500);
+  if (existing && isValidWebAuthLoginCsrfToken(existing)) {
+    return existing;
+  }
+
+  const nextToken = createWebAuthLoginCsrfToken();
+  setWebAuthLoginCsrfCookie(req, res, nextToken);
+  return nextToken;
+}
+
 function setWebAuthCsrfCookie(req, res, csrfToken) {
   const normalizedCsrfToken = sanitizeTextValue(csrfToken, 220);
   if (!normalizedCsrfToken) {
@@ -5688,6 +5815,7 @@ function clearWebAuthSessionCookie(req, res) {
     secure: isSecureCookieRequired(req),
     path: "/",
   });
+  clearWebAuthLoginCsrfCookie(req, res);
 }
 
 function normalizeRequestPathname(req, maxLength = 260) {
@@ -5753,6 +5881,233 @@ function resolveRequestCsrfToken(req) {
   return sanitizeTextValue(req?.body?._csrf, 220);
 }
 
+function resolveRequestExpectedOrigin(req) {
+  const forwardedProtoHeader = sanitizeTextValue(req?.headers?.["x-forwarded-proto"], 160)
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  const protocol = forwardedProtoHeader || (req?.secure ? "https" : "http");
+  const forwardedHostHeader = sanitizeTextValue(req?.headers?.["x-forwarded-host"], 260).split(",")[0].trim();
+  const hostHeader = sanitizeTextValue(req?.headers?.host, 260);
+  const host = (forwardedHostHeader || hostHeader).toLowerCase();
+  if (!protocol || !host) {
+    return "";
+  }
+  return `${protocol}://${host}`;
+}
+
+function parseRequestOriginValue(rawValue) {
+  const value = sanitizeTextValue(rawValue, 2000);
+  if (!value) {
+    return "";
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(value);
+  } catch {
+    return "";
+  }
+  const protocol = sanitizeTextValue(parsedUrl.protocol, 12).toLowerCase();
+  const host = sanitizeTextValue(parsedUrl.host, 260).toLowerCase();
+  if (!protocol || !host) {
+    return "";
+  }
+  return `${protocol}//${host}`;
+}
+
+function validateAuthStateChangeOrigin(req) {
+  if (!WEB_AUTH_ENFORCE_ORIGIN_CHECK) {
+    return {
+      ok: true,
+    };
+  }
+
+  const expectedOrigin = resolveRequestExpectedOrigin(req);
+  if (!expectedOrigin) {
+    return {
+      ok: false,
+      code: "csrf_origin_unresolved",
+      message: "Request origin could not be validated.",
+    };
+  }
+
+  const origin = parseRequestOriginValue(req?.headers?.origin);
+  const refererOrigin = parseRequestOriginValue(req?.headers?.referer);
+  if (!origin && !refererOrigin) {
+    return {
+      ok: true,
+    };
+  }
+
+  if (origin && origin !== expectedOrigin) {
+    return {
+      ok: false,
+      code: "csrf_origin_invalid",
+      message: "Origin header is not allowed.",
+      details: {
+        origin,
+        expectedOrigin,
+      },
+    };
+  }
+
+  if (refererOrigin && refererOrigin !== expectedOrigin) {
+    return {
+      ok: false,
+      code: "csrf_referer_invalid",
+      message: "Referer header is not allowed.",
+      details: {
+        refererOrigin,
+        expectedOrigin,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+  };
+}
+
+function sendAuthProtectionForbidden(req, res, options = {}) {
+  const message = sanitizeTextValue(options.message, 260) || "Request failed CSRF protection checks.";
+  const code = sanitizeTextValue(options.code, 80) || "csrf_invalid";
+  const pathname = normalizeRequestPathname(req, 260);
+
+  res.setHeader("Cache-Control", "no-store, private");
+  logAuthProtectionEvent("warn", "csrf_validation_failed", {
+    path: pathname,
+    method: req.method,
+    ip: resolveRateLimitClientIp(req),
+    username: req.webAuthUser || req.body?.username || "",
+    code,
+    reason: sanitizeTextValue(options.reason, 180),
+  });
+  trackAuthProtectionAnomaly("csrf_validation_failed", {
+    path: pathname,
+    ip: resolveRateLimitClientIp(req),
+    username: req.webAuthUser || req.body?.username || "",
+    code,
+  });
+
+  if (pathname === "/login" && !String(req.headers?.accept || "").includes("application/json")) {
+    const nextPath = resolveSafeNextPath(options.nextPath || req.body?.next || req.query.next);
+    const csrfToken = ensureWebAuthLoginCsrfCookie(req, res);
+    res.status(403).type("html").send(
+      buildWebLoginPageHtml({
+        nextPath,
+        errorMessage: message,
+        csrfToken,
+      }),
+    );
+    return;
+  }
+
+  res.status(403).json({
+    error: message,
+    code,
+  });
+}
+
+function validateAuthStateChangeCsrf(req) {
+  const pathname = normalizeRequestPathname(req, 260);
+  const providedCsrfToken = resolveRequestCsrfToken(req);
+  const sessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+
+  if (sessionToken) {
+    const sessionUsername = parseWebAuthSessionToken(sessionToken);
+    const expectedCsrfToken = createWebAuthCsrfToken(sessionUsername, sessionToken);
+    const csrfCookieToken = sanitizeTextValue(getRequestCookie(req, WEB_AUTH_CSRF_COOKIE_NAME), 220);
+    if (!sessionUsername || !expectedCsrfToken || !providedCsrfToken || !safeEqual(providedCsrfToken, expectedCsrfToken)) {
+      return {
+        ok: false,
+        code: "csrf_invalid",
+        message: "CSRF token is missing or invalid.",
+      };
+    }
+    if (csrfCookieToken && !safeEqual(csrfCookieToken, expectedCsrfToken)) {
+      return {
+        ok: false,
+        code: "csrf_invalid_cookie",
+        message: "CSRF token cookie is invalid.",
+      };
+    }
+    return {
+      ok: true,
+    };
+  }
+
+  const requiresLoginToken = pathname === "/login" || pathname === "/api/auth/login";
+  if (pathname === "/api/auth/login") {
+    return {
+      ok: true,
+    };
+  }
+  if (!requiresLoginToken) {
+    return {
+      ok: true,
+    };
+  }
+
+  const loginCsrfCookieToken = sanitizeTextValue(getRequestCookie(req, WEB_AUTH_LOGIN_CSRF_COOKIE_NAME), 500);
+  if (
+    !loginCsrfCookieToken ||
+    !providedCsrfToken ||
+    !safeEqual(providedCsrfToken, loginCsrfCookieToken) ||
+    !isValidWebAuthLoginCsrfToken(loginCsrfCookieToken)
+  ) {
+    return {
+      ok: false,
+      code: "csrf_invalid",
+      message: "CSRF token is missing or invalid.",
+    };
+  }
+
+  return {
+    ok: true,
+  };
+}
+
+function requireAuthStateChangeProtection(req, res, next) {
+  if (isSafeHttpMethod(req.method)) {
+    next();
+    return;
+  }
+
+  const pathname = normalizeRequestPathname(req, 260);
+  const protectedPath =
+    pathname === "/login" ||
+    pathname === "/logout" ||
+    pathname === "/api/auth/login" ||
+    pathname === "/api/auth/logout";
+  if (!protectedPath) {
+    next();
+    return;
+  }
+
+  const originValidation = validateAuthStateChangeOrigin(req);
+  if (!originValidation.ok) {
+    sendAuthProtectionForbidden(req, res, {
+      code: originValidation.code || "csrf_origin_invalid",
+      message: originValidation.message || "Origin check failed.",
+      reason: "origin",
+    });
+    return;
+  }
+
+  const csrfValidation = validateAuthStateChangeCsrf(req);
+  if (!csrfValidation.ok) {
+    sendAuthProtectionForbidden(req, res, {
+      code: csrfValidation.code || "csrf_invalid",
+      message: csrfValidation.message || "CSRF token is missing or invalid.",
+      reason: "csrf_token",
+    });
+    return;
+  }
+
+  next();
+}
+
 function requireWebApiCsrf(req, res, next) {
   if (isSafeHttpMethod(req.method)) {
     next();
@@ -5784,6 +6139,19 @@ function requireWebApiCsrf(req, res, next) {
   const cookieSessionUsername = parseWebAuthSessionToken(cookieSessionToken);
   const normalizedRequestUsername = normalizeWebAuthUsername(req.webAuthUser);
   if (!cookieSessionUsername || (normalizedRequestUsername && cookieSessionUsername !== normalizedRequestUsername)) {
+    logAuthProtectionEvent("warn", "csrf_invalid_session_context", {
+      path: pathname,
+      method: req.method,
+      ip: resolveRateLimitClientIp(req),
+      username: normalizedRequestUsername || cookieSessionUsername || "",
+      code: "csrf_invalid_session",
+    });
+    trackAuthProtectionAnomaly("csrf_invalid_session", {
+      path: pathname,
+      ip: resolveRateLimitClientIp(req),
+      username: normalizedRequestUsername || cookieSessionUsername || "",
+      code: "csrf_invalid_session",
+    });
     res.status(403).json({
       error: "Invalid CSRF session context.",
       code: "csrf_invalid_session",
@@ -5796,6 +6164,19 @@ function requireWebApiCsrf(req, res, next) {
   const providedCsrfToken = resolveRequestCsrfToken(req);
 
   if (!expectedCsrfToken || !providedCsrfToken || !safeEqual(providedCsrfToken, expectedCsrfToken)) {
+    logAuthProtectionEvent("warn", "csrf_invalid_token", {
+      path: pathname,
+      method: req.method,
+      ip: resolveRateLimitClientIp(req),
+      username: cookieSessionUsername,
+      code: "csrf_invalid",
+    });
+    trackAuthProtectionAnomaly("csrf_invalid_token", {
+      path: pathname,
+      ip: resolveRateLimitClientIp(req),
+      username: cookieSessionUsername,
+      code: "csrf_invalid",
+    });
     res.status(403).json({
       error: "CSRF token is missing or invalid.",
       code: "csrf_invalid",
@@ -5804,6 +6185,19 @@ function requireWebApiCsrf(req, res, next) {
   }
 
   if (csrfCookieToken && !safeEqual(csrfCookieToken, expectedCsrfToken)) {
+    logAuthProtectionEvent("warn", "csrf_invalid_cookie", {
+      path: pathname,
+      method: req.method,
+      ip: resolveRateLimitClientIp(req),
+      username: cookieSessionUsername,
+      code: "csrf_invalid_cookie",
+    });
+    trackAuthProtectionAnomaly("csrf_invalid_cookie", {
+      path: pathname,
+      ip: resolveRateLimitClientIp(req),
+      username: cookieSessionUsername,
+      code: "csrf_invalid_cookie",
+    });
     res.status(403).json({
       error: "CSRF token cookie is invalid.",
       code: "csrf_invalid_cookie",
@@ -11833,6 +12227,122 @@ function buildRateLimitRetryAfterSeconds(retryAfterMs) {
   return Math.max(1, Math.ceil(normalizedMs / 1000));
 }
 
+function delayMs(ms) {
+  const timeoutMs = Math.max(0, Number(ms) || 0);
+  if (!timeoutMs) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    setTimeout(resolve, timeoutMs);
+  });
+}
+
+function sanitizeAuthProtectionEventMeta(rawMeta = {}) {
+  const meta = rawMeta && typeof rawMeta === "object" ? rawMeta : {};
+  const sanitized = {};
+
+  const event = sanitizeTextValue(meta.event, 100);
+  if (event) {
+    sanitized.event = event;
+  }
+
+  const path = sanitizeTextValue(meta.path, 260);
+  if (path) {
+    sanitized.path = path;
+  }
+
+  const method = sanitizeTextValue(meta.method, 20).toUpperCase();
+  if (method) {
+    sanitized.method = method;
+  }
+
+  const ip = sanitizeTextValue(meta.ip, 120);
+  if (ip) {
+    sanitized.ip = ip;
+  }
+
+  const username = normalizeRateLimitUsername(meta.username || "");
+  if (username) {
+    sanitized.username = username;
+  }
+
+  const code = sanitizeTextValue(meta.code, 80);
+  if (code) {
+    sanitized.code = code;
+  }
+
+  const reason = sanitizeTextValue(meta.reason, 180);
+  if (reason) {
+    sanitized.reason = reason;
+  }
+
+  const retryAfterSec = Number.parseInt(meta.retryAfterSec, 10);
+  if (Number.isFinite(retryAfterSec) && retryAfterSec > 0) {
+    sanitized.retryAfterSec = retryAfterSec;
+  }
+
+  const failures = Number.parseInt(meta.failures, 10);
+  if (Number.isFinite(failures) && failures >= 0) {
+    sanitized.failures = failures;
+  }
+
+  const lockSec = Number.parseInt(meta.lockSec, 10);
+  if (Number.isFinite(lockSec) && lockSec > 0) {
+    sanitized.lockSec = lockSec;
+  }
+
+  const delayAppliedMs = Number.parseInt(meta.delayAppliedMs, 10);
+  if (Number.isFinite(delayAppliedMs) && delayAppliedMs > 0) {
+    sanitized.delayAppliedMs = delayAppliedMs;
+  }
+
+  return sanitized;
+}
+
+function logAuthProtectionEvent(level, event, meta = {}) {
+  const normalizedLevel = sanitizeTextValue(level, 20).toLowerCase();
+  const logger = normalizedLevel === "warn" ? console.warn : normalizedLevel === "error" ? console.error : console.log;
+  const payload = sanitizeAuthProtectionEventMeta({
+    event,
+    ...meta,
+  });
+  logger(`[auth-protection] ${JSON.stringify(payload)}`);
+}
+
+function trackAuthProtectionAnomaly(event, meta = {}) {
+  const nowMs = Date.now();
+  const ip = sanitizeTextValue(meta.ip, 120) || "unknown";
+  const username = normalizeRateLimitUsername(meta.username || "") || "unknown";
+  const normalizedEvent = sanitizeTextValue(event, 80) || "unknown";
+  const bucketKey = `${normalizedEvent}:${ip}:${username}`;
+  const existing = authProtectionAnomalyWindowByKey.get(bucketKey) || {
+    count: 0,
+    firstSeenMs: nowMs,
+    lastAlertCount: 0,
+  };
+
+  if (nowMs - existing.firstSeenMs > AUTH_PROTECTION_ALERT_WINDOW_MS) {
+    existing.count = 0;
+    existing.firstSeenMs = nowMs;
+    existing.lastAlertCount = 0;
+  }
+
+  existing.count += 1;
+  authProtectionAnomalyWindowByKey.set(bucketKey, existing);
+
+  const shouldAlert =
+    existing.count >= AUTH_PROTECTION_ALERT_THRESHOLD &&
+    existing.count - existing.lastAlertCount >= AUTH_PROTECTION_ALERT_THRESHOLD;
+  if (shouldAlert) {
+    existing.lastAlertCount = existing.count;
+    logAuthProtectionEvent("warn", "anomaly_threshold_reached", {
+      ...meta,
+      reason: normalizedEvent,
+      failures: existing.count,
+    });
+  }
+}
+
 function maybeSweepRateLimitStores(nowMs = Date.now()) {
   if (!RATE_LIMIT_ENABLED) {
     return;
@@ -11866,9 +12376,16 @@ function maybeSweepRateLimitStores(nowMs = Date.now()) {
     }
   }
 
+  for (const [key, entry] of authProtectionAnomalyWindowByKey) {
+    if ((entry.firstSeenMs || 0) + AUTH_PROTECTION_ALERT_WINDOW_MS < nowMs) {
+      authProtectionAnomalyWindowByKey.delete(key);
+    }
+  }
+
   trimRateLimitStore(rateLimitRequestBuckets);
   trimRateLimitStore(loginFailureByAccountKey);
   trimRateLimitStore(loginFailureByIpAccountKey);
+  trimRateLimitStore(authProtectionAnomalyWindowByKey);
 }
 
 function trimRateLimitStore(store) {
@@ -11953,16 +12470,39 @@ function sendRateLimitResponse(req, res, options = {}) {
   const retryAfterSec = buildRateLimitRetryAfterSeconds(retryAfterMs);
   const safeCode = sanitizeTextValue(options.code, 50) || "rate_limited";
   const safeMessage = sanitizeTextValue(options.message, 260) || "Too many requests. Please try again later.";
+  const path = normalizeRequestPathname(req, 260);
+  const ip = resolveRateLimitClientIp(req);
+  const username = normalizeRateLimitUsername(options.username || req.body?.username || req.webAuthUser || "");
 
   res.setHeader("Retry-After", String(retryAfterSec));
   res.setHeader("Cache-Control", "no-store, private");
 
+  if (safeCode.startsWith("login_")) {
+    logAuthProtectionEvent("warn", "rate_limit_triggered", {
+      path,
+      method: req.method,
+      ip,
+      username,
+      code: safeCode,
+      retryAfterSec,
+    });
+    trackAuthProtectionAnomaly("login_rate_limit", {
+      path,
+      ip,
+      username,
+      code: safeCode,
+      retryAfterSec,
+    });
+  }
+
   if ((req.path || "") === "/login" && !String(req.headers?.accept || "").includes("application/json")) {
     const nextPath = resolveSafeNextPath(options.nextPath || req.body?.next || req.query.next);
+    const csrfToken = ensureWebAuthLoginCsrfCookie(req, res);
     res.status(429).type("html").send(
       buildWebLoginPageHtml({
         nextPath,
         errorMessage: safeMessage,
+        csrfToken,
       }),
     );
     return;
@@ -12248,7 +12788,7 @@ function readLoginFailureLock(entry, nowMs, policy) {
 
 function recordLoginFailureEntry(store, key, policy, nowMs) {
   if (!key) {
-    return;
+    return null;
   }
 
   let entry = store.get(key);
@@ -12275,6 +12815,9 @@ function recordLoginFailureEntry(store, key, policy, nowMs) {
   }
 
   store.set(key, entry);
+  return {
+    ...entry,
+  };
 }
 
 function clearLoginFailureEntry(store, key) {
@@ -12282,6 +12825,71 @@ function clearLoginFailureEntry(store, key) {
     return;
   }
   store.delete(key);
+}
+
+function readActiveLoginFailures(entry, nowMs, policy) {
+  if (!entry) {
+    return 0;
+  }
+  if (entry.lockedUntilMs > nowMs) {
+    return Math.max(0, Number.parseInt(entry.failures, 10) || 0);
+  }
+  if (nowMs - entry.lastAttemptMs > policy.windowMs) {
+    return 0;
+  }
+  return Math.max(0, Number.parseInt(entry.failures, 10) || 0);
+}
+
+function resolveLoginProgressiveDelayMs(req, username) {
+  if (!RATE_LIMIT_ENABLED || LOGIN_FAILURE_PROGRESSIVE_DELAY_BASE_MS <= 0) {
+    return 0;
+  }
+
+  const normalizedUsername = normalizeRateLimitUsername(username);
+  if (!normalizedUsername) {
+    return 0;
+  }
+
+  maybeSweepRateLimitStores();
+  const nowMs = Date.now();
+  const ip = resolveRateLimitClientIp(req);
+  const accountKey = `account:${normalizedUsername}`;
+  const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const accountFailures = readActiveLoginFailures(
+    loginFailureByAccountKey.get(accountKey),
+    nowMs,
+    LOGIN_FAILURE_ACCOUNT_POLICY,
+  );
+  const ipAccountFailures = readActiveLoginFailures(
+    loginFailureByIpAccountKey.get(ipAccountKey),
+    nowMs,
+    LOGIN_FAILURE_IP_ACCOUNT_POLICY,
+  );
+  const failures = Math.max(accountFailures, ipAccountFailures);
+  if (failures <= 1) {
+    return 0;
+  }
+
+  const exponent = Math.min(failures - 2, 6);
+  const delay = LOGIN_FAILURE_PROGRESSIVE_DELAY_BASE_MS * Math.pow(2, exponent);
+  return Math.min(LOGIN_FAILURE_PROGRESSIVE_DELAY_MAX_MS, Math.max(0, Math.round(delay)));
+}
+
+async function applyLoginProgressiveDelay(req, username) {
+  const delayAppliedMs = resolveLoginProgressiveDelayMs(req, username);
+  if (delayAppliedMs <= 0) {
+    return;
+  }
+  const eventMeta = {
+    path: normalizeRequestPathname(req, 260),
+    method: req.method,
+    ip: resolveRateLimitClientIp(req),
+    username,
+    delayAppliedMs,
+  };
+  logAuthProtectionEvent("warn", "login_progressive_delay_applied", eventMeta);
+  trackAuthProtectionAnomaly("login_progressive_delay", eventMeta);
+  await delayMs(delayAppliedMs);
 }
 
 function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
@@ -12322,10 +12930,22 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
   const retryAfterMs = Math.max(accountLockMs, ipAccountLockMs);
 
   if (retryAfterMs > 0) {
+    const eventMeta = {
+      path: normalizeRequestPathname(req, 260),
+      method: req.method,
+      ip,
+      username: normalizedUsername,
+      code: "login_locked",
+      retryAfterSec: buildRateLimitRetryAfterSeconds(retryAfterMs),
+      lockSec: Math.max(1, Math.ceil(retryAfterMs / 1000)),
+    };
+    logAuthProtectionEvent("warn", "login_locked_precheck", eventMeta);
+    trackAuthProtectionAnomaly("login_locked_precheck", eventMeta);
     sendRateLimitResponse(req, res, {
       retryAfterMs,
       message: "Too many failed login attempts. Please wait before trying again.",
       code: "login_locked",
+      username: normalizedUsername,
       nextPath,
     });
     return false;
@@ -12336,12 +12956,12 @@ function ensureLoginAttemptAllowed(req, res, username, nextPath = "/") {
 
 function registerFailedLoginAttempt(req, username) {
   if (!RATE_LIMIT_ENABLED) {
-    return;
+    return null;
   }
 
   const normalizedUsername = normalizeRateLimitUsername(username);
   if (!normalizedUsername) {
-    return;
+    return null;
   }
 
   maybeSweepRateLimitStores();
@@ -12350,8 +12970,35 @@ function registerFailedLoginAttempt(req, username) {
   const accountKey = `account:${normalizedUsername}`;
   const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
 
-  recordLoginFailureEntry(loginFailureByAccountKey, accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
-  recordLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey, LOGIN_FAILURE_IP_ACCOUNT_POLICY, nowMs);
+  const accountEntry = recordLoginFailureEntry(loginFailureByAccountKey, accountKey, LOGIN_FAILURE_ACCOUNT_POLICY, nowMs);
+  const ipAccountEntry = recordLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey, LOGIN_FAILURE_IP_ACCOUNT_POLICY, nowMs);
+  const maxFailures = Math.max(accountEntry?.failures || 0, ipAccountEntry?.failures || 0);
+  const maxLockMs = Math.max(
+    Math.max(0, (accountEntry?.lockedUntilMs || 0) - nowMs),
+    Math.max(0, (ipAccountEntry?.lockedUntilMs || 0) - nowMs),
+  );
+  const eventMeta = {
+    path: normalizeRequestPathname(req, 260),
+    method: req.method,
+    ip,
+    username: normalizedUsername,
+    failures: maxFailures,
+    lockSec: Math.max(0, Math.ceil(maxLockMs / 1000)),
+    code: maxLockMs > 0 ? "login_locked" : "login_failed",
+  };
+  logAuthProtectionEvent("warn", "login_failed", eventMeta);
+  trackAuthProtectionAnomaly("login_failed", eventMeta);
+  if (maxLockMs > 0) {
+    logAuthProtectionEvent("warn", "login_locked", eventMeta);
+    trackAuthProtectionAnomaly("login_locked", eventMeta);
+  }
+
+  return {
+    accountEntry,
+    ipAccountEntry,
+    maxFailures,
+    maxLockMs,
+  };
 }
 
 function clearFailedLoginAttempts(req, username) {
@@ -12367,8 +13014,23 @@ function clearFailedLoginAttempts(req, username) {
   const ip = resolveRateLimitClientIp(req);
   const accountKey = `account:${normalizedUsername}`;
   const ipAccountKey = `account-ip:${normalizedUsername}:${ip}`;
+  const accountEntry = loginFailureByAccountKey.get(accountKey);
+  const ipAccountEntry = loginFailureByIpAccountKey.get(ipAccountKey);
   clearLoginFailureEntry(loginFailureByAccountKey, accountKey);
   clearLoginFailureEntry(loginFailureByIpAccountKey, ipAccountKey);
+  const clearedFailures = Math.max(
+    Number.parseInt(accountEntry?.failures, 10) || 0,
+    Number.parseInt(ipAccountEntry?.failures, 10) || 0,
+  );
+  if (clearedFailures > 0) {
+    logAuthProtectionEvent("log", "login_failure_state_cleared", {
+      path: normalizeRequestPathname(req, 260),
+      method: req.method,
+      ip,
+      username: normalizedUsername,
+      failures: clearedFailures,
+    });
+  }
 }
 
 function isPublicWebAuthPath(pathname) {
@@ -12434,9 +13096,10 @@ function resolveWebLoginErrorMessage(rawCode) {
   return "";
 }
 
-function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
+function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "", csrfToken = "" } = {}) {
   const safeNextPath = resolveSafeNextPath(nextPath);
   const safeError = sanitizeTextValue(errorMessage, 200);
+  const safeCsrfToken = sanitizeTextValue(csrfToken, 500);
   const errorBlock = safeError
     ? `<p class="auth-error" role="alert">${escapeHtml(safeError)}</p>`
     : `<p class="auth-help">Use your account credentials. If 2FA is enabled, enter your Authenticator code.</p>`;
@@ -12591,6 +13254,7 @@ function buildWebLoginPageHtml({ nextPath = "/", errorMessage = "" } = {}) {
       ${errorBlock}
       <form method="post" action="/login" novalidate>
         <input type="hidden" name="next" value="${escapeHtml(safeNextPath)}" />
+        <input type="hidden" name="_csrf" value="${escapeHtml(safeCsrfToken)}" />
         <label>
           Username
           <input type="text" name="username" autocomplete="username" required />
@@ -25013,6 +25677,7 @@ const handleWebLoginPage = (req, res) => {
   }
 
   const errorCode = sanitizeTextValue(req.query.error, 80);
+  const csrfToken = ensureWebAuthLoginCsrfCookie(req, res);
   res.setHeader("Cache-Control", "no-store, private");
   res
     .status(200)
@@ -25021,11 +25686,12 @@ const handleWebLoginPage = (req, res) => {
       buildWebLoginPageHtml({
         nextPath,
         errorMessage: resolveWebLoginErrorMessage(errorCode),
+        csrfToken,
       }),
     );
 };
 
-const handleWebLoginSubmit = (req, res) => {
+const handleWebLoginSubmit = async (req, res) => {
   const username = req.body?.username;
   const password = req.body?.password;
   const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
@@ -25033,6 +25699,7 @@ const handleWebLoginSubmit = (req, res) => {
   if (!ensureLoginAttemptAllowed(req, res, username, nextPath)) {
     return;
   }
+  await applyLoginProgressiveDelay(req, username);
 
   const authUser = authenticateWebAuthCredentials(username, password);
 
@@ -25056,6 +25723,14 @@ const handleWebLoginSubmit = (req, res) => {
 
   clearFailedLoginAttempts(req, authUser.username);
   setWebAuthSessionCookie(req, res, authUser.username);
+  clearWebAuthLoginCsrfCookie(req, res);
+  logAuthProtectionEvent("log", "login_success", {
+    path: "/login",
+    method: req.method,
+    ip: resolveRateLimitClientIp(req),
+    username: authUser.username,
+    code: mustChangePassword ? "password_change_required" : "ok",
+  });
   if (mustChangePassword) {
     res.redirect(302, `/first-password?next=${encodeURIComponent(nextPath)}`);
     return;
@@ -25063,13 +25738,14 @@ const handleWebLoginSubmit = (req, res) => {
   res.redirect(302, nextPath);
 };
 
-function handleApiAuthLogin(req, res) {
+async function handleApiAuthLogin(req, res) {
   const username = req.body?.username;
   const password = req.body?.password;
   const totpCode = req.body?.totpCode || req.body?.otpCode || req.body?.otp || req.body?.code;
   if (!ensureLoginAttemptAllowed(req, res, username, "/")) {
     return;
   }
+  await applyLoginProgressiveDelay(req, username);
 
   const authUser = authenticateWebAuthCredentials(username, password);
 
@@ -25119,6 +25795,9 @@ function handleApiAuthLogin(req, res) {
   if (isMobileApiLogin) {
     clearWebAuthSessionCookie(req, res);
   }
+  if (!isMobileApiLogin) {
+    clearWebAuthLoginCsrfCookie(req, res);
+  }
   res.setHeader("Cache-Control", "no-store, private");
   const payload = {
     ok: true,
@@ -25132,6 +25811,13 @@ function handleApiAuthLogin(req, res) {
     payload.sessionTtlSec = WEB_AUTH_MOBILE_SESSION_TTL_SEC;
     payload.tokenType = "Bearer";
   }
+  logAuthProtectionEvent("log", "login_success", {
+    path: normalizeRequestPathname(req, 260),
+    method: req.method,
+    ip: resolveRateLimitClientIp(req),
+    username: authUser.username,
+    code: isMobileApiLogin ? "mobile_ok" : "ok",
+  });
   res.json(payload);
 }
 
@@ -25151,6 +25837,13 @@ function handleApiAuthLogout(req, res) {
 
     revokeWebAuthMobileSessionByToken(mobileAuthContext.token);
     clearWebAuthSessionCookie(req, res);
+    logAuthProtectionEvent("log", "logout_success", {
+      path: normalizeRequestPathname(req, 260),
+      method: req.method,
+      ip: resolveRateLimitClientIp(req),
+      username: mobileAuthContext.username,
+      code: "mobile_ok",
+    });
     res.setHeader("Cache-Control", "no-store, private");
     res.json({
       ok: true,
@@ -25169,6 +25862,13 @@ function handleApiAuthLogout(req, res) {
   }
 
   clearWebAuthSessionCookie(req, res);
+  logAuthProtectionEvent("log", "logout_success", {
+    path: normalizeRequestPathname(req, 260),
+    method: req.method,
+    ip: resolveRateLimitClientIp(req),
+    username: req.webAuthUser || "",
+    code: "ok",
+  });
   res.setHeader("Cache-Control", "no-store, private");
   res.json({
     ok: true,
@@ -25176,6 +25876,13 @@ function handleApiAuthLogout(req, res) {
 }
 
 function handleWebLogout(req, res) {
+  logAuthProtectionEvent("log", "logout_success", {
+    path: normalizeRequestPathname(req, 260),
+    method: req.method,
+    ip: resolveRateLimitClientIp(req),
+    username: req.webAuthUser || "",
+    code: "ok",
+  });
   clearWebAuthSessionCookie(req, res);
   res.redirect(302, "/login");
 }
@@ -25189,6 +25896,7 @@ function handleWebLogoutMethodNotAllowed(_req, res) {
 registerAuthPublicRoutes({
   app,
   requireWebApiCsrf,
+  requireAuthStateChangeProtection,
   handlers: {
     handleWebLoginPage,
     handleWebLoginSubmit,
