@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   clearNotifications,
-  dismissNotification,
   getNotifications,
   getUnreadNotificationsCount,
   markAllNotificationsRead,
@@ -19,9 +18,12 @@ const notificationDateFormatter = new Intl.DateTimeFormat(undefined, {
 
 export function NotificationCenter() {
   const [isOpen, setIsOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<"active" | "archive">("active");
   const [notifications, setNotifications] = useState<AppNotification[]>(() => getNotifications());
   const rootRef = useRef<HTMLDivElement | null>(null);
   const unreadCount = useMemo(() => getUnreadNotificationsCount(notifications), [notifications]);
+  const activeNotifications = useMemo(() => notifications.filter((item) => !item.read), [notifications]);
+  const displayedNotifications = viewMode === "active" ? activeNotifications : notifications;
 
   useEffect(() => subscribeNotifications((next) => setNotifications(next)), []);
 
@@ -100,6 +102,27 @@ export function NotificationCenter() {
           <p className="notification-center__count">{unreadCount} unread</p>
         </header>
 
+        <div className="notification-center__modes" role="tablist" aria-label="Notification views">
+          <button
+            type="button"
+            className={`notification-center__mode-btn ${viewMode === "active" ? "is-active" : ""}`.trim()}
+            role="tab"
+            aria-selected={viewMode === "active"}
+            onClick={() => setViewMode("active")}
+          >
+            Active
+          </button>
+          <button
+            type="button"
+            className={`notification-center__mode-btn ${viewMode === "archive" ? "is-active" : ""}`.trim()}
+            role="tab"
+            aria-selected={viewMode === "archive"}
+            onClick={() => setViewMode("archive")}
+          >
+            Archive
+          </button>
+        </div>
+
         <div className="notification-center__toolbar">
           <button
             type="button"
@@ -119,16 +142,20 @@ export function NotificationCenter() {
           </button>
         </div>
 
-        {notifications.length ? (
+        {displayedNotifications.length ? (
           <ul className="notification-center__list">
-            {notifications.map((notification) => (
+            {displayedNotifications.map((notification) => (
               <li
                 key={notification.id}
                 className={`notification-center__item notification-center__item--${notification.tone} ${
                   notification.read ? "is-read" : "is-unread"
                 }`.trim()}
               >
-                <div className="notification-center__item-main">
+                <button
+                  type="button"
+                  className="notification-center__item-main notification-center__item-main-btn"
+                  onClick={() => markNotificationRead(notification.id)}
+                >
                   <span className="notification-center__tone-dot" aria-hidden="true" />
                   <div className="notification-center__item-copy">
                     <p className="notification-center__item-title">{notification.title}</p>
@@ -137,42 +164,28 @@ export function NotificationCenter() {
                       {formatNotificationDate(notification.createdAt)}
                     </time>
                   </div>
-                </div>
+                </button>
 
                 <div className="notification-center__item-actions">
-                  {!notification.read ? (
-                    <button
-                      type="button"
-                      className="notification-center__item-action"
-                      onClick={() => markNotificationRead(notification.id)}
-                    >
-                      Read
-                    </button>
-                  ) : null}
-
                   {notification.link || notification.clientName ? (
                     <button
                       type="button"
                       className="notification-center__item-action"
                       onClick={() => handleOpenNotification(notification)}
                     >
-                      {notification.link?.label || "Open"}
+                      Open
                     </button>
                   ) : null}
-
-                  <button
-                    type="button"
-                    className="notification-center__item-action"
-                    onClick={() => dismissNotification(notification.id)}
-                  >
-                    Dismiss
-                  </button>
                 </div>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="notification-center__empty">No notifications yet. New events will appear here.</p>
+          <p className="notification-center__empty">
+            {viewMode === "active"
+              ? "No active notifications. Open Archive to see all notifications."
+              : "Archive is empty."}
+          </p>
         )}
       </section>
     </div>

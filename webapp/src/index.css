@@ -269,12 +269,19 @@ a {
   font-weight: 600;
 }
 
+.notification-center__modes {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .notification-center__toolbar {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
+.notification-center__mode-btn,
 .notification-center__toolbar-btn,
 .notification-center__item-action {
   border: 1px solid var(--color-border);
@@ -289,6 +296,12 @@ a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.notification-center__mode-btn.is-active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-primary-contrast);
 }
 
 .notification-center__toolbar-btn:disabled {
@@ -324,6 +337,15 @@ a {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+}
+
+.notification-center__item-main-btn {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
 }
 
 .notification-center__tone-dot {
@@ -460,8 +482,10 @@ a {
 
 .account-menu__item:hover,
 .account-menu__item:active,
+.notification-center__mode-btn:hover:not(.is-active),
 .notification-center__toolbar-btn:hover:not(:disabled),
 .notification-center__item-action:hover,
+.notification-center__item-main-btn:hover,
 .notification-center__toggle:hover,
 .notification-center.is-open .notification-center__toggle,
 .account-menu__toggle:hover,
@@ -1268,8 +1292,10 @@ a {
 .cb-button:focus-visible,
 .account-menu__toggle:focus-visible,
 .notification-center__toggle:focus-visible,
+.notification-center__mode-btn:focus-visible,
 .notification-center__toolbar-btn:focus-visible,
 .notification-center__item-action:focus-visible,
+.notification-center__item-main-btn:focus-visible,
 .date-picker-trigger:focus-visible,
 .filters-toggle-btn:focus-visible,
 .th-sort-btn:focus-visible,
