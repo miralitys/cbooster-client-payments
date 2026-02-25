@@ -3486,6 +3486,10 @@ a {
   gap: var(--space-3);
 }
 
+.access-control-form-span-2-react {
+  grid-column: 1 / -1;
+}
+
 .access-control-form-react--edit-modal {
   grid-template-columns: 1fr;
   gap: var(--space-4);
@@ -3580,6 +3584,56 @@ a {
   display: inline-flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+.access-control-team-field-react {
+  align-items: stretch;
+}
+
+.access-control-team-options-react {
+  display: grid;
+  gap: var(--space-2);
+  max-height: 240px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.access-control-team-option-react {
+  align-items: flex-start;
+  min-height: 50px;
+}
+
+.access-control-team-option-react.is-selected {
+  border-color: color-mix(in srgb, var(--color-primary) 52%, var(--color-border) 48%);
+  background: color-mix(in srgb, var(--color-primary) 6%, var(--color-surface) 94%);
+}
+
+.access-control-team-option-text-react {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.access-control-team-option-text-react strong {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+}
+
+.access-control-team-option-text-react span {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xxs);
+  overflow-wrap: anywhere;
+}
+
+.access-control-team-empty-react {
+  margin: 0;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
 }
 
 .access-control-totp-actions-react {

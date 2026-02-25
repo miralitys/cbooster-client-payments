@@ -19,7 +19,7 @@ interface UserFormState {
   displayName: string;
   departmentId: string;
   roleId: string;
-  teamUsernames: string;
+  teamUsernames: string[];
   totpSecret: string;
   totpEnabled: boolean;
 }
@@ -30,7 +30,7 @@ const EMPTY_FORM: UserFormState = {
   displayName: "",
   departmentId: "",
   roleId: "",
-  teamUsernames: "",
+  teamUsernames: [],
   totpSecret: "",
   totpEnabled: false,
 };
@@ -44,6 +44,13 @@ const ASSISTANT_REVIEW_LIMIT = 80;
 const DEFAULT_TOTP_ISSUER = "Credit Booster";
 const DEFAULT_TOTP_PERIOD_SEC = 30;
 const DEFAULT_TOTP_DIGITS = 6;
+
+interface MiddleManagerTeamOption {
+  username: string;
+  displayName: string;
+  helperText: string;
+  isFallback: boolean;
+}
 
 export default function AccessControlPage() {
   const [isLoading, setIsLoading] = useState(true);
@@ -97,6 +104,21 @@ export default function AccessControlPage() {
   const editRoleOptions = useMemo(
     () => rolesByDepartment.get(editForm.departmentId) || [],
     [editForm.departmentId, rolesByDepartment],
+  );
+  const createMiddleManagerTeamOptions = useMemo(
+    () =>
+      buildMiddleManagerTeamOptions(users, createForm.departmentId, createForm.teamUsernames, [
+        createForm.username,
+      ]),
+    [createForm.departmentId, createForm.teamUsernames, createForm.username, users],
+  );
+  const editMiddleManagerTeamOptions = useMemo(
+    () =>
+      buildMiddleManagerTeamOptions(users, editForm.departmentId, editForm.teamUsernames, [
+        editingOriginalUsername,
+        editForm.username,
+      ]),
+    [editForm.departmentId, editForm.teamUsernames, editForm.username, editingOriginalUsername, users],
   );
   const totpIssuer = useMemo(
     () => sanitizeTotpIssuer(model?.totp?.issuer) || DEFAULT_TOTP_ISSUER,
@@ -229,7 +251,7 @@ export default function AccessControlPage() {
           displayName: user.displayName || user.username || "",
           departmentId: user.departmentId || "",
           roleId: user.roleId || "",
-          teamUsernames: (user.teamUsernames || []).join(", "),
+          teamUsernames: normalizeTeamUsernames(user.teamUsernames),
           totpSecret: "",
           totpEnabled: Boolean(user.totpEnabled),
         },
@@ -317,7 +339,7 @@ export default function AccessControlPage() {
       ...previous,
       departmentId,
       roleId: roleOptions.some((role) => role.id === previous.roleId) ? previous.roleId : roleOptions[0]?.id || "",
-      teamUsernames: "",
+      teamUsernames: [],
     }));
   }
 
@@ -327,7 +349,21 @@ export default function AccessControlPage() {
       ...previous,
       departmentId,
       roleId: roleOptions.some((role) => role.id === previous.roleId) ? previous.roleId : roleOptions[0]?.id || "",
-      teamUsernames: "",
+      teamUsernames: [],
+    }));
+  }
+
+  function toggleCreateTeamUsername(username: string) {
+    setCreateForm((previous) => ({
+      ...previous,
+      teamUsernames: toggleTeamUsername(previous.teamUsernames, username),
+    }));
+  }
+
+  function toggleEditTeamUsername(username: string) {
+    setEditForm((previous) => ({
+      ...previous,
+      teamUsernames: toggleTeamUsername(previous.teamUsernames, username),
     }));
   }
 
@@ -768,7 +804,7 @@ export default function AccessControlPage() {
                   setCreateForm((previous) => ({
                     ...previous,
                     roleId: nextRole,
-                    teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : "",
+                    teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : [],
                   }));
                 }}
                 disabled={isCreating}
@@ -782,14 +818,14 @@ export default function AccessControlPage() {
             </Field>
 
             {createForm.roleId === "middle_manager" ? (
-              <Field label="Team Usernames (comma separated, for Middle Manager)" htmlFor="access-create-team">
-                <Input
-                  id="access-create-team"
-                  value={createForm.teamUsernames}
-                  onChange={(event) => setCreateForm((previous) => ({ ...previous, teamUsernames: event.target.value }))}
-                  disabled={isCreating}
-                />
-              </Field>
+              <MiddleManagerTeamField
+                className="access-control-form-span-2-react"
+                idPrefix="access-create-team"
+                selectedUsernames={createForm.teamUsernames}
+                options={createMiddleManagerTeamOptions}
+                onToggle={toggleCreateTeamUsername}
+                disabled={isCreating}
+              />
             ) : null}
 
             <div className="access-control-form-actions-react">
@@ -1153,7 +1189,7 @@ export default function AccessControlPage() {
                     setEditForm((previous) => ({
                       ...previous,
                       roleId: nextRole,
-                      teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : "",
+                      teamUsernames: nextRole === "middle_manager" ? previous.teamUsernames : [],
                     }));
                   }}
                   disabled={isEditBusy}
@@ -1167,16 +1203,14 @@ export default function AccessControlPage() {
               </Field>
 
               {editForm.roleId === "middle_manager" ? (
-                <div className="access-control-edit-span-2-react">
-                  <Field label="Team Usernames (comma separated, for Middle Manager)" htmlFor="access-edit-team">
-                    <Input
-                      id="access-edit-team"
-                      value={editForm.teamUsernames}
-                      onChange={(event) => setEditForm((previous) => ({ ...previous, teamUsernames: event.target.value }))}
-                      disabled={isEditBusy}
-                    />
-                  </Field>
-                </div>
+                <MiddleManagerTeamField
+                  className="access-control-edit-span-2-react"
+                  idPrefix="access-edit-team"
+                  selectedUsernames={editForm.teamUsernames}
+                  options={editMiddleManagerTeamOptions}
+                  onToggle={toggleEditTeamUsername}
+                  disabled={isEditBusy}
+                />
               ) : null}
             </div>
           </section>
@@ -1230,6 +1264,67 @@ function CurrentAccessLine({ label, value }: { label: string; value: string }) {
     <div className="access-control-current-row-react">
       <span className="access-control-current-label-react">{label}:</span>
       <span className="access-control-current-value-react">{value}</span>
+    </div>
+  );
+}
+
+function MiddleManagerTeamField({
+  className = "",
+  idPrefix,
+  selectedUsernames,
+  options,
+  onToggle,
+  disabled,
+}: {
+  className?: string;
+  idPrefix: string;
+  selectedUsernames: string[];
+  options: MiddleManagerTeamOption[];
+  onToggle: (username: string) => void;
+  disabled?: boolean;
+}) {
+  const selectedSet = new Set(normalizeTeamUsernames(selectedUsernames));
+  const selectedCount = selectedSet.size;
+
+  return (
+    <div className={`cb-field access-control-team-field-react ${className}`.trim()}>
+      <span className="cb-field__label">Middle Manager Team (Client Managers)</span>
+
+      {options.length ? (
+        <div className="access-control-team-options-react">
+          {options.map((option) => {
+            const isSelected = selectedSet.has(option.username);
+            const optionId = `${idPrefix}-${encodeURIComponent(option.username).replace(/%/g, "")}`;
+            return (
+              <label
+                key={`${idPrefix}-${option.username}`}
+                className={`cb-checkbox-row access-control-team-option-react ${isSelected ? "is-selected" : ""}`.trim()}
+                htmlFor={optionId}
+              >
+                <input
+                  id={optionId}
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => onToggle(option.username)}
+                  disabled={disabled}
+                />
+                <span className="access-control-team-option-text-react">
+                  <strong>{option.displayName || option.username}</strong>
+                  <span>{option.isFallback ? `${option.helperText} (manual user)` : option.helperText}</span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="access-control-team-empty-react">No Client Managers found in this department.</p>
+      )}
+
+      <span className="cb-field__hint">
+        {selectedCount
+          ? `Selected team members: ${selectedCount}. Middle Manager will see their clients plus own clients.`
+          : "Select one or more Client Managers for this Middle Manager team."}
+      </span>
     </div>
   );
 }
@@ -1376,6 +1471,7 @@ function ensureFormDefaults(form: UserFormState, departments: AccessControlDepar
       ...form,
       departmentId: "",
       roleId: "",
+      teamUsernames: [],
     };
   }
 
@@ -1391,7 +1487,7 @@ function ensureFormDefaults(form: UserFormState, departments: AccessControlDepar
     ...form,
     departmentId,
     roleId,
-    teamUsernames: roleId === "middle_manager" ? form.teamUsernames : "",
+    teamUsernames: roleId === "middle_manager" ? normalizeTeamUsernames(form.teamUsernames) : [],
   };
 }
 
@@ -1400,7 +1496,7 @@ function buildUpsertPayload(form: UserFormState): UpsertUserPayload {
     displayName: form.displayName.trim(),
     departmentId: form.departmentId,
     roleId: form.roleId,
-    teamUsernames: form.roleId === "middle_manager" ? parseTeamUsernames(form.teamUsernames) : [],
+    teamUsernames: form.roleId === "middle_manager" ? normalizeTeamUsernames(form.teamUsernames) : [],
     totpEnabled: Boolean(form.totpEnabled),
   };
 
@@ -1426,11 +1522,83 @@ function buildUpsertPayload(form: UserFormState): UpsertUserPayload {
   return payload;
 }
 
-function parseTeamUsernames(rawValue: string): string[] {
-  return String(rawValue || "")
-    .split(/[\n,;]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+function normalizeTeamUsernames(rawValues: string[] | null | undefined): string[] {
+  const values = Array.isArray(rawValues) ? rawValues : [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const value of values) {
+    const username = normalizeUsername(value || "");
+    if (!username || seen.has(username)) {
+      continue;
+    }
+    seen.add(username);
+    normalized.push(username);
+  }
+
+  return normalized;
+}
+
+function toggleTeamUsername(current: string[], rawUsername: string): string[] {
+  const username = normalizeUsername(rawUsername);
+  if (!username) {
+    return normalizeTeamUsernames(current);
+  }
+
+  const set = new Set(normalizeTeamUsernames(current));
+  if (set.has(username)) {
+    set.delete(username);
+  } else {
+    set.add(username);
+  }
+
+  return [...set].sort((left, right) => left.localeCompare(right, "en-US", { sensitivity: "base" }));
+}
+
+function buildMiddleManagerTeamOptions(
+  users: AuthUser[],
+  departmentId: string,
+  selectedUsernames: string[],
+  excludedUsernames: string[] = [],
+): MiddleManagerTeamOption[] {
+  const normalizedUsers = Array.isArray(users) ? users : [];
+  const excluded = new Set(normalizeTeamUsernames(excludedUsernames));
+  const optionsByUsername = new Map<string, MiddleManagerTeamOption>();
+
+  for (const user of normalizedUsers) {
+    if (user.isOwner || user.roleId !== "manager" || user.departmentId !== departmentId) {
+      continue;
+    }
+    const username = normalizeUsername(user.username || "");
+    if (!username || excluded.has(username)) {
+      continue;
+    }
+    optionsByUsername.set(username, {
+      username,
+      displayName: (user.displayName || user.username || username).trim(),
+      helperText: user.username || username,
+      isFallback: false,
+    });
+  }
+
+  for (const selectedUsername of normalizeTeamUsernames(selectedUsernames)) {
+    if (excluded.has(selectedUsername) || optionsByUsername.has(selectedUsername)) {
+      continue;
+    }
+    optionsByUsername.set(selectedUsername, {
+      username: selectedUsername,
+      displayName: selectedUsername,
+      helperText: selectedUsername,
+      isFallback: true,
+    });
+  }
+
+  return [...optionsByUsername.values()].sort((left, right) => {
+    return (
+      left.displayName.localeCompare(right.displayName, "en-US", { sensitivity: "base" }) ||
+      left.username.localeCompare(right.username, "en-US", { sensitivity: "base" })
+    );
+  });
 }
 
 function normalizeTotpSecretValue(rawValue: string): string {
