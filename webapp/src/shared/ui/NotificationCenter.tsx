@@ -9,6 +9,7 @@ import {
   markNotificationRead,
   subscribeNotifications,
 } from "@/shared/lib/notifications";
+import { requestOpenClientCard } from "@/shared/lib/openClientCard";
 import type { AppNotification } from "@/shared/types/notifications";
 
 const notificationDateFormatter = new Intl.DateTimeFormat(undefined, {
@@ -49,6 +50,22 @@ export function NotificationCenter() {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, []);
+
+  function handleOpenNotification(notification: AppNotification): void {
+    markNotificationRead(notification.id);
+    setIsOpen(false);
+
+    if (notification.clientName) {
+      requestOpenClientCard(notification.clientName, {
+        fallbackHref: notification.link?.href,
+      });
+      return;
+    }
+
+    if (notification.link?.href) {
+      window.location.assign(notification.link.href);
+    }
+  }
 
   return (
     <div ref={rootRef} className={`notification-center ${isOpen ? "is-open" : ""}`.trim()}>
@@ -133,17 +150,14 @@ export function NotificationCenter() {
                     </button>
                   ) : null}
 
-                  {notification.link ? (
-                    <a
-                      href={notification.link.href}
+                  {notification.link || notification.clientName ? (
+                    <button
+                      type="button"
                       className="notification-center__item-action"
-                      onClick={() => {
-                        markNotificationRead(notification.id);
-                        setIsOpen(false);
-                      }}
+                      onClick={() => handleOpenNotification(notification)}
                     >
-                      {notification.link.label}
-                    </a>
+                      {notification.link?.label || "Open"}
+                    </button>
                   ) : null}
 
                   <button

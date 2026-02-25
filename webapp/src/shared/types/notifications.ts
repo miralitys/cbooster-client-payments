@@ -12,6 +12,7 @@ export interface AppNotification {
   tone: AppNotificationTone;
   createdAt: string;
   read: boolean;
+  clientName?: string;
   link?: AppNotificationLink;
 }
 
@@ -19,5 +20,6 @@ export interface AppNotificationPayload {
   title: string;
   message?: string;
   tone?: AppNotificationTone;
+  clientName?: string;
   link?: Partial<AppNotificationLink>;
 }

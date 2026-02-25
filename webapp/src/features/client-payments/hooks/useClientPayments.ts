@@ -36,6 +36,11 @@ import {
   readClientPaymentsUiState,
   writeClientPaymentsUiState,
 } from "@/shared/storage/uiState";
+import {
+  consumePendingOpenClientCardRequest,
+  OPEN_CLIENT_CARD_EVENT_NAME,
+  type OpenClientCardEventDetail,
+} from "@/shared/lib/openClientCard";
 
 interface ModalState {
   open: boolean;
@@ -43,10 +48,6 @@ interface ModalState {
   recordId: string;
   draft: ClientRecord;
   dirty: boolean;
-}
-
-interface AssistantOpenClientEventDetail {
-  clientName?: string;
 }
 
 const INITIAL_FILTERS: ClientPaymentsFilters = {
@@ -382,10 +383,9 @@ export function useClientPayments() {
     });
   }, []);
 
-  useEffect(() => {
-    function onAssistantOpenClient(event: Event) {
-      const detail = (event as CustomEvent<AssistantOpenClientEventDetail>).detail;
-      const requestedName = normalizeComparableClientName(detail?.clientName || "");
+  const openClientByName = useCallback(
+    (rawClientName: string | undefined) => {
+      const requestedName = normalizeComparableClientName(rawClientName || "");
       if (!requestedName || !records.length) {
         return;
       }
@@ -396,13 +396,34 @@ export function useClientPayments() {
       }
 
       openRecordModal(bestRecord);
+    },
+    [openRecordModal, records],
+  );
+
+  useEffect(() => {
+    if (!records.length) {
+      return;
     }
 
-    window.addEventListener("cb-assistant-open-client", onAssistantOpenClient as EventListener);
+    const pendingClientName = consumePendingOpenClientCardRequest();
+    if (!pendingClientName) {
+      return;
+    }
+
+    openClientByName(pendingClientName);
+  }, [openClientByName, records.length]);
+
+  useEffect(() => {
+    function onAssistantOpenClient(event: Event) {
+      const detail = (event as CustomEvent<OpenClientCardEventDetail>).detail;
+      openClientByName(detail?.clientName);
+    }
+
+    window.addEventListener(OPEN_CLIENT_CARD_EVENT_NAME, onAssistantOpenClient as EventListener);
     return () => {
-      window.removeEventListener("cb-assistant-open-client", onAssistantOpenClient as EventListener);
+      window.removeEventListener(OPEN_CLIENT_CARD_EVENT_NAME, onAssistantOpenClient as EventListener);
     };
-  }, [openRecordModal, records]);
+  }, [openClientByName]);
 
   const startEditRecord = useCallback(() => {
     if (!canManage || !activeRecord) {

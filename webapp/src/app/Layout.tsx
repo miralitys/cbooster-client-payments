@@ -218,9 +218,10 @@ function maybeShowDemoPaymentNotification(): void {
     title: "Payment received from Michail Aleshchenko",
     message: "Demo event: incoming payment was posted.",
     tone: "success",
+    clientName: "Michail Aleshchenko",
     link: {
       href: "/app/client-payments",
-      label: "Open payments",
+      label: "Open",
     },
   });
 

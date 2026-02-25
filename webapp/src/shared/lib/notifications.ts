@@ -37,6 +37,7 @@ export function pushNotification(payload: AppNotificationPayload): AppNotificati
   }
 
   const message = String(payload.message || "").trim();
+  const clientName = normalizeClientName(payload.clientName);
   const notification: AppNotification = {
     id: createNotificationId(),
     title,
@@ -44,6 +45,7 @@ export function pushNotification(payload: AppNotificationPayload): AppNotificati
     tone: isAppNotificationTone(payload.tone) ? payload.tone : "info",
     createdAt: new Date().toISOString(),
     read: false,
+    clientName,
     link: normalizeLink(payload.link),
   };
 
@@ -219,6 +221,7 @@ function normalizeNotification(value: unknown): AppNotification | null {
     tone: isAppNotificationTone(parsed.tone) ? parsed.tone : "info",
     createdAt: normalizeCreatedAt(parsed.createdAt),
     read: Boolean(parsed.read),
+    clientName: normalizeClientName(parsed.clientName),
     link: normalizeLink(parsed.link),
   };
 }
@@ -265,6 +268,11 @@ function cloneNotifications(notifications: AppNotification[]): AppNotification[]
     ...item,
     link: item.link ? { ...item.link } : undefined,
   }));
+}
+
+function normalizeClientName(value: unknown): string | undefined {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized || undefined;
 }
 
 function createNotificationId(): string {
