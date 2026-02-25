@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  clearNotifications,
   getNotifications,
   getUnreadNotificationsCount,
   markAllNotificationsRead,
@@ -140,14 +139,6 @@ export function NotificationCenter() {
             onClick={() => markAllNotificationsRead()}
           >
             Mark all read
-          </button>
-          <button
-            type="button"
-            className="notification-center__toolbar-btn"
-            disabled={!notifications.length}
-            onClick={() => clearNotifications()}
-          >
-            Clear all
           </button>
         </div>
 
