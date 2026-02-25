@@ -67,6 +67,17 @@ const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
   { key: "60-99", label: "60-99" },
   { key: "100", label: "100" },
 ];
+const PAYMENT_COLUMN_MATCH = /^payment(\d+)(Date)?$/;
+const buildPaymentColumns = (from: number, to: number): Array<keyof ClientRecord> => {
+  const columns: Array<keyof ClientRecord> = [];
+  for (let index = from; index <= to; index += 1) {
+    columns.push(`payment${index}` as keyof ClientRecord);
+    columns.push(`payment${index}Date` as keyof ClientRecord);
+  }
+  return columns;
+};
+const EXTENDED_PAYMENT_COLUMNS = buildPaymentColumns(8, 36);
+const EXTENDED_PAYMENT_COLUMN_SET = new Set(EXTENDED_PAYMENT_COLUMNS);
 const MANAGER_FILTER_ALL = "__all__";
 const NO_MANAGER_LABEL = "No manager";
 const TEXT_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
@@ -104,16 +115,20 @@ const COLUMN_LABELS: Record<string, string> = {
 const SUMMABLE_TABLE_COLUMNS = new Set<keyof ClientRecord>([
   "contractTotals",
   "totalPayments",
-  "payment1",
-  "payment2",
-  "payment3",
-  "payment4",
-  "payment5",
-  "payment6",
-  "payment7",
+  ...buildPaymentColumns(1, 36).filter((field) => !field.toString().endsWith("Date")),
   "futurePayments",
   "collection",
 ]);
+
+function resolveColumnLabel(column: string): string {
+  const match = column.match(PAYMENT_COLUMN_MATCH);
+  if (match) {
+    const index = match[1];
+    const isDate = Boolean(match[2]);
+    return isDate ? `Payment ${index} Date` : `Payment ${index}`;
+  }
+  return COLUMN_LABELS[column] || column;
+}
 
 function getOverviewContextLabel(period: OverviewPeriodKey): string {
   const found = OVERVIEW_PERIOD_OPTIONS.find((option) => option.key === period);
@@ -168,6 +183,7 @@ export default function ClientPaymentsPage() {
   const [isManagersLoading, setIsManagersLoading] = useState(false);
   const [managersError, setManagersError] = useState("");
   const [managersRefreshMode, setManagersRefreshMode] = useState<ClientManagersRefreshMode>("none");
+  const [showAllPayments, setShowAllPayments] = useState(false);
   const [clientManagersState, setClientManagersState] = useState<ClientManagersState>({
     byClientName: new Map(),
     total: 0,
@@ -175,17 +191,24 @@ export default function ClientPaymentsPage() {
   });
   const canSyncClientManagers = Boolean(session?.permissions?.sync_client_managers);
 
+  const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
+    () =>
+      showAllPayments
+        ? TABLE_COLUMNS
+        : TABLE_COLUMNS.filter((column) => !EXTENDED_PAYMENT_COLUMN_SET.has(column)),
+    [showAllPayments],
+  );
   const tableColumnKeys = useMemo<Array<keyof ClientRecord | "score" | "clientManager">>(
-    () => ["clientName", "clientManager", "score", ...TABLE_COLUMNS.filter((column) => column !== "clientName")],
-    [],
+    () => ["clientName", "clientManager", "score", ...visibleTableColumns.filter((column) => column !== "clientName")],
+    [visibleTableColumns],
   );
 
   const sortableColumns = useMemo(
     () =>
       new Set<keyof ClientRecord>(
-        TABLE_COLUMNS.filter((column) => column !== "afterResult" && column !== "writtenOff"),
+        visibleTableColumns.filter((column) => column !== "afterResult" && column !== "writtenOff"),
       ),
-    [],
+    [visibleTableColumns],
   );
 
   const scoreByRecordId = useMemo(() => {
@@ -333,7 +356,7 @@ export default function ClientPaymentsPage() {
     return tableColumnKeys.map((column) => {
       const isSortable = column !== "score" && column !== "clientManager" ? sortableColumns.has(column) : false;
       const isActive = column !== "score" && column !== "clientManager" ? sortState.key === column : false;
-      const headerLabel = column === "score" ? "Score" : COLUMN_LABELS[column] || column;
+    const headerLabel = column === "score" ? "Score" : resolveColumnLabel(column);
 
       return {
         key: column,
@@ -761,6 +784,13 @@ export default function ClientPaymentsPage() {
             <div className="table-panel__actions">
               <Button variant="secondary" size="sm" onClick={() => void forceRefresh()} isLoading={isLoading}>
                 Refresh
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setShowAllPayments((prev) => !prev)}
+              >
+                {showAllPayments ? "Hide Extra Payments" : "Show All Payments"}
               </Button>
               <Button variant="secondary" size="sm" onClick={() => exportRecordsToXls(filteredRecords)}>
                 Export XLS
