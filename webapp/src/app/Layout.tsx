@@ -4,6 +4,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { AssistantWidget } from "@/features/assistant/AssistantWidget";
 import { getSession } from "@/shared/api/session";
 import { isOwnerOrAdminSession } from "@/shared/lib/access";
+import { pushNotification } from "@/shared/lib/notifications";
 import { ModalStackProvider, NotificationCenter, ToastHost } from "@/shared/ui";
 
 interface NavigationItem {
@@ -25,6 +26,7 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/leads", label: "Leads" },
   { to: "/access-control", label: "Access Control" },
 ];
+const DEMO_PAYMENT_NOTIFICATION_ONCE_KEY = "cbooster_demo_payment_notification_once_v1";
 
 function resolvePageTitle(pathname: string): string {
   if (pathname.startsWith("/dashboard")) {
@@ -110,7 +112,11 @@ export function Layout() {
         if (!active) {
           return;
         }
-        setCanViewQuickBooks(isOwnerOrAdminSession(payload));
+        const ownerOrAdmin = isOwnerOrAdminSession(payload);
+        setCanViewQuickBooks(ownerOrAdmin);
+        if (ownerOrAdmin) {
+          maybeShowDemoPaymentNotification();
+        }
       })
       .catch(() => {
         if (!active) {
@@ -135,7 +141,7 @@ export function Layout() {
             </div>
 
             <div className="page-header__controls">
-              <NotificationCenter />
+              {canViewQuickBooks ? <NotificationCenter /> : null}
 
               <div ref={menuRef} className={`account-menu ${menuOpen ? "is-open" : ""}`.trim()}>
                 <button
@@ -196,4 +202,27 @@ export function Layout() {
       </main>
     </ModalStackProvider>
   );
+}
+
+function maybeShowDemoPaymentNotification(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const alreadyShown = window.sessionStorage.getItem(DEMO_PAYMENT_NOTIFICATION_ONCE_KEY) === "1";
+  if (alreadyShown) {
+    return;
+  }
+
+  pushNotification({
+    title: "Payment received from Michail Aleshchenko",
+    message: "Demo event: incoming payment was posted.",
+    tone: "success",
+    link: {
+      href: "/app/client-payments",
+      label: "Open payments",
+    },
+  });
+
+  window.sessionStorage.setItem(DEMO_PAYMENT_NOTIFICATION_ONCE_KEY, "1");
 }
