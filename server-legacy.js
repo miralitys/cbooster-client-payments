@@ -31101,16 +31101,21 @@ const handleHealthGet = async (req, res) => {
 
   const allowDetailedStatus = canAccessDetailedHealthStatus(req);
 
+  if (!allowDetailedStatus) {
+    // Public health response is intentionally neutral to reduce recon value.
+    // Operational details are available only with explicit health API key.
+    res.status(200).json({
+      ok: true,
+    });
+    return;
+  }
+
   if (!pool) {
     res.status(503).json(
-      allowDetailedStatus
-        ? {
-            ok: false,
-            status: "unhealthy",
-          }
-        : {
-            ok: false,
-          },
+      {
+        ok: false,
+        status: "unhealthy",
+      },
     );
     return;
   }
@@ -31118,28 +31123,16 @@ const handleHealthGet = async (req, res) => {
   try {
     await ensureDatabaseReady();
     await sharedDbQuery("SELECT 1");
-    res.status(200).json(
-      allowDetailedStatus
-        ? {
-            ok: true,
-            status: "healthy",
-          }
-        : {
-            ok: true,
-          },
-    );
+    res.status(200).json({
+      ok: true,
+      status: "healthy",
+    });
   } catch (error) {
     console.error("GET /api/health failed:", error);
-    res.status(resolveDbHttpStatus(error, 503)).json(
-      allowDetailedStatus
-        ? {
-            ok: false,
-            status: "unhealthy",
-          }
-        : {
-            ok: false,
-          },
-    );
+    res.status(resolveDbHttpStatus(error, 503)).json({
+      ok: false,
+      status: "unhealthy",
+    });
   }
 };
 
