@@ -13,12 +13,20 @@ const notificationDateFormatter = new Intl.DateTimeFormat(undefined, {
   timeStyle: "short",
 });
 const NOTIFICATIONS_POLL_INTERVAL_MS = 30_000;
+const MAX_BROWSER_NOTIFICATIONS_PER_POLL = 3;
+const BROWSER_NOTIFICATION_FALLBACK_MESSAGE = "Open the notification center to view details.";
 
 export function NotificationCenter() {
   const [isOpen, setIsOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"active" | "archive">("active");
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const isBrowserNotificationsSupported = supportsBrowserNotifications();
+  const [browserNotificationPermission, setBrowserNotificationPermission] = useState<NotificationPermission>(() =>
+    isBrowserNotificationsSupported ? Notification.permission : "default",
+  );
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const knownNotificationIdsRef = useRef<Set<string>>(new Set());
+  const hasLoadedInitialSnapshotRef = useRef(false);
   const unreadCount = useMemo(() => getUnreadNotificationsCount(notifications), [notifications]);
   const activeNotifications = useMemo(() => notifications.filter((item) => !item.read), [notifications]);
   const displayedNotifications = viewMode === "active" ? activeNotifications : notifications;
@@ -26,11 +34,25 @@ export function NotificationCenter() {
   const loadNotifications = useCallback(async () => {
     try {
       const nextNotifications = await getNotificationsFeed();
+      const knownNotificationIds = knownNotificationIdsRef.current;
+
+      if (hasLoadedInitialSnapshotRef.current && isBrowserNotificationsSupported && browserNotificationPermission === "granted") {
+        const newUnreadNotifications = nextNotifications
+          .filter((notification) => !notification.read && !knownNotificationIds.has(notification.id))
+          .slice(0, MAX_BROWSER_NOTIFICATIONS_PER_POLL);
+
+        for (const notification of newUnreadNotifications) {
+          showBrowserNotification(notification);
+        }
+      }
+
+      knownNotificationIdsRef.current = new Set(nextNotifications.map((notification) => notification.id));
+      hasLoadedInitialSnapshotRef.current = true;
       setNotifications(nextNotifications);
     } catch {
       // Keep existing notifications snapshot on transient API failures.
     }
-  }, []);
+  }, [browserNotificationPermission, isBrowserNotificationsSupported]);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +74,24 @@ export function NotificationCenter() {
       window.clearInterval(pollTimer);
     };
   }, [loadNotifications]);
+
+  useEffect(() => {
+    if (!isBrowserNotificationsSupported) {
+      return;
+    }
+
+    function syncPermission(): void {
+      setBrowserNotificationPermission(Notification.permission);
+    }
+
+    syncPermission();
+    window.addEventListener("focus", syncPermission);
+    document.addEventListener("visibilitychange", syncPermission);
+    return () => {
+      window.removeEventListener("focus", syncPermission);
+      document.removeEventListener("visibilitychange", syncPermission);
+    };
+  }, [isBrowserNotificationsSupported]);
 
   useEffect(() => {
     function onPointerDown(event: MouseEvent) {
@@ -144,6 +184,19 @@ export function NotificationCenter() {
     markNotificationRead(notification.id);
   }
 
+  async function handleEnableBrowserNotificationsClick(): Promise<void> {
+    if (!isBrowserNotificationsSupported) {
+      return;
+    }
+
+    try {
+      const nextPermission = await Notification.requestPermission();
+      setBrowserNotificationPermission(nextPermission);
+    } catch {
+      setBrowserNotificationPermission(Notification.permission);
+    }
+  }
+
   return (
     <div ref={rootRef} className={`notification-center ${isOpen ? "is-open" : ""}`.trim()}>
       <button
@@ -176,6 +229,34 @@ export function NotificationCenter() {
           <p className="notification-center__title">Notifications</p>
           <p className="notification-center__count">{unreadCount} unread</p>
         </header>
+
+        {isBrowserNotificationsSupported ? (
+          <div className="notification-center__browser">
+            {browserNotificationPermission === "default" ? (
+              <button
+                type="button"
+                className="notification-center__toolbar-btn"
+                onClick={() => {
+                  void handleEnableBrowserNotificationsClick();
+                }}
+              >
+                Enable Chrome alerts
+              </button>
+            ) : null}
+
+            {browserNotificationPermission === "granted" ? (
+              <p className="notification-center__browser-note notification-center__browser-note--enabled">
+                Chrome alerts enabled
+              </p>
+            ) : null}
+
+            {browserNotificationPermission === "denied" ? (
+              <p className="notification-center__browser-note">
+                Chrome alerts are blocked in browser settings for this site.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="notification-center__controls">
           <div className="notification-center__modes" role="tablist" aria-label="Notification views">
@@ -280,4 +361,43 @@ function getUnreadNotificationsCount(notifications: AppNotification[]): number {
     }
   }
   return unreadCount;
+}
+
+function supportsBrowserNotifications(): boolean {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+function showBrowserNotification(notification: AppNotification): void {
+  if (!supportsBrowserNotifications() || Notification.permission !== "granted") {
+    return;
+  }
+
+  try {
+    const popup = new Notification(notification.title, {
+      body: notification.message || BROWSER_NOTIFICATION_FALLBACK_MESSAGE,
+      tag: `cbooster-notification-${notification.id}`,
+    });
+
+    popup.onclick = () => {
+      try {
+        window.focus();
+      } catch {
+        // Browser may reject focus in some contexts.
+      }
+
+      void markNotificationReadRequest(notification.id).catch(() => {});
+
+      if (notification.clientName) {
+        requestOpenClientCard(notification.clientName, {
+          fallbackHref: notification.link?.href,
+        });
+      } else if (notification.link?.href) {
+        window.location.assign(notification.link.href);
+      }
+
+      popup.close();
+    };
+  } catch {
+    // Ignore browser notification API errors.
+  }
 }
