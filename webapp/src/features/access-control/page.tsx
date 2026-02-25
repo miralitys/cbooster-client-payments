@@ -75,7 +75,7 @@ export default function AccessControlPage() {
   const [assistantReviewsTotal, setAssistantReviewsTotal] = useState(0);
   const [assistantReviewsLoading, setAssistantReviewsLoading] = useState(false);
   const [assistantReviewsError, setAssistantReviewsError] = useState("");
-  const [assistantReviewsStatusText, setAssistantReviewsStatusText] = useState("Owner review queue has no pending topics.");
+  const [assistantReviewsStatusText, setAssistantReviewsStatusText] = useState("Owner/Admin review queue has no pending topics.");
   const [assistantReviewDrafts, setAssistantReviewDrafts] = useState<Record<string, AssistantReviewDraft>>({});
   const [assistantReviewSavingIds, setAssistantReviewSavingIds] = useState<Record<string, boolean>>({});
   const [expandedAssistantReviewId, setExpandedAssistantReviewId] = useState<number | null>(null);
@@ -179,14 +179,14 @@ export default function AccessControlPage() {
       setCanManageAccess(canManage);
       setCreateForm((previous) => ensureFormDefaults(previous, nextDepartments));
       setStatusText("Access model loaded.");
-      if (payload?.user?.isOwner) {
+      if (canManage) {
         await loadAssistantReviewQueue();
       } else {
         setAssistantReviews([]);
         setAssistantReviewsTotal(0);
         setAssistantReviewsLoading(false);
         setAssistantReviewsError("");
-        setAssistantReviewsStatusText("Owner review queue is available only for owner accounts.");
+        setAssistantReviewsStatusText("Assistant review queue is available only for owner/admin accounts.");
         setAssistantReviewDrafts({});
         setAssistantReviewSavingIds({});
         setExpandedAssistantReviewId(null);
@@ -203,7 +203,7 @@ export default function AccessControlPage() {
       setAssistantReviewsTotal(0);
       setAssistantReviewsLoading(false);
       setAssistantReviewsError("");
-      setAssistantReviewsStatusText("Owner review queue is unavailable until access model is loaded.");
+      setAssistantReviewsStatusText("Assistant review queue is unavailable until access model is loaded.");
       setAssistantReviewDrafts({});
       setAssistantReviewSavingIds({});
       setExpandedAssistantReviewId(null);
@@ -482,6 +482,7 @@ export default function AccessControlPage() {
 
   const isOwnerUser = Boolean(currentUser?.isOwner);
   const isAdminUser = Boolean(permissions?.manage_access_control) && !isOwnerUser;
+  const canReviewAssistantQueue = isOwnerUser || isAdminUser;
   const canDeleteUsers = isOwnerUser || isAdminUser;
   const isEditingCurrentUser =
     Boolean(editingOriginalUsername) &&
@@ -526,7 +527,7 @@ export default function AccessControlPage() {
   }
 
   async function submitAssistantReviewDecision(item: AssistantReviewItem, markCorrect: boolean) {
-    if (!isOwnerUser) {
+    if (!canReviewAssistantQueue) {
       return;
     }
 
@@ -535,7 +536,7 @@ export default function AccessControlPage() {
     const correctedReply = draft.correctedReply.trim();
     const correctionNote = draft.correctionNote.trim();
     if (!markCorrect && !correctedReply && !correctionNote) {
-      const message = "Write Owner Corrected Answer (or a note), or use Correct.";
+      const message = "Write corrected answer (or a note), or use Correct.";
       setAssistantReviewsError(message);
       setAssistantReviewsStatusText(message);
       return;
@@ -628,7 +629,7 @@ export default function AccessControlPage() {
             <CurrentAccessLine label="Department" value={currentUser?.departmentName || "-"} />
             <CurrentAccessLine
               label="Access Level"
-              value={currentUser?.isOwner ? "Owner (full access)" : "Department access"}
+              value={isOwnerUser || isAdminUser ? "Full access" : "Department access"}
             />
             <CurrentAccessLine label="2FA (Authenticator)" value={currentUser?.totpEnabled ? "Enabled" : "Off"} />
             <CurrentAccessLine label="Enabled Permissions" value={String(enabledPermissionsCount)} />
@@ -826,9 +827,9 @@ export default function AccessControlPage() {
         )}
       </Panel>
 
-      {isOwnerUser ? (
+      {canReviewAssistantQueue ? (
         <Panel
-          title="Assistant Review Queue (Owner)"
+          title="Assistant Review Queue (Owner/Admin)"
           actions={
             <Button
               type="button"

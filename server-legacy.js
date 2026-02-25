@@ -271,6 +271,7 @@ const WEB_AUTH_ALL_PERMISSION_KEYS = [
   WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL,
 ];
 const WEB_AUTH_ROLE_OWNER = "owner";
+const WEB_AUTH_ROLE_ADMIN = "admin";
 const WEB_AUTH_ROLE_DEPARTMENT_HEAD = "department_head";
 const WEB_AUTH_ROLE_MIDDLE_MANAGER = "middle_manager";
 const WEB_AUTH_ROLE_MANAGER = "manager";
@@ -280,6 +281,7 @@ const WEB_AUTH_DEPARTMENT_SALES = "sales";
 const WEB_AUTH_DEPARTMENT_COLLECTION = "collection";
 const WEB_AUTH_ROLE_DEFINITIONS = [
   { id: WEB_AUTH_ROLE_OWNER, name: "Owner" },
+  { id: WEB_AUTH_ROLE_ADMIN, name: "Admin" },
   { id: WEB_AUTH_ROLE_DEPARTMENT_HEAD, name: "Department Head" },
   { id: WEB_AUTH_ROLE_MIDDLE_MANAGER, name: "Middle Manager" },
   { id: WEB_AUTH_ROLE_MANAGER, name: "Manager" },
@@ -288,22 +290,22 @@ const WEB_AUTH_DEPARTMENT_DEFINITIONS = [
   {
     id: WEB_AUTH_DEPARTMENT_ACCOUNTING,
     name: "Accounting Department",
-    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER, WEB_AUTH_ROLE_ADMIN],
   },
   {
     id: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     name: "Client Service Department",
-    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MIDDLE_MANAGER, WEB_AUTH_ROLE_MANAGER],
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MIDDLE_MANAGER, WEB_AUTH_ROLE_MANAGER, WEB_AUTH_ROLE_ADMIN],
   },
   {
     id: WEB_AUTH_DEPARTMENT_SALES,
     name: "Sales Department",
-    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER, WEB_AUTH_ROLE_ADMIN],
   },
   {
     id: WEB_AUTH_DEPARTMENT_COLLECTION,
     name: "Collection Department",
-    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER],
+    roles: [WEB_AUTH_ROLE_DEPARTMENT_HEAD, WEB_AUTH_ROLE_MANAGER, WEB_AUTH_ROLE_ADMIN],
   },
 ];
 const WEB_AUTH_BOOTSTRAP_USERS = [
@@ -5961,8 +5963,12 @@ function normalizeWebAuthRoleId(rawValue, departmentId = "") {
     return "";
   }
 
-  if (normalized === "owner" || normalized === "admin" || normalized === "administrator") {
+  if (normalized === "owner") {
     return WEB_AUTH_ROLE_OWNER;
+  }
+
+  if (normalized === "admin" || normalized === "administrator") {
+    return WEB_AUTH_ROLE_ADMIN;
   }
 
   if (
@@ -5988,6 +5994,17 @@ function normalizeWebAuthRoleId(rawValue, departmentId = "") {
   }
 
   return "";
+}
+
+function isWebAuthOwnerOrAdminProfile(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return false;
+  }
+  if (userProfile.isOwner === true) {
+    return true;
+  }
+  const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
+  return normalizeWebAuthRoleId(userProfile.roleId, departmentId) === WEB_AUTH_ROLE_ADMIN;
 }
 
 function getWebAuthRoleName(roleId) {
@@ -6034,7 +6051,9 @@ function buildWebAuthPermissionsForUser(userProfile) {
     return permissions;
   }
 
-  if (userProfile.isOwner) {
+  const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
+  const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
+  if (userProfile.isOwner || roleId === WEB_AUTH_ROLE_ADMIN) {
     for (const key of WEB_AUTH_ALL_PERMISSION_KEYS) {
       permissions[key] = true;
     }
@@ -6044,8 +6063,6 @@ function buildWebAuthPermissionsForUser(userProfile) {
   permissions[WEB_AUTH_PERMISSION_VIEW_DASHBOARD] = true;
   permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS] = true;
 
-  const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
-  const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
   const isDepartmentHead = roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD;
   const isMiddleManager = roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER;
 
@@ -6180,7 +6197,7 @@ function canWebAuthUserViewClientRecord(userProfile, record) {
     return false;
   }
 
-  if (userProfile.isOwner) {
+  if (isWebAuthOwnerOrAdminProfile(userProfile)) {
     return true;
   }
 
@@ -11756,7 +11773,7 @@ function requireWebPermission(permissionKey, message = "Access denied.") {
 function requireOwnerOrAdminAccess(message = "Owner or admin access is required.") {
   return (req, res, next) => {
     const profile = req.webAuthProfile;
-    if (profile?.isOwner || hasWebAuthPermission(profile, WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL)) {
+    if (isWebAuthOwnerOrAdminProfile(profile) || hasWebAuthPermission(profile, WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL)) {
       next();
       return;
     }
@@ -25381,9 +25398,9 @@ const handleApiAuthAccessModel = (req, res) => {
 };
 
 const handleAssistantReviewsList = async (req, res) => {
-  if (!req.webAuthProfile?.isOwner) {
+  if (!isWebAuthOwnerOrAdminProfile(req.webAuthProfile)) {
     res.status(403).json({
-      error: "Access denied. Owner role is required.",
+      error: "Access denied. Owner or admin role is required.",
     });
     return;
   }
@@ -25415,9 +25432,9 @@ const handleAssistantReviewsList = async (req, res) => {
 };
 
 const handleAssistantReviewUpdate = async (req, res) => {
-  if (!req.webAuthProfile?.isOwner) {
+  if (!isWebAuthOwnerOrAdminProfile(req.webAuthProfile)) {
     res.status(403).json({
-      error: "Access denied. Owner role is required.",
+      error: "Access denied. Owner or admin role is required.",
     });
     return;
   }
@@ -29560,9 +29577,9 @@ const handleAssistantTtsPost = async (req, res) => {
     return;
   }
 
-  if (ASSISTANT_TTS_ENDPOINT_OWNER_ONLY && !req.webAuthProfile?.isOwner) {
+  if (ASSISTANT_TTS_ENDPOINT_OWNER_ONLY && !isWebAuthOwnerOrAdminProfile(req.webAuthProfile)) {
     res.status(403).json({
-      error: "Access denied. Owner role is required.",
+      error: "Access denied. Owner or admin role is required.",
     });
     return;
   }
