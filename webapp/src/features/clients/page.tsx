@@ -42,6 +42,11 @@ const MANAGER_FILTER_ALL = "__all_managers__";
 const MANAGER_FILTER_UNASSIGNED = "__unassigned_managers__";
 const CLIENTS_PAGE_SIZE = 100;
 
+function isActiveEnabled(value: unknown): boolean {
+  const normalized = String(value || "").toLowerCase().trim();
+  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
+}
+
 type ClientsStatusFilter = "all" | "new" | "active" | "inactive" | "overdue" | "written-off" | "fully-paid" | "after-result";
 type ContractSignedFilter = "all" | "signed" | "unsigned";
 type InWorkFilter = "all" | "in-work" | "not-in-work";
@@ -570,14 +575,19 @@ export default function ClientsPage() {
     [canRefreshClientPhoneInCard, records, selectedRecord],
   );
 
+  const activeRecords = useMemo(
+    () => records.filter((record) => isActiveEnabled(record.active)),
+    [records],
+  );
+
   const totalContractAmount = useMemo(
-    () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.contractTotals) || 0), 0),
-    [filteredRecords],
+    () => activeRecords.reduce((sum, record) => sum + (parseMoneyValue(record.contractTotals) || 0), 0),
+    [activeRecords],
   );
 
   const totalBalanceAmount = useMemo(
-    () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.futurePayments) || 0), 0),
-    [filteredRecords],
+    () => activeRecords.reduce((sum, record) => sum + (parseMoneyValue(record.futurePayments) || 0), 0),
+    [activeRecords],
   );
 
   const hasActiveStructuredFilters = useMemo(() => {
@@ -713,7 +723,7 @@ export default function ClientsPage() {
           <div className="page-header__stats">
             <span className="stat-chip">
               <span className="stat-chip__label">Clients:</span>
-              <span className="stat-chip__value">{filteredRecords.length}</span>
+              <span className="stat-chip__value">{activeRecords.length}</span>
             </span>
             <span className="stat-chip">
               <span className="stat-chip__label">Contract Total:</span>
