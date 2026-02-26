@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
-import { getClientManagers, postGhlClientPhoneRefresh } from "@/shared/api";
+import { getClientManagers, postGhlClientPhoneRefresh, startClientManagersRefreshBackgroundJob } from "@/shared/api";
 import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import {
   formatDate,
@@ -357,6 +357,38 @@ export default function ClientPaymentsPage() {
     },
     [],
   );
+
+  const startBackgroundClientManagersRefresh = useCallback(async () => {
+    setIsManagersLoading(true);
+    setManagersError("");
+    setManagersRefreshMode("full");
+
+    try {
+      const payload = await startClientManagersRefreshBackgroundJob();
+      const totalClientsRaw = Number(payload?.job?.totalClients);
+      const totalClients = Number.isFinite(totalClientsRaw) && totalClientsRaw > 0 ? totalClientsRaw : null;
+      const detail = totalClients === null ? "" : ` for ${totalClients} clients`;
+      const message =
+        payload?.reused === true
+          ? "Total refresh is already running in background. You will receive a notification when it finishes."
+          : `Total refresh started in background${detail}. You will receive a notification when it finishes.`;
+
+      showToast({
+        type: "success",
+        message,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to start background Client Manager refresh.";
+      setManagersError(message);
+      showToast({
+        type: "error",
+        message,
+      });
+    } finally {
+      setIsManagersLoading(false);
+      setManagersRefreshMode("none");
+    }
+  }, []);
 
   const refreshSingleClientManager = useCallback(
     async (clientName: string) => {
@@ -952,7 +984,7 @@ export default function ClientPaymentsPage() {
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => void loadClientManagers("full")}
+                onClick={() => void startBackgroundClientManagersRefresh()}
                 disabled={isManagersLoading || !canSyncClientManagers}
                 isLoading={isManagersLoading && managersRefreshMode === "full"}
               >

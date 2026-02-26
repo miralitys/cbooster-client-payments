@@ -623,6 +623,22 @@ const QUICKBOOKS_SYNC_JOB_MAX_ENTRIES = Math.min(
   Math.max(parsePositiveInteger(process.env.QUICKBOOKS_SYNC_JOB_MAX_ENTRIES, 300), 50),
   5000,
 );
+const GHL_CLIENT_MANAGERS_REFRESH_QUEUE_MAX_PENDING = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_MANAGERS_REFRESH_QUEUE_MAX_PENDING, 5), 1),
+  100,
+);
+const GHL_CLIENT_MANAGERS_REFRESH_QUEUE_MAX_AGE_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_MANAGERS_REFRESH_QUEUE_MAX_AGE_MS, 60 * 60 * 1000), 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
+const GHL_CLIENT_MANAGERS_REFRESH_JOB_RETENTION_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_MANAGERS_REFRESH_JOB_RETENTION_MS, 30 * 60 * 1000), 60 * 1000),
+  24 * 60 * 60 * 1000,
+);
+const GHL_CLIENT_MANAGERS_REFRESH_JOB_MAX_ENTRIES = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_MANAGERS_REFRESH_JOB_MAX_ENTRIES, 300), 50),
+  5000,
+);
 const QUICKBOOKS_AUTO_SYNC_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: QUICKBOOKS_AUTO_SYNC_TIME_ZONE,
   year: "numeric",
@@ -1904,6 +1920,8 @@ let webAuthUsersDirectoryStorageReadyPromise = null;
 let webAuthUsersDirectoryPersistPromise = Promise.resolve();
 let quickBooksSyncQueue = Promise.resolve();
 const quickBooksSyncJobsById = new Map();
+let ghlClientManagersRefreshQueue = Promise.resolve();
+const ghlClientManagersRefreshJobsById = new Map();
 const quickBooksHttpCircuitState = {
   consecutiveFailures: 0,
   openUntilMs: 0,
@@ -33311,6 +33329,380 @@ function scopeVisibleClientNamesByRequestedSubset(visibleClientNames, requestedC
   return scoped;
 }
 
+function normalizeGhlClientManagerRefreshClientNames(clientNames) {
+  const uniqueByComparable = new Map();
+  for (const clientName of Array.isArray(clientNames) ? clientNames : []) {
+    const normalizedClientName = sanitizeTextValue(clientName, 300);
+    if (!normalizedClientName) {
+      continue;
+    }
+    const comparable = normalizeAssistantComparableText(normalizedClientName, 220);
+    if (!comparable || uniqueByComparable.has(comparable)) {
+      continue;
+    }
+    uniqueByComparable.set(comparable, normalizedClientName);
+  }
+
+  return [...uniqueByComparable.values()];
+}
+
+async function refreshGhlClientManagersCacheForClientNames(clientNames, refreshMode = "incremental") {
+  const normalizedClientNames = normalizeGhlClientManagerRefreshClientNames(clientNames);
+  const normalizedRefreshMode = normalizeGhlRefreshMode(refreshMode);
+  const refreshMeta = {
+    mode: normalizedRefreshMode,
+    performed: normalizedRefreshMode !== "none",
+    refreshedClientsCount: 0,
+    refreshedRowsWritten: 0,
+    deletedStaleRowsCount: 0,
+  };
+  if (normalizedRefreshMode === "none") {
+    return refreshMeta;
+  }
+  if (!normalizedClientNames.length) {
+    return refreshMeta;
+  }
+
+  const cachedRows = await listCachedGhlClientManagerRowsByClientNames(normalizedClientNames);
+  const cachedClientNameSet = new Set(cachedRows.map((row) => row.clientName));
+  const namesToLookup =
+    normalizedRefreshMode === "full"
+      ? normalizedClientNames
+      : normalizedClientNames.filter((clientName) => !cachedClientNameSet.has(clientName));
+
+  if (normalizedRefreshMode === "full") {
+    refreshMeta.deletedStaleRowsCount = await deleteStaleGhlClientManagerCacheRows(normalizedClientNames);
+  }
+
+  if (namesToLookup.length) {
+    const lookedUpRows = await buildGhlClientManagerLookupRows(namesToLookup);
+    refreshMeta.refreshedRowsWritten = await upsertGhlClientManagerCacheRows(lookedUpRows);
+    refreshMeta.refreshedClientsCount = lookedUpRows.length;
+  }
+
+  return refreshMeta;
+}
+
+function queueGhlClientManagersRefreshTask(taskFactory) {
+  const runTask = () => Promise.resolve().then(() => taskFactory());
+  const runPromise = ghlClientManagersRefreshQueue.then(runTask, runTask);
+  ghlClientManagersRefreshQueue = runPromise.catch(() => {});
+  return runPromise;
+}
+
+function isGhlClientManagersRefreshJobTerminalStatus(status) {
+  return status === "completed" || status === "failed";
+}
+
+function buildGhlClientManagersRefreshJobPayload(job) {
+  if (!job || typeof job !== "object") {
+    return null;
+  }
+
+  const refreshMeta = job.refresh && typeof job.refresh === "object" ? job.refresh : null;
+  return {
+    id: sanitizeTextValue(job.id, 120),
+    status: sanitizeTextValue(job.status, 40) || "unknown",
+    done: isGhlClientManagersRefreshJobTerminalStatus(job.status),
+    requestedBy: sanitizeTextValue(job.requestedBy, 160),
+    totalClients: Array.isArray(job.clientNames) ? job.clientNames.length : 0,
+    queuedAt: sanitizeTextValue(job.queuedAt, 80) || null,
+    startedAt: sanitizeTextValue(job.startedAt, 80) || null,
+    finishedAt: sanitizeTextValue(job.finishedAt, 80) || null,
+    updatedAt: sanitizeTextValue(job.updatedAt, 80) || null,
+    error: sanitizeTextValue(job.error, 600) || null,
+    refresh: refreshMeta
+      ? {
+          mode: sanitizeTextValue(refreshMeta.mode, 40) || "full",
+          performed: refreshMeta.performed === true,
+          refreshedClientsCount: normalizeDualWriteSummaryValue(refreshMeta.refreshedClientsCount),
+          refreshedRowsWritten: normalizeDualWriteSummaryValue(refreshMeta.refreshedRowsWritten),
+          deletedStaleRowsCount: normalizeDualWriteSummaryValue(refreshMeta.deletedStaleRowsCount),
+        }
+      : null,
+  };
+}
+
+function countGhlClientManagersRefreshJobsByStatuses(statuses) {
+  const allowedStatuses = Array.isArray(statuses) ? new Set(statuses.map((item) => sanitizeTextValue(item, 40))) : new Set();
+  if (!allowedStatuses.size) {
+    return 0;
+  }
+
+  let count = 0;
+  for (const job of ghlClientManagersRefreshJobsById.values()) {
+    const jobStatus = sanitizeTextValue(job?.status, 40);
+    if (allowedStatuses.has(jobStatus)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function markGhlClientManagersRefreshJobFailed(job, message) {
+  if (!job || typeof job !== "object") {
+    return;
+  }
+  if (isGhlClientManagersRefreshJobTerminalStatus(job.status)) {
+    return;
+  }
+
+  const nowIso = new Date().toISOString();
+  job.status = "failed";
+  job.error = sanitizeTextValue(message, 600) || "Client manager total refresh failed.";
+  job.finishedAt = nowIso;
+  job.updatedAt = nowIso;
+}
+
+function dropStaleGhlClientManagersRefreshQueuedJobs() {
+  let droppedCount = 0;
+  const nowMs = Date.now();
+
+  for (const job of ghlClientManagersRefreshJobsById.values()) {
+    if (!job || job.status !== "queued") {
+      continue;
+    }
+
+    const queuedAtMs = Date.parse(sanitizeTextValue(job.queuedAt, 80));
+    if (!Number.isFinite(queuedAtMs)) {
+      continue;
+    }
+
+    if (nowMs - queuedAtMs <= GHL_CLIENT_MANAGERS_REFRESH_QUEUE_MAX_AGE_MS) {
+      continue;
+    }
+
+    markGhlClientManagersRefreshJobFailed(job, "Client manager total refresh job dropped from queue due to age.");
+    droppedCount += 1;
+  }
+
+  if (droppedCount > 0) {
+    console.warn(
+      `[GHL Client Manager Refresh Queue] dropped ${droppedCount} stale jobs older than ${Math.round(
+        GHL_CLIENT_MANAGERS_REFRESH_QUEUE_MAX_AGE_MS / 1000,
+      )}s.`,
+    );
+  }
+
+  return droppedCount;
+}
+
+function pruneGhlClientManagersRefreshJobs() {
+  dropStaleGhlClientManagersRefreshQueuedJobs();
+
+  const nowMs = Date.now();
+  for (const [jobId, job] of ghlClientManagersRefreshJobsById.entries()) {
+    if (!isGhlClientManagersRefreshJobTerminalStatus(job?.status)) {
+      continue;
+    }
+
+    const finishedAtMs = Date.parse(sanitizeTextValue(job?.finishedAt, 80));
+    if (!Number.isFinite(finishedAtMs)) {
+      continue;
+    }
+
+    if (nowMs - finishedAtMs > GHL_CLIENT_MANAGERS_REFRESH_JOB_RETENTION_MS) {
+      ghlClientManagersRefreshJobsById.delete(jobId);
+    }
+  }
+
+  if (ghlClientManagersRefreshJobsById.size <= GHL_CLIENT_MANAGERS_REFRESH_JOB_MAX_ENTRIES) {
+    return;
+  }
+
+  const removableTerminalJobIds = [];
+  for (const [jobId, job] of ghlClientManagersRefreshJobsById.entries()) {
+    if (isGhlClientManagersRefreshJobTerminalStatus(job?.status)) {
+      removableTerminalJobIds.push(jobId);
+    }
+  }
+
+  while (ghlClientManagersRefreshJobsById.size > GHL_CLIENT_MANAGERS_REFRESH_JOB_MAX_ENTRIES && removableTerminalJobIds.length) {
+    const jobId = removableTerminalJobIds.shift();
+    if (jobId) {
+      ghlClientManagersRefreshJobsById.delete(jobId);
+    }
+  }
+
+  if (ghlClientManagersRefreshJobsById.size <= GHL_CLIENT_MANAGERS_REFRESH_JOB_MAX_ENTRIES) {
+    return;
+  }
+
+  for (const [jobId, job] of ghlClientManagersRefreshJobsById.entries()) {
+    if (job?.status === "running") {
+      continue;
+    }
+    ghlClientManagersRefreshJobsById.delete(jobId);
+    if (ghlClientManagersRefreshJobsById.size <= GHL_CLIENT_MANAGERS_REFRESH_JOB_MAX_ENTRIES) {
+      break;
+    }
+  }
+}
+
+function getGhlClientManagersRefreshJobById(rawJobId) {
+  const jobId = sanitizeTextValue(rawJobId, 120);
+  if (!jobId) {
+    return null;
+  }
+
+  pruneGhlClientManagersRefreshJobs();
+  return ghlClientManagersRefreshJobsById.get(jobId) || null;
+}
+
+function buildGhlClientManagersRefreshNotificationEntry(job) {
+  if (!job || typeof job !== "object") {
+    return null;
+  }
+
+  const recipientUsername = normalizeWebAuthUsername(job.requestedBy);
+  if (!recipientUsername) {
+    return null;
+  }
+
+  const refreshMeta = job.refresh && typeof job.refresh === "object" ? job.refresh : null;
+  const refreshedClientsCount = normalizeDualWriteSummaryValue(refreshMeta?.refreshedClientsCount);
+  const refreshedRowsWritten = normalizeDualWriteSummaryValue(refreshMeta?.refreshedRowsWritten);
+  const totalClients = Array.isArray(job.clientNames) ? job.clientNames.length : 0;
+  const isCompleted = job.status === "completed";
+
+  const title = isCompleted ? "Client managers total refresh completed" : "Client managers total refresh failed";
+  const message = isCompleted
+    ? `Processed ${totalClients} clients. Refreshed ${refreshedClientsCount}. Cache rows written: ${refreshedRowsWritten}.`
+    : sanitizeTextValue(job.error, 600) || "Client managers total refresh failed.";
+
+  return {
+    id: createWebNotificationId(),
+    recipientUsername,
+    type: "ghl_client_managers_refresh",
+    title,
+    message,
+    tone: isCompleted ? "success" : "error",
+    linkHref: "/app/client-payments",
+    linkLabel: "Open",
+    payload: {
+      jobId: sanitizeTextValue(job.id, 120),
+      status: sanitizeTextValue(job.status, 40),
+      totalClients,
+      refreshedClientsCount,
+      refreshedRowsWritten,
+      deletedStaleRowsCount: normalizeDualWriteSummaryValue(refreshMeta?.deletedStaleRowsCount),
+    },
+  };
+}
+
+async function publishGhlClientManagersRefreshNotification(job) {
+  if (!notificationsService || typeof notificationsService.createNotifications !== "function") {
+    return;
+  }
+
+  const entry = buildGhlClientManagersRefreshNotificationEntry(job);
+  if (!entry) {
+    return;
+  }
+
+  try {
+    await notificationsService.createNotifications([entry]);
+  } catch (error) {
+    console.warn(
+      `[ghl client managers refresh notifications] Failed to store notification for job ${sanitizeTextValue(
+        job?.id,
+        120,
+      )}: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`,
+    );
+  }
+}
+
+function enqueueGhlClientManagersRefreshJob(clientNames, options = {}) {
+  const normalizedClientNames = normalizeGhlClientManagerRefreshClientNames(clientNames);
+  const requestedBy = normalizeWebAuthUsername(options.requestedBy) || "unknown";
+
+  if (!normalizedClientNames.length) {
+    throw createHttpError("No visible clients available for refresh.", 404, "ghl_client_managers_refresh_no_clients");
+  }
+
+  pruneGhlClientManagersRefreshJobs();
+  for (const job of ghlClientManagersRefreshJobsById.values()) {
+    if (!job || (job.status !== "queued" && job.status !== "running")) {
+      continue;
+    }
+    if (sanitizeTextValue(job.requestedBy, 160) !== requestedBy) {
+      continue;
+    }
+    return {
+      job,
+      reused: true,
+    };
+  }
+
+  const pendingJobsCount = countGhlClientManagersRefreshJobsByStatuses(["queued", "running"]);
+  if (pendingJobsCount >= GHL_CLIENT_MANAGERS_REFRESH_QUEUE_MAX_PENDING) {
+    throw createHttpError(
+      "Client manager refresh queue is full. Please wait and retry.",
+      429,
+      "ghl_client_managers_refresh_queue_full",
+    );
+  }
+
+  const nowIso = new Date().toISOString();
+  const job = {
+    id: crypto.randomUUID(),
+    status: "queued",
+    requestedBy,
+    clientNames: normalizedClientNames,
+    queuedAt: nowIso,
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: nowIso,
+    error: "",
+    refresh: null,
+  };
+  ghlClientManagersRefreshJobsById.set(job.id, job);
+
+  void queueGhlClientManagersRefreshTask(async () => {
+    const targetJob = ghlClientManagersRefreshJobsById.get(job.id);
+    if (!targetJob) {
+      return;
+    }
+
+    const queuedAtMs = Date.parse(sanitizeTextValue(targetJob.queuedAt, 80));
+    if (Number.isFinite(queuedAtMs) && Date.now() - queuedAtMs > GHL_CLIENT_MANAGERS_REFRESH_QUEUE_MAX_AGE_MS) {
+      markGhlClientManagersRefreshJobFailed(targetJob, "Client manager total refresh job dropped from queue due to age.");
+      await publishGhlClientManagersRefreshNotification(targetJob);
+      pruneGhlClientManagersRefreshJobs();
+      return;
+    }
+
+    const startedAt = new Date().toISOString();
+    targetJob.status = "running";
+    targetJob.startedAt = startedAt;
+    targetJob.updatedAt = startedAt;
+    targetJob.error = "";
+
+    try {
+      const refreshMeta = await refreshGhlClientManagersCacheForClientNames(targetJob.clientNames, "full");
+      targetJob.status = "completed";
+      targetJob.refresh = refreshMeta;
+    } catch (error) {
+      targetJob.status = "failed";
+      targetJob.error = sanitizeTextValue(error?.message, 600) || "Client manager total refresh failed.";
+      targetJob.refresh = null;
+      console.error(`[GHL Client Managers Refresh Job] failed (jobId=${targetJob.id}):`, error);
+    } finally {
+      const finishedAt = new Date().toISOString();
+      targetJob.finishedAt = finishedAt;
+      targetJob.updatedAt = finishedAt;
+      await publishGhlClientManagersRefreshNotification(targetJob);
+      pruneGhlClientManagersRefreshJobs();
+    }
+  });
+
+  pruneGhlClientManagersRefreshJobs();
+  return {
+    job,
+    reused: false,
+  };
+}
+
 async function respondGhlClientManagers(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/client-managers") {
   const managerRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
@@ -33377,11 +33769,13 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
       });
       return;
     }
-    let cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
-    let refreshedClientsCount = 0;
-    let refreshedRowsWritten = 0;
-    let deletedStaleRowsCount = 0;
-    let refreshed = false;
+    let refreshMeta = {
+      mode: refreshMode,
+      performed: false,
+      refreshedClientsCount: 0,
+      refreshedRowsWritten: 0,
+      deletedStaleRowsCount: 0,
+    };
 
     if (refreshMode !== "none") {
       if (!isGhlConfigured()) {
@@ -33391,26 +33785,10 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
         return;
       }
 
-      const cachedClientNameSet = new Set(cachedRows.map((row) => row.clientName));
-      const namesToLookup =
-        refreshMode === "full"
-          ? clientNames
-          : clientNames.filter((clientName) => !cachedClientNameSet.has(clientName));
-
-      if (refreshMode === "full") {
-        deletedStaleRowsCount = await deleteStaleGhlClientManagerCacheRows(clientNames);
-      }
-
-      if (namesToLookup.length) {
-        const lookedUpRows = await buildGhlClientManagerLookupRows(namesToLookup);
-        refreshedRowsWritten = await upsertGhlClientManagerCacheRows(lookedUpRows);
-        refreshedClientsCount = lookedUpRows.length;
-      }
-
-      refreshed = true;
-      cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
+      refreshMeta = await refreshGhlClientManagersCacheForClientNames(clientNames, refreshMode);
     }
 
+    const cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
     const items = buildClientManagerItemsFromCache(clientNames, cachedRows);
 
     res.json({
@@ -33419,13 +33797,7 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
       items,
       source: "gohighlevel",
       updatedAt: state.updatedAt,
-      refresh: {
-        mode: refreshMode,
-        performed: refreshed,
-        refreshedClientsCount,
-        refreshedRowsWritten,
-        deletedStaleRowsCount,
-      },
+      refresh: refreshMeta,
     });
   } catch (error) {
     console.error(`${routeLabel} failed:`, error);
@@ -37824,6 +38196,141 @@ const handleGhlClientManagersRefreshPost = async (req, res) => {
   await respondGhlClientManagers(req, res, resolvedRefreshMode, "POST /api/ghl/client-managers/refresh");
 };
 
+const handleGhlClientManagersRefreshBackgroundPost = async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_managers.refresh_background",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      message: "Client-manager background refresh limit reached. Please wait before retrying.",
+      code: "ghl_client_managers_background_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  if (
+    !isWebAuthOwnerOrAdminProfile(req.webAuthProfile) &&
+    !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS)
+  ) {
+    res.status(403).json({
+      error: "Access denied. You do not have permission to refresh client-manager data.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  const requestedClientNames = resolveRequestedGhlClientManagerNames(req.body?.clientNames || req.body?.clientName);
+  if (requestedClientNames.length) {
+    res.status(400).json({
+      error: "Background total refresh does not support scoped `clientName` or `clientNames`.",
+    });
+    return;
+  }
+
+  try {
+    const state = await getStoredRecords();
+    const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
+    const enqueueResult = enqueueGhlClientManagersRefreshJob(visibilityContext.visibleClientNames, {
+      requestedBy: req.webAuthUser || req.webAuthProfile?.username,
+    });
+    const payload = buildGhlClientManagersRefreshJobPayload(enqueueResult.job);
+
+    res.status(enqueueResult.reused ? 200 : 202).json({
+      ok: true,
+      reused: enqueueResult.reused === true,
+      started: enqueueResult.reused !== true,
+      job: payload,
+      message:
+        enqueueResult.reused === true
+          ? "A background total refresh is already running for your user."
+          : "Background total refresh started.",
+    });
+  } catch (error) {
+    console.error("POST /api/ghl/client-managers/refresh/background failed:", error);
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to start background client-manager refresh.",
+      code: sanitizeTextValue(error?.code, 120) || "ghl_client_managers_background_failed",
+    });
+  }
+};
+
+const handleGhlClientManagersRefreshBackgroundJobGet = async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_managers.refresh_background_status",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "Client-manager background status limit reached. Please wait before retrying.",
+      code: "ghl_client_managers_background_status_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  if (
+    !isWebAuthOwnerOrAdminProfile(req.webAuthProfile) &&
+    !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS)
+  ) {
+    res.status(403).json({
+      error: "Access denied. You do not have permission to view background refresh status.",
+    });
+    return;
+  }
+
+  const job = getGhlClientManagersRefreshJobById(req.params?.jobId);
+  if (!job) {
+    res.status(404).json({
+      error: "Background refresh job not found.",
+      code: "ghl_client_managers_refresh_job_not_found",
+    });
+    return;
+  }
+
+  const requesterUsername = normalizeWebAuthUsername(req.webAuthUser || req.webAuthProfile?.username);
+  const jobRequestedBy = normalizeWebAuthUsername(job.requestedBy);
+  if (!isWebAuthOwnerOrAdminProfile(req.webAuthProfile) && (!requesterUsername || requesterUsername !== jobRequestedBy)) {
+    res.status(403).json({
+      error: "Access denied. You can only view your own background refresh jobs.",
+    });
+    return;
+  }
+
+  res.json({
+    ok: true,
+    job: buildGhlClientManagersRefreshJobPayload(job),
+  });
+};
+
 const handleGhlClientPhoneRefreshPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
@@ -38695,6 +39202,8 @@ const ghlLeadsController = createGhlLeadsController({
   handleGhlLeadsRefreshPost,
   handleGhlClientManagersGet,
   handleGhlClientManagersRefreshPost,
+  handleGhlClientManagersRefreshBackgroundPost,
+  handleGhlClientManagersRefreshBackgroundJobGet,
 });
 
 const ghlNotesController = createGhlNotesController({
@@ -38726,6 +39235,8 @@ registerGhlRoutes({
     handleGhlLeadsRefreshPost: ghlLeadsController.handleGhlLeadsRefreshPost,
     handleGhlClientManagersGet: ghlLeadsController.handleGhlClientManagersGet,
     handleGhlClientManagersRefreshPost: ghlLeadsController.handleGhlClientManagersRefreshPost,
+    handleGhlClientManagersRefreshBackgroundPost: ghlLeadsController.handleGhlClientManagersRefreshBackgroundPost,
+    handleGhlClientManagersRefreshBackgroundJobGet: ghlLeadsController.handleGhlClientManagersRefreshBackgroundJobGet,
     handleGhlClientPhoneRefreshPost,
     handleGhlClientContractsArchivePost,
     handleGhlClientContractsGet,

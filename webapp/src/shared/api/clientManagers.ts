@@ -3,6 +3,34 @@ import type { ClientManagersPayload } from "@/shared/types/clientManagers";
 
 export type ClientManagersRefreshMode = "none" | "incremental" | "full";
 
+export interface ClientManagersRefreshJob {
+  id: string;
+  status: string;
+  done: boolean;
+  requestedBy: string;
+  totalClients: number;
+  queuedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string | null;
+  error: string | null;
+  refresh?: {
+    mode: string;
+    performed: boolean;
+    refreshedClientsCount: number;
+    refreshedRowsWritten: number;
+    deletedStaleRowsCount: number;
+  } | null;
+}
+
+export interface StartClientManagersRefreshJobPayload {
+  ok: boolean;
+  reused: boolean;
+  started: boolean;
+  message?: string;
+  job?: ClientManagersRefreshJob | null;
+}
+
 interface GetClientManagersOptions {
   clientName?: string;
   clientNames?: string[];
@@ -34,4 +62,16 @@ export async function getClientManagers(
   }
 
   return apiRequest<ClientManagersPayload>("/api/ghl/client-managers");
+}
+
+export async function startClientManagersRefreshBackgroundJob(): Promise<StartClientManagersRefreshJobPayload> {
+  return apiRequest<StartClientManagersRefreshJobPayload>("/api/ghl/client-managers/refresh/background", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      refresh: "full",
+    }),
+  });
 }

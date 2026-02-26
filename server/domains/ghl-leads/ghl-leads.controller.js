@@ -6,6 +6,8 @@ function createGhlLeadsController(handlers = {}) {
     handleGhlLeadsRefreshPost: handlers.handleGhlLeadsRefreshPost,
     handleGhlClientManagersGet: handlers.handleGhlClientManagersGet,
     handleGhlClientManagersRefreshPost: handlers.handleGhlClientManagersRefreshPost,
+    handleGhlClientManagersRefreshBackgroundPost: handlers.handleGhlClientManagersRefreshBackgroundPost,
+    handleGhlClientManagersRefreshBackgroundJobGet: handlers.handleGhlClientManagersRefreshBackgroundJobGet,
   };
 }
 

@@ -39,6 +39,18 @@ function registerGhlRoutes(context) {
   );
 
   app.post(
+    "/api/ghl/client-managers/refresh/background",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
+    handlers.handleGhlClientManagersRefreshBackgroundPost,
+  );
+
+  app.get(
+    "/api/ghl/client-managers/refresh/background-jobs/:jobId",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
+    handlers.handleGhlClientManagersRefreshBackgroundJobGet,
+  );
+
+  app.post(
     "/api/ghl/client-phone/refresh",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
     handlers.handleGhlClientPhoneRefreshPost,
