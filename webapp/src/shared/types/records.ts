@@ -18,6 +18,7 @@ export interface ClientRecord {
   clientEmailAddress: string;
   futurePayment: string;
   identityIq: string;
+  active: string;
   contractTotals: string;
   totalPayments: string;
   payment1: string;

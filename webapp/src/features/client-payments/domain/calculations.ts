@@ -94,6 +94,7 @@ export interface ClientPaymentsFilters {
 }
 
 export interface RecordStatusFlags {
+  isActive: boolean;
   isAfterResult: boolean;
   isWrittenOff: boolean;
   isFullyPaid: boolean;
@@ -201,6 +202,7 @@ export function createEmptyRecord(): ClientRecord {
     clientEmailAddress: "",
     futurePayment: "",
     identityIq: "",
+    active: "No",
     contractTotals: "",
     totalPayments: "",
     payment1: "",
@@ -300,6 +302,7 @@ export function applyDerivedRecordState(record: ClientRecord, previousRecord?: C
 }
 
 export function getRecordStatusFlags(record: ClientRecord): RecordStatusFlags {
+  const isActive = isActiveEnabled(record.active);
   const isAfterResult = isAfterResultEnabled(record.afterResult) || AFTER_RESULT_CLIENT_NAMES.has(normalizeClientName(record.clientName));
   const isWrittenOff = isWrittenOffEnabled(record.writtenOff) || WRITTEN_OFF_CLIENT_NAMES.has(normalizeClientName(record.clientName));
   const isContractCompleted = isContractCompletedEnabled(record.contractCompleted);
@@ -315,6 +318,7 @@ export function getRecordStatusFlags(record: ClientRecord): RecordStatusFlags {
   const isOverdue = Boolean(overdueRange);
 
   return {
+    isActive,
     isAfterResult,
     isWrittenOff,
     isFullyPaid,
@@ -716,6 +720,11 @@ function getOverdueRangeLabel(daysOverdue: number): OverdueRangeFilter {
 }
 
 function isAfterResultEnabled(value: unknown): boolean {
+  const normalized = sanitizeText(value).toLowerCase();
+  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
+}
+
+function isActiveEnabled(value: unknown): boolean {
   const normalized = sanitizeText(value).toLowerCase();
   return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
 }

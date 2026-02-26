@@ -1355,7 +1355,7 @@ function hasCommunicationDocuments(item: GhlClientCommunicationItem): boolean {
 function resolveStatusBadge(record: ClientRecord): BadgeMeta {
   const status = getRecordStatusFlags(record);
 
-  if (status.isContractCompleted) {
+  if (!status.isActive) {
     return { label: "Status: Inactive", tone: "neutral" };
   }
 
