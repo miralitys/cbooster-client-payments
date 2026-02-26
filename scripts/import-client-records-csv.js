@@ -334,6 +334,9 @@ function normalizeOwnerCompanyValue(rawValue) {
   if (normalized === "ramis booster") {
     return "Ramis Booster";
   }
+  if (normalized === "brobas") {
+    return "Brobas";
+  }
   if (normalized === "wolfowich" || normalized === "wolfovich") {
     return "Wolfowich";
   }
