@@ -22,7 +22,6 @@ import { RecordDetails } from "@/features/client-payments/components/RecordDetai
 import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
 import { StatusBadges } from "@/features/client-payments/components/StatusBadges";
 import { useClientPayments } from "@/features/client-payments/hooks/useClientPayments";
-import type { ClientManagerRow } from "@/shared/types/clientManagers";
 import type { ClientRecord } from "@/shared/types/records";
 import {
   Button,
@@ -51,12 +50,6 @@ interface ScoredClientRecord {
 }
 
 type ClientManagersRefreshMode = "none" | "incremental" | "full";
-
-interface ClientManagersState {
-  byClientName: Map<string, string>;
-  total: number;
-  refreshed: number;
-}
 
 const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
   { key: "all", label: "All" },
@@ -137,7 +130,6 @@ export default function ClientsPage() {
     filters,
     sortState,
     closedByOptions,
-    filtersCollapsed,
     isSaving,
     saveError,
     saveRetryCount,
@@ -151,7 +143,6 @@ export default function ClientsPage() {
     activeRecord,
     updateFilter,
     setDateRange,
-    setFiltersCollapsed,
     toggleSort,
     forceRefresh,
     openCreateModal,
@@ -171,13 +162,9 @@ export default function ClientsPage() {
   const [isManagersLoading, setIsManagersLoading] = useState(false);
   const [managersError, setManagersError] = useState("");
   const [managersRefreshMode, setManagersRefreshMode] = useState<ClientManagersRefreshMode>("none");
+  const [managersStatusNote, setManagersStatusNote] = useState("Client managers source: local database.");
   const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
   const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
-  const [clientManagersState, setClientManagersState] = useState<ClientManagersState>({
-    byClientName: new Map(),
-    total: 0,
-    refreshed: 0,
-  });
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
 
@@ -214,7 +201,7 @@ export default function ClientsPage() {
     const uniqueByComparable = new Map<string, string>();
 
     for (const record of visibleRecords) {
-      const managerNames = resolveClientManagerNames(record.clientName, clientManagersState.byClientName);
+      const managerNames = resolveClientManagerNamesFromRecord(record);
       for (const managerName of managerNames) {
         if (managerName === NO_MANAGER_LABEL) {
           hasNoManager = true;
@@ -231,12 +218,12 @@ export default function ClientsPage() {
 
     const sorted = [...uniqueByComparable.values()].sort((left, right) => TEXT_SORTER.compare(left, right));
     return hasNoManager ? [NO_MANAGER_LABEL, ...sorted] : sorted;
-  }, [clientManagersState.byClientName, visibleRecords]);
+  }, [visibleRecords]);
 
   const scoredVisibleRecords = useMemo<ScoredClientRecord[]>(() => {
     return visibleRecords
       .map((record) => {
-        const clientManagerNames = resolveClientManagerNames(record.clientName, clientManagersState.byClientName);
+        const clientManagerNames = resolveClientManagerNamesFromRecord(record);
         return {
           record,
           score: scoreByRecordId.get(record.id) || evaluateClientScore(record),
@@ -246,7 +233,7 @@ export default function ClientsPage() {
       })
       .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter))
       .filter((item) => matchesClientManagerFilter(item.clientManagerNames, managerFilter));
-  }, [clientManagersState.byClientName, managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
+  }, [managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
   const summedColumnValues = useMemo(() => {
@@ -292,53 +279,16 @@ export default function ClientsPage() {
       return `Client managers: ${managersError}`;
     }
 
-    if (!clientManagersState.total) {
-      return "Client managers: no synced rows found.";
-    }
-
-    return `Client managers loaded for ${clientManagersState.total} clients. Refreshed: ${clientManagersState.refreshed}.`;
-  }, [clientManagersState.refreshed, clientManagersState.total, isManagersLoading, managersError, managersRefreshMode]);
+    return managersStatusNote;
+  }, [isManagersLoading, managersError, managersRefreshMode, managersStatusNote]);
 
   const isViewMode = modalState.mode === "view";
   const activeRecordClientManagerLabel = useMemo(() => {
     if (!activeRecord) {
       return "";
     }
-    return resolveClientManagerNames(activeRecord.clientName, clientManagersState.byClientName).join(", ");
-  }, [activeRecord, clientManagersState.byClientName]);
-
-  const loadClientManagers = useCallback(
-    async (mode: ClientManagersRefreshMode = "none") => {
-      setIsManagersLoading(true);
-      setManagersError("");
-      setManagersRefreshMode(mode);
-
-      try {
-        const payload = await getClientManagers(mode);
-        const rows = Array.isArray(payload.items) ? payload.items : [];
-        const nextMap = buildClientManagersLookup(rows);
-        const refreshed = Number.isFinite(payload?.refresh?.refreshedClientsCount)
-          ? Number(payload.refresh?.refreshedClientsCount)
-          : 0;
-
-        setClientManagersState({
-          byClientName: nextMap,
-          total: rows.length,
-          refreshed,
-        });
-      } catch (error) {
-        setManagersError(error instanceof Error ? error.message : "Failed to load client-manager data.");
-        setClientManagersState({
-          byClientName: new Map(),
-          total: 0,
-          refreshed: 0,
-        });
-      } finally {
-        setIsManagersLoading(false);
-      }
-    },
-    [],
-  );
+    return resolveClientManagerNamesFromRecord(activeRecord).join(", ");
+  }, [activeRecord]);
 
   const refreshSingleClientManager = useCallback(
     async (clientName: string) => {
@@ -352,52 +302,35 @@ export default function ClientsPage() {
       }
 
       setRefreshingCardClientManagerKey(comparableClientName);
+      setIsManagersLoading(true);
+      setManagersRefreshMode("full");
+      setManagersError("");
       try {
-        const payload = await getClientManagers("full", {
+        await getClientManagers("full", {
           clientName: clientNameDisplay,
         });
-        const rows = Array.isArray(payload.items) ? payload.items : [];
-        const partialLookup = buildClientManagersLookup(rows);
-        const nextLabel = partialLookup.get(comparableClientName);
-        if (!nextLabel) {
-          throw new Error("Client manager was not returned by GoHighLevel.");
-        }
-
-        setClientManagersState((previous) => {
-          const mergedLookup = new Map(previous.byClientName);
-          for (const [key, value] of partialLookup.entries()) {
-            mergedLookup.set(key, value);
-          }
-
-          const refreshedClientsCountRaw = Number(payload?.refresh?.refreshedClientsCount);
-          const refreshedCount =
-            Number.isFinite(refreshedClientsCountRaw) && refreshedClientsCountRaw > 0
-              ? refreshedClientsCountRaw
-              : 1;
-
-          return {
-            byClientName: mergedLookup,
-            total: Math.max(previous.total, mergedLookup.size),
-            refreshed: previous.refreshed + refreshedCount,
-          };
-        });
+        await forceRefresh();
+        setManagersStatusNote("Client manager refreshed from GoHighLevel and saved to local database.");
 
         showToast({
           type: "success",
-          message: `Client Manager updated: ${nextLabel}`,
+          message: "Client Manager updated and saved to database.",
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to refresh Client Manager.";
+        setManagersError(message);
         showToast({
           type: "error",
           message,
         });
         throw new Error(message);
       } finally {
+        setIsManagersLoading(false);
+        setManagersRefreshMode("none");
         setRefreshingCardClientManagerKey("");
       }
     },
-    [canRefreshClientManagerInCard],
+    [canRefreshClientManagerInCard, forceRefresh],
   );
 
   const refreshSingleClientPhone = useCallback(
@@ -569,10 +502,6 @@ export default function ClientsPage() {
   }, [sortState.direction, sortState.key, sortableColumns, tableColumnKeys, toggleSort]);
 
   useEffect(() => {
-    void loadClientManagers("none");
-  }, [loadClientManagers]);
-
-  useEffect(() => {
     if (!saveError) {
       return;
     }
@@ -687,22 +616,8 @@ export default function ClientsPage() {
         <Panel
           className="filters-panel"
           title="Filters"
-          actions={
-            <button
-              type="button"
-              className="filters-toggle-btn"
-              aria-label={filtersCollapsed ? "Expand filters panel" : "Collapse filters panel"}
-              aria-expanded={!filtersCollapsed}
-              onClick={() => setFiltersCollapsed(!filtersCollapsed)}
-            >
-              <span className="filters-toggle-icon" aria-hidden="true">
-                {filtersCollapsed ? "›" : "‹"}
-              </span>
-            </button>
-          }
         >
-          {!filtersCollapsed ? (
-            <div className="filters-panel__content">
+          <div className="filters-panel__content">
               <label className="search-label" htmlFor="records-search-input">
                 Search by name, email, phone, or SSN
               </label>
@@ -868,7 +783,6 @@ export default function ClientsPage() {
                 ) : null}
               </div>
             </div>
-          ) : null}
         </Panel>
 
         <Panel
@@ -1094,58 +1008,26 @@ function getClientPaymentsColumnClassName(column: keyof ClientRecord | "score" |
   return undefined;
 }
 
-function buildClientManagersLookup(rows: ClientManagerRow[]): Map<string, string> {
-  const map = new Map<string, string>();
-
-  for (const row of rows) {
-    const key = normalizeComparableClientName(row?.clientName || "");
-    if (!key) {
-      continue;
-    }
-
-    const nextLabel = resolveManagersLabel(row);
-    if (!nextLabel) {
-      continue;
-    }
-
-  const current = map.get(key);
-  if (!current || current === NO_MANAGER_LABEL) {
-    map.set(key, nextLabel);
-    continue;
-  }
-
-  if (nextLabel === NO_MANAGER_LABEL) {
-    continue;
-  }
-
-  const merged = [...new Set([...splitClientManagerLabel(current), ...splitClientManagerLabel(nextLabel)])]
-    .filter(Boolean)
-    .join(", ");
-  map.set(key, merged || NO_MANAGER_LABEL);
-  }
-
-  return map;
-}
-
-function resolveClientManagerNames(clientName: string, lookup: Map<string, string>): string[] {
-  const key = normalizeComparableClientName(clientName);
-  if (!key) {
-    return [NO_MANAGER_LABEL];
-  }
-
-  const managersLabel = lookup.get(key);
-  if (!managersLabel) {
-    return [NO_MANAGER_LABEL];
-  }
-
-  return splitClientManagerLabel(managersLabel);
+function resolveClientManagerNamesFromRecord(record: ClientRecord): string[] {
+  return splitClientManagerLabel(record.clientManager);
 }
 
 function splitClientManagerLabel(rawLabel: string): string[] {
-  const names = rawLabel
+  const value = (rawLabel || "").toString().trim();
+  if (!value || value === "-" || value.toLowerCase() === "unassigned") {
+    return [NO_MANAGER_LABEL];
+  }
+
+  const names = value
     .split(",")
     .map((value) => value.trim())
-    .filter(Boolean);
+    .filter((item) => {
+      if (!item) {
+        return false;
+      }
+      const normalized = item.toLowerCase();
+      return normalized !== "-" && normalized !== "unassigned" && normalized !== "no manager";
+    });
   if (!names.length) {
     return [NO_MANAGER_LABEL];
   }
@@ -1164,22 +1046,6 @@ function matchesClientManagerFilter(managerNames: string[], selectedManager: str
   }
 
   return managerNames.some((name) => normalizeComparableClientName(name) === selectedComparable);
-}
-
-function resolveManagersLabel(row: ClientManagerRow): string {
-  const managers = Array.isArray(row?.managers)
-    ? row.managers.map((value) => String(value || "").trim()).filter(Boolean)
-    : [];
-  if (managers.length) {
-    return [...new Set(managers)].join(", ");
-  }
-
-  const managersLabel = (row?.managersLabel || "").toString().trim();
-  if (!managersLabel || managersLabel === "-" || managersLabel.toLowerCase() === "unassigned") {
-    return NO_MANAGER_LABEL;
-  }
-
-  return managersLabel;
 }
 
 function normalizeComparableClientName(rawValue: string): string {

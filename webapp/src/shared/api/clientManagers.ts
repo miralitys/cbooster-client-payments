@@ -20,6 +20,8 @@ export interface ClientManagersRefreshJob {
     refreshedClientsCount: number;
     refreshedRowsWritten: number;
     deletedStaleRowsCount: number;
+    savedRecordsCount?: number;
+    recordsUpdatedAt?: string | null;
   } | null;
 }
 

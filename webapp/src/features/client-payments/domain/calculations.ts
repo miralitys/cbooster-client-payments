@@ -186,6 +186,7 @@ export function createEmptyRecord(): ClientRecord {
     id: generateId(),
     createdAt: new Date().toISOString(),
     clientName: "",
+    clientManager: "",
     closedBy: "",
     companyName: "",
     ownerCompany: "Credit Booster",

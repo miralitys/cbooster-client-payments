@@ -2,6 +2,7 @@ export interface ClientRecord {
   id: string;
   createdAt: string;
   clientName: string;
+  clientManager: string;
   closedBy: string;
   companyName: string;
   ownerCompany: string;

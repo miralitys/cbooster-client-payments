@@ -16,6 +16,8 @@ export interface ClientManagersRefreshMeta {
   refreshedClientsCount: number;
   refreshedRowsWritten: number;
   deletedStaleRowsCount: number;
+  savedRecordsCount?: number;
+  recordsUpdatedAt?: string | null;
 }
 
 export interface ClientManagersPayload {

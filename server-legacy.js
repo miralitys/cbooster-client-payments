@@ -1340,6 +1340,7 @@ if (ATTACHMENTS_STREAMING_REQUESTED && !ATTACHMENTS_STREAMING_ENABLED) {
 
 const RECORD_TEXT_FIELDS = [
   "clientName",
+  "clientManager",
   "closedBy",
   "companyName",
   "ownerCompany",
@@ -1427,6 +1428,7 @@ const RECORDS_PUT_FIELD_MAX_LENGTH = Object.freeze({
   id: 180,
   createdAt: 120,
   clientName: 300,
+  clientManager: 2000,
   closedBy: 220,
   companyName: 320,
   ownerCompany: 160,
@@ -1777,6 +1779,7 @@ const TELEGRAM_NOTIFICATION_FIELD_ORDER = [
 ];
 const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
   clientName: "Client name",
+  clientManager: "Client manager",
   closedBy: "Closed by",
   companyName: "Company name",
   ownerCompany: "Owner company",
@@ -11960,6 +11963,8 @@ function normalizePaymentClientNameForLookup(rawValue) {
   return normalizeAssistantComparableText(rawValue, 300);
 }
 
+const PAYMENT_CLIENT_MANAGER_EMPTY_LABEL = "No manager";
+
 function splitPaymentClientManagerNames(rawValue) {
   const value = sanitizeTextValue(rawValue, 2000);
   if (!value) {
@@ -12037,6 +12042,169 @@ function buildPaymentClientManagerNamesByClientKey(rows) {
   }
 
   return namesByClientKey;
+}
+
+function buildPaymentClientManagerLabel(names) {
+  const uniqueNames = [...new Set((Array.isArray(names) ? names : []).map((value) => sanitizeTextValue(value, 240)).filter(Boolean))];
+  if (!uniqueNames.length) {
+    return PAYMENT_CLIENT_MANAGER_EMPTY_LABEL;
+  }
+  return uniqueNames.join(", ");
+}
+
+function normalizePaymentClientManagerLabelForCompare(rawValue) {
+  const comparableNames = splitPaymentClientManagerNames(rawValue)
+    .map((value) => normalizeAssistantComparableText(value, 220))
+    .filter(Boolean)
+    .sort();
+  if (!comparableNames.length) {
+    return PAYMENT_CLIENT_MANAGER_EMPTY_LABEL.toLowerCase();
+  }
+  return comparableNames.join("|");
+}
+
+function arePaymentClientManagerLabelsEqual(leftValue, rightValue) {
+  return normalizePaymentClientManagerLabelForCompare(leftValue) === normalizePaymentClientManagerLabelForCompare(rightValue);
+}
+
+function buildPaymentClientManagerLabelByClientKey(rows) {
+  const labelsByClientKey = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const clientName = sanitizeTextValue(row?.clientName || row?.client_name, 300);
+    if (!clientName) {
+      continue;
+    }
+
+    const clientKey = normalizePaymentClientNameForLookup(clientName);
+    if (!clientKey) {
+      continue;
+    }
+
+    const managerNames = extractPaymentClientManagerNamesFromCacheRow(row);
+    const nextLabel = buildPaymentClientManagerLabel(managerNames);
+    const currentLabel = labelsByClientKey.get(clientKey);
+    if (!currentLabel) {
+      labelsByClientKey.set(clientKey, nextLabel);
+      continue;
+    }
+
+    if (arePaymentClientManagerLabelsEqual(currentLabel, nextLabel)) {
+      continue;
+    }
+
+    const mergedLabel = buildPaymentClientManagerLabel([
+      ...splitPaymentClientManagerNames(currentLabel),
+      ...splitPaymentClientManagerNames(nextLabel),
+    ]);
+    labelsByClientKey.set(clientKey, mergedLabel);
+  }
+
+  return labelsByClientKey;
+}
+
+function buildClientManagerUpsertOperationsForClientKeys(records, labelsByClientKey, allowedClientKeys = null) {
+  const operations = [];
+  const sourceRecords = Array.isArray(records) ? records : [];
+  const labelLookup = labelsByClientKey instanceof Map ? labelsByClientKey : new Map();
+  const targetClientKeys = allowedClientKeys instanceof Set ? allowedClientKeys : null;
+
+  for (const record of sourceRecords) {
+    const recordId = sanitizeTextValue(record?.id, 180);
+    if (!recordId) {
+      continue;
+    }
+
+    const clientName = sanitizeTextValue(record?.clientName, 300);
+    const clientKey = normalizePaymentClientNameForLookup(clientName);
+    if (!clientKey) {
+      continue;
+    }
+    if (targetClientKeys && !targetClientKeys.has(clientKey)) {
+      continue;
+    }
+
+    const nextLabel = sanitizeTextValue(labelLookup.get(clientKey), 2000) || PAYMENT_CLIENT_MANAGER_EMPTY_LABEL;
+    const currentLabel = sanitizeTextValue(record?.clientManager, 2000) || PAYMENT_CLIENT_MANAGER_EMPTY_LABEL;
+    if (arePaymentClientManagerLabelsEqual(currentLabel, nextLabel)) {
+      continue;
+    }
+
+    operations.push({
+      type: "upsert",
+      id: recordId,
+      record: {
+        clientManager: nextLabel,
+      },
+    });
+  }
+
+  return operations;
+}
+
+async function persistClientManagersToRecordsByClientNames(clientNames) {
+  const normalizedClientNames = normalizeGhlClientManagerRefreshClientNames(clientNames);
+  if (!normalizedClientNames.length || !recordsService || typeof recordsService.patchRecordsForApi !== "function") {
+    return {
+      savedRecordsCount: 0,
+      updatedAt: null,
+    };
+  }
+
+  const cachedRows = await listCachedGhlClientManagerRowsByClientNames(normalizedClientNames);
+  const cachedItems = buildClientManagerItemsFromCache(normalizedClientNames, cachedRows);
+  const labelsByClientKey = buildPaymentClientManagerLabelByClientKey(cachedItems);
+  if (!labelsByClientKey.size) {
+    return {
+      savedRecordsCount: 0,
+      updatedAt: null,
+    };
+  }
+
+  const targetClientKeys = new Set(
+    normalizedClientNames
+      .map((clientName) => normalizePaymentClientNameForLookup(clientName))
+      .filter(Boolean),
+  );
+  if (!targetClientKeys.size) {
+    return {
+      savedRecordsCount: 0,
+      updatedAt: null,
+    };
+  }
+
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const state = await getStoredRecords();
+    const sourceRecords = Array.isArray(state?.records) ? state.records : [];
+    const operations = buildClientManagerUpsertOperationsForClientKeys(sourceRecords, labelsByClientKey, targetClientKeys);
+    if (!operations.length) {
+      return {
+        savedRecordsCount: 0,
+        updatedAt: sanitizeTextValue(state?.updatedAt, 80) || null,
+      };
+    }
+
+    try {
+      const saveResult = await recordsService.patchRecordsForApi({
+        operations,
+        expectedUpdatedAt: state?.updatedAt || null,
+      });
+      return {
+        savedRecordsCount: operations.length,
+        updatedAt: sanitizeTextValue(saveResult?.body?.updatedAt, 80) || sanitizeTextValue(state?.updatedAt, 80) || null,
+      };
+    } catch (error) {
+      if (sanitizeTextValue(error?.code, 80) === "records_conflict" && attempt < maxAttempts) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return {
+    savedRecordsCount: 0,
+    updatedAt: null,
+  };
 }
 
 async function listPaymentClientManagerNamesByClientKey(events) {
@@ -33421,6 +33589,8 @@ function buildGhlClientManagersRefreshJobPayload(job) {
           refreshedClientsCount: normalizeDualWriteSummaryValue(refreshMeta.refreshedClientsCount),
           refreshedRowsWritten: normalizeDualWriteSummaryValue(refreshMeta.refreshedRowsWritten),
           deletedStaleRowsCount: normalizeDualWriteSummaryValue(refreshMeta.deletedStaleRowsCount),
+          savedRecordsCount: normalizeDualWriteSummaryValue(refreshMeta.savedRecordsCount),
+          recordsUpdatedAt: sanitizeTextValue(refreshMeta.recordsUpdatedAt, 80) || null,
         }
       : null,
   };
@@ -33683,8 +33853,13 @@ function enqueueGhlClientManagersRefreshJob(clientNames, options = {}) {
 
     try {
       const refreshMeta = await refreshGhlClientManagersCacheForClientNames(targetJob.clientNames, "full");
+      const persisted = await persistClientManagersToRecordsByClientNames(targetJob.clientNames);
       targetJob.status = "completed";
-      targetJob.refresh = refreshMeta;
+      targetJob.refresh = {
+        ...refreshMeta,
+        savedRecordsCount: normalizeDualWriteSummaryValue(persisted?.savedRecordsCount),
+        recordsUpdatedAt: sanitizeTextValue(persisted?.updatedAt, 80) || null,
+      };
     } catch (error) {
       targetJob.status = "failed";
       targetJob.error = sanitizeTextValue(error?.message, 600) || "Client manager total refresh failed.";
@@ -33793,14 +33968,25 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
 
     const cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
     const items = buildClientManagerItemsFromCache(clientNames, cachedRows);
+    let persisted = {
+      savedRecordsCount: 0,
+      updatedAt: null,
+    };
+    if (refreshMode !== "none") {
+      persisted = await persistClientManagersToRecordsByClientNames(clientNames);
+    }
 
     res.json({
       ok: true,
       count: items.length,
       items,
-      source: "gohighlevel",
-      updatedAt: state.updatedAt,
-      refresh: refreshMeta,
+      source: refreshMode === "none" ? "database_cache" : "gohighlevel",
+      updatedAt: sanitizeTextValue(persisted?.updatedAt, 80) || state.updatedAt,
+      refresh: {
+        ...refreshMeta,
+        savedRecordsCount: normalizeDualWriteSummaryValue(persisted?.savedRecordsCount),
+        recordsUpdatedAt: sanitizeTextValue(persisted?.updatedAt, 80) || null,
+      },
     });
   } catch (error) {
     console.error(`${routeLabel} failed:`, error);
