@@ -4,6 +4,7 @@ import { Layout } from "@/app/Layout";
 import { OwnerAdminRoute } from "@/app/OwnerAdminRoute";
 import AccessControlPage from "@/features/access-control/page";
 import ClientsPage from "@/features/clients/page";
+import ClientMatchPage from "@/features/client-match/page";
 import ClientPaymentsPage from "@/features/client-payments/page";
 import ClientScorePage from "@/features/client-score/page";
 import CustomDashboardPage from "@/features/custom-dashboard/page";
@@ -26,6 +27,14 @@ export function AppRouter() {
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="custom-dashboard" element={<CustomDashboardPage />} />
         <Route path="clients" element={<ClientsPage />} />
+        <Route
+          path="client-match"
+          element={(
+            <OwnerAdminRoute>
+              <ClientMatchPage />
+            </OwnerAdminRoute>
+          )}
+        />
         <Route
           path="quickbooks"
           element={(

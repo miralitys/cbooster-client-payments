@@ -18,6 +18,7 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/custom-dashboard", label: "Custom Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
   { to: "/clients", label: "Clients" },
+  { to: "/client-match", label: "Client Match", ownerAdminOnly: true },
   { to: "/payment-probability", label: "Client Payment Probability" },
   { to: "/identityiq-score", label: "IdentityIQ Scores" },
   { to: "/ghl-contracts", label: "GHL Contract Text" },
@@ -37,6 +38,10 @@ function resolvePageTitle(pathname: string): string {
 
   if (pathname.startsWith("/quickbooks")) {
     return "QuickBooks";
+  }
+
+  if (pathname.startsWith("/client-match")) {
+    return "Client Match";
   }
 
   if (pathname.startsWith("/leads")) {

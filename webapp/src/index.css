@@ -2947,6 +2947,32 @@ a {
   max-height: 60vh;
 }
 
+.client-match-page .cb-panel__body {
+  padding-top: var(--space-3);
+}
+
+.client-match-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.client-match-table-wrap {
+  overflow-x: auto;
+}
+
+.client-match-table .cb-table__head-cell,
+.client-match-table .cb-table__cell {
+  white-space: nowrap;
+}
+
+.client-match-table .client-match-column-client {
+  min-width: 220px;
+}
+
 .assistant-widget {
   position: fixed;
   right: 18px;
