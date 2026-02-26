@@ -17,8 +17,11 @@ export async function getClientManagers(
     const clientNames = Array.isArray(options.clientNames)
       ? options.clientNames.map((value) => (value || "").toString().trim()).filter(Boolean)
       : [];
+    const isScopedRefresh = Boolean(clientName || clientNames.length);
+    const timeoutMs = refresh === "full" && !isScopedRefresh ? 120_000 : undefined;
     return apiRequest<ClientManagersPayload>("/api/ghl/client-managers/refresh", {
       method: "POST",
+      ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
       headers: {
         "Content-Type": "application/json",
       },
