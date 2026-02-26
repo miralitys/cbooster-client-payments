@@ -9,6 +9,7 @@ import {
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { getClients, getQuickBooksPayments, patchClients } from "@/shared/api";
+import { requestOpenClientCard } from "@/shared/lib/openClientCard";
 import { showToast } from "@/shared/lib/toast";
 import type { QuickBooksPaymentRow } from "@/shared/types/quickbooks";
 import type { ClientRecord } from "@/shared/types/records";
@@ -442,16 +443,27 @@ export default function ClientMatchPage() {
         cell: (row) => {
           const isConfirmed = confirmedClientIdSet.has(row.id);
           return (
-            <label className={`client-match-client-name ${isConfirmed ? "is-confirmed" : ""}`.trim()}>
+            <div className={`client-match-client-name ${isConfirmed ? "is-confirmed" : ""}`.trim()}>
               <input
                 type="checkbox"
                 checked={isConfirmed}
-                onChange={() => confirmClientRow(row)}
+                onChange={(event) => {
+                  if (event.target.checked) {
+                    confirmClientRow(row);
+                  }
+                }}
                 disabled={isConfirmed}
                 aria-label={`Confirm ${row.clientName}`}
               />
-              <span>{row.clientName}</span>
-            </label>
+              <button
+                type="button"
+                className="client-match-client-link"
+                onClick={() => requestOpenClientCard(row.clientName)}
+                aria-label={`Open client card for ${row.clientName}`}
+              >
+                {row.clientName}
+              </button>
+            </div>
           );
         },
       },
