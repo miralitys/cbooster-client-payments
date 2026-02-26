@@ -1097,6 +1097,24 @@ a {
   gap: var(--space-3);
 }
 
+.clients-react-page .cb-table thead th {
+  font-size: var(--font-size-xxs);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.clients-react-page .cb-table thead th .th-sort-btn {
+  font-size: inherit;
+  font-weight: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+
+.clients-react-page .cb-table thead th .th-sort-btn.is-active .th-sort-label {
+  color: var(--color-text-muted);
+}
+
 .clients-react-page .search-row {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -1138,8 +1156,10 @@ a {
 }
 
 .clients-react-page .clients-status-controls .cb-segmented {
-  flex: 1 1 560px;
+  flex: 0 1 auto;
   min-width: 0;
+  width: max-content;
+  max-width: 100%;
 }
 
 @media (max-width: 1400px) {

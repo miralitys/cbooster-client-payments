@@ -48,6 +48,7 @@ interface ScoredClientRecord {
   clientManager: string;
   clientManagerNames: string[];
   isActive: boolean;
+  isWrittenOff: boolean;
 }
 
 type ClientManagersRefreshMode = "none" | "incremental" | "full";
@@ -60,6 +61,15 @@ const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
   { key: "100", label: "100" },
 ];
 const PAYMENT_COLUMN_MATCH = /^payment(\d+)(Date)?$/;
+const PAYMENT_COLUMN_HIDE_MATCH = /^payment\d+(Date)?$/;
+const CLIENTS_TABLE_HIDDEN_COLUMNS = new Set<keyof ClientRecord>([
+  "serviceType",
+  "contractTotals",
+  "totalPayments",
+  "futurePayments",
+  "collection",
+  "dateOfCollection",
+]);
 const buildPaymentColumns = (from: number, to: number): Array<keyof ClientRecord> => {
   const columns: Array<keyof ClientRecord> = [];
   for (let index = from; index <= to; index += 1) {
@@ -172,7 +182,12 @@ export default function ClientsPage() {
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
 
   const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
-    () => TABLE_COLUMNS.filter((column) => column === "clientName" || !/^payment(?:[8-9]|[12]\d|3[0-6])(?:Date)?$/.test(String(column))),
+    () =>
+      TABLE_COLUMNS.filter(
+        (column) =>
+          column === "clientName" ||
+          (!PAYMENT_COLUMN_HIDE_MATCH.test(String(column)) && !CLIENTS_TABLE_HIDDEN_COLUMNS.has(column)),
+      ),
     [],
   );
   const tableColumnKeys = useMemo<Array<keyof ClientRecord | "score" | "clientManager">>(
@@ -234,12 +249,14 @@ export default function ClientsPage() {
           clientManager: clientManagerNames.join(", "),
           clientManagerNames,
           isActive: status.isActive,
+          isWrittenOff: status.isWrittenOff,
         };
       })
+      .filter((item) => (filters.status === "written-off" ? item.isWrittenOff : !item.isWrittenOff))
       .filter((item) => !isActiveOnly || item.isActive)
       .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter))
       .filter((item) => matchesClientManagerFilter(item.clientManagerNames, managerFilter));
-  }, [isActiveOnly, managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
+  }, [filters.status, isActiveOnly, managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
   const summedColumnValues = useMemo(() => {
