@@ -2973,6 +2973,20 @@ a {
   min-width: 220px;
 }
 
+.client-match-cell {
+  display: inline-block;
+  min-width: 100%;
+}
+
+.client-match-cell--matched {
+  background: #eaf8ee;
+  color: #11622d;
+  border: 1px solid #b7e3c3;
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-weight: 700;
+}
+
 .assistant-widget {
   position: fixed;
   right: 18px;

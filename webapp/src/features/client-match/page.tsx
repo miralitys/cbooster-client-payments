@@ -9,6 +9,7 @@ import { Button, EmptyState, ErrorState, LoadingSkeleton, PageHeader, PageShell,
 import type { TableColumn } from "@/shared/ui";
 
 const MATCH_FROM_DATE = "2026-01-01";
+const MATCH_FROM_TIMESTAMP = parseDateValue(MATCH_FROM_DATE) ?? 0;
 const NAME_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
 
 interface PaymentPair {
@@ -124,25 +125,45 @@ export default function ClientMatchPage() {
           key: `qbDate_${slot}`,
           label: `QB Date ${slot}`,
           align: "center",
-          cell: (row) => formatMatchDate(row.quickBooksPayments[index]?.date || ""),
+          cell: (row) => {
+            const qbPayment = row.quickBooksPayments[index];
+            const dbPayment = row.databasePayments[index];
+            const isMatched = isDateMatched(qbPayment?.date, dbPayment?.date);
+            return renderMatchDateCell(qbPayment?.date || "", isMatched);
+          },
         },
         {
           key: `qbAmount_${slot}`,
           label: `QB Amount ${slot}`,
           align: "right",
-          cell: (row) => formatMatchAmount(row.quickBooksPayments[index]?.amount),
+          cell: (row) => {
+            const qbPayment = row.quickBooksPayments[index];
+            const dbPayment = row.databasePayments[index];
+            const isMatched = isAmountMatched(qbPayment?.amount, dbPayment?.amount);
+            return renderMatchAmountCell(qbPayment?.amount, isMatched);
+          },
         },
         {
           key: `dbDate_${slot}`,
           label: `DB Date ${slot}`,
           align: "center",
-          cell: (row) => formatMatchDate(row.databasePayments[index]?.date || ""),
+          cell: (row) => {
+            const qbPayment = row.quickBooksPayments[index];
+            const dbPayment = row.databasePayments[index];
+            const isMatched = isDateMatched(qbPayment?.date, dbPayment?.date);
+            return renderMatchDateCell(dbPayment?.date || "", isMatched);
+          },
         },
         {
           key: `dbAmount_${slot}`,
           label: `DB Amount ${slot}`,
           align: "right",
-          cell: (row) => formatMatchAmount(row.databasePayments[index]?.amount),
+          cell: (row) => {
+            const qbPayment = row.quickBooksPayments[index];
+            const dbPayment = row.databasePayments[index];
+            const isMatched = isAmountMatched(qbPayment?.amount, dbPayment?.amount);
+            return renderMatchAmountCell(dbPayment?.amount, isMatched);
+          },
         },
       );
     }
@@ -213,6 +234,12 @@ function groupQuickBooksPaymentsByClientName(items: QuickBooksPaymentRow[]): Map
   const grouped = new Map<string, { clientName: string; payments: PaymentPair[] }>();
 
   for (const item of items) {
+    const paymentDate = String(item?.paymentDate || "").trim();
+    const paymentDateTimestamp = parseDateValue(paymentDate);
+    if (paymentDateTimestamp !== null && paymentDateTimestamp < MATCH_FROM_TIMESTAMP) {
+      continue;
+    }
+
     const clientName = String(item?.clientName || "").trim();
     const normalizedClientName = normalizeClientName(clientName);
     if (!normalizedClientName) {
@@ -225,7 +252,7 @@ function groupQuickBooksPaymentsByClientName(items: QuickBooksPaymentRow[]): Map
         clientName,
         payments: [
           {
-            date: String(item?.paymentDate || "").trim(),
+            date: paymentDate,
             amount: normalizeQuickBooksAmount(item?.paymentAmount),
           },
         ],
@@ -234,7 +261,7 @@ function groupQuickBooksPaymentsByClientName(items: QuickBooksPaymentRow[]): Map
     }
 
     existing.payments.push({
-      date: String(item?.paymentDate || "").trim(),
+      date: paymentDate,
       amount: normalizeQuickBooksAmount(item?.paymentAmount),
     });
   }
@@ -259,6 +286,10 @@ function groupDatabasePaymentsByClientName(records: ClientRecord[]): Map<string,
     for (const [paymentKey, paymentDateKey] of PAYMENT_PAIRS) {
       const amount = parseMoneyValue(record[paymentKey]);
       const date = String(record[paymentDateKey] || "").trim();
+      const paymentDateTimestamp = parseDateValue(date);
+      if (paymentDateTimestamp !== null && paymentDateTimestamp < MATCH_FROM_TIMESTAMP) {
+        continue;
+      }
       if (amount === null && !date) {
         continue;
       }
@@ -318,6 +349,44 @@ function formatMatchAmount(value: number | null | undefined): string {
     return "-";
   }
   return formatMoney(value);
+}
+
+function renderMatchDateCell(rawValue: string, isMatched: boolean) {
+  return (
+    <span className={resolveMatchCellClassName(isMatched)}>
+      {formatMatchDate(rawValue)}
+    </span>
+  );
+}
+
+function renderMatchAmountCell(value: number | null | undefined, isMatched: boolean) {
+  return (
+    <span className={resolveMatchCellClassName(isMatched)}>
+      {formatMatchAmount(value)}
+    </span>
+  );
+}
+
+function resolveMatchCellClassName(isMatched: boolean): string {
+  return isMatched ? "client-match-cell client-match-cell--matched" : "client-match-cell";
+}
+
+function isDateMatched(leftRaw: string | undefined, rightRaw: string | undefined): boolean {
+  const left = parseDateValue(leftRaw || "");
+  const right = parseDateValue(rightRaw || "");
+  return left !== null && right !== null && left === right;
+}
+
+function isAmountMatched(leftRaw: number | null | undefined, rightRaw: number | null | undefined): boolean {
+  if (leftRaw === null || leftRaw === undefined || !Number.isFinite(leftRaw)) {
+    return false;
+  }
+
+  if (rightRaw === null || rightRaw === undefined || !Number.isFinite(rightRaw)) {
+    return false;
+  }
+
+  return Math.abs(leftRaw - rightRaw) <= 0.005;
 }
 
 function formatDateForApi(value: Date): string {
