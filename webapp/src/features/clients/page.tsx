@@ -11,7 +11,7 @@ import {
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
-import { patchRecords, getClientManagers, getRecords, getSession, postGhlClientPhoneRefresh } from "@/shared/api";
+import { ApiError, patchRecords, getClientManagers, getRecords, getSession, postGhlClientPhoneRefresh, putRecords } from "@/shared/api";
 import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import { showToast } from "@/shared/lib/toast";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
@@ -546,20 +546,28 @@ export default function ClientsPage() {
           ...selectedRecord,
           clientPhoneNumber: nextPhone,
         };
+        const nextRecords = records.map((record) => (record.id === selectedRecord.id ? nextRecord : record));
+        let savePayload: { updatedAt?: string | null } = { updatedAt: null };
+        try {
+          savePayload = await patchRecords(
+            [
+              {
+                type: "upsert",
+                id: selectedRecord.id,
+                record: nextRecord,
+              },
+            ],
+            recordsUpdatedAt,
+          );
+        } catch (error) {
+          if (!shouldFallbackToPutFromPatch(error)) {
+            throw error;
+          }
+          savePayload = await putRecords(nextRecords, recordsUpdatedAt);
+        }
 
-        const patchPayload = await patchRecords(
-          [
-            {
-              type: "upsert",
-              id: selectedRecord.id,
-              record: nextRecord,
-            },
-          ],
-          recordsUpdatedAt,
-        );
-
-        setRecords((previous) => previous.map((record) => (record.id === selectedRecord.id ? nextRecord : record)));
-        const nextUpdatedAt = normalizeRevisionTimestamp(patchPayload.updatedAt);
+        setRecords(nextRecords);
+        const nextUpdatedAt = normalizeRevisionTimestamp(savePayload.updatedAt);
         if (nextUpdatedAt) {
           setRecordsUpdatedAt(nextUpdatedAt);
         }
@@ -578,7 +586,7 @@ export default function ClientsPage() {
         setRefreshingCardClientPhoneKey("");
       }
     },
-    [canRefreshClientPhoneInCard, recordsUpdatedAt, selectedRecord],
+    [canRefreshClientPhoneInCard, records, recordsUpdatedAt, selectedRecord],
   );
 
   const totalContractAmount = useMemo(
@@ -1394,4 +1402,11 @@ function normalizeRevisionTimestamp(rawValue: string | null | undefined): string
   }
 
   return new Date(timestamp).toISOString();
+}
+
+function shouldFallbackToPutFromPatch(error: unknown): boolean {
+  if (!(error instanceof ApiError)) {
+    return false;
+  }
+  return error.status === 404 || error.code === "records_patch_disabled";
 }
