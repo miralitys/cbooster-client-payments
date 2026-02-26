@@ -245,6 +245,11 @@ export default function ClientsPage() {
     setClientManagerFilter(MANAGER_FILTER_ALL);
   }, [clientManagerFilter, managerFilterOptions]);
 
+  const activeRecords = useMemo(
+    () => records.filter((record) => isActiveEnabled(record.active)),
+    [records],
+  );
+
   const scoreByRecordId = useMemo(() => {
     const scores = new Map<string, CachedScoreDisplay>();
     for (const record of activeRecords) {
@@ -573,11 +578,6 @@ export default function ClientsPage() {
       }
     },
     [canRefreshClientPhoneInCard, records, selectedRecord],
-  );
-
-  const activeRecords = useMemo(
-    () => records.filter((record) => isActiveEnabled(record.active)),
-    [records],
   );
 
   const totalContractAmount = useMemo(
