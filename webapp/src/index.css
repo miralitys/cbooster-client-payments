@@ -1055,6 +1055,24 @@ a {
   white-space: normal;
 }
 
+.clients-dashboard-stack {
+  display: grid;
+  gap: var(--layout-block-gap);
+}
+
+.clients-react-page .clients-dashboard-stack .filters-panel,
+.clients-react-page .clients-dashboard-stack .table-panel {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+.clients-react-page .clients-dashboard-stack .filters-panel {
+  position: static;
+  top: auto;
+  max-height: none;
+  overflow: visible;
+}
+
 .clients-react-page .cb-table th.clients-column-contact,
 .clients-react-page .cb-table td.clients-column-contact {
   min-width: clamp(180px, 18vw, 280px);

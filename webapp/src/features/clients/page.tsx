@@ -722,7 +722,7 @@ export default function ClientsPage() {
         }
       />
 
-      <div className={`grid dashboard-grid-react ${filtersCollapsed ? "is-filters-collapsed" : ""}`.trim()}>
+      <div className="clients-dashboard-stack">
         <Panel
           className="filters-panel"
           title="Filters"
