@@ -133,13 +133,18 @@ export default function ClientMatchPage() {
     void loadMatches();
   }, [loadMatches]);
 
+  const confirmedClientIdSet = useMemo(() => new Set(confirmedClientIds), [confirmedClientIds]);
+  const visibleRows = useMemo(() => rows.filter((row) => !confirmedClientIdSet.has(row.id)), [confirmedClientIdSet, rows]);
+  const confirmedRowsCount = useMemo(
+    () => rows.reduce((count, row) => (confirmedClientIdSet.has(row.id) ? count + 1 : count), 0),
+    [confirmedClientIdSet, rows],
+  );
   const maxPaymentColumns = useMemo(() => {
-    const maxColumns = rows.reduce((max, row) => {
+    const maxColumns = visibleRows.reduce((max, row) => {
       return Math.max(max, row.quickBooksPayments.length, row.databasePayments.length);
     }, 0);
     return Math.max(1, maxColumns);
-  }, [rows]);
-  const confirmedClientIdSet = useMemo(() => new Set(confirmedClientIds), [confirmedClientIds]);
+  }, [visibleRows]);
 
   useEffect(() => {
     writeConfirmedClientIds(confirmedClientIds);
@@ -549,7 +554,8 @@ export default function ClientMatchPage() {
       <span>QuickBooks payments: {summary.quickBooksPaymentsCount}</span>
       <span>QuickBooks clients: {summary.quickBooksClientsCount}</span>
       <span>Matched in DB: {summary.databaseMatchedClientsCount}</span>
-      <span>Confirmed: {confirmedClientIds.filter((id) => rows.some((row) => row.id === id)).length}</span>
+      <span>Confirmed: {confirmedRowsCount}</span>
+      <span>Visible: {visibleRows.length}</span>
       <span>
         Range: {summary.rangeFrom} -&gt; {summary.rangeTo}
       </span>
@@ -582,10 +588,13 @@ export default function ClientMatchPage() {
         {!isLoading && !loadError && !rows.length ? (
           <EmptyState title="No QuickBooks payments found" description="No payments were returned for the selected range." />
         ) : null}
-        {!isLoading && !loadError && rows.length ? (
+        {!isLoading && !loadError && rows.length && !visibleRows.length ? (
+          <EmptyState title="All confirmed clients are hidden" description="Unconfirmed clients will remain visible here." />
+        ) : null}
+        {!isLoading && !loadError && visibleRows.length ? (
           <Table
             columns={tableColumns}
-            rows={rows}
+            rows={visibleRows}
             rowKey={(row) => row.id}
             className="client-match-table-wrap"
             tableClassName="client-match-table"
