@@ -51,8 +51,6 @@ interface ScoredClientRecord {
   isWrittenOff: boolean;
 }
 
-type ClientManagersRefreshMode = "none" | "incremental" | "full";
-
 const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
   { key: "all", label: "All" },
   { key: "0-30", label: "0-30" },
@@ -63,6 +61,9 @@ const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
 const PAYMENT_COLUMN_MATCH = /^payment(\d+)(Date)?$/;
 const PAYMENT_COLUMN_HIDE_MATCH = /^payment\d+(Date)?$/;
 const CLIENTS_TABLE_HIDDEN_COLUMNS = new Set<keyof ClientRecord>([
+  "companyName",
+  "afterResult",
+  "dateWhenWrittenOff",
   "serviceType",
   "contractTotals",
   "totalPayments",
@@ -85,6 +86,8 @@ const TEXT_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: t
 const COLUMN_LABELS: Record<string, string> = {
   clientName: "Client Name",
   clientManager: "Client Manager",
+  clientEmailAddress: "E-mail",
+  clientPhoneNumber: "Phone",
   closedBy: "Closed By",
   companyName: "Company",
   serviceType: "Service",
@@ -172,10 +175,6 @@ export default function ClientsPage() {
   const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
   const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
   const [isActiveOnly, setIsActiveOnly] = useState(true);
-  const [isManagersLoading, setIsManagersLoading] = useState(false);
-  const [managersError, setManagersError] = useState("");
-  const [managersRefreshMode, setManagersRefreshMode] = useState<ClientManagersRefreshMode>("none");
-  const [managersStatusNote, setManagersStatusNote] = useState("Client managers source: local database.");
   const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
   const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
@@ -191,7 +190,14 @@ export default function ClientsPage() {
     [],
   );
   const tableColumnKeys = useMemo<Array<keyof ClientRecord | "score" | "clientManager">>(
-    () => ["clientName", "clientManager", "score", ...visibleTableColumns.filter((column) => column !== "clientName")],
+    () => [
+      "clientName",
+      "clientManager",
+      "clientEmailAddress",
+      "clientPhoneNumber",
+      "score",
+      ...visibleTableColumns.filter((column) => column !== "clientName"),
+    ],
     [visibleTableColumns],
   );
 
@@ -287,24 +293,6 @@ export default function ClientsPage() {
 
     return totals;
   }, [filteredRecords]);
-  const managerStatusText = useMemo(() => {
-    if (isManagersLoading) {
-      if (managersRefreshMode === "full") {
-        return "Client managers: running total refresh...";
-      }
-      if (managersRefreshMode === "incremental") {
-        return "Client managers: refreshing new clients...";
-      }
-      return "Client managers: loading saved data...";
-    }
-
-    if (managersError) {
-      return `Client managers: ${managersError}`;
-    }
-
-    return managersStatusNote;
-  }, [isManagersLoading, managersError, managersRefreshMode, managersStatusNote]);
-
   const isViewMode = modalState.mode === "view";
   const activeRecordClientManagerLabel = useMemo(() => {
     if (!activeRecord) {
@@ -325,15 +313,11 @@ export default function ClientsPage() {
       }
 
       setRefreshingCardClientManagerKey(comparableClientName);
-      setIsManagersLoading(true);
-      setManagersRefreshMode("full");
-      setManagersError("");
       try {
         await getClientManagers("full", {
           clientName: clientNameDisplay,
         });
         await forceRefresh();
-        setManagersStatusNote("Client manager refreshed from GoHighLevel and saved to local database.");
 
         showToast({
           type: "success",
@@ -341,15 +325,12 @@ export default function ClientsPage() {
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to refresh Client Manager.";
-        setManagersError(message);
         showToast({
           type: "error",
           message,
         });
         throw new Error(message);
       } finally {
-        setIsManagersLoading(false);
-        setManagersRefreshMode("none");
         setRefreshingCardClientManagerKey("");
       }
     },
@@ -471,6 +452,10 @@ export default function ClientsPage() {
               );
             case "clientManager":
               return row.clientManager;
+            case "clientEmailAddress":
+              return record.clientEmailAddress || "-";
+            case "clientPhoneNumber":
+              return record.clientPhoneNumber || "-";
             case "closedBy":
               return record.closedBy || "-";
             case "companyName":
@@ -745,24 +730,22 @@ export default function ClientsPage() {
                       options={STATUS_FILTER_OPTIONS}
                       onChange={(value) => updateFilter("status", value as typeof filters.status)}
                     />
-                    <Button
+                    <button
                       type="button"
-                      variant={isActiveOnly ? "primary" : "secondary"}
-                      size="sm"
+                      className={`cb-segmented__item clients-status-controls__toggle ${isActiveOnly ? "is-active" : ""}`.trim()}
                       onClick={() => setIsActiveOnly((prev) => !prev)}
                       aria-pressed={isActiveOnly}
                     >
                       Active
-                    </Button>
-                    <Button
+                    </button>
+                    <button
                       type="button"
-                      variant={isScoreFilterOpen ? "primary" : "secondary"}
-                      size="sm"
+                      className={`cb-segmented__item clients-status-controls__toggle ${isScoreFilterOpen ? "is-active" : ""}`.trim()}
                       aria-expanded={isScoreFilterOpen}
                       onClick={() => setIsScoreFilterOpen((prev) => !prev)}
                     >
                       Score
-                    </Button>
+                    </button>
                   </div>
 
                   {filters.status === STATUS_FILTER_OVERDUE ? (
@@ -845,7 +828,6 @@ export default function ClientsPage() {
             </div>
           }
         >
-          <p className="dashboard-message client-payments-manager-status">{managerStatusText}</p>
           {isLoading ? <TableLoadingSkeleton columnCount={tableColumnKeys.length} /> : null}
           {!isLoading && loadError ? (
             <ErrorState
@@ -1049,6 +1031,10 @@ function getClientPaymentsColumnClassName(column: keyof ClientRecord | "score" |
 
   if (column === "clientManager") {
     return "client-manager-column";
+  }
+
+  if (column === "clientEmailAddress" || column === "clientPhoneNumber") {
+    return "clients-column-contact";
   }
 
   return undefined;
