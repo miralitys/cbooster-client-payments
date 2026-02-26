@@ -138,6 +138,9 @@ export default function ClientsPage() {
     session,
     canManage,
     isLoading,
+    hasMoreRecords,
+    isLoadingMoreRecords,
+    totalRecordsCount,
     loadError,
     records,
     visibleRecords,
@@ -159,6 +162,7 @@ export default function ClientsPage() {
     setDateRange,
     toggleSort,
     forceRefresh,
+    loadMoreRecords,
     openCreateModal,
     openRecordModal,
     startEditRecord,
@@ -168,7 +172,12 @@ export default function ClientsPage() {
     updateDraftField,
     saveDraft,
     retrySave,
-  } = useClientPayments();
+  } = useClientPayments({
+    pagination: {
+      enabled: true,
+      pageSize: 100,
+    },
+  });
 
   const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("all");
   const [managerFilter, setManagerFilter] = useState<string>(MANAGER_FILTER_ALL);
@@ -396,13 +405,13 @@ export default function ClientsPage() {
     }
 
     return {
-      totalCount: records.length,
+      totalCount: totalRecordsCount && totalRecordsCount > 0 ? totalRecordsCount : records.length,
       filteredCount: filteredRecords.length,
       writtenOffCount,
       fullyPaidCount,
       overdueCount,
     };
-  }, [filteredRecords, records.length]);
+  }, [filteredRecords, records.length, totalRecordsCount]);
 
   const tableColumns = useMemo<TableColumn<ScoredClientRecord>[]>(() => {
     return tableColumnKeys.map((column) => {
@@ -852,6 +861,12 @@ export default function ClientsPage() {
               virtualRowHeight={52}
               virtualOverscan={10}
               virtualThreshold={80}
+              onScrollNearEnd={() => {
+                if (hasMoreRecords && !isLoadingMoreRecords) {
+                  void loadMoreRecords();
+                }
+              }}
+              scrollNearEndOffset={260}
               onRowActivate={(row) => openRecordModal(row.record)}
               footer={
                 <tr>
@@ -890,6 +905,15 @@ export default function ClientsPage() {
                 </tr>
               }
             />
+          ) : null}
+          {!isLoading && !loadError && hasMoreRecords ? (
+            <div className="clients-pagination-progress">
+              <span className="react-user-footnote">
+                Loaded {records.length}
+                {typeof totalRecordsCount === "number" && totalRecordsCount > 0 ? ` of ${totalRecordsCount}` : ""} clients
+              </span>
+              {isLoadingMoreRecords ? <span className="react-user-footnote">Loading next 100...</span> : null}
+            </div>
           ) : null}
         </Panel>
       </div>

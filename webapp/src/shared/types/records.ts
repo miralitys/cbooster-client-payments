@@ -112,6 +112,11 @@ export interface ClientRecord {
 export interface RecordsPayload {
   records: ClientRecord[];
   updatedAt?: string | null;
+  total?: number;
+  limit?: number;
+  offset?: number;
+  hasMore?: boolean;
+  nextOffset?: number | null;
 }
 
 export interface PutRecordsPayload {

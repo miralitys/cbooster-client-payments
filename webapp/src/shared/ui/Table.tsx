@@ -30,6 +30,8 @@ interface TableProps<RowType> {
   virtualRowHeight?: number;
   virtualOverscan?: number;
   virtualThreshold?: number;
+  onScrollNearEnd?: () => void;
+  scrollNearEndOffset?: number;
 }
 
 export function Table<RowType>({
@@ -48,6 +50,8 @@ export function Table<RowType>({
   virtualRowHeight = 44,
   virtualOverscan = 6,
   virtualThreshold = 120,
+  onScrollNearEnd,
+  scrollNearEndOffset = 180,
 }: TableProps<RowType>) {
   const activationHandler = onRowActivate || onRowClick;
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -58,7 +62,7 @@ export function Table<RowType>({
   const shouldVirtualize = virtualizeRows && rows.length >= virtualThreshold;
 
   useEffect(() => {
-    if (!virtualizeRows) {
+    if (!virtualizeRows && !onScrollNearEnd) {
       return;
     }
 
@@ -67,12 +71,25 @@ export function Table<RowType>({
       return;
     }
 
+    const nearEndOffset = Math.max(0, Math.floor(scrollNearEndOffset));
+    const maybeTriggerNearEnd = () => {
+      if (!onScrollNearEnd) {
+        return;
+      }
+      const distanceToEnd = wrapperElement.scrollHeight - (wrapperElement.scrollTop + wrapperElement.clientHeight);
+      if (distanceToEnd <= nearEndOffset) {
+        onScrollNearEnd();
+      }
+    };
+
     const updateViewportMetrics = () => {
       setViewportHeight(wrapperElement.clientHeight || 0);
       setScrollTop(wrapperElement.scrollTop || 0);
+      maybeTriggerNearEnd();
     };
     const handleScroll = () => {
       setScrollTop(wrapperElement.scrollTop || 0);
+      maybeTriggerNearEnd();
     };
 
     updateViewportMetrics();
@@ -94,7 +111,7 @@ export function Table<RowType>({
         window.removeEventListener("resize", updateViewportMetrics);
       }
     };
-  }, [virtualizeRows, rows.length]);
+  }, [onScrollNearEnd, rows.length, scrollNearEndOffset, virtualizeRows]);
 
   const virtualizationWindow = useMemo(() => {
     if (!shouldVirtualize) {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 
-import { ApiError, getClients, getSession, patchClients, putClients } from "@/shared/api";
+import { ApiError, getClients, getClientsPage, getSession, patchClients, putClients } from "@/shared/api";
 import type { ClientRecord } from "@/shared/types/records";
 import type { Session } from "@/shared/types/session";
 import {
@@ -82,7 +82,14 @@ const normalizeRevisionTimestamp = (rawValue: string | null | undefined): string
   return new Date(timestamp).toISOString();
 };
 
-export function useClientPayments() {
+interface UseClientPaymentsOptions {
+  pagination?: {
+    enabled?: boolean;
+    pageSize?: number;
+  };
+}
+
+export function useClientPayments(options: UseClientPaymentsOptions = {}) {
   const uiState = useMemo(() => readClientPaymentsUiState(), []);
 
   const [session, setSession] = useState<Session | null>(null);
@@ -110,6 +117,9 @@ export function useClientPayments() {
   const [lastSyncedAt, setLastSyncedAt] = useState("");
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
+  const [hasMoreRecords, setHasMoreRecords] = useState(false);
+  const [isLoadingMoreRecords, setIsLoadingMoreRecords] = useState(false);
+  const [totalRecordsCount, setTotalRecordsCount] = useState<number | null>(null);
 
   const recordsRef = useRef<ClientRecord[]>([]);
   const baselineRecordsRef = useRef<ClientRecord[]>([]);
@@ -124,6 +134,10 @@ export function useClientPayments() {
   const saveSuccessTimerRef = useRef<number | null>(null);
   const lastSaveSuccessAtRef = useRef(0);
   const serverUpdatedAtRef = useRef<string | null>(null);
+  const nextOffsetRef = useRef(0);
+
+  const paginationEnabled = options.pagination?.enabled === true;
+  const pageSize = Math.max(1, Math.min(500, Math.trunc(options.pagination?.pageSize || 100)));
 
   const canManage = Boolean(session?.permissions?.manage_client_payments);
 
@@ -191,10 +205,17 @@ export function useClientPayments() {
             throw error;
           }
 
+          if (paginationEnabled) {
+            throw new Error("PATCH API is unavailable. Saving is blocked in paged mode to prevent partial overwrite.");
+          }
+
           recordsPatchEnabledRef.current = false;
           savePayload = await putClients(snapshot, serverUpdatedAtRef.current);
         }
       } else {
+        if (paginationEnabled) {
+          throw new Error("Saving is unavailable in paged mode because PATCH is disabled.");
+        }
         savePayload = await putClients(snapshot, serverUpdatedAtRef.current);
       }
 
@@ -240,7 +261,7 @@ export function useClientPayments() {
         scheduleDebouncedSave(flushSave, debounceTimerRef, 80);
       }
     }
-  }, []);
+  }, [paginationEnabled]);
 
   useEffect(() => {
     if (!initializedRef.current) {
@@ -287,9 +308,16 @@ export function useClientPayments() {
     async function bootstrap() {
       setIsLoading(true);
       setLoadError("");
+      setHasMoreRecords(false);
+      setIsLoadingMoreRecords(false);
+      setTotalRecordsCount(null);
+      nextOffsetRef.current = 0;
 
       try {
-        const [sessionPayload, recordsPayload] = await Promise.all([getSession(), getClients()]);
+        const [sessionPayload, recordsPayload] = await Promise.all([
+          getSession(),
+          paginationEnabled ? getClientsPage(pageSize, 0) : getClients(),
+        ]);
         if (cancelled) {
           return;
         }
@@ -300,6 +328,16 @@ export function useClientPayments() {
         setRecords(normalizedRecords);
         baselineRef.current = serializeRecords(normalizedRecords);
         baselineRecordsRef.current = cloneRecords(normalizedRecords);
+        nextOffsetRef.current =
+          typeof recordsPayload.nextOffset === "number"
+            ? Math.max(0, recordsPayload.nextOffset)
+            : normalizedRecords.length;
+        setHasMoreRecords(Boolean(recordsPayload.hasMore));
+        setTotalRecordsCount(
+          typeof recordsPayload.total === "number" && Number.isFinite(recordsPayload.total)
+            ? Math.max(normalizedRecords.length, recordsPayload.total)
+            : null,
+        );
         const nextUpdatedAt = normalizeRevisionTimestamp(recordsPayload.updatedAt);
         serverUpdatedAtRef.current = nextUpdatedAt;
         initializedRef.current = true;
@@ -323,7 +361,7 @@ export function useClientPayments() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [pageSize, paginationEnabled]);
 
   const updateFilter = useCallback(<Key extends keyof ClientPaymentsFilters>(key: Key, value: ClientPaymentsFilters[Key]) => {
     setFilters((prev) => ({
@@ -506,13 +544,26 @@ export function useClientPayments() {
   const forceRefresh = useCallback(async () => {
     setLoadError("");
     setIsLoading(true);
+    setHasMoreRecords(false);
+    setIsLoadingMoreRecords(false);
+    nextOffsetRef.current = 0;
 
     try {
-      const recordsPayload = await getClients();
+      const recordsPayload = paginationEnabled ? await getClientsPage(pageSize, 0) : await getClients();
       const normalized = normalizeRecords(recordsPayload.records);
       setRecords(normalized);
       baselineRef.current = serializeRecords(normalized);
       baselineRecordsRef.current = cloneRecords(normalized);
+      nextOffsetRef.current =
+        typeof recordsPayload.nextOffset === "number"
+          ? Math.max(0, recordsPayload.nextOffset)
+          : normalized.length;
+      setHasMoreRecords(Boolean(recordsPayload.hasMore));
+      setTotalRecordsCount(
+        typeof recordsPayload.total === "number" && Number.isFinite(recordsPayload.total)
+          ? Math.max(normalized.length, recordsPayload.total)
+          : null,
+      );
       const nextUpdatedAt = normalizeRevisionTimestamp(recordsPayload.updatedAt);
       serverUpdatedAtRef.current = nextUpdatedAt;
       setLastSyncedAt(nextUpdatedAt || new Date().toISOString());
@@ -524,7 +575,56 @@ export function useClientPayments() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [pageSize, paginationEnabled]);
+
+  const loadMoreRecords = useCallback(async () => {
+    if (!paginationEnabled || isLoading || isLoadingMoreRecords || !hasMoreRecords) {
+      return;
+    }
+
+    setIsLoadingMoreRecords(true);
+    setLoadError("");
+    try {
+      const recordsPayload = await getClientsPage(pageSize, nextOffsetRef.current);
+      const normalized = normalizeRecords(recordsPayload.records);
+      if (!normalized.length) {
+        setHasMoreRecords(Boolean(recordsPayload.hasMore));
+        nextOffsetRef.current =
+          typeof recordsPayload.nextOffset === "number"
+            ? Math.max(nextOffsetRef.current, recordsPayload.nextOffset)
+            : nextOffsetRef.current;
+        return;
+      }
+
+      const nextBaseline = appendUniqueRecordsById(baselineRecordsRef.current, normalized);
+      baselineRecordsRef.current = nextBaseline;
+      baselineRef.current = serializeRecords(nextBaseline);
+
+      setRecords((prev) => appendUniqueRecordsById(prev, normalized));
+      nextOffsetRef.current =
+        typeof recordsPayload.nextOffset === "number"
+          ? Math.max(nextOffsetRef.current, recordsPayload.nextOffset)
+          : nextOffsetRef.current + normalized.length;
+      setHasMoreRecords(Boolean(recordsPayload.hasMore));
+      setTotalRecordsCount((prev) => {
+        const incomingTotal =
+          typeof recordsPayload.total === "number" && Number.isFinite(recordsPayload.total)
+            ? Math.max(recordsPayload.total, nextOffsetRef.current)
+            : null;
+        if (incomingTotal === null) {
+          return prev;
+        }
+        if (prev === null) {
+          return incomingTotal;
+        }
+        return Math.max(prev, incomingTotal);
+      });
+    } catch (error) {
+      setLoadError(extractErrorMessage(error, "Failed to load more records."));
+    } finally {
+      setIsLoadingMoreRecords(false);
+    }
+  }, [hasMoreRecords, isLoading, isLoadingMoreRecords, pageSize, paginationEnabled]);
 
   return {
     session,
@@ -541,6 +641,9 @@ export function useClientPayments() {
     closedByOptions,
     filtersCollapsed,
     isSaving,
+    hasMoreRecords,
+    isLoadingMoreRecords,
+    totalRecordsCount,
     saveError,
     saveRetryCount,
     saveRetryMax: REMOTE_SYNC_MAX_RETRIES,
@@ -557,6 +660,7 @@ export function useClientPayments() {
     setFiltersCollapsed,
     toggleSort,
     forceRefresh,
+    loadMoreRecords,
     openCreateModal,
     openRecordModal,
     startEditRecord,
@@ -575,6 +679,20 @@ function serializeRecords(records: ClientRecord[]): string {
 
 function cloneRecords(records: ClientRecord[]): ClientRecord[] {
   return records.map((record) => ({ ...record }));
+}
+
+function appendUniqueRecordsById(currentRecords: ClientRecord[], incomingRecords: ClientRecord[]): ClientRecord[] {
+  if (!incomingRecords.length) {
+    return currentRecords;
+  }
+
+  const existingIds = new Set(currentRecords.map((record) => record.id));
+  const additions = incomingRecords.filter((record) => !existingIds.has(record.id));
+  if (!additions.length) {
+    return currentRecords;
+  }
+
+  return [...currentRecords, ...additions];
 }
 
 function scheduleDebouncedSave(

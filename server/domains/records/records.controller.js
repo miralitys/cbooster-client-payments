@@ -33,9 +33,12 @@ function createRecordsController(dependencies = {}) {
 
   async function handleRecordsGet(req, res) {
     try {
+      const isClientsRoute = req.path === "/api/clients" || req.originalUrl?.startsWith("/api/clients");
+      const pagination = isClientsRoute ? resolvePaginationFromQuery(req.query) : null;
       const result = await recordsService.getRecordsForApi({
         webAuthProfile: req.webAuthProfile,
         webAuthUser: req.webAuthUser,
+        pagination,
       });
       res.status(result.status).json(result.body);
     } catch (error) {
@@ -140,3 +143,51 @@ function createRecordsController(dependencies = {}) {
 module.exports = {
   createRecordsController,
 };
+
+function resolvePaginationFromQuery(query) {
+  const rawLimit = parsePositiveInteger(query?.limit);
+  const rawOffset = parseNonNegativeInteger(query?.offset);
+
+  if (rawLimit === null && rawOffset === null) {
+    return null;
+  }
+
+  const limit = clampInteger(rawLimit === null ? 100 : rawLimit, 1, 500);
+  const offset = Math.max(0, rawOffset === null ? 0 : rawOffset);
+
+  return {
+    enabled: true,
+    limit,
+    offset,
+  };
+}
+
+function parsePositiveInteger(rawValue) {
+  if (rawValue === null || rawValue === undefined) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(String(rawValue), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function parseNonNegativeInteger(rawValue) {
+  if (rawValue === null || rawValue === undefined) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(String(rawValue), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function clampInteger(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}

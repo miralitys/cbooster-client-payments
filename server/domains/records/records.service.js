@@ -18,7 +18,7 @@ function createRecordsService(dependencies = {}) {
   } = dependencies;
   const warn = typeof logWarn === "function" ? logWarn : () => {};
 
-  async function getRecordsForApi({ webAuthProfile, webAuthUser }) {
+  async function getRecordsForApi({ webAuthProfile, webAuthUser, pagination = null }) {
     if (simulateSlowRecords) {
       await delayMs(simulateSlowRecordsDelayMs);
       return {
@@ -54,6 +54,27 @@ function createRecordsService(dependencies = {}) {
     }
 
     const filteredRecords = filterClientRecordsForWebAuthUser(state.records, webAuthProfile);
+    if (pagination?.enabled) {
+      const offset = Math.max(0, Number.parseInt(String(pagination.offset || 0), 10) || 0);
+      const limit = Math.max(1, Number.parseInt(String(pagination.limit || 100), 10) || 100);
+      const total = filteredRecords.length;
+      const pagedRecords = filteredRecords.slice(offset, offset + limit);
+      const nextOffset = offset + pagedRecords.length;
+
+      return {
+        status: 200,
+        body: {
+          records: pagedRecords,
+          updatedAt: state.updatedAt,
+          total,
+          limit,
+          offset,
+          hasMore: nextOffset < total,
+          nextOffset: nextOffset < total ? nextOffset : null,
+        },
+      };
+    }
+
     return {
       status: 200,
       body: {
