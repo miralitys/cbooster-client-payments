@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
-import { ApiError, getClientManagers, patchClients, postGhlClientPhoneRefresh, putClients } from "@/shared/api";
+import { getClientManagers, postGhlClientPhoneRefresh } from "@/shared/api";
 import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import {
   formatDate,
@@ -439,29 +439,6 @@ export default function ClientPaymentsPage() {
         if (payload?.status !== "found" || !nextPhone) {
           throw new Error("Phone was not returned by GoHighLevel.");
         }
-
-        const nextRecord: ClientRecord = {
-          ...activeRecord,
-          clientPhoneNumber: nextPhone,
-        };
-        const nextRecords = records.map((record) => (record.id === activeRecord.id ? nextRecord : record));
-        try {
-          await patchClients(
-            [
-              {
-                type: "upsert",
-                id: activeRecord.id,
-                record: nextRecord,
-              },
-            ],
-            null,
-          );
-        } catch (error) {
-          if (!shouldFallbackToPutFromPatch(error)) {
-            throw error;
-          }
-          await putClients(nextRecords, null);
-        }
         await forceRefresh();
         showToast({
           type: "success",
@@ -478,7 +455,7 @@ export default function ClientPaymentsPage() {
         setRefreshingCardClientPhoneKey("");
       }
     },
-    [activeRecord, canRefreshClientPhoneInCard, forceRefresh, records],
+    [activeRecord, canRefreshClientPhoneInCard, forceRefresh],
   );
 
   const counters = useMemo(() => {
@@ -1297,13 +1274,6 @@ function formatMoneyCell(rawValue: string): string {
     return "-";
   }
   return formatMoney(amount);
-}
-
-function shouldFallbackToPutFromPatch(error: unknown): boolean {
-  if (!(error instanceof ApiError)) {
-    return false;
-  }
-  return error.status === 404 || error.code === "records_patch_disabled";
 }
 
 function TableLoadingSkeleton({ columnCount }: { columnCount: number }) {

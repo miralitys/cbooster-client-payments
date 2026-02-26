@@ -8,4 +8,6 @@ export interface GhlClientPhoneRefreshPayload {
   source: string;
   matchedContacts: number;
   inspectedContacts: number;
+  savedRecordsCount?: number;
+  updatedAt?: string | null;
 }

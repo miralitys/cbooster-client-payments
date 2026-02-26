@@ -37713,10 +37713,40 @@ const handleGhlClientPhoneRefreshPost = async (req, res) => {
       writtenOffFlag: null,
     });
     const result = await findGhlClientPhoneByClientName(context.clientName);
+    let savedRecordsCount = 0;
+    let recordsUpdatedAt = null;
+    if (result?.status === "found" && sanitizeTextValue(result?.phone, 80)) {
+      const stateForSave = await getStoredRecords();
+      const visibilityForSave = resolveVisibleClientNamesForWebAuthUser(stateForSave.records, req.webAuthProfile);
+      const comparableClientName = normalizeAssistantComparableText(context.clientName, 220);
+      const recordsToUpdate = (Array.isArray(visibilityForSave?.visibleRecords) ? visibilityForSave.visibleRecords : []).filter((record) => {
+        const recordComparableClientName = normalizeAssistantComparableText(record?.clientName, 220);
+        return Boolean(recordComparableClientName && comparableClientName && recordComparableClientName === comparableClientName);
+      });
+      if (recordsToUpdate.length) {
+        const operations = recordsToUpdate.map((record) => ({
+          type: "upsert",
+          id: sanitizeTextValue(record?.id, 120),
+          record: {
+            clientPhoneNumber: sanitizeTextValue(result.phone, 80),
+          },
+        })).filter((operation) => operation.id);
+        if (operations.length) {
+          const saveResult = await recordsService.patchRecordsForApi({
+            operations,
+            expectedUpdatedAt: null,
+          });
+          savedRecordsCount = operations.length;
+          recordsUpdatedAt = sanitizeTextValue(saveResult?.body?.updatedAt, 80) || null;
+        }
+      }
+    }
     res.json({
       ok: true,
       ...result,
       clientName: context.clientName,
+      savedRecordsCount,
+      updatedAt: recordsUpdatedAt,
     });
   } catch (error) {
     console.error("POST /api/ghl/client-phone/refresh failed:", error);

@@ -11,7 +11,7 @@ import {
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
-import { ApiError, patchRecords, getClientManagers, getRecords, getSession, postGhlClientPhoneRefresh, putRecords } from "@/shared/api";
+import { patchRecords, getClientManagers, getRecords, getSession, postGhlClientPhoneRefresh } from "@/shared/api";
 import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import { showToast } from "@/shared/lib/toast";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
@@ -542,32 +542,13 @@ export default function ClientsPage() {
           throw new Error("Phone was not returned by GoHighLevel.");
         }
 
-        const nextRecord: ClientRecord = {
-          ...selectedRecord,
-          clientPhoneNumber: nextPhone,
-        };
-        const nextRecords = records.map((record) => (record.id === selectedRecord.id ? nextRecord : record));
-        let savePayload: { updatedAt?: string | null } = { updatedAt: null };
-        try {
-          savePayload = await patchRecords(
-            [
-              {
-                type: "upsert",
-                id: selectedRecord.id,
-                record: nextRecord,
-              },
-            ],
-            recordsUpdatedAt,
-          );
-        } catch (error) {
-          if (!shouldFallbackToPutFromPatch(error)) {
-            throw error;
-          }
-          savePayload = await putRecords(nextRecords, recordsUpdatedAt);
-        }
-
+        const nextRecords = records.map((record) =>
+          normalizeComparableClientName(record.clientName) === comparableClientName
+            ? { ...record, clientPhoneNumber: nextPhone }
+            : record,
+        );
         setRecords(nextRecords);
-        const nextUpdatedAt = normalizeRevisionTimestamp(savePayload.updatedAt);
+        const nextUpdatedAt = normalizeRevisionTimestamp(phonePayload.updatedAt);
         if (nextUpdatedAt) {
           setRecordsUpdatedAt(nextUpdatedAt);
         }
@@ -586,7 +567,7 @@ export default function ClientsPage() {
         setRefreshingCardClientPhoneKey("");
       }
     },
-    [canRefreshClientPhoneInCard, records, recordsUpdatedAt, selectedRecord],
+    [canRefreshClientPhoneInCard, records, selectedRecord],
   );
 
   const totalContractAmount = useMemo(
@@ -1402,11 +1383,4 @@ function normalizeRevisionTimestamp(rawValue: string | null | undefined): string
   }
 
   return new Date(timestamp).toISOString();
-}
-
-function shouldFallbackToPutFromPatch(error: unknown): boolean {
-  if (!(error instanceof ApiError)) {
-    return false;
-  }
-  return error.status === 404 || error.code === "records_patch_disabled";
 }
