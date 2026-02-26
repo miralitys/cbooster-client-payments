@@ -5,7 +5,6 @@ import { getClientManagers, postGhlClientPhoneRefresh, startClientManagersRefres
 import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import {
   formatDate,
-  formatKpiMoney,
   formatMoney,
   getRecordStatusFlags,
   parseMoneyValue,
@@ -14,11 +13,9 @@ import { evaluateClientScore, type ClientScoreResult } from "@/features/client-s
 import {
   PAYMENT_DATE_FIELDS,
   OVERDUE_RANGE_OPTIONS,
-  OVERVIEW_PERIOD_OPTIONS,
   STATUS_FILTER_OVERDUE,
   STATUS_FILTER_OPTIONS,
   TABLE_COLUMNS,
-  type OverviewPeriodKey,
 } from "@/features/client-payments/domain/constants";
 import { exportRecordsToPdf, exportRecordsToXls } from "@/features/client-payments/domain/export";
 import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
@@ -131,11 +128,6 @@ function resolveColumnLabel(column: string): string {
   return COLUMN_LABELS[column] || column;
 }
 
-function getOverviewContextLabel(period: OverviewPeriodKey): string {
-  const found = OVERVIEW_PERIOD_OPTIONS.find((option) => option.key === period);
-  return found?.label || "Current Week";
-}
-
 export default function ClientsPage() {
   const {
     session,
@@ -146,8 +138,6 @@ export default function ClientsPage() {
     visibleRecords,
     filters,
     sortState,
-    overviewPeriod,
-    overviewMetrics,
     closedByOptions,
     filtersCollapsed,
     isSaving,
@@ -163,7 +153,6 @@ export default function ClientsPage() {
     activeRecord,
     updateFilter,
     setDateRange,
-    setOverviewPeriod,
     setFiltersCollapsed,
     toggleSort,
     forceRefresh,
@@ -919,36 +908,6 @@ export default function ClientsPage() {
               </div>
             </div>
           ) : null}
-        </Panel>
-
-        <Panel
-          className="period-dashboard-shell-react"
-          title="Overview"
-          actions={
-            <SegmentedControl
-              value={overviewPeriod}
-              options={OVERVIEW_PERIOD_OPTIONS.map((option) => ({ key: option.key, label: option.label }))}
-              onChange={(value) => setOverviewPeriod(value as OverviewPeriodKey)}
-            />
-          }
-        >
-          <div className="overview-cards">
-            <article className="overview-card">
-              <p className="overview-card__title">Sales</p>
-              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.sales)}</p>
-              <p className="overview-card__context">{getOverviewContextLabel(overviewPeriod)}</p>
-            </article>
-            <article className="overview-card">
-              <p className="overview-card__title">Received</p>
-              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.received)}</p>
-              <p className="overview-card__context">{getOverviewContextLabel(overviewPeriod)}</p>
-            </article>
-            <article className="overview-card">
-              <p className="overview-card__title">Debt</p>
-              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.debt)}</p>
-              <p className="overview-card__context">As of today</p>
-            </article>
-          </div>
         </Panel>
 
         <Panel
