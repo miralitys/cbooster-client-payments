@@ -9,7 +9,7 @@ export {
   unsubscribeNotificationsPush,
 } from "@/shared/api/notifications";
 export { getRecords, patchRecords, putRecords } from "@/shared/api/records";
-export { getClients, getClientsPage, patchClients, putClients } from "@/shared/api/clients";
+export { getClients, getClientsPage, getClientFilterOptions, patchClients, putClients } from "@/shared/api/clients";
 export { queueAssistantSessionContextResetBeacon, resetAssistantSessionContext, sendAssistantMessage } from "@/shared/api/assistant";
 export {
   approveModerationSubmission,

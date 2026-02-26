@@ -119,6 +119,11 @@ export interface RecordsPayload {
   nextOffset?: number | null;
 }
 
+export interface ClientsFilterOptionsPayload {
+  closedByOptions: string[];
+  clientManagerOptions: string[];
+}
+
 export interface PutRecordsPayload {
   ok: boolean;
   updatedAt?: string | null;

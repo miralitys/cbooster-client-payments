@@ -35,15 +35,30 @@ function createRecordsController(dependencies = {}) {
     try {
       const isClientsRoute = req.path === "/api/clients" || req.originalUrl?.startsWith("/api/clients");
       const pagination = isClientsRoute ? resolvePaginationFromQuery(req.query) : null;
+      const clientFilters = isClientsRoute ? resolveClientFiltersFromQuery(req.query) : null;
       const result = await recordsService.getRecordsForApi({
         webAuthProfile: req.webAuthProfile,
         webAuthUser: req.webAuthUser,
         pagination,
+        clientFilters,
       });
       res.status(result.status).json(result.body);
     } catch (error) {
       console.error("GET /api/records failed:", error);
       res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load records"));
+    }
+  }
+
+  async function handleClientsFiltersGet(req, res) {
+    try {
+      const result = await recordsService.getClientFilterOptionsForApi({
+        webAuthProfile: req.webAuthProfile,
+        webAuthUser: req.webAuthUser,
+      });
+      res.status(result.status).json(result.body);
+    } catch (error) {
+      console.error("GET /api/clients/filters failed:", error);
+      res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load client filters"));
     }
   }
 
@@ -135,6 +150,7 @@ function createRecordsController(dependencies = {}) {
 
   return {
     handleRecordsGet,
+    handleClientsFiltersGet,
     handleRecordsPut,
     handleRecordsPatch,
   };
@@ -190,4 +206,36 @@ function parseNonNegativeInteger(rawValue) {
 
 function clampInteger(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function resolveClientFiltersFromQuery(query) {
+  return {
+    search: sanitizeFilterValue(query?.search, 320),
+    closedBy: sanitizeFilterValue(query?.closedBy, 180),
+    clientManager: sanitizeFilterValue(query?.clientManager, 180),
+    status: sanitizeFilterValue(query?.status, 40),
+    overdueRange: sanitizeFilterValue(query?.overdueRange, 40),
+    createdFrom: sanitizeFilterValue(query?.createdFrom, 24),
+    createdTo: sanitizeFilterValue(query?.createdTo, 24),
+    paymentFrom: sanitizeFilterValue(query?.paymentFrom, 24),
+    paymentTo: sanitizeFilterValue(query?.paymentTo, 24),
+    writtenOffFrom: sanitizeFilterValue(query?.writtenOffFrom, 24),
+    writtenOffTo: sanitizeFilterValue(query?.writtenOffTo, 24),
+    fullyPaidFrom: sanitizeFilterValue(query?.fullyPaidFrom, 24),
+    fullyPaidTo: sanitizeFilterValue(query?.fullyPaidTo, 24),
+  };
+}
+
+function sanitizeFilterValue(rawValue, maxLen) {
+  if (rawValue === null || rawValue === undefined) {
+    return "";
+  }
+  const value = String(rawValue).trim();
+  if (!value) {
+    return "";
+  }
+  if (!Number.isFinite(maxLen) || maxLen <= 0) {
+    return value;
+  }
+  return value.slice(0, maxLen);
 }

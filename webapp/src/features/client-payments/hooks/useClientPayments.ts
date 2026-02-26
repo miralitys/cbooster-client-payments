@@ -83,18 +83,26 @@ const normalizeRevisionTimestamp = (rawValue: string | null | undefined): string
 };
 
 interface UseClientPaymentsOptions {
+  enabled?: boolean;
   pagination?: {
     enabled?: boolean;
     pageSize?: number;
   };
+  buildClientsApiQuery?: (
+    filters: ClientPaymentsFilters,
+  ) => Record<string, string | number | boolean | null | undefined>;
 }
 
 export function useClientPayments(options: UseClientPaymentsOptions = {}) {
   const uiState = useMemo(() => readClientPaymentsUiState(), []);
+  const paginationOptions = options.pagination;
+  const buildClientsApiQuery = options.buildClientsApiQuery;
+  const enabledOption = options.enabled;
 
   const [session, setSession] = useState<Session | null>(null);
   const [records, setRecords] = useState<ClientRecord[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const hookEnabled = enabledOption !== false;
+  const [isLoading, setIsLoading] = useState(hookEnabled);
   const [loadError, setLoadError] = useState("");
 
   const [filters, setFilters] = useState<ClientPaymentsFilters>(INITIAL_FILTERS);
@@ -136,8 +144,15 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
   const serverUpdatedAtRef = useRef<string | null>(null);
   const nextOffsetRef = useRef(0);
 
-  const paginationEnabled = options.pagination?.enabled === true;
-  const pageSize = Math.max(1, Math.min(500, Math.trunc(options.pagination?.pageSize || 100)));
+  const paginationEnabled = paginationOptions?.enabled === true;
+  const pageSize = Math.max(1, Math.min(500, Math.trunc(paginationOptions?.pageSize || 100)));
+  const clientsApiQuery = useMemo(() => {
+    if (!paginationEnabled || typeof buildClientsApiQuery !== "function") {
+      return {};
+    }
+    return normalizeClientsApiQuery(buildClientsApiQuery(filters));
+  }, [buildClientsApiQuery, filters, paginationEnabled]);
+  const clientsApiQueryKey = useMemo(() => serializeClientsApiQuery(clientsApiQuery), [clientsApiQuery]);
 
   const canManage = Boolean(session?.permissions?.manage_client_payments);
 
@@ -306,6 +321,11 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
     let cancelled = false;
 
     async function bootstrap() {
+      if (!hookEnabled) {
+        setIsLoading(false);
+        return;
+      }
+
       setIsLoading(true);
       setLoadError("");
       setHasMoreRecords(false);
@@ -316,7 +336,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
       try {
         const [sessionPayload, recordsPayload] = await Promise.all([
           getSession(),
-          paginationEnabled ? getClientsPage(pageSize, 0) : getClients(),
+          paginationEnabled ? getClientsPage(pageSize, 0, clientsApiQuery) : getClients(),
         ]);
         if (cancelled) {
           return;
@@ -361,7 +381,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
     return () => {
       cancelled = true;
     };
-  }, [pageSize, paginationEnabled]);
+  }, [clientsApiQuery, clientsApiQueryKey, hookEnabled, pageSize, paginationEnabled]);
 
   const updateFilter = useCallback(<Key extends keyof ClientPaymentsFilters>(key: Key, value: ClientPaymentsFilters[Key]) => {
     setFilters((prev) => ({
@@ -542,6 +562,10 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
   }, [flushSave]);
 
   const forceRefresh = useCallback(async () => {
+    if (!hookEnabled) {
+      return;
+    }
+
     setLoadError("");
     setIsLoading(true);
     setHasMoreRecords(false);
@@ -549,7 +573,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
     nextOffsetRef.current = 0;
 
     try {
-      const recordsPayload = paginationEnabled ? await getClientsPage(pageSize, 0) : await getClients();
+      const recordsPayload = paginationEnabled ? await getClientsPage(pageSize, 0, clientsApiQuery) : await getClients();
       const normalized = normalizeRecords(recordsPayload.records);
       setRecords(normalized);
       baselineRef.current = serializeRecords(normalized);
@@ -575,17 +599,17 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
     } finally {
       setIsLoading(false);
     }
-  }, [pageSize, paginationEnabled]);
+  }, [clientsApiQuery, hookEnabled, pageSize, paginationEnabled]);
 
   const loadMoreRecords = useCallback(async () => {
-    if (!paginationEnabled || isLoading || isLoadingMoreRecords || !hasMoreRecords) {
+    if (!hookEnabled || !paginationEnabled || isLoading || isLoadingMoreRecords || !hasMoreRecords) {
       return;
     }
 
     setIsLoadingMoreRecords(true);
     setLoadError("");
     try {
-      const recordsPayload = await getClientsPage(pageSize, nextOffsetRef.current);
+      const recordsPayload = await getClientsPage(pageSize, nextOffsetRef.current, clientsApiQuery);
       const normalized = normalizeRecords(recordsPayload.records);
       if (!normalized.length) {
         setHasMoreRecords(Boolean(recordsPayload.hasMore));
@@ -624,7 +648,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
     } finally {
       setIsLoadingMoreRecords(false);
     }
-  }, [hasMoreRecords, isLoading, isLoadingMoreRecords, pageSize, paginationEnabled]);
+  }, [clientsApiQuery, hasMoreRecords, hookEnabled, isLoading, isLoadingMoreRecords, pageSize, paginationEnabled]);
 
   return {
     session,
@@ -853,4 +877,34 @@ function validateDraftAgainstLegacyRules(record: ClientRecord): string {
   }
 
   return "";
+}
+
+function normalizeClientsApiQuery(
+  query: Record<string, string | number | boolean | null | undefined>,
+): Record<string, string | number | boolean> {
+  const normalized: Record<string, string | number | boolean> = {};
+  for (const [key, rawValue] of Object.entries(query || {})) {
+    if (rawValue === null || rawValue === undefined) {
+      continue;
+    }
+    if (typeof rawValue === "boolean") {
+      normalized[key] = rawValue;
+      continue;
+    }
+    if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+      normalized[key] = rawValue;
+      continue;
+    }
+    const value = String(rawValue).trim();
+    if (!value) {
+      continue;
+    }
+    normalized[key] = value;
+  }
+  return normalized;
+}
+
+function serializeClientsApiQuery(query: Record<string, string | number | boolean>): string {
+  const entries = Object.entries(query || {}).sort(([left], [right]) => left.localeCompare(right));
+  return JSON.stringify(entries);
 }

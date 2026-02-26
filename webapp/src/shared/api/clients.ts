@@ -1,5 +1,6 @@
 import { apiRequest } from "@/shared/api/fetcher";
 import type {
+  ClientsFilterOptionsPayload,
   ClientRecord,
   PatchRecordsPayload,
   PutRecordsPayload,
@@ -20,10 +21,27 @@ export async function getClients(): Promise<RecordsPayload> {
   };
 }
 
-export async function getClientsPage(limit: number, offset: number): Promise<RecordsPayload> {
+export async function getClientsPage(
+  limit: number,
+  offset: number,
+  query: Record<string, string | number | boolean | null | undefined> = {},
+): Promise<RecordsPayload> {
   const safeLimit = clampInteger(limit, 1, 500);
   const safeOffset = Math.max(0, Number.isFinite(offset) ? Math.trunc(offset) : 0);
-  const payload = await apiRequest<RecordsPayload>(`/api/clients?limit=${safeLimit}&offset=${safeOffset}`);
+  const params = new URLSearchParams();
+  params.set("limit", String(safeLimit));
+  params.set("offset", String(safeOffset));
+  for (const [key, rawValue] of Object.entries(query)) {
+    if (rawValue === null || rawValue === undefined) {
+      continue;
+    }
+    const value = String(rawValue).trim();
+    if (!value) {
+      continue;
+    }
+    params.set(key, value);
+  }
+  const payload = await apiRequest<RecordsPayload>(`/api/clients?${params.toString()}`);
   return {
     records: Array.isArray(payload.records) ? payload.records : [],
     updatedAt: typeof payload.updatedAt === "string" ? payload.updatedAt : null,
@@ -32,6 +50,18 @@ export async function getClientsPage(limit: number, offset: number): Promise<Rec
     offset: normalizeOptionalNumber(payload.offset),
     hasMore: typeof payload.hasMore === "boolean" ? payload.hasMore : undefined,
     nextOffset: normalizeOptionalNumberOrNull(payload.nextOffset),
+  };
+}
+
+export async function getClientFilterOptions(): Promise<ClientsFilterOptionsPayload> {
+  const payload = await apiRequest<ClientsFilterOptionsPayload>("/api/clients/filters");
+  return {
+    closedByOptions: Array.isArray(payload.closedByOptions)
+      ? payload.closedByOptions.filter((item) => typeof item === "string" && item.trim())
+      : [],
+    clientManagerOptions: Array.isArray(payload.clientManagerOptions)
+      ? payload.clientManagerOptions.filter((item) => typeof item === "string" && item.trim())
+      : [],
   };
 }
 

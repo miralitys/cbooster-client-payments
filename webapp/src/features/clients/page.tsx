@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
-import { getClientManagers, postGhlClientPhoneRefresh } from "@/shared/api";
+import { getClientFilterOptions, getClientManagers, postGhlClientPhoneRefresh } from "@/shared/api";
 import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import {
   formatDate,
   formatMoney,
   getRecordStatusFlags,
   parseMoneyValue,
+  type ClientPaymentsFilters,
 } from "@/features/client-payments/domain/calculations";
 import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
 import {
@@ -134,6 +135,42 @@ function resolveColumnLabel(column: string): string {
 }
 
 export default function ClientsPage() {
+  const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("all");
+  const [managerFilter, setManagerFilter] = useState<string>(MANAGER_FILTER_ALL);
+  const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
+  const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
+  const [isActiveOnly, setIsActiveOnly] = useState(true);
+  const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
+  const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
+  const [isFilterOptionsLoading, setIsFilterOptionsLoading] = useState(true);
+  const [filterOptionsError, setFilterOptionsError] = useState("");
+  const [serverFilterOptions, setServerFilterOptions] = useState<{
+    closedByOptions: string[];
+    clientManagerOptions: string[];
+  }>({
+    closedByOptions: [],
+    clientManagerOptions: [],
+  });
+
+  const buildClientsApiQuery = useCallback(
+    (currentFilters: ClientPaymentsFilters): Record<string, string | undefined> => ({
+      search: currentFilters.search || undefined,
+      closedBy: currentFilters.closedBy || undefined,
+      clientManager: managerFilter !== MANAGER_FILTER_ALL ? managerFilter : undefined,
+      status: currentFilters.status !== "all" ? currentFilters.status : undefined,
+      overdueRange: currentFilters.overdueRange || undefined,
+      createdFrom: currentFilters.createdAtRange.from || undefined,
+      createdTo: currentFilters.createdAtRange.to || undefined,
+      paymentFrom: currentFilters.paymentDateRange.from || undefined,
+      paymentTo: currentFilters.paymentDateRange.to || undefined,
+      writtenOffFrom: currentFilters.writtenOffDateRange.from || undefined,
+      writtenOffTo: currentFilters.writtenOffDateRange.to || undefined,
+      fullyPaidFrom: currentFilters.fullyPaidDateRange.from || undefined,
+      fullyPaidTo: currentFilters.fullyPaidDateRange.to || undefined,
+    }),
+    [managerFilter],
+  );
+
   const {
     session,
     canManage,
@@ -146,7 +183,7 @@ export default function ClientsPage() {
     visibleRecords,
     filters,
     sortState,
-    closedByOptions,
+    closedByOptions: closedByOptionsFromLoadedRecords,
     isSaving,
     saveError,
     saveRetryCount,
@@ -173,21 +210,52 @@ export default function ClientsPage() {
     saveDraft,
     retrySave,
   } = useClientPayments({
+    enabled: !isFilterOptionsLoading,
     pagination: {
       enabled: true,
       pageSize: 100,
     },
+    buildClientsApiQuery,
   });
 
-  const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("all");
-  const [managerFilter, setManagerFilter] = useState<string>(MANAGER_FILTER_ALL);
-  const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
-  const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
-  const [isActiveOnly, setIsActiveOnly] = useState(true);
-  const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
-  const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
+  const isPageLoading = isFilterOptionsLoading || isLoading;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadClientFilterOptions() {
+      setIsFilterOptionsLoading(true);
+      setFilterOptionsError("");
+      try {
+        const payload = await getClientFilterOptions();
+        if (cancelled) {
+          return;
+        }
+        setServerFilterOptions({
+          closedByOptions: payload.closedByOptions,
+          clientManagerOptions: payload.clientManagerOptions,
+        });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : "Failed to load client filters.";
+        setFilterOptionsError(message);
+      } finally {
+        if (!cancelled) {
+          setIsFilterOptionsLoading(false);
+        }
+      }
+    }
+
+    void loadClientFilterOptions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
     () =>
@@ -229,7 +297,7 @@ export default function ClientsPage() {
     return scoredMap;
   }, [records]);
 
-  const managerFilterOptions = useMemo<string[]>(() => {
+  const fallbackManagerFilterOptions = useMemo<string[]>(() => {
     let hasNoManager = false;
     const uniqueByComparable = new Map<string, string>();
 
@@ -252,6 +320,29 @@ export default function ClientsPage() {
     const sorted = [...uniqueByComparable.values()].sort((left, right) => TEXT_SORTER.compare(left, right));
     return hasNoManager ? [NO_MANAGER_LABEL, ...sorted] : sorted;
   }, [visibleRecords]);
+
+  const closedByOptions = useMemo<string[]>(
+    () => (serverFilterOptions.closedByOptions.length ? serverFilterOptions.closedByOptions : closedByOptionsFromLoadedRecords),
+    [closedByOptionsFromLoadedRecords, serverFilterOptions.closedByOptions],
+  );
+
+  const managerFilterOptions = useMemo<string[]>(
+    () =>
+      serverFilterOptions.clientManagerOptions.length
+        ? serverFilterOptions.clientManagerOptions
+        : fallbackManagerFilterOptions,
+    [fallbackManagerFilterOptions, serverFilterOptions.clientManagerOptions],
+  );
+
+  useEffect(() => {
+    if (managerFilter === MANAGER_FILTER_ALL) {
+      return;
+    }
+    if (managerFilterOptions.includes(managerFilter)) {
+      return;
+    }
+    setManagerFilter(MANAGER_FILTER_ALL);
+  }, [managerFilter, managerFilterOptions]);
 
   const scoredVisibleRecords = useMemo<ScoredClientRecord[]>(() => {
     return visibleRecords
@@ -661,6 +752,7 @@ export default function ClientsPage() {
                   </Button>
                 </div>
               </div>
+              {filterOptionsError ? <p className="react-user-footnote">{filterOptionsError}</p> : null}
 
               {isMoreFiltersOpen ? (
                 <>
@@ -837,8 +929,8 @@ export default function ClientsPage() {
             </div>
           }
         >
-          {isLoading ? <TableLoadingSkeleton columnCount={tableColumnKeys.length} /> : null}
-          {!isLoading && loadError ? (
+          {isPageLoading ? <TableLoadingSkeleton columnCount={tableColumnKeys.length} /> : null}
+          {!isPageLoading && loadError ? (
             <ErrorState
               title="Failed to load records"
               description={loadError}
@@ -846,11 +938,11 @@ export default function ClientsPage() {
               onAction={() => void forceRefresh()}
             />
           ) : null}
-          {!isLoading && !loadError && !scoredVisibleRecords.length ? (
+          {!isPageLoading && !loadError && !scoredVisibleRecords.length ? (
             <EmptyState title="No records found" description="Adjust filters or add a new client." />
           ) : null}
 
-          {!isLoading && !loadError && scoredVisibleRecords.length ? (
+          {!isPageLoading && !loadError && scoredVisibleRecords.length ? (
             <Table
               className="table-wrap"
               columns={tableColumns}
@@ -906,7 +998,7 @@ export default function ClientsPage() {
               }
             />
           ) : null}
-          {!isLoading && !loadError && hasMoreRecords ? (
+          {!isPageLoading && !loadError && hasMoreRecords ? (
             <div className="clients-pagination-progress">
               <span className="react-user-footnote">
                 Loaded {records.length}
