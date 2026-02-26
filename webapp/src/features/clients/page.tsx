@@ -625,7 +625,7 @@ export default function ClientsPage() {
   }
 
   return (
-    <PageShell className="client-payments-react-page">
+    <PageShell className="clients-react-page">
       <PageHeader
         actions={
           canManage ? (

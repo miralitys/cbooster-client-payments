@@ -1060,10 +1060,24 @@ a {
   gap: var(--layout-block-gap);
 }
 
+.clients-react-page .clients-dashboard-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--layout-block-gap);
+}
+
 .clients-react-page .clients-dashboard-stack .filters-panel,
 .clients-react-page .clients-dashboard-stack .table-panel {
   grid-column: 1 / -1;
   grid-row: auto;
+}
+
+.clients-react-page .clients-dashboard-stack .filters-panel {
+  order: 1;
+}
+
+.clients-react-page .clients-dashboard-stack .table-panel {
+  order: 2;
 }
 
 .clients-react-page .clients-dashboard-stack .filters-panel {
