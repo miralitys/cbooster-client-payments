@@ -247,11 +247,11 @@ export default function ClientsPage() {
 
   const scoreByRecordId = useMemo(() => {
     const scores = new Map<string, CachedScoreDisplay>();
-    for (const record of records) {
+    for (const record of activeRecords) {
       scores.set(record.id, resolveCachedScoreDisplay(record));
     }
     return scores;
-  }, [records]);
+  }, [activeRecords]);
 
   const filteredRecords = useMemo(() => {
     const query = normalizeSearchTerm(search);
@@ -262,7 +262,7 @@ export default function ClientsPage() {
     const contractDateToTimestamp = parseDateValue(contractDateTo);
     const hasContractDateFilter = Boolean(contractDateFrom.trim() || contractDateTo.trim());
 
-    const scopedRecords = records.filter((record) => {
+    const scopedRecords = activeRecords.filter((record) => {
       const managerLabel = resolveClientManagerLabel(record, clientManagersByClientName);
       const managerNames = splitClientManagerLabel(managerLabel);
       const contractDateTimestamp = parseDateValue(record.payment1Date);
@@ -349,7 +349,7 @@ export default function ClientsPage() {
     contractSignedFilter,
     hideWrittenOffByDefault,
     inWorkFilter,
-    records,
+    activeRecords,
     salesFilter,
     search,
     statusFilter,
