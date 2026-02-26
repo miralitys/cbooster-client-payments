@@ -8,12 +8,12 @@ import {
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
+import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
 import { getClients, getQuickBooksPayments, patchClients } from "@/shared/api";
-import { requestOpenClientCard } from "@/shared/lib/openClientCard";
 import { showToast } from "@/shared/lib/toast";
 import type { QuickBooksPaymentRow } from "@/shared/types/quickbooks";
 import type { ClientRecord } from "@/shared/types/records";
-import { Button, EmptyState, ErrorState, Input, LoadingSkeleton, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
+import { Button, EmptyState, ErrorState, Input, LoadingSkeleton, Modal, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
 const MATCH_FROM_DATE = "2026-01-01";
@@ -68,11 +68,13 @@ const EMPTY_SUMMARY: ClientMatchSummary = {
 
 export default function ClientMatchPage() {
   const [rows, setRows] = useState<ClientMatchRow[]>([]);
+  const [clientRecords, setClientRecords] = useState<ClientRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [summary, setSummary] = useState<ClientMatchSummary>(EMPTY_SUMMARY);
   const [clientsUpdatedAt, setClientsUpdatedAt] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<EditingCellState | null>(null);
+  const [selectedClientRecord, setSelectedClientRecord] = useState<ClientRecord | null>(null);
   const [confirmedClientIds, setConfirmedClientIds] = useState<string[]>(() => readConfirmedClientIds());
 
   const loadMatches = useCallback(async () => {
@@ -88,6 +90,7 @@ export default function ClientMatchPage() {
 
       const quickBooksItems = Array.isArray(quickBooksPayload?.items) ? quickBooksPayload.items : [];
       const clientRecords = Array.isArray(clientsPayload?.records) ? clientsPayload.records : [];
+      setClientRecords(clientRecords);
       setClientsUpdatedAt(typeof clientsPayload?.updatedAt === "string" ? clientsPayload.updatedAt : null);
 
       const quickBooksByClient = groupQuickBooksPaymentsByClientName(quickBooksItems);
@@ -115,6 +118,7 @@ export default function ClientMatchPage() {
       });
     } catch (error) {
       setRows([]);
+      setClientRecords([]);
       setSummary({
         ...EMPTY_SUMMARY,
         rangeTo: formatDateForApi(new Date()),
@@ -165,6 +169,24 @@ export default function ClientMatchPage() {
       cooldownMs: 800,
     });
   }, [confirmedClientIdSet]);
+
+  const openClientCardByRow = useCallback((row: ClientMatchRow) => {
+    const matchedRecords = clientRecords.filter((record) => normalizeClientName(record.clientName) === row.id);
+    if (!matchedRecords.length) {
+      showToast({
+        type: "error",
+        message: "Client card not found in Client Payments DB.",
+        dedupeKey: `client-match-open-card-not-found-${row.id}`,
+        cooldownMs: 1000,
+      });
+      return;
+    }
+
+    const bestRecord = matchedRecords.reduce((latest, current) => {
+      return parseCreatedAtTimestamp(current.createdAt) > parseCreatedAtTimestamp(latest.createdAt) ? current : latest;
+    });
+    setSelectedClientRecord(bestRecord);
+  }, [clientRecords]);
 
   const beginEditCell = useCallback((rowId: string, slotIndex: number, fieldType: EditableDbFieldType, initialValue: string) => {
     setEditingCell({
@@ -458,7 +480,7 @@ export default function ClientMatchPage() {
               <button
                 type="button"
                 className="client-match-client-link"
-                onClick={() => requestOpenClientCard(row.clientName)}
+                onClick={() => openClientCardByRow(row)}
                 aria-label={`Open client card for ${row.clientName}`}
               >
                 {row.clientName}
@@ -520,7 +542,7 @@ export default function ClientMatchPage() {
     }
 
     return columns;
-  }, [confirmClientRow, confirmedClientIdSet, maxPaymentColumns, renderDbAmountCell, renderDbDateCell]);
+  }, [confirmClientRow, confirmedClientIdSet, maxPaymentColumns, openClientCardByRow, renderDbAmountCell, renderDbDateCell]);
 
   const headerMeta = (
     <div className="client-match-meta">
@@ -570,6 +592,21 @@ export default function ClientMatchPage() {
           />
         ) : null}
       </Panel>
+
+      <Modal
+        open={Boolean(selectedClientRecord)}
+        title={selectedClientRecord?.clientName || "Client Details"}
+        onClose={() => setSelectedClientRecord(null)}
+        footer={(
+          <div className="client-payments__modal-actions">
+            <Button type="button" variant="secondary" size="sm" onClick={() => setSelectedClientRecord(null)}>
+              Close
+            </Button>
+          </div>
+        )}
+      >
+        {selectedClientRecord ? <RecordDetails record={selectedClientRecord} /> : null}
+      </Modal>
     </PageShell>
   );
 }
@@ -805,4 +842,9 @@ function formatDateForApi(value: Date): string {
   const month = String(value.getUTCMonth() + 1).padStart(2, "0");
   const day = String(value.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function parseCreatedAtTimestamp(rawValue: string): number {
+  const timestamp = Date.parse(rawValue || "");
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
