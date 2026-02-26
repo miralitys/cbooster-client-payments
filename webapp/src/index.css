@@ -1078,6 +1078,9 @@ a {
 
 .clients-react-page .clients-dashboard-stack .table-panel {
   order: 2;
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
 }
 
 .clients-react-page .clients-dashboard-stack .filters-panel {
@@ -1127,6 +1130,18 @@ a {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.clients-react-page .clients-status-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.clients-react-page .clients-status-controls .cb-segmented {
+  flex: 1 1 560px;
+  min-width: 0;
+}
+
 @media (max-width: 1400px) {
   .clients-react-page .filters-grid-react {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1141,6 +1156,11 @@ a {
   .clients-react-page .search-row,
   .clients-react-page .filters-grid-react,
   .clients-react-page .written-off-date-filter-react {
+    grid-template-columns: 1fr;
+  }
+
+  .clients-react-page .clients-status-controls {
+    display: grid;
     grid-template-columns: 1fr;
   }
 

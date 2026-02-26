@@ -47,6 +47,7 @@ interface ScoredClientRecord {
   score: ClientScoreResult;
   clientManager: string;
   clientManagerNames: string[];
+  isActive: boolean;
 }
 
 type ClientManagersRefreshMode = "none" | "incremental" | "full";
@@ -160,6 +161,7 @@ export default function ClientsPage() {
   const [managerFilter, setManagerFilter] = useState<string>(MANAGER_FILTER_ALL);
   const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
   const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
+  const [isActiveOnly, setIsActiveOnly] = useState(true);
   const [isManagersLoading, setIsManagersLoading] = useState(false);
   const [managersError, setManagersError] = useState("");
   const [managersRefreshMode, setManagersRefreshMode] = useState<ClientManagersRefreshMode>("none");
@@ -224,17 +226,20 @@ export default function ClientsPage() {
   const scoredVisibleRecords = useMemo<ScoredClientRecord[]>(() => {
     return visibleRecords
       .map((record) => {
+        const status = getRecordStatusFlags(record);
         const clientManagerNames = resolveClientManagerNamesFromRecord(record);
         return {
           record,
           score: scoreByRecordId.get(record.id) || evaluateClientScore(record),
           clientManager: clientManagerNames.join(", "),
           clientManagerNames,
+          isActive: status.isActive,
         };
       })
+      .filter((item) => !isActiveOnly || item.isActive)
       .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter))
       .filter((item) => matchesClientManagerFilter(item.clientManagerNames, managerFilter));
-  }, [managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
+  }, [isActiveOnly, managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
   const summedColumnValues = useMemo(() => {
@@ -549,6 +554,7 @@ export default function ClientsPage() {
     setDateRange("writtenOffDateRange", "to", "");
     setDateRange("fullyPaidDateRange", "from", "");
     setDateRange("fullyPaidDateRange", "to", "");
+    setIsActiveOnly(true);
     setScoreFilter("all");
     setManagerFilter(MANAGER_FILTER_ALL);
     setIsScoreFilterOpen(false);
@@ -716,11 +722,31 @@ export default function ClientsPage() {
                 </div>
                   </div>
 
-                  <SegmentedControl
-                    value={filters.status}
-                    options={STATUS_FILTER_OPTIONS}
-                    onChange={(value) => updateFilter("status", value as typeof filters.status)}
-                  />
+                  <div className="clients-status-controls">
+                    <SegmentedControl
+                      value={filters.status}
+                      options={STATUS_FILTER_OPTIONS}
+                      onChange={(value) => updateFilter("status", value as typeof filters.status)}
+                    />
+                    <Button
+                      type="button"
+                      variant={isActiveOnly ? "primary" : "secondary"}
+                      size="sm"
+                      onClick={() => setIsActiveOnly((prev) => !prev)}
+                      aria-pressed={isActiveOnly}
+                    >
+                      Active
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={isScoreFilterOpen ? "primary" : "secondary"}
+                      size="sm"
+                      aria-expanded={isScoreFilterOpen}
+                      onClick={() => setIsScoreFilterOpen((prev) => !prev)}
+                    >
+                      Score
+                    </Button>
+                  </div>
 
                   {filters.status === STATUS_FILTER_OVERDUE ? (
                     <SegmentedControl
@@ -770,32 +796,19 @@ export default function ClientsPage() {
                           id="fully-paid-to-input"
                           value={filters.fullyPaidDateRange.to}
                           onChange={(nextValue) => setDateRange("fullyPaidDateRange", "to", nextValue)}
-                          placeholder="MM/DD/YYYY"
-                        />
-                      </div>
-                    </div>
-                  ) : null}
-
-                  <div className="score-filter-block">
-                    <div className="score-filter-block__header">
-                      <p className="search-label">Score</p>
-                      <Button
-                        type="button"
-                        variant={isScoreFilterOpen ? "primary" : "secondary"}
-                        size="sm"
-                        onClick={() => setIsScoreFilterOpen((prev) => !prev)}
-                      >
-                        Score
-                      </Button>
-                    </div>
-                    {isScoreFilterOpen ? (
-                      <SegmentedControl
-                        value={scoreFilter}
-                        options={SCORE_FILTER_OPTIONS}
-                        onChange={(value) => setScoreFilter(value as ScoreFilter)}
-                      />
-                    ) : null}
+                      placeholder="MM/DD/YYYY"
+                    />
                   </div>
+                </div>
+              ) : null}
+
+                  {isScoreFilterOpen ? (
+                    <SegmentedControl
+                      value={scoreFilter}
+                      options={SCORE_FILTER_OPTIONS}
+                      onChange={(value) => setScoreFilter(value as ScoreFilter)}
+                    />
+                  ) : null}
                 </>
               ) : null}
             </div>
