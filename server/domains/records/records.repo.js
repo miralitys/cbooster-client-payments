@@ -74,6 +74,7 @@ function createRecordsRepo(dependencies = {}) {
   } = metrics || {};
 
   const log = logger || console;
+  let legacyStateUpdatedAtModeCache = "";
 
   if (typeof ensureDatabaseReady !== "function") {
     throw new Error("createRecordsRepo requires ensureDatabaseReady()");
@@ -97,6 +98,123 @@ function createRecordsRepo(dependencies = {}) {
     return new Date(maxTimestamp).toISOString();
   }
 
+  function normalizeUpdatedAtForApi(rawValue) {
+    const timestamp = normalizeRecordStateTimestamp(rawValue);
+    if (timestamp === null) {
+      return null;
+    }
+    return new Date(timestamp).toISOString();
+  }
+
+  function parseQualifiedTableName(rawValue) {
+    const value = sanitizeTextValue(rawValue, 240);
+    if (!value) {
+      return null;
+    }
+
+    const quotedSchemaMatch = value.match(/^"([^"]+)"\."([^"]+)"$/);
+    if (quotedSchemaMatch) {
+      return {
+        schemaName: sanitizeTextValue(quotedSchemaMatch[1], 120),
+        tableName: sanitizeTextValue(quotedSchemaMatch[2], 120),
+      };
+    }
+
+    const plainSchemaMatch = value.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)$/);
+    if (plainSchemaMatch) {
+      return {
+        schemaName: sanitizeTextValue(plainSchemaMatch[1], 120),
+        tableName: sanitizeTextValue(plainSchemaMatch[2], 120),
+      };
+    }
+
+    const quotedTableMatch = value.match(/^"([^"]+)"$/);
+    if (quotedTableMatch) {
+      return {
+        schemaName: "public",
+        tableName: sanitizeTextValue(quotedTableMatch[1], 120),
+      };
+    }
+
+    const plainTableMatch = value.match(/^([a-zA-Z_][a-zA-Z0-9_]*)$/);
+    if (plainTableMatch) {
+      return {
+        schemaName: "public",
+        tableName: sanitizeTextValue(plainTableMatch[1], 120),
+      };
+    }
+
+    return null;
+  }
+
+  async function resolveLegacyStateUpdatedAtMode(queryClient) {
+    if (legacyStateUpdatedAtModeCache) {
+      return legacyStateUpdatedAtModeCache;
+    }
+
+    const parsedStateTable = parseQualifiedTableName(STATE_TABLE);
+    if (!parsedStateTable?.schemaName || !parsedStateTable?.tableName) {
+      legacyStateUpdatedAtModeCache = "timestamp";
+      return legacyStateUpdatedAtModeCache;
+    }
+
+    try {
+      const result = await queryClient(
+        `
+          SELECT udt_name
+          FROM information_schema.columns
+          WHERE table_schema = $1
+            AND table_name = $2
+            AND column_name = 'updated_at'
+          LIMIT 1
+        `,
+        [parsedStateTable.schemaName, parsedStateTable.tableName],
+      );
+      const udtName = sanitizeTextValue(result.rows[0]?.udt_name, 40).toLowerCase();
+      legacyStateUpdatedAtModeCache = udtName === "int8" ? "bigint" : "timestamp";
+    } catch (error) {
+      log.warn?.(
+        `[records] Failed to resolve ${STATE_TABLE}.updated_at type, falling back to timestamp: ${sanitizeTextValue(error?.message, 320) || "unknown error"}`,
+      );
+      legacyStateUpdatedAtModeCache = "timestamp";
+    }
+
+    return legacyStateUpdatedAtModeCache;
+  }
+
+  async function upsertLegacyStateRecords(queryClient, records, writeTimestamp) {
+    const updatedAtMode = await resolveLegacyStateUpdatedAtMode(queryClient);
+    const normalizedWriteTimestamp = normalizeSourceStateUpdatedAtForV2(writeTimestamp) || new Date().toISOString();
+    const parsedWriteTimestamp = Date.parse(normalizedWriteTimestamp);
+    const writeTimestampMs = Number.isFinite(parsedWriteTimestamp) ? Math.floor(parsedWriteTimestamp) : Date.now();
+
+    if (updatedAtMode === "bigint") {
+      const result = await queryClient(
+        `
+          INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+          VALUES ($1, $2::jsonb, $3::bigint)
+          ON CONFLICT (id)
+          DO UPDATE SET records = EXCLUDED.records, updated_at = EXCLUDED.updated_at
+          RETURNING updated_at
+        `,
+        [STATE_ROW_ID, JSON.stringify(records), writeTimestampMs],
+      );
+      return normalizeUpdatedAtForApi(result.rows[0]?.updated_at) || normalizedWriteTimestamp;
+    }
+
+    const result = await queryClient(
+      `
+        INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+        VALUES ($1, $2::jsonb, $3::timestamptz)
+        ON CONFLICT (id)
+        DO UPDATE SET records = EXCLUDED.records, updated_at = EXCLUDED.updated_at
+        RETURNING updated_at
+      `,
+      [STATE_ROW_ID, JSON.stringify(records), normalizedWriteTimestamp],
+    );
+    return normalizeUpdatedAtForApi(result.rows[0]?.updated_at) || normalizedWriteTimestamp;
+  }
+
   function normalizeRecordFromV2Row(rawValue) {
     if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
       return null;
@@ -115,7 +233,7 @@ function createRecordsRepo(dependencies = {}) {
     const row = result.rows[0];
     return {
       records: Array.isArray(row.records) ? row.records : [],
-      updatedAt: row.updated_at || null,
+      updatedAt: normalizeUpdatedAtForApi(row.updated_at),
     };
   }
 
@@ -154,7 +272,7 @@ function createRecordsRepo(dependencies = {}) {
   async function getStoredRecordsHeadRevision() {
     await ensureDatabaseReady();
     const revisionResult = await query(`SELECT updated_at FROM ${STATE_TABLE} WHERE id = $1`, [STATE_ROW_ID]);
-    return revisionResult.rows[0]?.updated_at || null;
+    return normalizeUpdatedAtForApi(revisionResult.rows[0]?.updated_at);
   }
 
   function normalizeV2RowForDualReadCompare(rawRow) {
@@ -453,6 +571,23 @@ function createRecordsRepo(dependencies = {}) {
 
   async function upsertLegacyStateRevisionPointer(queryClient, updatedAt) {
     const writeTimestamp = normalizeSourceStateUpdatedAtForV2(updatedAt) || new Date().toISOString();
+    const updatedAtMode = await resolveLegacyStateUpdatedAtMode(queryClient);
+    const parsedWriteTimestamp = Date.parse(writeTimestamp);
+    const writeTimestampMs = Number.isFinite(parsedWriteTimestamp) ? Math.floor(parsedWriteTimestamp) : Date.now();
+
+    if (updatedAtMode === "bigint") {
+      await queryClient(
+        `
+          INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+          VALUES ($1, '[]'::jsonb, $2::bigint)
+          ON CONFLICT (id)
+          DO UPDATE SET updated_at = EXCLUDED.updated_at
+        `,
+        [STATE_ROW_ID, writeTimestampMs],
+      );
+      return new Date(writeTimestampMs).toISOString();
+    }
+
     await queryClient(
       `
         INSERT INTO ${STATE_TABLE} (id, records, updated_at)
@@ -467,18 +602,9 @@ function createRecordsRepo(dependencies = {}) {
 
   async function mirrorLegacyStateRecordsBestEffort(queryClient, records, updatedAt, options = {}) {
     const mode = sanitizeTextValue(options.mode, 32) || "unknown";
-    const writeTimestamp = normalizeSourceStateUpdatedAtForV2(updatedAt) || new Date().toISOString();
     await queryClient("SAVEPOINT legacy_mirror_write", []);
     try {
-      await queryClient(
-        `
-          INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-          VALUES ($1, $2::jsonb, $3::timestamptz)
-          ON CONFLICT (id)
-          DO UPDATE SET records = EXCLUDED.records, updated_at = EXCLUDED.updated_at
-        `,
-        [STATE_ROW_ID, JSON.stringify(records), writeTimestamp],
-      );
+      await upsertLegacyStateRecords(queryClient, records, updatedAt);
       await queryClient("RELEASE SAVEPOINT legacy_mirror_write", []);
       return {
         mirrored: true,
@@ -498,6 +624,25 @@ function createRecordsRepo(dependencies = {}) {
 
   async function prependSingleRecordToLegacyState(queryClient, record, options = {}) {
     const writeTimestamp = normalizeSourceStateUpdatedAtForV2(options.writeTimestamp) || new Date().toISOString();
+    const updatedAtMode = await resolveLegacyStateUpdatedAtMode(queryClient);
+    const parsedWriteTimestamp = Date.parse(writeTimestamp);
+    const writeTimestampMs = Number.isFinite(parsedWriteTimestamp) ? Math.floor(parsedWriteTimestamp) : Date.now();
+
+    if (updatedAtMode === "bigint") {
+      await queryClient(
+        `
+          INSERT INTO ${STATE_TABLE} (id, records, updated_at)
+          VALUES ($1, jsonb_build_array($2::jsonb), $3::bigint)
+          ON CONFLICT (id)
+          DO UPDATE SET
+            records = jsonb_build_array($2::jsonb) || ${STATE_TABLE}.records,
+            updated_at = EXCLUDED.updated_at
+        `,
+        [STATE_ROW_ID, JSON.stringify(record), writeTimestampMs],
+      );
+      return;
+    }
+
     await queryClient(
       `
         INSERT INTO ${STATE_TABLE} (id, records, updated_at)
@@ -604,7 +749,7 @@ function createRecordsRepo(dependencies = {}) {
           409,
           "records_conflict",
         );
-        conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
+        conflictError.currentUpdatedAt = normalizeUpdatedAtForApi(currentUpdatedAt);
         throw conflictError;
       }
 
@@ -656,14 +801,14 @@ function createRecordsRepo(dependencies = {}) {
           409,
           "records_conflict",
         );
-        conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
+        conflictError.currentUpdatedAt = normalizeUpdatedAtForApi(currentUpdatedAt);
         throw conflictError;
       }
 
       const normalizedOperations = Array.isArray(operations) ? operations : [];
       if (!normalizedOperations.length) {
         return {
-          updatedAt: currentUpdatedAt,
+          updatedAt: normalizeUpdatedAtForApi(currentUpdatedAt),
         };
       }
 
@@ -742,27 +887,14 @@ function createRecordsRepo(dependencies = {}) {
           409,
           "records_conflict",
         );
-        conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
+        conflictError.currentUpdatedAt = normalizeUpdatedAtForApi(currentUpdatedAt);
         throw conflictError;
       }
-
-      const result = await txQuery(
-        `
-          INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-          VALUES ($1, $2::jsonb, NOW())
-          ON CONFLICT (id)
-          DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
-          RETURNING updated_at
-        `,
-        [STATE_ROW_ID, JSON.stringify(records)],
-      );
-
-      const updatedAt = result.rows[0]?.updated_at || null;
+      const updatedAt = await upsertLegacyStateRecords(txQuery, records, new Date().toISOString());
       await applyRecordsDualWriteV2(txQuery, records, {
         mode: "put",
         sourceStateUpdatedAt: updatedAt,
       });
-
       return updatedAt;
     });
   }
@@ -809,7 +941,7 @@ function createRecordsRepo(dependencies = {}) {
           409,
           "records_conflict",
         );
-        conflictError.currentUpdatedAt = currentUpdatedAt ? new Date(currentUpdatedAt).toISOString() : null;
+        conflictError.currentUpdatedAt = normalizeUpdatedAtForApi(currentUpdatedAt);
         throw conflictError;
       }
 
@@ -818,24 +950,12 @@ function createRecordsRepo(dependencies = {}) {
 
       if (!normalizedOperations.length) {
         return {
-          updatedAt: currentUpdatedAt,
+          updatedAt: normalizeUpdatedAtForApi(currentUpdatedAt),
         };
       }
 
       const nextRecords = applyRecordsPatchOperations(currentRecords, normalizedOperations);
-
-      const result = await txQuery(
-        `
-          INSERT INTO ${STATE_TABLE} (id, records, updated_at)
-          VALUES ($1, $2::jsonb, NOW())
-          ON CONFLICT (id)
-          DO UPDATE SET records = EXCLUDED.records, updated_at = NOW()
-          RETURNING updated_at
-        `,
-        [STATE_ROW_ID, JSON.stringify(nextRecords)],
-      );
-
-      const updatedAt = result.rows[0]?.updated_at || null;
+      const updatedAt = await upsertLegacyStateRecords(txQuery, nextRecords, new Date().toISOString());
       await applyRecordsDualWriteV2(txQuery, nextRecords, {
         mode: "patch",
         sourceStateUpdatedAt: updatedAt,

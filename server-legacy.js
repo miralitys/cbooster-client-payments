@@ -15783,6 +15783,51 @@ async function resolveGhlManagerName(managerId, usersIndex, managerNameCache) {
   return managerName;
 }
 
+function buildPhoneLookupSearchName(rawClientName) {
+  const normalizedClientName = sanitizeTextValue(rawClientName, 300);
+  if (!normalizedClientName) {
+    return "";
+  }
+
+  const compactClientName = sanitizeTextValue(
+    normalizedClientName
+      .replace(/[^\p{L}\p{N}\s,'-]+/gu, " ")
+      .replace(/\s+/g, " "),
+    300,
+  );
+  if (!compactClientName) {
+    return normalizedClientName;
+  }
+
+  if (/^unnamed client$/i.test(compactClientName)) {
+    return compactClientName;
+  }
+
+  const commaParts = compactClientName
+    .split(",")
+    .map((entry) => sanitizeTextValue(entry, 120))
+    .filter(Boolean);
+
+  if (commaParts.length >= 2) {
+    const lastName = sanitizeTextValue(commaParts[0].split(/\s+/)[0], 80);
+    const firstName = sanitizeTextValue(commaParts[1].split(/\s+/)[0], 80);
+    if (firstName && lastName) {
+      return `${lastName} ${firstName}`;
+    }
+  }
+
+  const tokens = compactClientName.split(/\s+/).filter(Boolean);
+  if (tokens.length >= 2) {
+    const firstName = sanitizeTextValue(tokens[0], 80);
+    const lastName = sanitizeTextValue(tokens[tokens.length - 1], 80);
+    if (firstName && lastName) {
+      return `${lastName} ${firstName}`;
+    }
+  }
+
+  return compactClientName;
+}
+
 async function searchGhlContactsByClientName(clientName, options = {}) {
   const normalizedClientName = sanitizeTextValue(clientName, 300);
   if (!normalizedClientName) {
@@ -16009,10 +16054,11 @@ async function findGhlClientPhoneByClientName(clientName) {
     maxRetries: Math.max(4, GHL_HTTP_MAX_RETRIES),
     timeoutMs: Math.max(25000, GHL_REQUEST_TIMEOUT_MS),
   };
+  const phoneLookupSearchName = buildPhoneLookupSearchName(normalizedClientName) || normalizedClientName;
 
   let contacts = [];
   try {
-    contacts = await searchGhlContactsByClientName(normalizedClientName, requestOverrides);
+    contacts = await searchGhlContactsByClientName(phoneLookupSearchName, requestOverrides);
   } catch (error) {
     if (isGhlRateLimitError(error)) {
       throw createHttpError(
