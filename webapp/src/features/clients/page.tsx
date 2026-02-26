@@ -8,7 +8,6 @@ import {
   getRecordStatusFlags,
   normalizeFormRecord,
   normalizeRecords,
-  parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { patchRecords, getClientManagers, getRecords, getSession, postGhlClientPhoneRefresh } from "@/shared/api";
@@ -891,32 +890,6 @@ export default function ClientsPage() {
   );
 }
 
-function normalizeSearchTerm(value: unknown): string {
-  return (value || "").toString().trim().toLowerCase();
-}
-
-function normalizeDigits(value: unknown): string {
-  return (value || "").toString().replace(/\D/g, "");
-}
-
-function matchesClientsSearchQuery(record: ClientRecord, query: string, queryDigits: string): boolean {
-  const searchableFields = [
-    record.clientName,
-    record.clientEmailAddress,
-    record.clientPhoneNumber,
-    record.ssn,
-  ];
-
-  if (searchableFields.some((value) => normalizeSearchTerm(value).includes(query))) {
-    return true;
-  }
-
-  if (!queryDigits) {
-    return false;
-  }
-
-  return [record.clientPhoneNumber, record.ssn].some((value) => normalizeDigits(value).includes(queryDigits));
-}
 
 function resolveCreatedAtTimestamp(record: ClientRecord): number {
   const parsed = Date.parse(record.createdAt || "");
@@ -1103,44 +1076,6 @@ function resolveCachedScoreTone(rawValue: string, displayScore: number | null): 
   return "danger";
 }
 
-function matchesStatusFilter(
-  record: ClientRecord,
-  statusFilter: ClientsStatusFilter,
-  isContractSigned: boolean,
-  isContractCompleted: boolean,
-): boolean {
-  if (statusFilter === "all") {
-    return true;
-  }
-
-  if (statusFilter === "inactive") {
-    return isContractCompleted;
-  }
-
-  if (statusFilter === "new") {
-    return !isContractSigned && !isContractCompleted;
-  }
-
-  if (!isContractSigned || isContractCompleted) {
-    return false;
-  }
-
-  const status = getRecordStatusFlags(record);
-  if (statusFilter === "written-off") {
-    return status.isWrittenOff;
-  }
-  if (statusFilter === "fully-paid") {
-    return status.isFullyPaid;
-  }
-  if (statusFilter === "overdue") {
-    return status.isOverdue;
-  }
-  if (statusFilter === "after-result") {
-    return status.isAfterResult;
-  }
-
-  return !status.isAfterResult && !status.isWrittenOff && !status.isFullyPaid && !status.isOverdue;
-}
 
 function resolvePrimaryStatusBadge(record: ClientRecord): {
   label: string;
