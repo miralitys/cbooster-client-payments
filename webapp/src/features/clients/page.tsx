@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
-import { getClientManagers, postGhlClientPhoneRefresh, startClientManagersRefreshBackgroundJob } from "@/shared/api";
+import { getClientManagers, postGhlClientPhoneRefresh } from "@/shared/api";
 import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import {
   formatDate,
@@ -74,8 +74,6 @@ const buildPaymentColumns = (from: number, to: number): Array<keyof ClientRecord
   }
   return columns;
 };
-const EXTENDED_PAYMENT_COLUMNS = buildPaymentColumns(8, 36);
-const EXTENDED_PAYMENT_COLUMN_SET = new Set(EXTENDED_PAYMENT_COLUMNS);
 const MANAGER_FILTER_ALL = "__all__";
 const NO_MANAGER_LABEL = "No manager";
 const TEXT_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
@@ -175,22 +173,17 @@ export default function ClientsPage() {
   const [managersRefreshMode, setManagersRefreshMode] = useState<ClientManagersRefreshMode>("none");
   const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
   const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
-  const [showAllPayments, setShowAllPayments] = useState(false);
   const [clientManagersState, setClientManagersState] = useState<ClientManagersState>({
     byClientName: new Map(),
     total: 0,
     refreshed: 0,
   });
-  const canSyncClientManagers = Boolean(session?.permissions?.sync_client_managers);
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
 
   const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
-    () =>
-      showAllPayments
-        ? TABLE_COLUMNS
-        : TABLE_COLUMNS.filter((column) => !EXTENDED_PAYMENT_COLUMN_SET.has(column)),
-    [showAllPayments],
+    () => TABLE_COLUMNS.filter((column) => column === "clientName" || !/^payment(?:[8-9]|[12]\d|3[0-6])(?:Date)?$/.test(String(column))),
+    [],
   );
   const tableColumnKeys = useMemo<Array<keyof ClientRecord | "score" | "clientManager">>(
     () => ["clientName", "clientManager", "score", ...visibleTableColumns.filter((column) => column !== "clientName")],
@@ -346,38 +339,6 @@ export default function ClientsPage() {
     },
     [],
   );
-
-  const startBackgroundClientManagersRefresh = useCallback(async () => {
-    setIsManagersLoading(true);
-    setManagersError("");
-    setManagersRefreshMode("full");
-
-    try {
-      const payload = await startClientManagersRefreshBackgroundJob();
-      const totalClientsRaw = Number(payload?.job?.totalClients);
-      const totalClients = Number.isFinite(totalClientsRaw) && totalClientsRaw > 0 ? totalClientsRaw : null;
-      const detail = totalClients === null ? "" : ` for ${totalClients} clients`;
-      const message =
-        payload?.reused === true
-          ? "Total refresh is already running in background. You will receive a notification when it finishes."
-          : `Total refresh started in background${detail}. You will receive a notification when it finishes.`;
-
-      showToast({
-        type: "success",
-        message,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to start background Client Manager refresh.";
-      setManagersError(message);
-      showToast({
-        type: "error",
-        message,
-      });
-    } finally {
-      setIsManagersLoading(false);
-      setManagersRefreshMode("none");
-    }
-  }, []);
 
   const refreshSingleClientManager = useCallback(
     async (clientName: string) => {
@@ -915,39 +876,11 @@ export default function ClientsPage() {
           title="Records"
           actions={
             <div className="table-panel__actions">
-              <Button variant="secondary" size="sm" onClick={() => void forceRefresh()} isLoading={isLoading}>
-                Refresh
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setShowAllPayments((prev) => !prev)}
-              >
-                {showAllPayments ? "Hide Extra Payments" : "Show All Payments"}
-              </Button>
               <Button variant="secondary" size="sm" onClick={() => exportRecordsToXls(filteredRecords)}>
-                Export XLS
+                Export Excel
               </Button>
               <Button variant="secondary" size="sm" onClick={() => exportRecordsToPdf(filteredRecords)}>
                 Export PDF
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void loadClientManagers("incremental")}
-                disabled={isManagersLoading || !canSyncClientManagers}
-                isLoading={isManagersLoading && managersRefreshMode === "incremental"}
-              >
-                Refresh Manager
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void startBackgroundClientManagersRefresh()}
-                disabled={isManagersLoading || !canSyncClientManagers}
-                isLoading={isManagersLoading && managersRefreshMode === "full"}
-              >
-                Total Refresh Manager
               </Button>
             </div>
           }
