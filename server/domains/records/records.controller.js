@@ -223,6 +223,8 @@ function resolveClientFiltersFromQuery(query) {
     writtenOffTo: sanitizeFilterValue(query?.writtenOffTo, 24),
     fullyPaidFrom: sanitizeFilterValue(query?.fullyPaidFrom, 24),
     fullyPaidTo: sanitizeFilterValue(query?.fullyPaidTo, 24),
+    activeOnly: parseBooleanFilterValue(query?.activeOnly),
+    excludeWrittenOff: parseBooleanFilterValue(query?.excludeWrittenOff),
   };
 }
 
@@ -238,4 +240,21 @@ function sanitizeFilterValue(rawValue, maxLen) {
     return value;
   }
   return value.slice(0, maxLen);
+}
+
+function parseBooleanFilterValue(rawValue) {
+  if (rawValue === null || rawValue === undefined) {
+    return null;
+  }
+  const value = String(rawValue).trim().toLowerCase();
+  if (!value) {
+    return null;
+  }
+  if (value === "1" || value === "true" || value === "yes" || value === "on") {
+    return true;
+  }
+  if (value === "0" || value === "false" || value === "no" || value === "off") {
+    return false;
+  }
+  return null;
 }

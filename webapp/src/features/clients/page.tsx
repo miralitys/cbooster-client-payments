@@ -47,7 +47,6 @@ interface ScoredClientRecord {
   record: ClientRecord;
   score: ClientScoreResult;
   clientManager: string;
-  clientManagerNames: string[];
   isActive: boolean;
   isWrittenOff: boolean;
 }
@@ -158,6 +157,8 @@ export default function ClientsPage() {
       closedBy: currentFilters.closedBy || undefined,
       clientManager: managerFilter !== MANAGER_FILTER_ALL ? managerFilter : undefined,
       status: currentFilters.status !== "all" ? currentFilters.status : undefined,
+      activeOnly: isActiveOnly ? "1" : undefined,
+      excludeWrittenOff: currentFilters.status === "written-off" ? undefined : "1",
       overdueRange: currentFilters.overdueRange || undefined,
       createdFrom: currentFilters.createdAtRange.from || undefined,
       createdTo: currentFilters.createdAtRange.to || undefined,
@@ -168,7 +169,7 @@ export default function ClientsPage() {
       fullyPaidFrom: currentFilters.fullyPaidDateRange.from || undefined,
       fullyPaidTo: currentFilters.fullyPaidDateRange.to || undefined,
     }),
-    [managerFilter],
+    [isActiveOnly, managerFilter],
   );
 
   const {
@@ -353,18 +354,23 @@ export default function ClientsPage() {
           record,
           score: scoreByRecordId.get(record.id) || evaluateClientScore(record),
           clientManager: clientManagerNames.join(", "),
-          clientManagerNames,
           isActive: status.isActive,
           isWrittenOff: status.isWrittenOff,
         };
       })
-      .filter((item) => (filters.status === "written-off" ? item.isWrittenOff : !item.isWrittenOff))
-      .filter((item) => !isActiveOnly || item.isActive)
-      .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter))
-      .filter((item) => matchesClientManagerFilter(item.clientManagerNames, managerFilter));
-  }, [filters.status, isActiveOnly, managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
+      .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter));
+  }, [scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
+  const filteredCount = useMemo(() => {
+    if (scoreFilter !== "all") {
+      return filteredRecords.length;
+    }
+    if (typeof totalRecordsCount === "number" && totalRecordsCount >= 0) {
+      return totalRecordsCount;
+    }
+    return filteredRecords.length;
+  }, [filteredRecords.length, scoreFilter, totalRecordsCount]);
   const summedColumnValues = useMemo(() => {
     const totals = new Map<keyof ClientRecord, number | null>();
     const runningTotals = new Map<keyof ClientRecord, number>();
@@ -497,12 +503,12 @@ export default function ClientsPage() {
 
     return {
       totalCount: totalRecordsCount && totalRecordsCount > 0 ? totalRecordsCount : records.length,
-      filteredCount: filteredRecords.length,
+      filteredCount,
       writtenOffCount,
       fullyPaidCount,
       overdueCount,
     };
-  }, [filteredRecords, records.length, totalRecordsCount]);
+  }, [filteredCount, filteredRecords, records.length, totalRecordsCount]);
 
   const tableColumns = useMemo<TableColumn<ScoredClientRecord>[]>(() => {
     return tableColumnKeys.map((column) => {
@@ -980,7 +986,7 @@ export default function ClientsPage() {
                     }
 
                     if (column === "closedBy") {
-                      return <td key={column}>{`${filteredRecords.length} clients`}</td>;
+                      return <td key={column}>{`${filteredCount} clients`}</td>;
                     }
 
                     if (SUMMABLE_TABLE_COLUMNS.has(column)) {
@@ -1181,19 +1187,6 @@ function splitClientManagerLabel(rawLabel: string): string[] {
   }
 
   return [...new Set(names)];
-}
-
-function matchesClientManagerFilter(managerNames: string[], selectedManager: string): boolean {
-  if (!selectedManager || selectedManager === MANAGER_FILTER_ALL) {
-    return true;
-  }
-
-  const selectedComparable = normalizeComparableClientName(selectedManager);
-  if (!selectedComparable) {
-    return true;
-  }
-
-  return managerNames.some((name) => normalizeComparableClientName(name) === selectedComparable);
 }
 
 function normalizeComparableClientName(rawValue: string): string {

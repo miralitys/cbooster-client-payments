@@ -266,6 +266,14 @@ function applyClientApiFilters(records, rawFilters) {
       continue;
     }
 
+    if (filters.activeOnly && !isActiveEnabled(record?.active)) {
+      continue;
+    }
+
+    if (filters.excludeWrittenOff && isTruthy(record?.writtenOff)) {
+      continue;
+    }
+
     if (!isDateWithinRange(record?.payment1Date, filters.createdFromTs, filters.createdToTs)) {
       continue;
     }
@@ -333,6 +341,8 @@ function normalizeClientApiFilters(rawFilters) {
     hasWrittenOffRange,
     hasFullyPaidRange,
     requiresStatus: hasWrittenOffRange || hasFullyPaidRange || status !== STATUS_FILTER_ALL,
+    activeOnly: filters.activeOnly === true,
+    excludeWrittenOff: filters.excludeWrittenOff === true,
   };
 }
 
@@ -350,7 +360,9 @@ function hasClientApiFilters(filters) {
       filters.writtenOffFromTs !== null ||
       filters.writtenOffToTs !== null ||
       filters.fullyPaidFromTs !== null ||
-      filters.fullyPaidToTs !== null,
+      filters.fullyPaidToTs !== null ||
+      filters.activeOnly ||
+      filters.excludeWrittenOff,
   );
 }
 
@@ -526,6 +538,11 @@ function getRecordStatusFlags(record) {
 function isTruthy(rawValue) {
   const value = String(rawValue || "").trim().toLowerCase();
   return value === "yes" || value === "true" || value === "1" || value === "on" || value === "completed";
+}
+
+function isActiveEnabled(rawValue) {
+  const value = String(rawValue || "").trim().toLowerCase();
+  return value === "yes" || value === "true" || value === "1" || value === "on" || value === "active";
 }
 
 function computeFuturePaymentsAmount(record) {
