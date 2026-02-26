@@ -74,7 +74,7 @@ interface ManagerFilterOptions {
 }
 
 interface SalesFilterOptions {
-  sales: string[];
+  sales: Array<{ key: string; label: string }>;
   hasUnassigned: boolean;
 }
 
@@ -174,7 +174,9 @@ export default function ClientsPage() {
     }
 
     return {
-      sales: [...uniqueByComparable.values()].sort((left, right) => TEXT_SORTER.compare(left, right)),
+      sales: [...uniqueByComparable.entries()]
+        .map(([key, label]) => ({ key, label }))
+        .sort((left, right) => TEXT_SORTER.compare(left.label, right.label)),
       hasUnassigned,
     };
   }, [records]);
@@ -218,10 +220,7 @@ export default function ClientsPage() {
       return;
     }
 
-    const selectedSalesComparable = normalizeComparableClientName(salesFilter);
-    const hasMatchingSalesOption = salesFilterOptions.sales.some(
-      (salesName) => normalizeComparableClientName(salesName) === selectedSalesComparable,
-    );
+    const hasMatchingSalesOption = salesFilterOptions.sales.some((salesOption) => salesOption.key === salesFilter);
     if (hasMatchingSalesOption) {
       return;
     }
@@ -281,15 +280,13 @@ export default function ClientsPage() {
       }
 
       if (salesFilter !== SALES_FILTER_ALL) {
-        const salesName = (record.closedBy || "").trim();
+        const salesComparable = normalizeComparableClientName((record.closedBy || "").trim());
         if (salesFilter === SALES_FILTER_UNASSIGNED) {
-          if (salesName) {
+          if (salesComparable) {
             return false;
           }
         } else {
-          const selectedSalesComparable = normalizeComparableClientName(salesFilter);
-          const salesComparable = normalizeComparableClientName(salesName);
-          if (!selectedSalesComparable || salesComparable !== selectedSalesComparable) {
+          if (!salesComparable || salesComparable !== salesFilter) {
             return false;
           }
         }
@@ -878,9 +875,9 @@ export default function ClientsPage() {
                 >
                   <option value={SALES_FILTER_ALL}>All Sales</option>
                   {salesFilterOptions.hasUnassigned ? <option value={SALES_FILTER_UNASSIGNED}>Unassigned</option> : null}
-                  {salesFilterOptions.sales.map((salesName) => (
-                    <option key={salesName} value={salesName}>
-                      {salesName}
+                  {salesFilterOptions.sales.map((salesOption) => (
+                    <option key={salesOption.key} value={salesOption.key}>
+                      {salesOption.label}
                     </option>
                   ))}
                 </Select>
