@@ -3,14 +3,14 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { AssistantWidget } from "@/features/assistant/AssistantWidget";
 import { getSession } from "@/shared/api/session";
-import { isOwnerOrAdminSession } from "@/shared/lib/access";
+import { canViewClientMatchSession, isOwnerOrAdminSession } from "@/shared/lib/access";
 import { ModalStackProvider, NotificationCenter, ToastHost } from "@/shared/ui";
 
 interface NavigationItem {
   to: string;
   label: string;
   external?: boolean;
-  ownerAdminOnly?: boolean;
+  visibility?: "owner-admin" | "owner-admin-or-accounting";
 }
 
 const NAV_ITEMS: NavigationItem[] = [
@@ -18,11 +18,11 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/custom-dashboard", label: "Custom Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
   { to: "/clients", label: "Clients" },
-  { to: "/client-match", label: "Client Match", ownerAdminOnly: true },
+  { to: "/client-match", label: "Client Match", visibility: "owner-admin-or-accounting" },
   { to: "/payment-probability", label: "Client Payment Probability" },
   { to: "/identityiq-score", label: "IdentityIQ Scores" },
   { to: "/ghl-contracts", label: "GHL Contract Text" },
-  { to: "/quickbooks", label: "QuickBooks", ownerAdminOnly: true },
+  { to: "/quickbooks", label: "QuickBooks", visibility: "owner-admin" },
   { to: "/leads", label: "Leads" },
   { to: "/access-control", label: "Access Control" },
 ];
@@ -77,7 +77,8 @@ function resolvePageTitle(pathname: string): string {
 export function Layout() {
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [canViewQuickBooks, setCanViewQuickBooks] = useState(false);
+  const [canViewOwnerAdminOnly, setCanViewOwnerAdminOnly] = useState(false);
+  const [canViewClientMatch, setCanViewClientMatch] = useState(false);
   const [canViewNotifications, setCanViewNotifications] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const pageTitle = resolvePageTitle(location.pathname);
@@ -117,14 +118,16 @@ export function Layout() {
           return;
         }
         const ownerOrAdmin = isOwnerOrAdminSession(payload);
-        setCanViewQuickBooks(ownerOrAdmin);
+        setCanViewOwnerAdminOnly(ownerOrAdmin);
+        setCanViewClientMatch(canViewClientMatchSession(payload));
         setCanViewNotifications(Boolean(payload?.permissions?.view_client_payments));
       })
       .catch(() => {
         if (!active) {
           return;
         }
-        setCanViewQuickBooks(false);
+        setCanViewOwnerAdminOnly(false);
+        setCanViewClientMatch(false);
         setCanViewNotifications(false);
       });
 
@@ -162,7 +165,15 @@ export function Layout() {
                 </button>
 
                 <div id="app-account-menu-panel" className="account-menu__panel" role="menu" hidden={!menuOpen}>
-                  {NAV_ITEMS.filter((item) => !item.ownerAdminOnly || canViewQuickBooks).map((item) => {
+                  {NAV_ITEMS.filter((item) => {
+                    if (item.visibility === "owner-admin") {
+                      return canViewOwnerAdminOnly;
+                    }
+                    if (item.visibility === "owner-admin-or-accounting") {
+                      return canViewClientMatch;
+                    }
+                    return true;
+                  }).map((item) => {
                     if (item.external) {
                       return (
                         <a

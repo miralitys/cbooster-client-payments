@@ -2973,6 +2973,28 @@ a {
   min-width: 220px;
 }
 
+.client-match-client-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.client-match-client-name input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.client-match-client-name.is-confirmed {
+  color: #11622d;
+}
+
+.client-match-client-name.is-confirmed input[type="checkbox"] {
+  cursor: default;
+}
+
 .client-match-cell {
   display: inline-block;
   min-width: 100%;
@@ -2985,6 +3007,96 @@ a {
   border-radius: 6px;
   padding: 2px 6px;
   font-weight: 700;
+}
+
+.client-match-cell-button {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  text-align: inherit;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.client-match-cell-button:hover {
+  background: #f2f6fb;
+}
+
+.client-match-cell-button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.client-match-cell-button--matched {
+  background: #eaf8ee;
+  color: #11622d;
+  border-color: #b7e3c3;
+  font-weight: 700;
+}
+
+.client-match-edit-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.client-match-edit-input {
+  min-width: 116px;
+}
+
+.client-match-edit-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.client-match-edit-action {
+  appearance: none;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  min-width: 26px;
+  height: 26px;
+  padding: 0;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.client-match-edit-action:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.client-match-edit-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.client-match-edit-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.client-match-edit-action--confirm {
+  border-color: #9fd7ad;
+  color: #11622d;
+}
+
+.client-match-edit-action--cancel {
+  border-color: #efb6b6;
+  color: #9f2222;
+}
+
+.client-match-edit-error {
+  margin: 0;
+  color: #9f2222;
+  font-size: var(--font-size-xxs);
+  text-align: left;
 }
 
 .assistant-widget {

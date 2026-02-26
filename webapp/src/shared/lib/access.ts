@@ -18,6 +18,15 @@ export function isClientServiceDepartmentHeadSession(session: Session | null | u
   return roleId === "department_head" && departmentId === "client_service";
 }
 
+export function isAccountingDepartmentSession(session: Session | null | undefined): boolean {
+  const departmentId = normalizeSessionIdentity(session?.user?.departmentId);
+  return departmentId === "accounting";
+}
+
+export function canViewClientMatchSession(session: Session | null | undefined): boolean {
+  return isOwnerOrAdminSession(session) || isAccountingDepartmentSession(session);
+}
+
 export function canRefreshClientManagerFromGhlSession(session: Session | null | undefined): boolean {
   return isOwnerOrAdminSession(session) || isClientServiceDepartmentHeadSession(session);
 }

@@ -47,6 +47,9 @@ function registerQuickBooksRoutes(context) {
   const requireQuickBooksAccess = typeof requireOwnerOrAdminAccess === "function"
     ? requireOwnerOrAdminAccess("Owner or admin access is required.")
     : requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS);
+  const requireQuickBooksViewAccess = permissionKeys.WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS
+    ? requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS)
+    : requireQuickBooksAccess;
   const requireDashboardAccess = permissionKeys.WEB_AUTH_PERMISSION_VIEW_DASHBOARD
     ? requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_DASHBOARD)
     : requireQuickBooksAccess;
@@ -56,7 +59,7 @@ function registerQuickBooksRoutes(context) {
       requireDashboardAccess(req, res, next);
       return;
     }
-    requireQuickBooksAccess(req, res, next);
+    requireQuickBooksViewAccess(req, res, next);
   }
 
   app.all("/api/quickbooks/*", handlers.handleQuickbooksReadonlyGuard);

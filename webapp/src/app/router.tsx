@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { Layout } from "@/app/Layout";
 import { OwnerAdminRoute } from "@/app/OwnerAdminRoute";
+import { OwnerAdminOrAccountingRoute } from "@/app/OwnerAdminOrAccountingRoute";
 import AccessControlPage from "@/features/access-control/page";
 import ClientsPage from "@/features/clients/page";
 import ClientMatchPage from "@/features/client-match/page";
@@ -30,9 +31,9 @@ export function AppRouter() {
         <Route
           path="client-match"
           element={(
-            <OwnerAdminRoute>
+            <OwnerAdminOrAccountingRoute>
               <ClientMatchPage />
-            </OwnerAdminRoute>
+            </OwnerAdminOrAccountingRoute>
           )}
         />
         <Route
