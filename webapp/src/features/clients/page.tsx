@@ -242,7 +242,11 @@ export default function ClientsPage() {
       return;
     }
 
-    if (managerFilterOptions.managers.includes(clientManagerFilter)) {
+    const selectedManagerComparable = normalizeComparableClientName(clientManagerFilter);
+    const hasMatchingManagerOption = managerFilterOptions.managers.some(
+      (managerName) => normalizeComparableClientName(managerName) === selectedManagerComparable,
+    );
+    if (hasMatchingManagerOption) {
       return;
     }
 
@@ -271,8 +275,8 @@ export default function ClientsPage() {
       const status = getRecordStatusFlags(record);
       const isContractCompleted = resolveContractCompleted(record);
       const isInactive = isContractCompleted || !status.isActive;
-
-      if (hideWrittenOffByDefault && (status.isWrittenOff || isInactive)) {
+      const shouldApplyDefaultHiddenStatuses = hideWrittenOffByDefault && statusFilter === "all";
+      if (shouldApplyDefaultHiddenStatuses && (status.isWrittenOff || isInactive)) {
         return false;
       }
 
@@ -299,33 +303,18 @@ export default function ClientsPage() {
           }
         } else {
           const managerNames = splitClientManagerLabel(clientManagerLabel);
-          if (!managerNames.includes(clientManagerFilter)) {
+          const selectedManagerComparable = normalizeComparableClientName(clientManagerFilter);
+          const hasManagerMatch = managerNames.some(
+            (managerName) => normalizeComparableClientName(managerName) === selectedManagerComparable,
+          );
+          if (!selectedManagerComparable || !hasManagerMatch) {
             return false;
           }
         }
       }
 
       if (statusFilter !== "all") {
-        const statusLabel = resolvePrimaryStatusBadge(record).label;
-        if (statusFilter === "new" && statusLabel !== "New") {
-          return false;
-        }
-        if (statusFilter === "active" && statusLabel !== "Active") {
-          return false;
-        }
-        if (statusFilter === "inactive" && statusLabel !== "Inactive") {
-          return false;
-        }
-        if (statusFilter === "overdue" && !statusLabel.startsWith("Overdue")) {
-          return false;
-        }
-        if (statusFilter === "written-off" && statusLabel !== "Written Off") {
-          return false;
-        }
-        if (statusFilter === "fully-paid" && statusLabel !== "Fully Paid") {
-          return false;
-        }
-        if (statusFilter === "after-result" && statusLabel !== "After Result") {
+        if (!matchesClientsStatusFilter(record, statusFilter)) {
           return false;
         }
       }
@@ -1274,6 +1263,46 @@ function resolvePrimaryStatusBadge(record: ClientRecord): {
     label: "Active",
     tone: "neutral",
   };
+}
+
+function matchesClientsStatusFilter(record: ClientRecord, statusFilter: ClientsStatusFilter): boolean {
+  if (statusFilter === "all") {
+    return true;
+  }
+
+  const status = getRecordStatusFlags(record);
+  const isContractCompleted = resolveContractCompleted(record);
+  const isInactive = isContractCompleted || !status.isActive;
+
+  if (statusFilter === "inactive") {
+    return isInactive;
+  }
+
+  if (statusFilter === "written-off") {
+    return status.isWrittenOff;
+  }
+
+  if (statusFilter === "fully-paid") {
+    return status.isFullyPaid;
+  }
+
+  if (statusFilter === "after-result") {
+    return status.isAfterResult;
+  }
+
+  if (statusFilter === "overdue") {
+    return status.isOverdue;
+  }
+
+  if (statusFilter === "new") {
+    return !isInactive && !resolveContractSigned(record);
+  }
+
+  if (statusFilter === "active") {
+    return !isInactive && !status.isWrittenOff && !status.isFullyPaid && !status.isAfterResult && !status.isOverdue && resolveContractSigned(record);
+  }
+
+  return true;
 }
 
 function resolveContractSigned(record: ClientRecord): boolean {
