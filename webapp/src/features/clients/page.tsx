@@ -259,86 +259,7 @@ export default function ClientsPage() {
   }, [activeRecords]);
 
   const filteredRecords = useMemo(() => {
-    const query = normalizeSearchTerm(search);
-    const queryDigits = normalizeDigits(search);
-    const selectedSalesComparable = normalizeComparableClientName(salesFilter);
-    const selectedManagerComparable = normalizeComparableClientName(clientManagerFilter);
-    const contractDateFromTimestamp = parseDateValue(contractDateFrom);
-    const contractDateToTimestamp = parseDateValue(contractDateTo);
-    const hasContractDateFilter = Boolean(contractDateFrom.trim() || contractDateTo.trim());
-
-    const scopedRecords = activeRecords.filter((record) => {
-      const managerLabel = resolveClientManagerLabel(record, clientManagersByClientName);
-      const managerNames = splitClientManagerLabel(managerLabel);
-      const contractDateTimestamp = parseDateValue(record.payment1Date);
-      const isContractSigned = resolveContractSigned(record);
-      const isContractCompleted = resolveContractCompleted(record);
-      const isInWork = resolveStartedInWork(record);
-
-      if (query && !matchesClientsSearchQuery(record, query, queryDigits)) {
-        return false;
-      }
-
-      if (salesFilter === SALES_FILTER_UNASSIGNED) {
-        if ((record.closedBy || "").trim()) {
-          return false;
-        }
-      } else if (salesFilter !== SALES_FILTER_ALL) {
-        if (normalizeComparableClientName(record.closedBy || "") !== selectedSalesComparable) {
-          return false;
-        }
-      }
-
-      if (clientManagerFilter === MANAGER_FILTER_UNASSIGNED) {
-        if (!managerNames.includes(NO_MANAGER_LABEL)) {
-          return false;
-        }
-      } else if (clientManagerFilter !== MANAGER_FILTER_ALL) {
-        if (!managerNames.some((managerName) => normalizeComparableClientName(managerName) === selectedManagerComparable)) {
-          return false;
-        }
-      }
-
-      if (hideWrittenOffByDefault && (getRecordStatusFlags(record).isWrittenOff || isContractCompleted)) {
-        return false;
-      }
-
-      if (!matchesStatusFilter(record, statusFilter, isContractSigned, isContractCompleted)) {
-        return false;
-      }
-
-      if (contractSignedFilter === "signed" && !isContractSigned) {
-        return false;
-      }
-      if (contractSignedFilter === "unsigned" && isContractSigned) {
-        return false;
-      }
-
-      if (inWorkFilter === "in-work" && !isInWork) {
-        return false;
-      }
-      if (inWorkFilter === "not-in-work" && isInWork) {
-        return false;
-      }
-
-      if (hasContractDateFilter) {
-        if (contractDateTimestamp === null) {
-          return false;
-        }
-
-        if (contractDateFromTimestamp !== null && contractDateTimestamp < contractDateFromTimestamp) {
-          return false;
-        }
-
-        if (contractDateToTimestamp !== null && contractDateTimestamp > contractDateToTimestamp) {
-          return false;
-        }
-      }
-
-      return true;
-    });
-
-    return [...scopedRecords].sort((left, right) => {
+    return [...activeRecords].sort((left, right) => {
       const nameCompare = TEXT_SORTER.compare((left.clientName || "").trim(), (right.clientName || "").trim());
       if (nameCompare !== 0) {
         return nameCompare;
@@ -346,19 +267,7 @@ export default function ClientsPage() {
 
       return resolveCreatedAtTimestamp(right) - resolveCreatedAtTimestamp(left);
     });
-  }, [
-    clientManagerFilter,
-    clientManagersByClientName,
-    contractDateFrom,
-    contractDateTo,
-    contractSignedFilter,
-    hideWrittenOffByDefault,
-    inWorkFilter,
-    activeRecords,
-    salesFilter,
-    search,
-    statusFilter,
-  ]);
+  }, [activeRecords]);
 
   const visibleFilteredRecords = useMemo(
     () => filteredRecords.slice(0, Math.max(CLIENTS_PAGE_SIZE, visibleRowsCount)),
