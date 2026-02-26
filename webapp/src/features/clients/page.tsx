@@ -43,7 +43,7 @@ const CLIENTS_PAGE_SIZE = 100;
 
 function isActiveEnabled(value: unknown): boolean {
   const normalized = String(value || "").toLowerCase().trim();
-  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
+  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on" || normalized === "active";
 }
 
 type ClientsStatusFilter = "all" | "new" | "active" | "inactive" | "overdue" | "written-off" | "fully-paid" | "after-result";

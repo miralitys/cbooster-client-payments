@@ -726,7 +726,7 @@ function isAfterResultEnabled(value: unknown): boolean {
 
 function isActiveEnabled(value: unknown): boolean {
   const normalized = sanitizeText(value).toLowerCase();
-  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
+  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on" || normalized === "active";
 }
 
 function isWrittenOffEnabled(value: unknown): boolean {

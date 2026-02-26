@@ -52,6 +52,7 @@ const PROFILE_SUMMARY_FIELD_KEYS = new Set<keyof ClientRecord>([
 ]);
 const WORKFLOW_SUMMARY_FIELD_KEYS = new Set<keyof ClientRecord>([
   "closedBy",
+  "active",
   "contractCompleted",
   "afterResult",
   "writtenOff",
@@ -639,6 +640,7 @@ export function RecordDetails({
     return paymentScheduleRows.slice(0, 1);
   }, [paymentScheduleRows]);
   const hiddenPaymentRowsCount = Math.max(0, paymentScheduleRows.length - visiblePaymentScheduleRows.length);
+  const activeClientDisplay = useMemo(() => formatActiveClientValue(record.active), [record.active]);
 
   async function handleRefreshClientManagerClick() {
     if (!canRefreshClientManagerForCurrentRecord || !onRefreshClientManager) {
@@ -802,6 +804,10 @@ export function RecordDetails({
             {hiddenPaymentRowsCount > 0 ? (
               <p className="react-user-footnote">Hidden empty payment rows: {hiddenPaymentRowsCount}</p>
             ) : null}
+            <div className="record-details-grid__item">
+              <span className="record-details-grid__label">Active Client</span>
+              <strong className="record-details-grid__value">{activeClientDisplay}</strong>
+            </div>
           </section>
 
           <section className="record-details-grid">
@@ -1143,6 +1149,14 @@ function formatMoneyCell(rawValue: string): string {
     return rawValue || "-";
   }
   return formatMoney(amount);
+}
+
+function formatActiveClientValue(rawValue: unknown): string {
+  const normalized = (rawValue || "").toString().trim().toLowerCase();
+  if (normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on" || normalized === "active") {
+    return "Active";
+  }
+  return "Inactive";
 }
 
 function buildMultilinePreview(
