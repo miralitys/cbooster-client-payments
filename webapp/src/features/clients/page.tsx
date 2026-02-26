@@ -625,13 +625,13 @@ export default function ClientsPage() {
   );
 
   const totalContractAmount = useMemo(
-    () => activeRecords.reduce((sum, record) => sum + (parseMoneyValue(record.contractTotals) || 0), 0),
-    [activeRecords],
+    () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.contractTotals) || 0), 0),
+    [filteredRecords],
   );
 
   const totalBalanceAmount = useMemo(
-    () => activeRecords.reduce((sum, record) => sum + (parseMoneyValue(record.futurePayments) || 0), 0),
-    [activeRecords],
+    () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.futurePayments) || 0), 0),
+    [filteredRecords],
   );
 
   const hasActiveStructuredFilters = useMemo(() => {
@@ -768,6 +768,10 @@ export default function ClientsPage() {
             <span className="stat-chip">
               <span className="stat-chip__label">Clients:</span>
               <span className="stat-chip__value">{activeRecords.length}</span>
+            </span>
+            <span className="stat-chip">
+              <span className="stat-chip__label">Filtered:</span>
+              <span className="stat-chip__value">{filteredRecords.length}</span>
             </span>
             <span className="stat-chip">
               <span className="stat-chip__label">Contract Total:</span>
