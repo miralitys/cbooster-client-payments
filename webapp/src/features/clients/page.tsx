@@ -8,6 +8,7 @@ import {
   getRecordStatusFlags,
   normalizeFormRecord,
   normalizeRecords,
+  parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { patchRecords, getClientManagers, getRecords, getSession, postGhlClientPhoneRefresh } from "@/shared/api";
@@ -258,7 +259,133 @@ export default function ClientsPage() {
   }, [activeRecords]);
 
   const filteredRecords = useMemo(() => {
-    return [...activeRecords].sort((left, right) => {
+    const normalizedSearch = search.trim().toLowerCase();
+    const contractDateFromTimestamp = contractDateFrom ? parseDateValue(contractDateFrom) : null;
+    const contractDateToTimestamp = contractDateTo ? parseDateValue(contractDateTo) : null;
+
+    const scopedRecords = records.filter((record) => {
+      const status = getRecordStatusFlags(record);
+      const isContractCompleted = resolveContractCompleted(record);
+      const isInactive = isContractCompleted || !status.isActive;
+
+      if (hideWrittenOffByDefault && (status.isWrittenOff || isInactive)) {
+        return false;
+      }
+
+      if (salesFilter !== SALES_FILTER_ALL) {
+        const salesName = (record.closedBy || "").trim();
+        if (salesFilter === SALES_FILTER_UNASSIGNED) {
+          if (salesName) {
+            return false;
+          }
+        } else if (salesName !== salesFilter) {
+          return false;
+        }
+      }
+
+      const clientManagerLabel = resolveClientManagerLabel(record, clientManagersByClientName);
+      if (clientManagerFilter !== MANAGER_FILTER_ALL) {
+        if (clientManagerFilter === MANAGER_FILTER_UNASSIGNED) {
+          if (clientManagerLabel !== NO_MANAGER_LABEL) {
+            return false;
+          }
+        } else {
+          const managerNames = splitClientManagerLabel(clientManagerLabel);
+          if (!managerNames.includes(clientManagerFilter)) {
+            return false;
+          }
+        }
+      }
+
+      if (statusFilter !== "all") {
+        const statusLabel = resolvePrimaryStatusBadge(record).label;
+        if (statusFilter === "new" && statusLabel !== "New") {
+          return false;
+        }
+        if (statusFilter === "active" && statusLabel !== "Active") {
+          return false;
+        }
+        if (statusFilter === "inactive" && statusLabel !== "Inactive") {
+          return false;
+        }
+        if (statusFilter === "overdue" && !statusLabel.startsWith("Overdue")) {
+          return false;
+        }
+        if (statusFilter === "written-off" && statusLabel !== "Written Off") {
+          return false;
+        }
+        if (statusFilter === "fully-paid" && statusLabel !== "Fully Paid") {
+          return false;
+        }
+        if (statusFilter === "after-result" && statusLabel !== "After Result") {
+          return false;
+        }
+      }
+
+      if (contractSignedFilter !== "all") {
+        const signed = resolveContractSigned(record);
+        if (contractSignedFilter === "signed" && !signed) {
+          return false;
+        }
+        if (contractSignedFilter === "unsigned" && signed) {
+          return false;
+        }
+      }
+
+      if (inWorkFilter !== "all") {
+        const inWork = resolveStartedInWork(record);
+        if (inWorkFilter === "in-work" && !inWork) {
+          return false;
+        }
+        if (inWorkFilter === "not-in-work" && inWork) {
+          return false;
+        }
+      }
+
+      if (contractDateFromTimestamp !== null || contractDateToTimestamp !== null) {
+        const contractDateTimestamp = parseDateValue(record.payment1Date);
+        if (contractDateTimestamp === null) {
+          return false;
+        }
+        if (contractDateFromTimestamp !== null && contractDateTimestamp < contractDateFromTimestamp) {
+          return false;
+        }
+        if (contractDateToTimestamp !== null && contractDateTimestamp > contractDateToTimestamp) {
+          return false;
+        }
+      }
+
+      if (normalizedSearch) {
+        const searchHaystack = [
+          record.clientName,
+          record.closedBy,
+          clientManagerLabel,
+          record.clientPhoneNumber,
+          record.clientEmailAddress,
+          record.ssn,
+          record.notes,
+          record.companyName,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        if (!searchHaystack.includes(normalizedSearch)) {
+          const queryDigits = normalizedSearch.replace(/\D/g, "");
+          if (!queryDigits) {
+            return false;
+          }
+          const phoneDigits = String(record.clientPhoneNumber || "").replace(/\D/g, "");
+          const ssnDigits = String(record.ssn || "").replace(/\D/g, "");
+          if (!phoneDigits.includes(queryDigits) && !ssnDigits.includes(queryDigits)) {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    });
+
+    return scopedRecords.sort((left, right) => {
       const nameCompare = TEXT_SORTER.compare((left.clientName || "").trim(), (right.clientName || "").trim());
       if (nameCompare !== 0) {
         return nameCompare;
@@ -266,7 +393,19 @@ export default function ClientsPage() {
 
       return resolveCreatedAtTimestamp(right) - resolveCreatedAtTimestamp(left);
     });
-  }, [activeRecords]);
+  }, [
+    clientManagerFilter,
+    clientManagersByClientName,
+    contractDateFrom,
+    contractDateTo,
+    contractSignedFilter,
+    hideWrittenOffByDefault,
+    inWorkFilter,
+    records,
+    salesFilter,
+    search,
+    statusFilter,
+  ]);
 
   const visibleFilteredRecords = useMemo(
     () => filteredRecords.slice(0, Math.max(CLIENTS_PAGE_SIZE, visibleRowsCount)),
