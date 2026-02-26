@@ -363,15 +363,7 @@ export default function ClientsPage() {
   }, [scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
-  const filteredCount = useMemo(() => {
-    if (scoreFilter !== "all") {
-      return filteredRecords.length;
-    }
-    if (typeof totalRecordsCount === "number" && totalRecordsCount >= 0) {
-      return totalRecordsCount;
-    }
-    return filteredRecords.length;
-  }, [filteredRecords.length, scoreFilter, totalRecordsCount]);
+  const filteredCount = useMemo(() => filteredRecords.length, [filteredRecords.length]);
 
   useEffect(() => {
     if (scoreFilter === "all") {
