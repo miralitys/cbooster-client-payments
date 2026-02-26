@@ -1,195 +1,241 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
-import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
+import { showToast } from "@/shared/lib/toast";
+import { getClientManagers, postGhlClientPhoneRefresh, startClientManagersRefreshBackgroundJob } from "@/shared/api";
+import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import {
   formatDate,
+  formatKpiMoney,
   formatMoney,
   getRecordStatusFlags,
-  normalizeFormRecord,
-  normalizeRecords,
-  parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
-import { patchRecords, getClientManagers, getRecords, getSession, postGhlClientPhoneRefresh } from "@/shared/api";
-import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
-import { showToast } from "@/shared/lib/toast";
+import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
+import {
+  PAYMENT_DATE_FIELDS,
+  OVERDUE_RANGE_OPTIONS,
+  OVERVIEW_PERIOD_OPTIONS,
+  STATUS_FILTER_OVERDUE,
+  STATUS_FILTER_OPTIONS,
+  TABLE_COLUMNS,
+  type OverviewPeriodKey,
+} from "@/features/client-payments/domain/constants";
+import { exportRecordsToPdf, exportRecordsToXls } from "@/features/client-payments/domain/export";
+import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
+import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
+import { StatusBadges } from "@/features/client-payments/components/StatusBadges";
+import { useClientPayments } from "@/features/client-payments/hooks/useClientPayments";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
 import type { ClientRecord } from "@/shared/types/records";
-import type { Session } from "@/shared/types/session";
 import {
-  Badge,
   Button,
+  Badge,
   DateInput,
   EmptyState,
   ErrorState,
   Input,
-  LoadingSkeleton,
   Modal,
   PageHeader,
   PageShell,
   Panel,
+  SegmentedControl,
   Select,
   Table,
 } from "@/shared/ui";
-import type { TableColumn } from "@/shared/ui";
+import type { TableAlign, TableColumn } from "@/shared/ui/Table";
 
-const TEXT_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
-const NO_MANAGER_LABEL = "No manager";
-const SALES_FILTER_ALL = "__all_sales__";
-const SALES_FILTER_UNASSIGNED = "__unassigned_sales__";
-const MANAGER_FILTER_ALL = "__all_managers__";
-const MANAGER_FILTER_UNASSIGNED = "__unassigned_managers__";
-const CLIENTS_PAGE_SIZE = 100;
+type ScoreFilter = "all" | "0-30" | "30-60" | "60-99" | "100";
 
-function isActiveEnabled(value: unknown): boolean {
-  const normalized = String(value || "").toLowerCase().trim();
-  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on" || normalized === "active";
+interface ScoredClientRecord {
+  record: ClientRecord;
+  score: ClientScoreResult;
+  clientManager: string;
+  clientManagerNames: string[];
 }
 
-type ClientsStatusFilter = "all" | "new" | "active" | "inactive" | "overdue" | "written-off" | "fully-paid" | "after-result";
-type ContractSignedFilter = "all" | "signed" | "unsigned";
-type InWorkFilter = "all" | "in-work" | "not-in-work";
-type ScoreTone = "neutral" | "success" | "info" | "warning" | "danger";
+type ClientManagersRefreshMode = "none" | "incremental" | "full";
 
-interface CachedScoreDisplay {
-  displayScore: number | null;
-  tone: ScoreTone;
+interface ClientManagersState {
+  byClientName: Map<string, string>;
+  total: number;
+  refreshed: number;
 }
 
-const STATUS_FILTER_OPTIONS: Array<{ key: ClientsStatusFilter; label: string }> = [
-  { key: "all", label: "All Statuses" },
-  { key: "new", label: "New" },
-  { key: "active", label: "Active" },
-  { key: "inactive", label: "Inactive" },
-  { key: "overdue", label: "Overdue" },
-  { key: "written-off", label: "Written Off" },
-  { key: "fully-paid", label: "Fully Paid" },
-  { key: "after-result", label: "After Result" },
+const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
+  { key: "all", label: "All" },
+  { key: "0-30", label: "0-30" },
+  { key: "30-60", label: "30-60" },
+  { key: "60-99", label: "60-99" },
+  { key: "100", label: "100" },
 ];
+const PAYMENT_COLUMN_MATCH = /^payment(\d+)(Date)?$/;
+const buildPaymentColumns = (from: number, to: number): Array<keyof ClientRecord> => {
+  const columns: Array<keyof ClientRecord> = [];
+  for (let index = from; index <= to; index += 1) {
+    columns.push(`payment${index}` as keyof ClientRecord);
+    columns.push(`payment${index}Date` as keyof ClientRecord);
+  }
+  return columns;
+};
+const EXTENDED_PAYMENT_COLUMNS = buildPaymentColumns(8, 36);
+const EXTENDED_PAYMENT_COLUMN_SET = new Set(EXTENDED_PAYMENT_COLUMNS);
+const MANAGER_FILTER_ALL = "__all__";
+const NO_MANAGER_LABEL = "No manager";
+const TEXT_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
 
-interface ManagerFilterOptions {
-  managers: string[];
-  hasUnassigned: boolean;
+const COLUMN_LABELS: Record<string, string> = {
+  clientName: "Client Name",
+  clientManager: "Client Manager",
+  closedBy: "Closed By",
+  companyName: "Company",
+  serviceType: "Service",
+  contractTotals: "Contract",
+  totalPayments: "Paid",
+  payment1: "Payment 1",
+  payment1Date: "Payment 1 Date",
+  payment2: "Payment 2",
+  payment2Date: "Payment 2 Date",
+  payment3: "Payment 3",
+  payment3Date: "Payment 3 Date",
+  payment4: "Payment 4",
+  payment4Date: "Payment 4 Date",
+  payment5: "Payment 5",
+  payment5Date: "Payment 5 Date",
+  payment6: "Payment 6",
+  payment6Date: "Payment 6 Date",
+  payment7: "Payment 7",
+  payment7Date: "Payment 7 Date",
+  futurePayments: "Balance",
+  afterResult: "After Result",
+  notes: "Notes",
+  collection: "COLLECTION",
+  dateOfCollection: "Date of collection",
+  dateWhenWrittenOff: "Date when written off",
+};
+
+const SUMMABLE_TABLE_COLUMNS = new Set<keyof ClientRecord>([
+  "contractTotals",
+  "totalPayments",
+  ...buildPaymentColumns(1, 36).filter((field) => !field.toString().endsWith("Date")),
+  "futurePayments",
+  "collection",
+]);
+
+function resolveColumnLabel(column: string): string {
+  const match = column.match(PAYMENT_COLUMN_MATCH);
+  if (match) {
+    const index = match[1];
+    const isDate = Boolean(match[2]);
+    return isDate ? `Payment ${index} Date` : `Payment ${index}`;
+  }
+  return COLUMN_LABELS[column] || column;
 }
 
-interface SalesFilterOptions {
-  sales: Array<{ key: string; label: string }>;
-  hasUnassigned: boolean;
+function getOverviewContextLabel(period: OverviewPeriodKey): string {
+  const found = OVERVIEW_PERIOD_OPTIONS.find((option) => option.key === period);
+  return found?.label || "Current Week";
 }
 
 export default function ClientsPage() {
-  const [records, setRecords] = useState<ClientRecord[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
-  const [search, setSearch] = useState("");
-  const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
-  const [hideWrittenOffByDefault, setHideWrittenOffByDefault] = useState(true);
-  const [salesFilter, setSalesFilter] = useState(SALES_FILTER_ALL);
-  const [clientManagerFilter, setClientManagerFilter] = useState(MANAGER_FILTER_ALL);
-  const [statusFilter, setStatusFilter] = useState<ClientsStatusFilter>("all");
-  const [contractSignedFilter, setContractSignedFilter] = useState<ContractSignedFilter>("all");
-  const [inWorkFilter, setInWorkFilter] = useState<InWorkFilter>("all");
-  const [contractDateFrom, setContractDateFrom] = useState("");
-  const [contractDateTo, setContractDateTo] = useState("");
-  const [selectedRecordId, setSelectedRecordId] = useState("");
-  const [recordsUpdatedAt, setRecordsUpdatedAt] = useState<string | null>(null);
-  const [visibleRowsCount, setVisibleRowsCount] = useState(CLIENTS_PAGE_SIZE);
-  const [isEditingSelectedRecord, setIsEditingSelectedRecord] = useState(false);
-  const [selectedRecordDraft, setSelectedRecordDraft] = useState<ClientRecord | null>(null);
-  const [isSavingSelectedRecordEdit, setIsSavingSelectedRecordEdit] = useState(false);
-  const [saveSelectedRecordEditError, setSaveSelectedRecordEditError] = useState("");
-  const [clientManagersByClientName, setClientManagersByClientName] = useState<Map<string, string>>(new Map());
-  const [session, setSession] = useState<Session | null>(null);
+  const {
+    session,
+    canManage,
+    isLoading,
+    loadError,
+    records,
+    visibleRecords,
+    filters,
+    sortState,
+    overviewPeriod,
+    overviewMetrics,
+    closedByOptions,
+    filtersCollapsed,
+    isSaving,
+    saveError,
+    saveRetryCount,
+    saveRetryMax,
+    saveRetryGiveUp,
+    saveSuccessNotice,
+    hasUnsavedChanges,
+    lastSyncedAt,
+    modalState,
+    isDiscardConfirmOpen,
+    activeRecord,
+    updateFilter,
+    setDateRange,
+    setOverviewPeriod,
+    setFiltersCollapsed,
+    toggleSort,
+    forceRefresh,
+    openCreateModal,
+    openRecordModal,
+    startEditRecord,
+    requestCloseModal,
+    cancelDiscardModalClose,
+    discardDraftAndCloseModal,
+    updateDraftField,
+    saveDraft,
+    retrySave,
+  } = useClientPayments();
+
+  const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("all");
+  const [managerFilter, setManagerFilter] = useState<string>(MANAGER_FILTER_ALL);
+  const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
+  const [isManagersLoading, setIsManagersLoading] = useState(false);
+  const [managersError, setManagersError] = useState("");
+  const [managersRefreshMode, setManagersRefreshMode] = useState<ClientManagersRefreshMode>("none");
   const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
   const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
-
-  const loadClients = useCallback(async () => {
-    setIsLoading(true);
-    setLoadError("");
-
-    try {
-      const payload = await getRecords();
-      const normalizedRecords = normalizeRecords(Array.isArray(payload.records) ? payload.records : []);
-      setRecords(normalizedRecords);
-      setRecordsUpdatedAt(normalizeRevisionTimestamp(payload.updatedAt));
-    } catch (error) {
-      setRecords([]);
-      setLoadError(error instanceof Error ? error.message : "Failed to load clients from Client Payments.");
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  const loadClientManagers = useCallback(async () => {
-    try {
-      const payload = await getClientManagers("none");
-      const items = Array.isArray(payload?.items) ? payload.items : [];
-      setClientManagersByClientName(buildClientManagersLookup(items));
-    } catch {
-      setClientManagersByClientName(new Map());
-    }
-  }, []);
-
-  const loadSession = useCallback(async () => {
-    try {
-      const payload = await getSession();
-      setSession(payload);
-    } catch {
-      setSession(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadClients();
-  }, [loadClients]);
-
-  useEffect(() => {
-    void loadClientManagers();
-  }, [loadClientManagers]);
-
-  useEffect(() => {
-    void loadSession();
-  }, [loadSession]);
-
+  const [showAllPayments, setShowAllPayments] = useState(false);
+  const [clientManagersState, setClientManagersState] = useState<ClientManagersState>({
+    byClientName: new Map(),
+    total: 0,
+    refreshed: 0,
+  });
+  const canSyncClientManagers = Boolean(session?.permissions?.sync_client_managers);
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
 
-  const salesFilterOptions = useMemo<SalesFilterOptions>(() => {
-    let hasUnassigned = false;
-    const uniqueByComparable = new Map<string, string>();
+  const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
+    () =>
+      showAllPayments
+        ? TABLE_COLUMNS
+        : TABLE_COLUMNS.filter((column) => !EXTENDED_PAYMENT_COLUMN_SET.has(column)),
+    [showAllPayments],
+  );
+  const tableColumnKeys = useMemo<Array<keyof ClientRecord | "score" | "clientManager">>(
+    () => ["clientName", "clientManager", "score", ...visibleTableColumns.filter((column) => column !== "clientName")],
+    [visibleTableColumns],
+  );
+
+  const sortableColumns = useMemo(
+    () =>
+      new Set<keyof ClientRecord>(
+        visibleTableColumns.filter((column) => column !== "afterResult" && column !== "writtenOff"),
+      ),
+    [visibleTableColumns],
+  );
+
+  const scoreByRecordId = useMemo(() => {
+    const asOfDate = new Date();
+    const scoredMap = new Map<string, ClientScoreResult>();
 
     for (const record of records) {
-      const salesName = (record.closedBy || "").trim();
-      if (!salesName) {
-        hasUnassigned = true;
-        continue;
-      }
-
-      const comparable = normalizeComparableClientName(salesName);
-      if (!comparable || uniqueByComparable.has(comparable)) {
-        continue;
-      }
-      uniqueByComparable.set(comparable, salesName);
+      scoredMap.set(record.id, evaluateClientScore(record, asOfDate));
     }
 
-    return {
-      sales: [...uniqueByComparable.entries()]
-        .map(([key, label]) => ({ key, label }))
-        .sort((left, right) => TEXT_SORTER.compare(left.label, right.label)),
-      hasUnassigned,
-    };
+    return scoredMap;
   }, [records]);
 
-  const managerFilterOptions = useMemo<ManagerFilterOptions>(() => {
-    let hasUnassigned = false;
+  const managerFilterOptions = useMemo<string[]>(() => {
+    let hasNoManager = false;
     const uniqueByComparable = new Map<string, string>();
 
-    for (const record of records) {
-      const managerNames = splitClientManagerLabel(resolveClientManagerLabel(record, clientManagersByClientName));
+    for (const record of visibleRecords) {
+      const managerNames = resolveClientManagerNames(record.clientName, clientManagersState.byClientName);
       for (const managerName of managerNames) {
         if (managerName === NO_MANAGER_LABEL) {
-          hasUnassigned = true;
+          hasNoManager = true;
           continue;
         }
 
@@ -201,325 +247,147 @@ export default function ClientsPage() {
       }
     }
 
-    return {
-      managers: [...uniqueByComparable.values()].sort((left, right) => TEXT_SORTER.compare(left, right)),
-      hasUnassigned,
-    };
-  }, [clientManagersByClientName, records]);
+    const sorted = [...uniqueByComparable.values()].sort((left, right) => TEXT_SORTER.compare(left, right));
+    return hasNoManager ? [NO_MANAGER_LABEL, ...sorted] : sorted;
+  }, [clientManagersState.byClientName, visibleRecords]);
 
-  useEffect(() => {
-    if (salesFilter === SALES_FILTER_ALL) {
-      return;
+  const scoredVisibleRecords = useMemo<ScoredClientRecord[]>(() => {
+    return visibleRecords
+      .map((record) => {
+        const clientManagerNames = resolveClientManagerNames(record.clientName, clientManagersState.byClientName);
+        return {
+          record,
+          score: scoreByRecordId.get(record.id) || evaluateClientScore(record),
+          clientManager: clientManagerNames.join(", "),
+          clientManagerNames,
+        };
+      })
+      .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter))
+      .filter((item) => matchesClientManagerFilter(item.clientManagerNames, managerFilter));
+  }, [clientManagersState.byClientName, managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
+
+  const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
+  const summedColumnValues = useMemo(() => {
+    const totals = new Map<keyof ClientRecord, number | null>();
+    const runningTotals = new Map<keyof ClientRecord, number>();
+    const populatedColumns = new Set<keyof ClientRecord>();
+
+    for (const column of SUMMABLE_TABLE_COLUMNS) {
+      runningTotals.set(column, 0);
+      totals.set(column, null);
     }
 
-    if (salesFilter === SALES_FILTER_UNASSIGNED) {
-      if (salesFilterOptions.hasUnassigned) {
-        return;
+    for (const record of filteredRecords) {
+      for (const column of SUMMABLE_TABLE_COLUMNS) {
+        const amount = parseMoneyValue(record[column]);
+        if (amount === null) {
+          continue;
+        }
+
+        populatedColumns.add(column);
+        runningTotals.set(column, (runningTotals.get(column) || 0) + amount);
       }
-      setSalesFilter(SALES_FILTER_ALL);
-      return;
     }
 
-    const hasMatchingSalesOption = salesFilterOptions.sales.some((salesOption) => salesOption.key === salesFilter);
-    if (hasMatchingSalesOption) {
-      return;
+    for (const column of SUMMABLE_TABLE_COLUMNS) {
+      totals.set(column, populatedColumns.has(column) ? runningTotals.get(column) || 0 : null);
     }
 
-    setSalesFilter(SALES_FILTER_ALL);
-  }, [salesFilter, salesFilterOptions]);
-
-  useEffect(() => {
-    if (clientManagerFilter === MANAGER_FILTER_ALL) {
-      return;
-    }
-
-    if (clientManagerFilter === MANAGER_FILTER_UNASSIGNED) {
-      if (managerFilterOptions.hasUnassigned) {
-        return;
+    return totals;
+  }, [filteredRecords]);
+  const managerStatusText = useMemo(() => {
+    if (isManagersLoading) {
+      if (managersRefreshMode === "full") {
+        return "Client managers: running total refresh...";
       }
-      setClientManagerFilter(MANAGER_FILTER_ALL);
-      return;
+      if (managersRefreshMode === "incremental") {
+        return "Client managers: refreshing new clients...";
+      }
+      return "Client managers: loading saved data...";
     }
 
-    const selectedManagerComparable = normalizeComparableClientName(clientManagerFilter);
-    const hasMatchingManagerOption = managerFilterOptions.managers.some(
-      (managerName) => normalizeComparableClientName(managerName) === selectedManagerComparable,
-    );
-    if (hasMatchingManagerOption) {
-      return;
+    if (managersError) {
+      return `Client managers: ${managersError}`;
     }
 
-    setClientManagerFilter(MANAGER_FILTER_ALL);
-  }, [clientManagerFilter, managerFilterOptions]);
+    if (!clientManagersState.total) {
+      return "Client managers: no synced rows found.";
+    }
 
-  const activeRecords = useMemo(
-    () => records.filter((record) => isActiveEnabled(record.active)),
-    [records],
+    return `Client managers loaded for ${clientManagersState.total} clients. Refreshed: ${clientManagersState.refreshed}.`;
+  }, [clientManagersState.refreshed, clientManagersState.total, isManagersLoading, managersError, managersRefreshMode]);
+
+  const isViewMode = modalState.mode === "view";
+  const activeRecordClientManagerLabel = useMemo(() => {
+    if (!activeRecord) {
+      return "";
+    }
+    return resolveClientManagerNames(activeRecord.clientName, clientManagersState.byClientName).join(", ");
+  }, [activeRecord, clientManagersState.byClientName]);
+
+  const loadClientManagers = useCallback(
+    async (mode: ClientManagersRefreshMode = "none") => {
+      setIsManagersLoading(true);
+      setManagersError("");
+      setManagersRefreshMode(mode);
+
+      try {
+        const payload = await getClientManagers(mode);
+        const rows = Array.isArray(payload.items) ? payload.items : [];
+        const nextMap = buildClientManagersLookup(rows);
+        const refreshed = Number.isFinite(payload?.refresh?.refreshedClientsCount)
+          ? Number(payload.refresh?.refreshedClientsCount)
+          : 0;
+
+        setClientManagersState({
+          byClientName: nextMap,
+          total: rows.length,
+          refreshed,
+        });
+      } catch (error) {
+        setManagersError(error instanceof Error ? error.message : "Failed to load client-manager data.");
+        setClientManagersState({
+          byClientName: new Map(),
+          total: 0,
+          refreshed: 0,
+        });
+      } finally {
+        setIsManagersLoading(false);
+      }
+    },
+    [],
   );
 
-  const scoreByRecordId = useMemo(() => {
-    const scores = new Map<string, CachedScoreDisplay>();
-    for (const record of activeRecords) {
-      scores.set(record.id, resolveCachedScoreDisplay(record));
-    }
-    return scores;
-  }, [activeRecords]);
-
-  const filteredRecords = useMemo(() => {
-    const normalizedSearch = search.trim().toLowerCase();
-    const contractDateFromTimestamp = contractDateFrom ? parseDateValue(contractDateFrom) : null;
-    const contractDateToTimestamp = contractDateTo ? parseDateValue(contractDateTo) : null;
-
-    const scopedRecords = records.filter((record) => {
-      const status = getRecordStatusFlags(record);
-      const isContractCompleted = resolveContractCompleted(record);
-      const isInactive = isContractCompleted || !status.isActive;
-      const shouldApplyDefaultHiddenStatuses = hideWrittenOffByDefault && statusFilter === "all";
-      if (shouldApplyDefaultHiddenStatuses && (status.isWrittenOff || isInactive)) {
-        return false;
-      }
-
-      if (salesFilter !== SALES_FILTER_ALL) {
-        const salesComparable = normalizeComparableClientName((record.closedBy || "").trim());
-        if (salesFilter === SALES_FILTER_UNASSIGNED) {
-          if (salesComparable) {
-            return false;
-          }
-        } else {
-          if (!salesComparable || salesComparable !== salesFilter) {
-            return false;
-          }
-        }
-      }
-
-      const clientManagerLabel = resolveClientManagerLabel(record, clientManagersByClientName);
-      if (clientManagerFilter !== MANAGER_FILTER_ALL) {
-        if (clientManagerFilter === MANAGER_FILTER_UNASSIGNED) {
-          if (clientManagerLabel !== NO_MANAGER_LABEL) {
-            return false;
-          }
-        } else {
-          const managerNames = splitClientManagerLabel(clientManagerLabel);
-          const selectedManagerComparable = normalizeComparableClientName(clientManagerFilter);
-          const hasManagerMatch = managerNames.some(
-            (managerName) => normalizeComparableClientName(managerName) === selectedManagerComparable,
-          );
-          if (!selectedManagerComparable || !hasManagerMatch) {
-            return false;
-          }
-        }
-      }
-
-      if (statusFilter !== "all") {
-        if (!matchesClientsStatusFilter(record, statusFilter)) {
-          return false;
-        }
-      }
-
-      if (contractSignedFilter !== "all") {
-        const signed = resolveContractSigned(record);
-        if (contractSignedFilter === "signed" && !signed) {
-          return false;
-        }
-        if (contractSignedFilter === "unsigned" && signed) {
-          return false;
-        }
-      }
-
-      if (inWorkFilter !== "all") {
-        const inWork = resolveStartedInWork(record);
-        if (inWorkFilter === "in-work" && !inWork) {
-          return false;
-        }
-        if (inWorkFilter === "not-in-work" && inWork) {
-          return false;
-        }
-      }
-
-      if (contractDateFromTimestamp !== null || contractDateToTimestamp !== null) {
-        const contractDateTimestamp = parseDateValue(record.payment1Date);
-        if (contractDateTimestamp === null) {
-          return false;
-        }
-        if (contractDateFromTimestamp !== null && contractDateTimestamp < contractDateFromTimestamp) {
-          return false;
-        }
-        if (contractDateToTimestamp !== null && contractDateTimestamp > contractDateToTimestamp) {
-          return false;
-        }
-      }
-
-      if (normalizedSearch) {
-        const searchHaystack = [
-          record.clientName,
-          record.closedBy,
-          clientManagerLabel,
-          record.clientPhoneNumber,
-          record.clientEmailAddress,
-          record.ssn,
-          record.notes,
-          record.companyName,
-        ]
-          .join(" ")
-          .toLowerCase();
-
-        if (!searchHaystack.includes(normalizedSearch)) {
-          const queryDigits = normalizedSearch.replace(/\D/g, "");
-          if (!queryDigits) {
-            return false;
-          }
-          const phoneDigits = String(record.clientPhoneNumber || "").replace(/\D/g, "");
-          const ssnDigits = String(record.ssn || "").replace(/\D/g, "");
-          if (!phoneDigits.includes(queryDigits) && !ssnDigits.includes(queryDigits)) {
-            return false;
-          }
-        }
-      }
-
-      return true;
-    });
-
-    return scopedRecords.sort((left, right) => {
-      const nameCompare = TEXT_SORTER.compare((left.clientName || "").trim(), (right.clientName || "").trim());
-      if (nameCompare !== 0) {
-        return nameCompare;
-      }
-
-      return resolveCreatedAtTimestamp(right) - resolveCreatedAtTimestamp(left);
-    });
-  }, [
-    clientManagerFilter,
-    clientManagersByClientName,
-    contractDateFrom,
-    contractDateTo,
-    contractSignedFilter,
-    hideWrittenOffByDefault,
-    inWorkFilter,
-    records,
-    salesFilter,
-    search,
-    statusFilter,
-  ]);
-
-  const visibleFilteredRecords = useMemo(
-    () => filteredRecords.slice(0, Math.max(CLIENTS_PAGE_SIZE, visibleRowsCount)),
-    [filteredRecords, visibleRowsCount],
-  );
-  const hasMoreFilteredRecords = visibleFilteredRecords.length < filteredRecords.length;
-
-  useEffect(() => {
-    setVisibleRowsCount(CLIENTS_PAGE_SIZE);
-  }, [
-    search,
-    salesFilter,
-    clientManagerFilter,
-    statusFilter,
-    contractSignedFilter,
-    inWorkFilter,
-    contractDateFrom,
-    contractDateTo,
-    hideWrittenOffByDefault,
-  ]);
-
-  useEffect(() => {
-    if (!hasMoreFilteredRecords) {
-      return;
-    }
-
-    const tableWrapElement = document.querySelector<HTMLDivElement>(".clients-react-page .clients-table-wrap");
-    if (!tableWrapElement) {
-      return;
-    }
-
-    const loadMoreIfNeeded = () => {
-      const remaining = tableWrapElement.scrollHeight - tableWrapElement.scrollTop - tableWrapElement.clientHeight;
-      if (remaining > 64) {
-        return;
-      }
-
-      setVisibleRowsCount((current) => Math.min(current + CLIENTS_PAGE_SIZE, filteredRecords.length));
-    };
-
-    loadMoreIfNeeded();
-    tableWrapElement.addEventListener("scroll", loadMoreIfNeeded, { passive: true });
-    return () => tableWrapElement.removeEventListener("scroll", loadMoreIfNeeded);
-  }, [filteredRecords.length, hasMoreFilteredRecords]);
-
-  const selectedRecord = useMemo(
-    () => records.find((record) => record.id === selectedRecordId) || null,
-    [records, selectedRecordId],
-  );
-
-  const selectedRecordClientManagerLabel = useMemo(
-    () => (selectedRecord ? resolveClientManagerLabel(selectedRecord, clientManagersByClientName) : undefined),
-    [clientManagersByClientName, selectedRecord],
-  );
-
-  useEffect(() => {
-    setSaveSelectedRecordEditError("");
-    setIsEditingSelectedRecord(false);
-    setSelectedRecordDraft(null);
-  }, [selectedRecordId]);
-
-  const startEditSelectedRecord = useCallback(() => {
-    if (!selectedRecord) {
-      return;
-    }
-
-    setSaveSelectedRecordEditError("");
-    setSelectedRecordDraft({ ...selectedRecord });
-    setIsEditingSelectedRecord(true);
-  }, [selectedRecord]);
-
-  const updateSelectedRecordDraftField = useCallback((key: keyof ClientRecord, value: string) => {
-    setSaveSelectedRecordEditError("");
-    setSelectedRecordDraft((previous) => (previous ? { ...previous, [key]: value } : previous));
-  }, []);
-
-  const saveSelectedRecordDraft = useCallback(async () => {
-    if (!selectedRecord || !selectedRecordDraft) {
-      return;
-    }
-
-    setIsSavingSelectedRecordEdit(true);
-    setSaveSelectedRecordEditError("");
+  const startBackgroundClientManagersRefresh = useCallback(async () => {
+    setIsManagersLoading(true);
+    setManagersError("");
+    setManagersRefreshMode("full");
 
     try {
-      const normalizedDraft = normalizeFormRecord(selectedRecordDraft);
-      const nextRecord: ClientRecord = {
-        ...normalizedDraft,
-        id: selectedRecord.id,
-        createdAt: selectedRecord.createdAt,
-      };
+      const payload = await startClientManagersRefreshBackgroundJob();
+      const totalClientsRaw = Number(payload?.job?.totalClients);
+      const totalClients = Number.isFinite(totalClientsRaw) && totalClientsRaw > 0 ? totalClientsRaw : null;
+      const detail = totalClients === null ? "" : ` for ${totalClients} clients`;
+      const message =
+        payload?.reused === true
+          ? "Total refresh is already running in background. You will receive a notification when it finishes."
+          : `Total refresh started in background${detail}. You will receive a notification when it finishes.`;
 
-      const payload = await patchRecords(
-        [
-          {
-            type: "upsert",
-            id: selectedRecord.id,
-            record: nextRecord,
-          },
-        ],
-        recordsUpdatedAt,
-      );
-
-      setRecords((previous) => previous.map((record) => (record.id === selectedRecord.id ? nextRecord : record)));
-      setRecordsUpdatedAt(normalizeRevisionTimestamp(payload.updatedAt) || recordsUpdatedAt);
-      setIsEditingSelectedRecord(false);
-      setSelectedRecordDraft(null);
+      showToast({
+        type: "success",
+        message,
+      });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to save client changes.";
-      setSaveSelectedRecordEditError(message);
+      const message = error instanceof Error ? error.message : "Failed to start background Client Manager refresh.";
+      setManagersError(message);
+      showToast({
+        type: "error",
+        message,
+      });
     } finally {
-      setIsSavingSelectedRecordEdit(false);
+      setIsManagersLoading(false);
+      setManagersRefreshMode("none");
     }
-  }, [recordsUpdatedAt, selectedRecord, selectedRecordDraft]);
-
-  const closeSelectedRecordModal = useCallback(() => {
-    setSelectedRecordId("");
-    setIsEditingSelectedRecord(false);
-    setSelectedRecordDraft(null);
-    setSaveSelectedRecordEditError("");
   }, []);
 
   const refreshSingleClientManager = useCallback(
@@ -545,12 +413,23 @@ export default function ClientsPage() {
           throw new Error("Client manager was not returned by GoHighLevel.");
         }
 
-        setClientManagersByClientName((previous) => {
-          const mergedLookup = new Map(previous);
+        setClientManagersState((previous) => {
+          const mergedLookup = new Map(previous.byClientName);
           for (const [key, value] of partialLookup.entries()) {
             mergedLookup.set(key, value);
           }
-          return mergedLookup;
+
+          const refreshedClientsCountRaw = Number(payload?.refresh?.refreshedClientsCount);
+          const refreshedCount =
+            Number.isFinite(refreshedClientsCountRaw) && refreshedClientsCountRaw > 0
+              ? refreshedClientsCountRaw
+              : 1;
+
+          return {
+            byClientName: mergedLookup,
+            total: Math.max(previous.total, mergedLookup.size),
+            refreshed: previous.refreshed + refreshedCount,
+          };
         });
 
         showToast({
@@ -581,28 +460,18 @@ export default function ClientsPage() {
       if (!canRefreshClientPhoneInCard) {
         throw new Error("Only owner/admin/client-service department head can refresh Phone.");
       }
-      if (!selectedRecord || normalizeComparableClientName(selectedRecord.clientName) !== comparableClientName) {
-        throw new Error("Selected client record is not available.");
+      if (!activeRecord || normalizeComparableClientName(activeRecord.clientName) !== comparableClientName) {
+        throw new Error("Active client record is not available.");
       }
 
       setRefreshingCardClientPhoneKey(comparableClientName);
       try {
-        const phonePayload = await postGhlClientPhoneRefresh(clientNameDisplay);
-        const nextPhone = (phonePayload?.phone || "").toString().trim();
-        if (phonePayload?.status !== "found" || !nextPhone) {
+        const payload = await postGhlClientPhoneRefresh(clientNameDisplay);
+        const nextPhone = (payload?.phone || "").toString().trim();
+        if (payload?.status !== "found" || !nextPhone) {
           throw new Error("Phone was not returned by GoHighLevel.");
         }
-
-        const nextRecords = records.map((record) =>
-          normalizeComparableClientName(record.clientName) === comparableClientName
-            ? { ...record, clientPhoneNumber: nextPhone }
-            : record,
-        );
-        setRecords(nextRecords);
-        const nextUpdatedAt = normalizeRevisionTimestamp(phonePayload.updatedAt);
-        if (nextUpdatedAt) {
-          setRecordsUpdatedAt(nextUpdatedAt);
-        }
+        await forceRefresh();
         showToast({
           type: "success",
           message: `Phone updated: ${nextPhone}`,
@@ -618,437 +487,726 @@ export default function ClientsPage() {
         setRefreshingCardClientPhoneKey("");
       }
     },
-    [canRefreshClientPhoneInCard, records, selectedRecord],
+    [activeRecord, canRefreshClientPhoneInCard, forceRefresh],
   );
 
-  const totalContractAmount = useMemo(
-    () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.contractTotals) || 0), 0),
-    [filteredRecords],
-  );
+  const counters = useMemo(() => {
+    let writtenOffCount = 0;
+    let fullyPaidCount = 0;
+    let overdueCount = 0;
 
-  const totalBalanceAmount = useMemo(
-    () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.futurePayments) || 0), 0),
-    [filteredRecords],
-  );
+    for (const record of filteredRecords) {
+      const status = getRecordStatusFlags(record);
+      if (status.isWrittenOff) {
+        writtenOffCount += 1;
+      }
+      if (status.isFullyPaid) {
+        fullyPaidCount += 1;
+      }
+      if (status.isOverdue) {
+        overdueCount += 1;
+      }
+    }
 
-  const hasActiveStructuredFilters = useMemo(() => {
-    return (
-      salesFilter !== SALES_FILTER_ALL ||
-      clientManagerFilter !== MANAGER_FILTER_ALL ||
-      statusFilter !== "all" ||
-      contractSignedFilter !== "all" ||
-      inWorkFilter !== "all" ||
-      !hideWrittenOffByDefault ||
-      Boolean(contractDateFrom.trim()) ||
-      Boolean(contractDateTo.trim())
-    );
-  }, [
-    clientManagerFilter,
-    contractDateFrom,
-    contractDateTo,
-    contractSignedFilter,
-    hideWrittenOffByDefault,
-    inWorkFilter,
-    salesFilter,
-    statusFilter,
-  ]);
+    return {
+      totalCount: records.length,
+      filteredCount: filteredRecords.length,
+      writtenOffCount,
+      fullyPaidCount,
+      overdueCount,
+    };
+  }, [filteredRecords, records.length]);
 
-  const columns = useMemo<TableColumn<ClientRecord>[]>(() => {
-    return [
-      {
-        key: "clientName",
-        label: "Client",
-        align: "left",
-        className: "clients-column-client",
-        headerClassName: "clients-column-client",
-        cell: (record) => (
-          <div className="client-name-cell">
-            <strong>{record.clientName || "Unnamed client"}</strong>
-          </div>
+  const tableColumns = useMemo<TableColumn<ScoredClientRecord>[]>(() => {
+    return tableColumnKeys.map((column) => {
+      const isSortable = column !== "score" && column !== "clientManager" ? sortableColumns.has(column) : false;
+      const isActive = column !== "score" && column !== "clientManager" ? sortState.key === column : false;
+    const headerLabel = column === "score" ? "Score" : resolveColumnLabel(column);
+
+      return {
+        key: column,
+        label: isSortable ? (
+          <button
+            type="button"
+            className={`th-sort-btn ${isActive ? "is-active" : ""}`.trim()}
+            onClick={() => {
+              if (column !== "score" && column !== "clientManager") {
+                toggleSort(column);
+              }
+            }}
+          >
+            <span className="th-sort-label">{headerLabel}</span>
+            {isActive ? <span className="th-sort-indicator">{sortState.direction === "asc" ? "↑" : "↓"}</span> : null}
+          </button>
+        ) : (
+          <span className="th-sort-label">{headerLabel}</span>
         ),
-      },
-      {
-        key: "score",
-        label: "Score",
-        align: "center",
-        cell: (record) => {
-          const scoreMeta = resolveScoreDisplay(scoreByRecordId.get(record.id));
-          return <Badge tone={scoreMeta.tone}>{scoreMeta.value}</Badge>;
+        headerClassName: getClientPaymentsColumnClassName(column),
+        className: getClientPaymentsColumnClassName(column),
+        align: getColumnAlign(column),
+        cell: (row) => {
+          const record = row.record;
+
+          if (column === "score") {
+            if (row.score.displayScore === null) {
+              return "-";
+            }
+
+            return <Badge tone={row.score.tone}>{row.score.displayScore}</Badge>;
+          }
+
+          switch (column) {
+            case "clientName":
+              return (
+                <div className="client-name-cell">
+                  <strong className="client-name-cell__name">{record.clientName || "Unnamed"}</strong>
+                  <StatusBadges record={record} />
+                </div>
+              );
+            case "clientManager":
+              return row.clientManager;
+            case "closedBy":
+              return record.closedBy || "-";
+            case "companyName":
+              return record.companyName || "-";
+            case "serviceType":
+              return record.serviceType || "-";
+            case "contractTotals":
+              return formatMoneyCell(record.contractTotals);
+            case "totalPayments":
+              return formatMoneyCell(record.totalPayments);
+            case "payment1":
+            case "payment2":
+            case "payment3":
+            case "payment4":
+            case "payment5":
+            case "payment6":
+            case "payment7":
+              return formatMoneyCell(record[column]);
+            case "payment1Date":
+            case "payment2Date":
+            case "payment3Date":
+            case "payment4Date":
+            case "payment5Date":
+            case "payment6Date":
+            case "payment7Date":
+            case "dateOfCollection":
+            case "dateWhenWrittenOff":
+              return formatDate((record[column] || "").toString());
+            case "futurePayments":
+              return formatMoneyCell(record.futurePayments);
+            case "afterResult":
+              return record.afterResult ? "Yes" : "No";
+            case "notes":
+              return record.notes || "-";
+            case "collection":
+              return formatMoneyCell(record.collection);
+            default:
+              if (typeof column === "string") {
+                const match = column.match(PAYMENT_COLUMN_MATCH);
+                if (match) {
+                  const isDate = Boolean(match[2]);
+                  return isDate
+                    ? formatDate((record[column as keyof ClientRecord] || "").toString())
+                    : formatMoneyCell(record[column as keyof ClientRecord]);
+                }
+              }
+              return "";
+          }
         },
-      },
-      {
-        key: "closedBy",
-        label: "Closed By",
-        align: "left",
-        cell: (record) => record.closedBy || "-",
-      },
-      {
-        key: "clientManager",
-        label: "Client Manager",
-        align: "left",
-        cell: (record) => resolveClientManagerLabel(record, clientManagersByClientName),
-      },
-      {
-        key: "status",
-        label: "Status",
-        align: "left",
-        cell: (record) => {
-          const statusBadge = resolvePrimaryStatusBadge(record);
-          return <Badge tone={statusBadge.tone}>{statusBadge.label}</Badge>;
-        },
-      },
-      {
-        key: "startedInWork",
-        label: "In Work",
-        align: "center",
-        cell: (record) => {
-          const startedInWork = resolveStartedInWork(record);
-          return (
-            <Badge tone={startedInWork ? "success" : "warning"}>
-              {startedInWork ? "In Work" : "Not In Work"}
-            </Badge>
-          );
-        },
-      },
-      {
-        key: "contractSigned",
-        label: "Contract Signed",
-        align: "center",
-        cell: (record) => {
-          const isSigned = resolveContractSigned(record);
-          return <Badge tone={isSigned ? "success" : "warning"}>{isSigned ? "Yes" : "No"}</Badge>;
-        },
-      },
-      {
-        key: "contractTotals",
-        label: "Total Contract",
-        align: "right",
-        cell: (record) => formatMoneyCell(record.contractTotals),
-      },
-      {
-        key: "futurePayments",
-        label: "Remaining",
-        align: "right",
-        cell: (record) => formatMoneyCell(record.futurePayments),
-      },
-      {
-        key: "totalPayments",
-        label: "Paid",
-        align: "right",
-        cell: (record) => formatMoneyCell(record.totalPayments),
-      },
-      {
-        key: "contractDate",
-        label: "Contract Date",
-        align: "center",
-        cell: (record) => formatDate(record.payment1Date),
-      },
-      {
-        key: "notes",
-        label: "Notes",
-        align: "left",
-        cell: (record) => (record.notes || "").trim() || "-",
-      },
-    ];
-  }, [clientManagersByClientName, scoreByRecordId]);
+      };
+    });
+  }, [sortState.direction, sortState.key, sortableColumns, tableColumnKeys, toggleSort]);
+
+  useEffect(() => {
+    void loadClientManagers("none");
+  }, [loadClientManagers]);
+
+  useEffect(() => {
+    if (!saveError) {
+      return;
+    }
+
+    showToast({
+      type: "error",
+      message: saveError,
+      dedupeKey: `client-payments-save-error-${saveError}`,
+      cooldownMs: 3000,
+      action: saveRetryGiveUp
+        ? {
+            label: "Retry",
+            onClick: retrySave,
+          }
+        : undefined,
+      durationMs: saveRetryGiveUp ? 6000 : 4200,
+    });
+  }, [retrySave, saveError, saveRetryGiveUp]);
+
+  useEffect(() => {
+    if (!saveSuccessNotice || saveError || hasUnsavedChanges || isSaving) {
+      return;
+    }
+
+    showToast({
+      type: "success",
+      message: saveSuccessNotice,
+      dedupeKey: "client-payments-save-success",
+      cooldownMs: 3200,
+      durationMs: 2200,
+    });
+  }, [hasUnsavedChanges, isSaving, saveError, saveSuccessNotice]);
+
+  function clearAllFilters() {
+    updateFilter("search", "");
+    updateFilter("closedBy", "");
+    updateFilter("status", "all");
+    updateFilter("overdueRange", "");
+    setDateRange("createdAtRange", "from", "");
+    setDateRange("createdAtRange", "to", "");
+    setDateRange("paymentDateRange", "from", "");
+    setDateRange("paymentDateRange", "to", "");
+    setDateRange("writtenOffDateRange", "from", "");
+    setDateRange("writtenOffDateRange", "to", "");
+    setDateRange("fullyPaidDateRange", "from", "");
+    setDateRange("fullyPaidDateRange", "to", "");
+    setScoreFilter("all");
+    setManagerFilter(MANAGER_FILTER_ALL);
+    setIsScoreFilterOpen(false);
+  }
 
   return (
-    <PageShell className="clients-react-page">
+    <PageShell className="client-payments-react-page">
       <PageHeader
         actions={
-          <Button type="button" variant="secondary" onClick={() => void loadClients()} isLoading={isLoading}>
-            Refresh
-          </Button>
+          canManage ? (
+            <Button size="sm" onClick={openCreateModal}>
+              Add Client
+            </Button>
+          ) : null
         }
         meta={
-          <div className="page-header__stats">
-            <span className="stat-chip">
-              <span className="stat-chip__label">Clients:</span>
-              <span className="stat-chip__value">{activeRecords.length}</span>
-            </span>
-            <span className="stat-chip">
-              <span className="stat-chip__label">Filtered:</span>
-              <span className="stat-chip__value">{filteredRecords.length}</span>
-            </span>
-            <span className="stat-chip">
-              <span className="stat-chip__label">Contract Total:</span>
-              <span className="stat-chip__value">{formatMoney(totalContractAmount)}</span>
-            </span>
-            <span className="stat-chip">
-              <span className="stat-chip__label">Balance:</span>
-              <span className="stat-chip__value">{formatMoney(totalBalanceAmount)}</span>
-            </span>
+          <div className="client-payments-page-header-meta">
+            <div className="page-header__stats">
+              <span className="stat-chip">
+                <span className="stat-chip__label">Clients:</span>
+                <span className="stat-chip__value">{counters.totalCount}</span>
+              </span>
+              <span className="stat-chip">
+                <span className="stat-chip__label">Filtered:</span>
+                <span className="stat-chip__value">{counters.filteredCount}</span>
+              </span>
+              <span className="stat-chip">
+                <span className="stat-chip__label">Written Off:</span>
+                <span className="stat-chip__value">{counters.writtenOffCount}</span>
+              </span>
+              <span className="stat-chip">
+                <span className="stat-chip__label">Fully Paid:</span>
+                <span className="stat-chip__value">{counters.fullyPaidCount}</span>
+              </span>
+              <span className="stat-chip">
+                <span className="stat-chip__label">Overdue:</span>
+                <span className="stat-chip__value">{counters.overdueCount}</span>
+              </span>
+            </div>
+            <div className="table-panel-sync-row">
+              <p className="table-panel-updated-at">Last sync: {lastSyncedAt}</p>
+              {isSaving ? (
+                <span className="cb-badge cb-badge--info cb-badge--with-spinner">
+                  <span className="cb-inline-spinner" aria-hidden="true" />
+                  Saving...
+                </span>
+              ) : hasUnsavedChanges ? (
+                <span className="cb-badge cb-badge--warning">Unsaved changes</span>
+              ) : null}
+              {!saveRetryGiveUp && saveRetryCount > 0 ? (
+                <span className="react-user-footnote">
+                  Retry {saveRetryCount}/{saveRetryMax}
+                </span>
+              ) : null}
+              {saveRetryGiveUp ? (
+                <Button type="button" variant="secondary" size="sm" onClick={retrySave}>
+                  Retry Save
+                </Button>
+              ) : null}
+            </div>
           </div>
         }
       />
 
-      <Panel title="Clients Database">
-        <div>
-          <label className="search-label" htmlFor="clients-search-input">
-            Search Clients (Name / Email / Phone / SSN)
-          </label>
-          <div className="search-row clients-search-row">
-            <Input
-              id="clients-search-input"
-              placeholder="For example: John Smith, john@email.com, +1(555)555-5555, 123-45-6789"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              autoComplete="off"
-            />
-            <Button
+      <div className={`grid dashboard-grid-react ${filtersCollapsed ? "is-filters-collapsed" : ""}`.trim()}>
+        <Panel
+          className="filters-panel"
+          title="Filters"
+          actions={
+            <button
               type="button"
-              variant={isMoreFiltersOpen ? "secondary" : "ghost"}
-              className="clients-more-btn"
-              onClick={() => setIsMoreFiltersOpen((previous) => !previous)}
-              aria-expanded={isMoreFiltersOpen}
-              aria-controls="clients-advanced-filters"
+              className="filters-toggle-btn"
+              aria-label={filtersCollapsed ? "Expand filters panel" : "Collapse filters panel"}
+              aria-expanded={!filtersCollapsed}
+              onClick={() => setFiltersCollapsed(!filtersCollapsed)}
             >
-              More
-            </Button>
-          </div>
-        </div>
-
-        {isMoreFiltersOpen ? (
-          <div id="clients-advanced-filters" className="clients-advanced-filters">
-            <div className="clients-advanced-filters__toolbar">
-              <label className="clients-toggle-row" htmlFor="clients-hide-writeoff-checkbox">
-                <span className="clients-toggle-row__control">
-                  <input
-                    id="clients-hide-writeoff-checkbox"
-                    type="checkbox"
-                    checked={hideWrittenOffByDefault}
-                    onChange={(event) => setHideWrittenOffByDefault(event.target.checked)}
-                  />
-                </span>
-                <span>Show all clients except write-off and inactive</span>
+              <span className="filters-toggle-icon" aria-hidden="true">
+                {filtersCollapsed ? "›" : "‹"}
+              </span>
+            </button>
+          }
+        >
+          {!filtersCollapsed ? (
+            <div className="filters-panel__content">
+              <label className="search-label" htmlFor="records-search-input">
+                Search by name, email, phone, or SSN
               </label>
+              <div className="search-row">
+                <Input
+                  id="records-search-input"
+                  value={filters.search}
+                  onChange={(event) => updateFilter("search", event.target.value)}
+                  placeholder="For example: John Smith, john@email.com, +1(555)555-5555, 123-45-6789"
+                />
+                <Button type="button" variant="secondary" size="sm" onClick={clearAllFilters}>
+                  Reset
+                </Button>
+              </div>
 
+              <div className="filters-grid-react">
+                <div className="filter-field">
+                  <label htmlFor="created-from-input">New Client From</label>
+                  <DateInput
+                    id="created-from-input"
+                    value={filters.createdAtRange.from}
+                    onChange={(nextValue) => setDateRange("createdAtRange", "from", nextValue)}
+                    placeholder="MM/DD/YYYY"
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="created-to-input">To</label>
+                  <DateInput
+                    id="created-to-input"
+                    value={filters.createdAtRange.to}
+                    onChange={(nextValue) => setDateRange("createdAtRange", "to", nextValue)}
+                    placeholder="MM/DD/YYYY"
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="payments-from-input">Payments From</label>
+                  <DateInput
+                    id="payments-from-input"
+                    value={filters.paymentDateRange.from}
+                    onChange={(nextValue) => setDateRange("paymentDateRange", "from", nextValue)}
+                    placeholder="MM/DD/YYYY"
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="payments-to-input">To</label>
+                  <DateInput
+                    id="payments-to-input"
+                    value={filters.paymentDateRange.to}
+                    onChange={(nextValue) => setDateRange("paymentDateRange", "to", nextValue)}
+                    placeholder="MM/DD/YYYY"
+                  />
+                </div>
+                <div className="filter-field filter-field--full">
+                  <label htmlFor="closed-by-filter-select">Closed By</label>
+                  <Select
+                    id="closed-by-filter-select"
+                    value={filters.closedBy}
+                    onChange={(event) => updateFilter("closedBy", event.target.value)}
+                  >
+                    <option value="">All</option>
+                    {closedByOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="filter-field filter-field--full">
+                  <label htmlFor="client-manager-filter-select">Client Manager</label>
+                  <Select
+                    id="client-manager-filter-select"
+                    value={managerFilter}
+                    onChange={(event) => setManagerFilter(event.target.value)}
+                  >
+                    <option value={MANAGER_FILTER_ALL}>All</option>
+                    {managerFilterOptions.map((managerName) => (
+                      <option key={managerName} value={managerName}>
+                        {managerName}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
+
+              <SegmentedControl
+                value={filters.status}
+                options={STATUS_FILTER_OPTIONS}
+                onChange={(value) => updateFilter("status", value as typeof filters.status)}
+              />
+
+              {filters.status === STATUS_FILTER_OVERDUE ? (
+                <SegmentedControl
+                  value={filters.overdueRange}
+                  options={OVERDUE_RANGE_OPTIONS}
+                  onChange={(value) => updateFilter("overdueRange", value as typeof filters.overdueRange)}
+                />
+              ) : null}
+
+              {filters.status === "written-off" ? (
+                <div className="written-off-date-filter-react">
+                  <div className="filter-field">
+                    <label htmlFor="written-off-from-input">Written Off Date From</label>
+                    <DateInput
+                      id="written-off-from-input"
+                      value={filters.writtenOffDateRange.from}
+                      onChange={(nextValue) => setDateRange("writtenOffDateRange", "from", nextValue)}
+                      placeholder="MM/DD/YYYY"
+                    />
+                  </div>
+                  <div className="filter-field">
+                    <label htmlFor="written-off-to-input">To</label>
+                    <DateInput
+                      id="written-off-to-input"
+                      value={filters.writtenOffDateRange.to}
+                      onChange={(nextValue) => setDateRange("writtenOffDateRange", "to", nextValue)}
+                      placeholder="MM/DD/YYYY"
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              {filters.status === "fully-paid" ? (
+                <div className="written-off-date-filter-react">
+                  <div className="filter-field">
+                    <label htmlFor="fully-paid-from-input">Fully Paid Date From</label>
+                    <DateInput
+                      id="fully-paid-from-input"
+                      value={filters.fullyPaidDateRange.from}
+                      onChange={(nextValue) => setDateRange("fullyPaidDateRange", "from", nextValue)}
+                      placeholder="MM/DD/YYYY"
+                    />
+                  </div>
+                  <div className="filter-field">
+                    <label htmlFor="fully-paid-to-input">To</label>
+                    <DateInput
+                      id="fully-paid-to-input"
+                      value={filters.fullyPaidDateRange.to}
+                      onChange={(nextValue) => setDateRange("fullyPaidDateRange", "to", nextValue)}
+                      placeholder="MM/DD/YYYY"
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="score-filter-block">
+                <div className="score-filter-block__header">
+                  <p className="search-label">Score</p>
+                  <Button
+                    type="button"
+                    variant={isScoreFilterOpen ? "primary" : "secondary"}
+                    size="sm"
+                    onClick={() => setIsScoreFilterOpen((prev) => !prev)}
+                  >
+                    Score
+                  </Button>
+                </div>
+                {isScoreFilterOpen ? (
+                  <SegmentedControl
+                    value={scoreFilter}
+                    options={SCORE_FILTER_OPTIONS}
+                    onChange={(value) => setScoreFilter(value as ScoreFilter)}
+                  />
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </Panel>
+
+        <Panel
+          className="period-dashboard-shell-react"
+          title="Overview"
+          actions={
+            <SegmentedControl
+              value={overviewPeriod}
+              options={OVERVIEW_PERIOD_OPTIONS.map((option) => ({ key: option.key, label: option.label }))}
+              onChange={(value) => setOverviewPeriod(value as OverviewPeriodKey)}
+            />
+          }
+        >
+          <div className="overview-cards">
+            <article className="overview-card">
+              <p className="overview-card__title">Sales</p>
+              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.sales)}</p>
+              <p className="overview-card__context">{getOverviewContextLabel(overviewPeriod)}</p>
+            </article>
+            <article className="overview-card">
+              <p className="overview-card__title">Received</p>
+              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.received)}</p>
+              <p className="overview-card__context">{getOverviewContextLabel(overviewPeriod)}</p>
+            </article>
+            <article className="overview-card">
+              <p className="overview-card__title">Debt</p>
+              <p className="overview-card__value">{formatKpiMoney(overviewMetrics.debt)}</p>
+              <p className="overview-card__context">As of today</p>
+            </article>
+          </div>
+        </Panel>
+
+        <Panel
+          className="table-panel"
+          title="Records"
+          actions={
+            <div className="table-panel__actions">
+              <Button variant="secondary" size="sm" onClick={() => void forceRefresh()} isLoading={isLoading}>
+                Refresh
+              </Button>
               <Button
-                type="button"
-                variant="ghost"
+                variant="secondary"
                 size="sm"
-                className="clients-reset-btn"
-                onClick={() => {
-                  setSalesFilter(SALES_FILTER_ALL);
-                  setClientManagerFilter(MANAGER_FILTER_ALL);
-                  setStatusFilter("all");
-                  setContractSignedFilter("all");
-                  setInWorkFilter("all");
-                  setHideWrittenOffByDefault(true);
-                  setContractDateFrom("");
-                  setContractDateTo("");
-                }}
-                disabled={!hasActiveStructuredFilters}
+                onClick={() => setShowAllPayments((prev) => !prev)}
               >
-                Reset Filters
+                {showAllPayments ? "Hide Extra Payments" : "Show All Payments"}
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => exportRecordsToXls(filteredRecords)}>
+                Export XLS
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => exportRecordsToPdf(filteredRecords)}>
+                Export PDF
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void loadClientManagers("incremental")}
+                disabled={isManagersLoading || !canSyncClientManagers}
+                isLoading={isManagersLoading && managersRefreshMode === "incremental"}
+              >
+                Refresh Manager
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void startBackgroundClientManagersRefresh()}
+                disabled={isManagersLoading || !canSyncClientManagers}
+                isLoading={isManagersLoading && managersRefreshMode === "full"}
+              >
+                Total Refresh Manager
               </Button>
             </div>
+          }
+        >
+          <p className="dashboard-message client-payments-manager-status">{managerStatusText}</p>
+          {isLoading ? <TableLoadingSkeleton columnCount={tableColumnKeys.length} /> : null}
+          {!isLoading && loadError ? (
+            <ErrorState
+              title="Failed to load records"
+              description={loadError}
+              actionLabel="Retry"
+              onAction={() => void forceRefresh()}
+            />
+          ) : null}
+          {!isLoading && !loadError && !scoredVisibleRecords.length ? (
+            <EmptyState title="No records found" description="Adjust filters or add a new client." />
+          ) : null}
 
-            <div className="clients-filters-grid">
-
-              <div className="filter-field">
-                <label htmlFor="clients-contract-date-from-input">Contract Date From</label>
-                <DateInput
-                  id="clients-contract-date-from-input"
-                  value={contractDateFrom}
-                  onChange={setContractDateFrom}
-                  placeholder="MM/DD/YYYY"
-                />
-              </div>
-
-              <div className="filter-field">
-                <label htmlFor="clients-contract-date-to-input">Contract Date To</label>
-                <DateInput
-                  id="clients-contract-date-to-input"
-                  value={contractDateTo}
-                  onChange={setContractDateTo}
-                  placeholder="MM/DD/YYYY"
-                />
-              </div>
-
-              <div className="filter-field">
-                <label htmlFor="clients-sales-filter-select">Sales (Closed By)</label>
-                <Select
-                  id="clients-sales-filter-select"
-                  value={salesFilter}
-                  onChange={(event) => setSalesFilter(event.target.value)}
-                >
-                  <option value={SALES_FILTER_ALL}>All Sales</option>
-                  {salesFilterOptions.hasUnassigned ? <option value={SALES_FILTER_UNASSIGNED}>Unassigned</option> : null}
-                  {salesFilterOptions.sales.map((salesOption) => (
-                    <option key={salesOption.key} value={salesOption.key}>
-                      {salesOption.label}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-
-              <div className="filter-field">
-                <label htmlFor="clients-manager-filter-select">Client Manager</label>
-                <Select
-                  id="clients-manager-filter-select"
-                  value={clientManagerFilter}
-                  onChange={(event) => setClientManagerFilter(event.target.value)}
-                >
-                  <option value={MANAGER_FILTER_ALL}>All Managers</option>
-                  {managerFilterOptions.hasUnassigned ? <option value={MANAGER_FILTER_UNASSIGNED}>Unassigned</option> : null}
-                  {managerFilterOptions.managers.map((managerName) => (
-                    <option key={managerName} value={managerName}>
-                      {managerName}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-
-              <div className="filter-field">
-                <label htmlFor="clients-status-filter-select">Status</label>
-                <Select
-                  id="clients-status-filter-select"
-                  value={statusFilter}
-                  onChange={(event) => setStatusFilter(event.target.value as ClientsStatusFilter)}
-                >
-                  {STATUS_FILTER_OPTIONS.map((option) => (
-                    <option key={option.key} value={option.key}>
-                      {option.label}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-
-              <div className="filter-field">
-                <label htmlFor="clients-contract-signed-filter-select">Contract Signed</label>
-                <Select
-                  id="clients-contract-signed-filter-select"
-                  value={contractSignedFilter}
-                  onChange={(event) => setContractSignedFilter(event.target.value as ContractSignedFilter)}
-                >
-                  <option value="all">All</option>
-                  <option value="signed">Signed</option>
-                  <option value="unsigned">Not Signed</option>
-                </Select>
-              </div>
-
-              <div className="filter-field">
-                <label htmlFor="clients-in-work-filter-select">In Work</label>
-                <Select
-                  id="clients-in-work-filter-select"
-                  value={inWorkFilter}
-                  onChange={(event) => setInWorkFilter(event.target.value as InWorkFilter)}
-                >
-                  <option value="all">All</option>
-                  <option value="in-work">In Work</option>
-                  <option value="not-in-work">Not In Work</option>
-                </Select>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {isLoading ? <LoadingSkeleton rows={6} /> : null}
-        {!isLoading && loadError ? (
-          <ErrorState
-            title="Failed to load clients"
-            description={loadError}
-            actionLabel="Retry"
-            onAction={() => void loadClients()}
-          />
-        ) : null}
-        {!isLoading && !loadError ? (
-          <>
+          {!isLoading && !loadError && scoredVisibleRecords.length ? (
             <Table
-              columns={columns}
-              rows={visibleFilteredRecords}
-              className="clients-table-wrap"
-              rowKey={(record, index) => record.id || `client-${index}`}
-              onRowClick={(record) => setSelectedRecordId(record.id)}
-              emptyState={
-                <EmptyState title="No clients found" description="Try changing search filters or refresh Client Payments data." />
+              className="table-wrap"
+              columns={tableColumns}
+              rows={scoredVisibleRecords}
+              rowKey={(row) => row.record.id}
+              density="compact"
+              virtualizeRows
+              virtualRowHeight={52}
+              virtualOverscan={10}
+              virtualThreshold={80}
+              onRowActivate={(row) => openRecordModal(row.record)}
+              footer={
+                <tr>
+                  {tableColumnKeys.map((column) => {
+                    if (column === "clientName") {
+                      return (
+                        <td key={column}>
+                          <strong>Totals</strong>
+                        </td>
+                      );
+                    }
+
+                    if (column === "score") {
+                      return <td key={column}>-</td>;
+                    }
+
+                    if (column === "clientManager") {
+                      return <td key={column}>-</td>;
+                    }
+
+                    if (column === "closedBy") {
+                      return <td key={column}>{`${filteredRecords.length} clients`}</td>;
+                    }
+
+                    if (SUMMABLE_TABLE_COLUMNS.has(column)) {
+                      const sum = summedColumnValues.get(column as keyof ClientRecord) ?? null;
+                      return (
+                        <td key={column} className={getColumnAlign(column) === "right" ? "cb-table__cell--align-right" : undefined}>
+                          {sum === null ? "-" : formatMoney(sum)}
+                        </td>
+                      );
+                    }
+
+                    return <td key={column}>-</td>;
+                  })}
+                </tr>
               }
             />
-            {hasMoreFilteredRecords ? (
-              <div className="clients-pagination-progress" aria-live="polite">
-                <p className="react-user-footnote">
-                  Showing {visibleFilteredRecords.length} of {filteredRecords.length} clients. Scroll to the bottom of the
-                  table to load next {CLIENTS_PAGE_SIZE}.
-                </p>
-              </div>
-            ) : null}
-          </>
-        ) : null}
-      </Panel>
+          ) : null}
+        </Panel>
+      </div>
 
       <Modal
-        open={Boolean(selectedRecord)}
-        title={selectedRecord?.clientName || "Client Details"}
-        onClose={closeSelectedRecordModal}
+        open={modalState.open}
+        title={
+          modalState.mode === "create"
+            ? "Create Client"
+            : modalState.mode === "edit"
+              ? "Edit Client"
+              : activeRecord?.clientName || "Client Details"
+        }
+        onClose={requestCloseModal}
         footer={
           <div className="client-payments__modal-actions">
-            <Button type="button" variant="secondary" size="sm" onClick={closeSelectedRecordModal}>
+            <Button variant="secondary" size="sm" onClick={requestCloseModal}>
               Close
             </Button>
-            {selectedRecord && !isEditingSelectedRecord ? (
-              <Button type="button" size="sm" onClick={startEditSelectedRecord}>
+            {isViewMode && canManage ? (
+              <Button size="sm" onClick={startEditRecord}>
                 Edit
               </Button>
             ) : null}
-            {selectedRecord && isEditingSelectedRecord ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => void saveSelectedRecordDraft()}
-                isLoading={isSavingSelectedRecordEdit}
-              >
+            {!isViewMode ? (
+              <Button size="sm" onClick={saveDraft}>
                 Save
               </Button>
             ) : null}
           </div>
         }
       >
-        {selectedRecord && !isEditingSelectedRecord ? (
+        {isViewMode && activeRecord ? (
           <RecordDetails
-            record={selectedRecord}
-            clientManagerLabel={selectedRecordClientManagerLabel}
+            record={activeRecord}
+            clientManagerLabel={activeRecordClientManagerLabel}
             canRefreshClientManager={canRefreshClientManagerInCard}
-            isRefreshingClientManager={refreshingCardClientManagerKey === normalizeComparableClientName(selectedRecord.clientName)}
+            isRefreshingClientManager={refreshingCardClientManagerKey === normalizeComparableClientName(activeRecord.clientName)}
             onRefreshClientManager={refreshSingleClientManager}
             canRefreshClientPhone={canRefreshClientPhoneInCard}
-            isRefreshingClientPhone={refreshingCardClientPhoneKey === normalizeComparableClientName(selectedRecord.clientName)}
+            isRefreshingClientPhone={refreshingCardClientPhoneKey === normalizeComparableClientName(activeRecord.clientName)}
             onRefreshClientPhone={refreshSingleClientPhone}
           />
         ) : null}
-        {selectedRecord && isEditingSelectedRecord && selectedRecordDraft ? (
-          <>
-            {saveSelectedRecordEditError ? <p className="dashboard-message error">{saveSelectedRecordEditError}</p> : null}
-            <RecordEditorForm draft={selectedRecordDraft} onChange={updateSelectedRecordDraftField} />
-          </>
-        ) : null}
+        {!isViewMode ? <RecordEditorForm draft={modalState.draft} onChange={updateDraftField} /> : null}
       </Modal>
+
+      <Modal
+        open={isDiscardConfirmOpen}
+        title="Discard Changes?"
+        onClose={cancelDiscardModalClose}
+        footer={
+          <div className="client-payments__modal-actions">
+            <Button type="button" variant="secondary" size="sm" onClick={cancelDiscardModalClose}>
+              Cancel
+            </Button>
+            <Button type="button" variant="danger" size="sm" onClick={discardDraftAndCloseModal}>
+              Discard
+            </Button>
+          </div>
+        }
+      >
+        <p>You have unsaved changes. Discard?</p>
+      </Modal>
+
+      {session?.user?.displayName ? <p className="react-user-footnote">Signed in as: {session.user.displayName}</p> : null}
     </PageShell>
   );
 }
 
-
-function resolveCreatedAtTimestamp(record: ClientRecord): number {
-  const parsed = Date.parse(record.createdAt || "");
-  if (Number.isNaN(parsed)) {
-    return 0;
+function matchesScoreFilter(displayScore: number | null, filter: ScoreFilter): boolean {
+  if (filter === "all") {
+    return true;
   }
-  return parsed;
+
+  if (displayScore === null) {
+    return false;
+  }
+
+  if (filter === "0-30") {
+    return displayScore >= 0 && displayScore <= 30;
+  }
+
+  if (filter === "30-60") {
+    return displayScore > 30 && displayScore <= 60;
+  }
+
+  if (filter === "60-99") {
+    return displayScore > 60 && displayScore < 100;
+  }
+
+  return displayScore === 100;
 }
 
-function formatMoneyCell(rawValue: string): string {
-  const amount = parseMoneyValue(rawValue);
-  if (amount === null) {
-    return "-";
+function getColumnAlign(column: keyof ClientRecord | "score" | "clientManager"): TableAlign {
+  if (column === "score") {
+    return "center";
   }
-  return formatMoney(amount);
+
+  if (column === "clientManager") {
+    return "left";
+  }
+
+  if (
+    column === "createdAt" ||
+    column === "dateOfCollection" ||
+    column === "dateWhenWrittenOff" ||
+    column === "dateWhenFullyPaid" ||
+    column === "afterResult" ||
+    column === "writtenOff" ||
+    PAYMENT_DATE_FIELDS.includes(column)
+  ) {
+    return "center";
+  }
+
+  if (
+    column === "contractTotals" ||
+    column === "totalPayments" ||
+    column === "futurePayments" ||
+    column === "collection" ||
+    column === "payment1" ||
+    column === "payment2" ||
+    column === "payment3" ||
+    column === "payment4" ||
+    column === "payment5" ||
+    column === "payment6" ||
+    column === "payment7"
+  ) {
+    return "right";
+  }
+
+  return "left";
+}
+
+function getClientPaymentsColumnClassName(column: keyof ClientRecord | "score" | "clientManager"): string | undefined {
+  if (column === "clientName") {
+    return "client-name-column";
+  }
+
+  if (column === "clientManager") {
+    return "client-manager-column";
+  }
+
+  return undefined;
 }
 
 function buildClientManagersLookup(rows: ClientManagerRow[]): Map<string, string> {
   const map = new Map<string, string>();
 
   for (const row of rows) {
-    const key = normalizeComparableClientName((row?.clientName || "").toString());
+    const key = normalizeComparableClientName(row?.clientName || "");
     if (!key) {
       continue;
     }
@@ -1058,23 +1216,62 @@ function buildClientManagersLookup(rows: ClientManagerRow[]): Map<string, string
       continue;
     }
 
-    const current = map.get(key);
-    if (!current || current === NO_MANAGER_LABEL) {
-      map.set(key, nextLabel);
-      continue;
-    }
+  const current = map.get(key);
+  if (!current || current === NO_MANAGER_LABEL) {
+    map.set(key, nextLabel);
+    continue;
+  }
 
-    if (nextLabel === NO_MANAGER_LABEL) {
-      continue;
-    }
+  if (nextLabel === NO_MANAGER_LABEL) {
+    continue;
+  }
 
-    const merged = [...new Set([...splitClientManagerLabel(current), ...splitClientManagerLabel(nextLabel)])]
-      .filter((name) => name !== NO_MANAGER_LABEL)
-      .join(", ");
-    map.set(key, merged || NO_MANAGER_LABEL);
+  const merged = [...new Set([...splitClientManagerLabel(current), ...splitClientManagerLabel(nextLabel)])]
+    .filter(Boolean)
+    .join(", ");
+  map.set(key, merged || NO_MANAGER_LABEL);
   }
 
   return map;
+}
+
+function resolveClientManagerNames(clientName: string, lookup: Map<string, string>): string[] {
+  const key = normalizeComparableClientName(clientName);
+  if (!key) {
+    return [NO_MANAGER_LABEL];
+  }
+
+  const managersLabel = lookup.get(key);
+  if (!managersLabel) {
+    return [NO_MANAGER_LABEL];
+  }
+
+  return splitClientManagerLabel(managersLabel);
+}
+
+function splitClientManagerLabel(rawLabel: string): string[] {
+  const names = rawLabel
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!names.length) {
+    return [NO_MANAGER_LABEL];
+  }
+
+  return [...new Set(names)];
+}
+
+function matchesClientManagerFilter(managerNames: string[], selectedManager: string): boolean {
+  if (!selectedManager || selectedManager === MANAGER_FILTER_ALL) {
+    return true;
+  }
+
+  const selectedComparable = normalizeComparableClientName(selectedManager);
+  if (!selectedComparable) {
+    return true;
+  }
+
+  return managerNames.some((name) => normalizeComparableClientName(name) === selectedComparable);
 }
 
 function resolveManagersLabel(row: ClientManagerRow): string {
@@ -1093,43 +1290,6 @@ function resolveManagersLabel(row: ClientManagerRow): string {
   return managersLabel;
 }
 
-function splitClientManagerLabel(rawLabel: string): string[] {
-  const names = rawLabel
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (!names.length) {
-    return [NO_MANAGER_LABEL];
-  }
-
-  return [...new Set(names)];
-}
-
-function resolveClientManagerLabel(record: ClientRecord, lookup: Map<string, string>): string {
-  const key = normalizeComparableClientName(record.clientName);
-  if (key) {
-    const label = lookup.get(key);
-    if (label) {
-      return label;
-    }
-  }
-
-  const fallbackCandidates = [
-    getOptionalRecordText(record, "manager"),
-    getOptionalRecordText(record, "assignedManager"),
-    getOptionalRecordText(record, "clientManager"),
-    getOptionalRecordText(record, "managerName"),
-  ];
-
-  for (const candidate of fallbackCandidates) {
-    if (candidate) {
-      return candidate;
-    }
-  }
-
-  return NO_MANAGER_LABEL;
-}
-
 function normalizeComparableClientName(rawValue: string): string {
   return (rawValue || "")
     .toString()
@@ -1140,278 +1300,39 @@ function normalizeComparableClientName(rawValue: string): string {
     .trim();
 }
 
-function getOptionalRecordText(record: ClientRecord, key: string): string {
-  const rawValue = (record as unknown as Record<string, unknown>)[key];
-  if (typeof rawValue !== "string") {
-    return "";
+function formatMoneyCell(rawValue: string): string {
+  const amount = parseMoneyValue(rawValue);
+  if (amount === null) {
+    return "-";
   }
-  return rawValue.trim();
+  return formatMoney(amount);
 }
 
-function resolveScoreDisplay(score: CachedScoreDisplay | undefined): {
-  value: string;
-  tone: ScoreTone;
-} {
-  if (!score || score.displayScore === null) {
-    return { value: "N/A", tone: "neutral" };
-  }
-
-  return {
-    value: String(score.displayScore),
-    tone: score.tone,
-  };
-}
-
-function resolveCachedScoreDisplay(record: ClientRecord): CachedScoreDisplay {
-  const displayScore = parseCachedScoreValue(record.cachedScore);
-  const tone = resolveCachedScoreTone(record.cachedScoreTone, displayScore);
-  return {
-    displayScore,
-    tone,
-  };
-}
-
-function parseCachedScoreValue(rawValue: string): number | null {
-  const normalized = (rawValue || "").toString().trim();
-  if (!normalized) {
-    return null;
-  }
-
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed)) {
-    return null;
-  }
-
-  const rounded = Math.round(parsed);
-  if (rounded < 0 || rounded > 100) {
-    return null;
-  }
-  return rounded;
-}
-
-function resolveCachedScoreTone(rawValue: string, displayScore: number | null): ScoreTone {
-  const normalizedTone = (rawValue || "").toString().trim().toLowerCase();
-  if (normalizedTone === "success" || normalizedTone === "info" || normalizedTone === "warning" || normalizedTone === "danger") {
-    return normalizedTone;
-  }
-  if (normalizedTone === "neutral") {
-    return "neutral";
-  }
-
-  if (displayScore === null) {
-    return "neutral";
-  }
-  if (displayScore >= 95) {
-    return "success";
-  }
-  if (displayScore >= 80) {
-    return "info";
-  }
-  if (displayScore >= 60) {
-    return "warning";
-  }
-  return "danger";
-}
-
-
-function resolvePrimaryStatusBadge(record: ClientRecord): {
-  label: string;
-  tone: "neutral" | "success" | "info" | "warning" | "danger";
-} {
-  const isContractCompleted = resolveContractCompleted(record);
-  if (isContractCompleted) {
-    return {
-      label: "Inactive",
-      tone: "neutral",
-    };
-  }
-
-  const isContractSigned = resolveContractSigned(record);
-  if (!isContractSigned) {
-    return {
-      label: "New",
-      tone: "info",
-    };
-  }
-
-  const status = getRecordStatusFlags(record);
-  if (status.isWrittenOff) {
-    return {
-      label: "Written Off",
-      tone: "danger",
-    };
-  }
-  if (status.isFullyPaid) {
-    return {
-      label: "Fully Paid",
-      tone: "success",
-    };
-  }
-  if (status.isOverdue) {
-    return {
-      label: `Overdue ${status.overdueRange}`,
-      tone: "warning",
-    };
-  }
-  if (status.isAfterResult) {
-    return {
-      label: "After Result",
-      tone: "info",
-    };
-  }
-
-  return {
-    label: "Active",
-    tone: "neutral",
-  };
-}
-
-function matchesClientsStatusFilter(record: ClientRecord, statusFilter: ClientsStatusFilter): boolean {
-  if (statusFilter === "all") {
-    return true;
-  }
-
-  const status = getRecordStatusFlags(record);
-  const isContractCompleted = resolveContractCompleted(record);
-  const isInactive = isContractCompleted || !status.isActive;
-
-  if (statusFilter === "inactive") {
-    return isInactive;
-  }
-
-  if (statusFilter === "written-off") {
-    return status.isWrittenOff;
-  }
-
-  if (statusFilter === "fully-paid") {
-    return status.isFullyPaid;
-  }
-
-  if (statusFilter === "after-result") {
-    return status.isAfterResult;
-  }
-
-  if (statusFilter === "overdue") {
-    return status.isOverdue;
-  }
-
-  if (statusFilter === "new") {
-    return !isInactive && !resolveContractSigned(record);
-  }
-
-  if (statusFilter === "active") {
-    return !isInactive && !status.isWrittenOff && !status.isFullyPaid && !status.isAfterResult && !status.isOverdue && resolveContractSigned(record);
-  }
-
-  return true;
-}
-
-function resolveContractSigned(record: ClientRecord): boolean {
-  const directFieldValue = parseOptionalBoolean(record.contractSigned);
-  if (directFieldValue !== null) {
-    return directFieldValue;
-  }
-
-  const rawContractSignedValues: unknown[] = [
-    getOptionalUnknownRecordValue(record, "isContractSigned"),
-    getOptionalUnknownRecordValue(record, "signedContract"),
-    getOptionalUnknownRecordValue(record, "contractIsSigned"),
-    getOptionalUnknownRecordValue(record, "contract_sign"),
-    getOptionalUnknownRecordValue(record, "contractStatus"),
-  ];
-
-  for (const rawValue of rawContractSignedValues) {
-    const parsed = parseOptionalBoolean(rawValue);
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-
-  const totalContract = parseMoneyValue(record.contractTotals);
-  return totalContract !== null && totalContract > 0;
-}
-
-function resolveStartedInWork(record: ClientRecord): boolean {
-  const directFieldValue = parseOptionalBoolean(record.startedInWork);
-  if (directFieldValue !== null) {
-    return directFieldValue;
-  }
-
-  const rawStartedInWorkValues: unknown[] = [
-    getOptionalUnknownRecordValue(record, "inWork"),
-    getOptionalUnknownRecordValue(record, "isInWork"),
-    getOptionalUnknownRecordValue(record, "startedWork"),
-    getOptionalUnknownRecordValue(record, "workStarted"),
-    getOptionalUnknownRecordValue(record, "launchedInWork"),
-  ];
-
-  for (const rawValue of rawStartedInWorkValues) {
-    const parsed = parseOptionalBoolean(rawValue);
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-
-  return false;
-}
-
-function resolveContractCompleted(record: ClientRecord): boolean {
-  const directFieldValue = parseOptionalBoolean(record.contractCompleted);
-  if (directFieldValue !== null) {
-    return directFieldValue;
-  }
-
-  const rawContractCompletedValues: unknown[] = [
-    getOptionalUnknownRecordValue(record, "isContractCompleted"),
-    getOptionalUnknownRecordValue(record, "contractIsCompleted"),
-    getOptionalUnknownRecordValue(record, "completedContract"),
-    getOptionalUnknownRecordValue(record, "contractStatus"),
-  ];
-
-  for (const rawValue of rawContractCompletedValues) {
-    const parsed = parseOptionalBoolean(rawValue);
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-
-  return false;
-}
-
-function getOptionalUnknownRecordValue(record: ClientRecord, key: string): unknown {
-  return (record as unknown as Record<string, unknown>)[key];
-}
-
-function parseOptionalBoolean(value: unknown): boolean | null {
-  if (typeof value === "boolean") {
-    return value;
-  }
-
-  const normalized = (value || "").toString().trim().toLowerCase();
-  if (!normalized) {
-    return null;
-  }
-
-  if (["true", "yes", "1", "on", "signed", "active", "completed"].includes(normalized)) {
-    return true;
-  }
-
-  if (["false", "no", "0", "off", "unsigned", "not signed", "pending", "not completed", "no completed"].includes(normalized)) {
-    return false;
-  }
-
-  return null;
-}
-
-function normalizeRevisionTimestamp(rawValue: string | null | undefined): string | null {
-  if (!rawValue) {
-    return null;
-  }
-
-  const timestamp = Date.parse(rawValue);
-  if (Number.isNaN(timestamp)) {
-    return null;
-  }
-
-  return new Date(timestamp).toISOString();
+function TableLoadingSkeleton({ columnCount }: { columnCount: number }) {
+  return (
+    <div className="table-wrap table-wrap--loading">
+      <table className="cb-table cb-table--compact">
+        <thead>
+          <tr>
+            {Array.from({ length: columnCount }).map((_, index) => (
+              <th key={index}>
+                <span className="cb-table-skeleton__head" />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: 8 }).map((_, rowIndex) => (
+            <tr key={rowIndex}>
+              {Array.from({ length: columnCount }).map((_, cellIndex) => (
+                <td key={cellIndex}>
+                  <span className="cb-table-skeleton__cell" />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
