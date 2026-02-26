@@ -1049,9 +1049,13 @@ a {
   flex-wrap: wrap;
 }
 
+.clients-react-page .cb-table th.client-name-column,
+.clients-react-page .cb-table td.client-name-column,
 .clients-react-page .cb-table th.clients-column-client,
 .clients-react-page .cb-table td.clients-column-client {
-  min-width: clamp(180px, 18vw, 300px);
+  min-width: clamp(260px, 26vw, 420px);
+  width: clamp(280px, 30vw, 460px);
+  max-width: min(46vw, 520px);
   white-space: normal;
 }
 
@@ -1208,8 +1212,12 @@ a {
 
 .clients-react-page .cb-table th.clients-column-contact,
 .clients-react-page .cb-table td.clients-column-contact {
-  min-width: clamp(180px, 18vw, 280px);
+  min-width: clamp(130px, 12vw, 200px);
+  width: clamp(140px, 14vw, 220px);
+  max-width: min(24vw, 260px);
   white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .clients-contact-cell {
