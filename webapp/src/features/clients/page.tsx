@@ -218,7 +218,11 @@ export default function ClientsPage() {
       return;
     }
 
-    if (salesFilterOptions.sales.includes(salesFilter)) {
+    const selectedSalesComparable = normalizeComparableClientName(salesFilter);
+    const hasMatchingSalesOption = salesFilterOptions.sales.some(
+      (salesName) => normalizeComparableClientName(salesName) === selectedSalesComparable,
+    );
+    if (hasMatchingSalesOption) {
       return;
     }
 
@@ -278,8 +282,12 @@ export default function ClientsPage() {
           if (salesName) {
             return false;
           }
-        } else if (salesName !== salesFilter) {
-          return false;
+        } else {
+          const selectedSalesComparable = normalizeComparableClientName(salesFilter);
+          const salesComparable = normalizeComparableClientName(salesName);
+          if (!selectedSalesComparable || salesComparable !== selectedSalesComparable) {
+            return false;
+          }
         }
       }
 
