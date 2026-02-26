@@ -38,6 +38,12 @@ function registerGhlRoutes(context) {
     handlers.handleGhlClientManagersRefreshPost,
   );
 
+  app.post(
+    "/api/ghl/client-phone/refresh",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
+    handlers.handleGhlClientPhoneRefreshPost,
+  );
+
   app.post("/api/ghl/client-contracts/archive", handlers.handleGhlClientContractsArchivePost);
 
   app.get(

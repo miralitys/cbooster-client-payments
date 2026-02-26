@@ -11,9 +11,12 @@ import {
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
-import { patchRecords, getClientManagers, getRecords } from "@/shared/api";
+import { patchRecords, getClientManagers, getRecords, getSession, postGhlClientPhoneRefresh } from "@/shared/api";
+import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
+import { showToast } from "@/shared/lib/toast";
 import type { ClientManagerRow } from "@/shared/types/clientManagers";
 import type { ClientRecord } from "@/shared/types/records";
+import type { Session } from "@/shared/types/session";
 import {
   Badge,
   Button,
@@ -92,6 +95,9 @@ export default function ClientsPage() {
   const [isSavingSelectedRecordEdit, setIsSavingSelectedRecordEdit] = useState(false);
   const [saveSelectedRecordEditError, setSaveSelectedRecordEditError] = useState("");
   const [clientManagersByClientName, setClientManagersByClientName] = useState<Map<string, string>>(new Map());
+  const [session, setSession] = useState<Session | null>(null);
+  const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
+  const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
 
   const loadClients = useCallback(async () => {
     setIsLoading(true);
@@ -120,6 +126,15 @@ export default function ClientsPage() {
     }
   }, []);
 
+  const loadSession = useCallback(async () => {
+    try {
+      const payload = await getSession();
+      setSession(payload);
+    } catch {
+      setSession(null);
+    }
+  }, []);
+
   useEffect(() => {
     void loadClients();
   }, [loadClients]);
@@ -127,6 +142,13 @@ export default function ClientsPage() {
   useEffect(() => {
     void loadClientManagers();
   }, [loadClientManagers]);
+
+  useEffect(() => {
+    void loadSession();
+  }, [loadSession]);
+
+  const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
+  const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
 
   const salesFilterOptions = useMemo<SalesFilterOptions>(() => {
     let hasUnassigned = false;
@@ -448,6 +470,116 @@ export default function ClientsPage() {
     setSelectedRecordDraft(null);
     setSaveSelectedRecordEditError("");
   }, []);
+
+  const refreshSingleClientManager = useCallback(
+    async (clientName: string) => {
+      const clientNameDisplay = (clientName || "").toString().trim();
+      const comparableClientName = normalizeComparableClientName(clientNameDisplay);
+      if (!comparableClientName) {
+        throw new Error("Client name is required.");
+      }
+      if (!canRefreshClientManagerInCard) {
+        throw new Error("Only owner/admin/client-service department head can refresh Client Manager.");
+      }
+
+      setRefreshingCardClientManagerKey(comparableClientName);
+      try {
+        const payload = await getClientManagers("full", {
+          clientName: clientNameDisplay,
+        });
+        const rows = Array.isArray(payload.items) ? payload.items : [];
+        const partialLookup = buildClientManagersLookup(rows);
+        const nextLabel = partialLookup.get(comparableClientName);
+        if (!nextLabel) {
+          throw new Error("Client manager was not returned by GoHighLevel.");
+        }
+
+        setClientManagersByClientName((previous) => {
+          const mergedLookup = new Map(previous);
+          for (const [key, value] of partialLookup.entries()) {
+            mergedLookup.set(key, value);
+          }
+          return mergedLookup;
+        });
+
+        showToast({
+          type: "success",
+          message: `Client Manager updated: ${nextLabel}`,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to refresh Client Manager.";
+        showToast({
+          type: "error",
+          message,
+        });
+        throw new Error(message);
+      } finally {
+        setRefreshingCardClientManagerKey("");
+      }
+    },
+    [canRefreshClientManagerInCard],
+  );
+
+  const refreshSingleClientPhone = useCallback(
+    async (clientName: string) => {
+      const clientNameDisplay = (clientName || "").toString().trim();
+      const comparableClientName = normalizeComparableClientName(clientNameDisplay);
+      if (!comparableClientName) {
+        throw new Error("Client name is required.");
+      }
+      if (!canRefreshClientPhoneInCard) {
+        throw new Error("Only owner/admin/client-service department head can refresh Phone.");
+      }
+      if (!selectedRecord || normalizeComparableClientName(selectedRecord.clientName) !== comparableClientName) {
+        throw new Error("Selected client record is not available.");
+      }
+
+      setRefreshingCardClientPhoneKey(comparableClientName);
+      try {
+        const phonePayload = await postGhlClientPhoneRefresh(clientNameDisplay);
+        const nextPhone = (phonePayload?.phone || "").toString().trim();
+        if (phonePayload?.status !== "found" || !nextPhone) {
+          throw new Error("Phone was not returned by GoHighLevel.");
+        }
+
+        const nextRecord: ClientRecord = {
+          ...selectedRecord,
+          clientPhoneNumber: nextPhone,
+        };
+
+        const patchPayload = await patchRecords(
+          [
+            {
+              type: "upsert",
+              id: selectedRecord.id,
+              record: nextRecord,
+            },
+          ],
+          recordsUpdatedAt,
+        );
+
+        setRecords((previous) => previous.map((record) => (record.id === selectedRecord.id ? nextRecord : record)));
+        const nextUpdatedAt = normalizeRevisionTimestamp(patchPayload.updatedAt);
+        if (nextUpdatedAt) {
+          setRecordsUpdatedAt(nextUpdatedAt);
+        }
+        showToast({
+          type: "success",
+          message: `Phone updated: ${nextPhone}`,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to refresh Phone.";
+        showToast({
+          type: "error",
+          message,
+        });
+        throw new Error(message);
+      } finally {
+        setRefreshingCardClientPhoneKey("");
+      }
+    },
+    [canRefreshClientPhoneInCard, recordsUpdatedAt, selectedRecord],
+  );
 
   const totalContractAmount = useMemo(
     () => filteredRecords.reduce((sum, record) => sum + (parseMoneyValue(record.contractTotals) || 0), 0),
@@ -829,7 +961,16 @@ export default function ClientsPage() {
         }
       >
         {selectedRecord && !isEditingSelectedRecord ? (
-          <RecordDetails record={selectedRecord} clientManagerLabel={selectedRecordClientManagerLabel} />
+          <RecordDetails
+            record={selectedRecord}
+            clientManagerLabel={selectedRecordClientManagerLabel}
+            canRefreshClientManager={canRefreshClientManagerInCard}
+            isRefreshingClientManager={refreshingCardClientManagerKey === normalizeComparableClientName(selectedRecord.clientName)}
+            onRefreshClientManager={refreshSingleClientManager}
+            canRefreshClientPhone={canRefreshClientPhoneInCard}
+            isRefreshingClientPhone={refreshingCardClientPhoneKey === normalizeComparableClientName(selectedRecord.clientName)}
+            onRefreshClientPhone={refreshSingleClientPhone}
+          />
         ) : null}
         {selectedRecord && isEditingSelectedRecord && selectedRecordDraft ? (
           <>

@@ -6604,6 +6604,20 @@ function isWebAuthOwnerOrAdminProfile(userProfile) {
   return normalizeWebAuthRoleId(userProfile.roleId, departmentId) === WEB_AUTH_ROLE_ADMIN;
 }
 
+function isWebAuthClientServiceDepartmentHeadProfile(userProfile) {
+  if (!userProfile || typeof userProfile !== "object") {
+    return false;
+  }
+
+  const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
+  if (departmentId !== WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
+    return false;
+  }
+
+  const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
+  return roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD;
+}
+
 function getWebAuthRoleName(roleId, departmentId = "") {
   if (roleId === WEB_AUTH_ROLE_MANAGER) {
     const normalizedDepartmentId = normalizeWebAuthDepartmentId(departmentId);
@@ -15861,6 +15875,180 @@ async function searchGhlContactsByClientName(clientName) {
   });
 
   return orderedContacts;
+}
+
+function flattenGhlPhoneCandidates(rawValue, target) {
+  if (!(target instanceof Array) || rawValue === null || rawValue === undefined) {
+    return;
+  }
+
+  if (Array.isArray(rawValue)) {
+    for (const item of rawValue) {
+      flattenGhlPhoneCandidates(item, target);
+    }
+    return;
+  }
+
+  if (typeof rawValue === "object") {
+    const nested = rawValue || {};
+    const nestedCandidates = [
+      nested.phone,
+      nested.phoneNumber,
+      nested.phone_number,
+      nested.mobile,
+      nested.mobilePhone,
+      nested.mobile_phone,
+      nested.number,
+      nested.value,
+    ];
+    for (const candidate of nestedCandidates) {
+      flattenGhlPhoneCandidates(candidate, target);
+    }
+    return;
+  }
+
+  const value = sanitizeTextValue(rawValue, 80);
+  if (value) {
+    target.push(value);
+  }
+}
+
+function resolveGhlPhoneFromContact(rawContact) {
+  const contact = rawContact && typeof rawContact === "object" ? rawContact : {};
+  const nestedContact = contact?.contact && typeof contact.contact === "object" ? contact.contact : null;
+  const candidates = [
+    contact.phone,
+    contact.phoneNumber,
+    contact.phone_number,
+    contact.mobile,
+    contact.mobilePhone,
+    contact.mobile_phone,
+    contact.contactPhone,
+    contact.contact_phone,
+    contact.phoneRaw,
+    contact.phone_raw,
+    contact.additionalPhones,
+    contact.additional_phones,
+    contact.phones,
+    contact.phoneNumbers,
+    contact.phone_numbers,
+    nestedContact?.phone,
+    nestedContact?.phoneNumber,
+    nestedContact?.phone_number,
+    nestedContact?.mobile,
+    nestedContact?.mobilePhone,
+    nestedContact?.mobile_phone,
+    nestedContact?.contactPhone,
+    nestedContact?.contact_phone,
+    nestedContact?.phones,
+    nestedContact?.phoneNumbers,
+    nestedContact?.phone_numbers,
+  ];
+
+  const flattened = [];
+  for (const candidate of candidates) {
+    flattenGhlPhoneCandidates(candidate, flattened);
+  }
+
+  for (const value of flattened) {
+    const normalized = sanitizeTextValue(value, 80);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return "";
+}
+
+async function findGhlClientPhoneByClientName(clientName) {
+  const normalizedClientName = sanitizeTextValue(clientName, 300);
+  if (!normalizedClientName) {
+    return {
+      status: "not_found",
+      clientName: "",
+      contactName: "",
+      contactId: "",
+      phone: "",
+      source: "gohighlevel.contacts.search",
+      matchedContacts: 0,
+      inspectedContacts: 0,
+    };
+  }
+
+  const contacts = await searchGhlContactsByClientName(normalizedClientName);
+  if (!contacts.length) {
+    return {
+      status: "not_found",
+      clientName: normalizedClientName,
+      contactName: "",
+      contactId: "",
+      phone: "",
+      source: "gohighlevel.contacts.search",
+      matchedContacts: 0,
+      inspectedContacts: 0,
+    };
+  }
+
+  const contactsToInspect = contacts.slice(0, 40);
+  let inspectedContacts = 0;
+  let fallbackContactName = "";
+  let fallbackContactId = "";
+
+  for (const rawContact of contactsToInspect) {
+    const contactId = sanitizeTextValue(rawContact?.id || rawContact?._id || rawContact?.contactId, 160);
+    const contactName = sanitizeTextValue(buildContactCandidateName(rawContact), 300) || normalizedClientName;
+    if (!fallbackContactName) {
+      fallbackContactName = contactName;
+      fallbackContactId = contactId;
+    }
+
+    inspectedContacts += 1;
+
+    const phoneFromSearch = resolveGhlPhoneFromContact(rawContact);
+    if (phoneFromSearch) {
+      return {
+        status: "found",
+        clientName: normalizedClientName,
+        contactName,
+        contactId,
+        phone: phoneFromSearch,
+        source: "gohighlevel.contacts.search",
+        matchedContacts: contacts.length,
+        inspectedContacts,
+      };
+    }
+
+    if (!contactId) {
+      continue;
+    }
+
+    const detailedContact = await fetchGhlContactById(contactId).catch(() => null);
+    const mergedContact = mergeGhlContactSnapshots(rawContact, detailedContact);
+    const phoneFromDetails = resolveGhlPhoneFromContact(mergedContact);
+    if (phoneFromDetails) {
+      return {
+        status: "found",
+        clientName: normalizedClientName,
+        contactName,
+        contactId,
+        phone: phoneFromDetails,
+        source: "gohighlevel.contacts.by_id",
+        matchedContacts: contacts.length,
+        inspectedContacts,
+      };
+    }
+  }
+
+  return {
+    status: "not_found",
+    clientName: normalizedClientName,
+    contactName: fallbackContactName,
+    contactId: fallbackContactId,
+    phone: "",
+    source: "gohighlevel.contacts.search",
+    matchedContacts: contacts.length,
+    inspectedContacts,
+  };
 }
 
 function extractGhlNotesFromPayload(payload) {
@@ -32897,6 +33085,72 @@ async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET
   }
 }
 
+function resolveRequestedGhlClientManagerNames(rawValue) {
+  const values = [];
+  if (Array.isArray(rawValue)) {
+    for (const entry of rawValue) {
+      const candidate = sanitizeTextValue(entry, 300);
+      if (candidate) {
+        values.push(candidate);
+      }
+    }
+  } else if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+    const nestedClientName = sanitizeTextValue(rawValue.clientName, 300);
+    const nestedClientNames = resolveRequestedGhlClientManagerNames(rawValue.clientNames);
+    if (nestedClientName) {
+      values.push(nestedClientName);
+    }
+    values.push(...nestedClientNames);
+  } else {
+    const candidate = sanitizeTextValue(rawValue, 300);
+    if (candidate) {
+      values.push(candidate);
+    }
+  }
+
+  const uniqueByComparable = new Map();
+  for (const value of values) {
+    const comparable = normalizeAssistantComparableText(value, 220);
+    if (!comparable || uniqueByComparable.has(comparable)) {
+      continue;
+    }
+    uniqueByComparable.set(comparable, value);
+  }
+  return [...uniqueByComparable.values()];
+}
+
+function scopeVisibleClientNamesByRequestedSubset(visibleClientNames, requestedClientNames) {
+  const visible = Array.isArray(visibleClientNames) ? visibleClientNames : [];
+  const requested = Array.isArray(requestedClientNames) ? requestedClientNames : [];
+
+  if (!requested.length) {
+    return visible;
+  }
+
+  const visibleByComparable = new Map();
+  for (const clientName of visible) {
+    const comparable = normalizeAssistantComparableText(clientName, 220);
+    if (!comparable || visibleByComparable.has(comparable)) {
+      continue;
+    }
+    visibleByComparable.set(comparable, clientName);
+  }
+
+  const scoped = [];
+  for (const requestedClientName of requested) {
+    const comparable = normalizeAssistantComparableText(requestedClientName, 220);
+    if (!comparable) {
+      continue;
+    }
+    const canonicalVisibleName = visibleByComparable.get(comparable);
+    if (!canonicalVisibleName) {
+      continue;
+    }
+    scoped.push(canonicalVisibleName);
+  }
+  return scoped;
+}
+
 async function respondGhlClientManagers(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/client-managers") {
   const managerRateProfile = refreshMode !== "none" ? RATE_LIMIT_PROFILE_API_SYNC : RATE_LIMIT_PROFILE_API_EXPENSIVE;
   if (
@@ -32926,7 +33180,11 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
     return;
   }
 
-  if (refreshMode !== "none" && !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS)) {
+  if (
+    refreshMode !== "none" &&
+    !isWebAuthOwnerOrAdminProfile(req.webAuthProfile) &&
+    !hasWebAuthPermission(req.webAuthProfile, WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS)
+  ) {
     res.status(403).json({
       error: "Access denied. You do not have permission to refresh client-manager data.",
     });
@@ -32934,9 +33192,31 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
   }
 
   try {
+    const requestedClientNames =
+      refreshMode !== "none"
+        ? resolveRequestedGhlClientManagerNames(req.body?.clientNames || req.body?.clientName)
+        : [];
+    const isScopedRefreshRequest = requestedClientNames.length > 0;
+    const canRefreshScopedClientManager =
+      isWebAuthOwnerOrAdminProfile(req.webAuthProfile) ||
+      isWebAuthClientServiceDepartmentHeadProfile(req.webAuthProfile);
+
+    if (isScopedRefreshRequest && !canRefreshScopedClientManager) {
+      res.status(403).json({
+        error: "Access denied. Only owner/admin/client-service department head can refresh client manager for a specific client.",
+      });
+      return;
+    }
+
     const state = await getStoredRecords();
     const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
-    const clientNames = visibilityContext.visibleClientNames;
+    const clientNames = scopeVisibleClientNamesByRequestedSubset(visibilityContext.visibleClientNames, requestedClientNames);
+    if (refreshMode !== "none" && isScopedRefreshRequest && !clientNames.length) {
+      res.status(404).json({
+        error: "Client was not found in your visible scope.",
+      });
+      return;
+    }
     let cachedRows = await listCachedGhlClientManagerRowsByClientNames(clientNames);
     let refreshedClientsCount = 0;
     let refreshedRowsWritten = 0;
@@ -37384,6 +37664,68 @@ const handleGhlClientManagersRefreshPost = async (req, res) => {
   await respondGhlClientManagers(req, res, resolvedRefreshMode, "POST /api/ghl/client-managers/refresh");
 };
 
+const handleGhlClientPhoneRefreshPost = async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_phone.refresh",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      message: "Client phone refresh limit reached. Please wait before retrying.",
+      code: "ghl_client_phone_refresh_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const requestedClientName = sanitizeTextValue(req.body?.clientName, 300);
+  if (!requestedClientName) {
+    res.status(400).json({
+      error: "Payload must include `clientName`.",
+    });
+    return;
+  }
+
+  if (!isWebAuthOwnerOrAdminProfile(req.webAuthProfile) && !isWebAuthClientServiceDepartmentHeadProfile(req.webAuthProfile)) {
+    res.status(403).json({
+      error: "Access denied. Only owner/admin/client-service department head can refresh client phone.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  try {
+    const context = await resolveGhlBasicNoteContext(req, {
+      requestedClientName,
+      writtenOffFlag: null,
+    });
+    const result = await findGhlClientPhoneByClientName(context.clientName);
+    res.json({
+      ok: true,
+      ...result,
+      clientName: context.clientName,
+    });
+  } catch (error) {
+    console.error("POST /api/ghl/client-phone/refresh failed:", error);
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to refresh client phone from GoHighLevel.",
+    });
+  }
+};
+
 const handleGhlClientContractsArchivePost = async (req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -38194,6 +38536,7 @@ registerGhlRoutes({
     handleGhlLeadsRefreshPost: ghlLeadsController.handleGhlLeadsRefreshPost,
     handleGhlClientManagersGet: ghlLeadsController.handleGhlClientManagersGet,
     handleGhlClientManagersRefreshPost: ghlLeadsController.handleGhlClientManagersRefreshPost,
+    handleGhlClientPhoneRefreshPost,
     handleGhlClientContractsArchivePost,
     handleGhlClientContractsGet,
     handleGhlClientContractsDownloadGet,

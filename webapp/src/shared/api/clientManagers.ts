@@ -3,8 +3,20 @@ import type { ClientManagersPayload } from "@/shared/types/clientManagers";
 
 export type ClientManagersRefreshMode = "none" | "incremental" | "full";
 
-export async function getClientManagers(refresh: ClientManagersRefreshMode = "none"): Promise<ClientManagersPayload> {
+interface GetClientManagersOptions {
+  clientName?: string;
+  clientNames?: string[];
+}
+
+export async function getClientManagers(
+  refresh: ClientManagersRefreshMode = "none",
+  options: GetClientManagersOptions = {},
+): Promise<ClientManagersPayload> {
   if (refresh !== "none") {
+    const clientName = (options.clientName || "").toString().trim();
+    const clientNames = Array.isArray(options.clientNames)
+      ? options.clientNames.map((value) => (value || "").toString().trim()).filter(Boolean)
+      : [];
     return apiRequest<ClientManagersPayload>("/api/ghl/client-managers/refresh", {
       method: "POST",
       headers: {
@@ -12,6 +24,8 @@ export async function getClientManagers(refresh: ClientManagersRefreshMode = "no
       },
       body: JSON.stringify({
         refresh,
+        ...(clientName ? { clientName } : {}),
+        ...(clientNames.length ? { clientNames } : {}),
       }),
     });
   }

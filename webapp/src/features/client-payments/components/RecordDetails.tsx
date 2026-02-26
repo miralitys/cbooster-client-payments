@@ -21,6 +21,12 @@ import { Badge, Button, Modal } from "@/shared/ui";
 interface RecordDetailsProps {
   record: ClientRecord;
   clientManagerLabel?: string;
+  canRefreshClientManager?: boolean;
+  isRefreshingClientManager?: boolean;
+  onRefreshClientManager?: (clientName: string) => Promise<void>;
+  canRefreshClientPhone?: boolean;
+  isRefreshingClientPhone?: boolean;
+  onRefreshClientPhone?: (clientName: string) => Promise<void>;
 }
 
 const HEADER_FIELD_KEYS = new Set<keyof ClientRecord>([
@@ -73,6 +79,7 @@ const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{7,}\d)/;
 const MAX_RENDERED_COMMUNICATION_ITEMS = 120;
 const COMMUNICATIONS_PAGE_SIZE = 5;
+const NOTE_PREVIEW_MAX_LINES = 15;
 const TRANSCRIPT_NORMALIZE_BATCH_LIMIT = 240;
 const DEFAULT_OWNER_COMPANY_LABEL = "Credit Booster";
 const OWNER_COMPANY_FIELD_ALIASES = [
@@ -92,7 +99,16 @@ interface SpeakerTranscriptTurn {
   text: string;
 }
 
-export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps) {
+export function RecordDetails({
+  record,
+  clientManagerLabel,
+  canRefreshClientManager = false,
+  isRefreshingClientManager = false,
+  onRefreshClientManager,
+  canRefreshClientPhone = false,
+  isRefreshingClientPhone = false,
+  onRefreshClientPhone,
+}: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
   const [isLoadingGhlBasicNote, setIsLoadingGhlBasicNote] = useState(false);
   const [ghlBasicNoteError, setGhlBasicNoteError] = useState("");
@@ -107,6 +123,10 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
   const [isNormalizingTranscripts, setIsNormalizingTranscripts] = useState(false);
   const [transcriptNormalizeError, setTranscriptNormalizeError] = useState("");
   const [activeCommunicationFilter, setActiveCommunicationFilter] = useState<CommunicationFilter>("all");
+  const [isBasicInfoExpanded, setIsBasicInfoExpanded] = useState(false);
+  const [isMemoExpanded, setIsMemoExpanded] = useState(false);
+  const [clientManagerRefreshError, setClientManagerRefreshError] = useState("");
+  const [clientPhoneRefreshError, setClientPhoneRefreshError] = useState("");
   const transcriptNormalizationByClientRef = useRef<Record<string, boolean>>({});
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
@@ -140,6 +160,20 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
   const avatarInitials = useMemo(() => buildAvatarInitials(normalizedClientName), [normalizedClientName]);
   const scoreResult = useMemo(() => evaluateClientScore(record), [record]);
   const statusBadge = useMemo(() => resolveStatusBadge(record), [record]);
+  const canRefreshClientManagerForCurrentRecord = Boolean(
+    canRefreshClientManager && normalizedClientName && typeof onRefreshClientManager === "function",
+  );
+  const canRefreshClientPhoneForCurrentRecord = Boolean(
+    canRefreshClientPhone && normalizedClientName && typeof onRefreshClientPhone === "function",
+  );
+  const basicInfoPreview = useMemo(
+    () => buildMultilinePreview(ghlBasicNote?.noteBody || "", NOTE_PREVIEW_MAX_LINES, isBasicInfoExpanded),
+    [ghlBasicNote?.noteBody, isBasicInfoExpanded],
+  );
+  const memoPreview = useMemo(
+    () => buildMultilinePreview(ghlBasicNote?.memoBody || "", NOTE_PREVIEW_MAX_LINES, isMemoExpanded),
+    [ghlBasicNote?.memoBody, isMemoExpanded],
+  );
 
   const detailsFields = useMemo(
     () =>
@@ -197,6 +231,13 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
       abortController.abort();
     };
   }, [normalizedClientName, record]);
+
+  useEffect(() => {
+    setClientManagerRefreshError("");
+    setClientPhoneRefreshError("");
+    setIsBasicInfoExpanded(false);
+    setIsMemoExpanded(false);
+  }, [normalizedClientName]);
 
   useEffect(() => {
     if (!normalizedClientName) {
@@ -386,6 +427,31 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
     () => (ghlCommunications?.items || []).slice(0, MAX_RENDERED_COMMUNICATION_ITEMS),
     [ghlCommunications?.items],
   );
+  const hasSmsItems = useMemo(
+    () => communicationItemsLoaded.some((item) => normalizeCommunicationKind(item.kind) === "sms"),
+    [communicationItemsLoaded],
+  );
+  const hasCallItems = useMemo(
+    () => communicationItemsLoaded.some((item) => normalizeCommunicationKind(item.kind) === "call"),
+    [communicationItemsLoaded],
+  );
+  const hasDocumentItems = useMemo(
+    () => communicationItemsLoaded.some((item) => hasCommunicationDocuments(item)),
+    [communicationItemsLoaded],
+  );
+
+  useEffect(() => {
+    if (activeCommunicationFilter === "calls" && !hasCallItems) {
+      setActiveCommunicationFilter("all");
+      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+      return;
+    }
+    if (activeCommunicationFilter === "documents" && !hasDocumentItems) {
+      setActiveCommunicationFilter("all");
+      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+    }
+  }, [activeCommunicationFilter, hasCallItems, hasDocumentItems]);
+
   const communicationItemsFiltered = useMemo(
     () =>
       communicationItemsLoaded.filter((item) => {
@@ -574,6 +640,32 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
   }, [paymentScheduleRows]);
   const hiddenPaymentRowsCount = Math.max(0, paymentScheduleRows.length - visiblePaymentScheduleRows.length);
 
+  async function handleRefreshClientManagerClick() {
+    if (!canRefreshClientManagerForCurrentRecord || !onRefreshClientManager) {
+      return;
+    }
+
+    setClientManagerRefreshError("");
+    try {
+      await onRefreshClientManager(normalizedClientName);
+    } catch (error) {
+      setClientManagerRefreshError(error instanceof Error ? error.message : "Failed to refresh Client Manager.");
+    }
+  }
+
+  async function handleRefreshClientPhoneClick() {
+    if (!canRefreshClientPhoneForCurrentRecord || !onRefreshClientPhone) {
+      return;
+    }
+
+    setClientPhoneRefreshError("");
+    try {
+      await onRefreshClientPhone(normalizedClientName);
+    } catch (error) {
+      setClientPhoneRefreshError(error instanceof Error ? error.message : "Failed to refresh Phone.");
+    }
+  }
+
   return (
     <div className="record-details-stack">
       <div className="record-details-layout">
@@ -615,15 +707,47 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
                   <span className="record-profile-header__manager-entry">
                     <span className="record-profile-header__manager-label">Client Manager:</span>
                     <strong>{clientManagerDisplay}</strong>
+                    {canRefreshClientManagerForCurrentRecord ? (
+                      <button
+                        type="button"
+                        className="record-profile-header__manager-refresh-btn"
+                        onClick={() => void handleRefreshClientManagerClick()}
+                        disabled={isRefreshingClientManager}
+                        title="Refresh Client Manager from GoHighLevel"
+                        aria-label="Refresh Client Manager from GoHighLevel"
+                      >
+                        {isRefreshingClientManager ? "..." : "↻"}
+                      </button>
+                    ) : null}
                   </span>
                 </p>
+                {clientManagerRefreshError ? (
+                  <p className="record-profile-header__manager-error">{clientManagerRefreshError}</p>
+                ) : null}
               </div>
             </div>
 
             <div className="record-profile-header__contact-row">
               <div className="record-profile-header__contact-item">
-                <span className="record-profile-header__contact-label">Phone</span>
+                <span className="record-profile-header__contact-label-row">
+                  <span className="record-profile-header__contact-label">Phone</span>
+                  {canRefreshClientPhoneForCurrentRecord ? (
+                    <button
+                      type="button"
+                      className="record-profile-header__contact-refresh-btn"
+                      onClick={() => void handleRefreshClientPhoneClick()}
+                      disabled={isRefreshingClientPhone}
+                      title="Refresh phone from GoHighLevel"
+                      aria-label="Refresh phone from GoHighLevel"
+                    >
+                      {isRefreshingClientPhone ? "..." : "↻"}
+                    </button>
+                  ) : null}
+                </span>
                 <strong className="record-profile-header__contact-value">{contactInfo.phone || "-"}</strong>
+                {clientPhoneRefreshError ? (
+                  <p className="record-profile-header__contact-error">{clientPhoneRefreshError}</p>
+                ) : null}
               </div>
               <div className="record-profile-header__contact-item">
                 <span className="record-profile-header__contact-label">Email</span>
@@ -719,7 +843,14 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
             ) : null}
             {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.status === "found" ? (
               <>
-                <pre className="record-details-ghl-note__body">{ghlBasicNote.noteBody}</pre>
+                <pre className="record-details-ghl-note__body">{basicInfoPreview.text}</pre>
+                {basicInfoPreview.hasMore && !isBasicInfoExpanded ? (
+                  <div className="record-details-ghl-note__actions">
+                    <Button type="button" variant="secondary" size="sm" onClick={() => setIsBasicInfoExpanded(true)}>
+                      Show more
+                    </Button>
+                  </div>
+                ) : null}
                 {ghlBasicNote.noteCreatedAt ? (
                   <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.noteCreatedAt)}</p>
                 ) : null}
@@ -741,7 +872,14 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
             ) : null}
             {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.memoBody ? (
               <>
-                <pre className="record-details-ghl-note__body">{ghlBasicNote.memoBody}</pre>
+                <pre className="record-details-ghl-note__body">{memoPreview.text}</pre>
+                {memoPreview.hasMore && !isMemoExpanded ? (
+                  <div className="record-details-ghl-note__actions">
+                    <Button type="button" variant="secondary" size="sm" onClick={() => setIsMemoExpanded(true)}>
+                      Show more
+                    </Button>
+                  </div>
+                ) : null}
                 {ghlBasicNote.memoCreatedAt ? (
                   <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.memoCreatedAt)}</p>
                 ) : null}
@@ -790,39 +928,45 @@ export function RecordDetails({ record, clientManagerLabel }: RecordDetailsProps
                   <p className="record-details-ghl-note__error">{transcriptNormalizeError}</p>
                 ) : null}
                 <div className="record-details-communications__filters">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={activeCommunicationFilter === "sms" ? "primary" : "secondary"}
-                    onClick={() => {
-                      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
-                      setActiveCommunicationFilter((previous) => (previous === "sms" ? "all" : "sms"));
-                    }}
-                  >
-                    SMS
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={activeCommunicationFilter === "calls" ? "primary" : "secondary"}
-                    onClick={() => {
-                      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
-                      setActiveCommunicationFilter((previous) => (previous === "calls" ? "all" : "calls"));
-                    }}
-                  >
-                    Звонки
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={activeCommunicationFilter === "documents" ? "primary" : "secondary"}
-                    onClick={() => {
-                      setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
-                      setActiveCommunicationFilter((previous) => (previous === "documents" ? "all" : "documents"));
-                    }}
-                  >
-                    Документы
-                  </Button>
+                  {hasSmsItems ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={activeCommunicationFilter === "sms" ? "primary" : "secondary"}
+                      onClick={() => {
+                        setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+                        setActiveCommunicationFilter((previous) => (previous === "sms" ? "all" : "sms"));
+                      }}
+                    >
+                      SMS
+                    </Button>
+                  ) : null}
+                  {hasCallItems ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={activeCommunicationFilter === "calls" ? "primary" : "secondary"}
+                      onClick={() => {
+                        setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+                        setActiveCommunicationFilter((previous) => (previous === "calls" ? "all" : "calls"));
+                      }}
+                    >
+                      Звонки
+                    </Button>
+                  ) : null}
+                  {hasDocumentItems ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={activeCommunicationFilter === "documents" ? "primary" : "secondary"}
+                      onClick={() => {
+                        setVisibleCommunicationCount(COMMUNICATIONS_PAGE_SIZE);
+                        setActiveCommunicationFilter((previous) => (previous === "documents" ? "all" : "documents"));
+                      }}
+                    >
+                      Документы
+                    </Button>
+                  ) : null}
                 </div>
                 {communicationItemsVisible.length === 0 ? (
                   <p className="react-user-footnote">{communicationEmptyMessage}</p>
@@ -999,6 +1143,38 @@ function formatMoneyCell(rawValue: string): string {
     return rawValue || "-";
   }
   return formatMoney(amount);
+}
+
+function buildMultilinePreview(
+  rawValue: string,
+  maxLines: number,
+  expanded: boolean,
+): {
+  text: string;
+  hasMore: boolean;
+} {
+  const normalized = (rawValue || "").toString().replace(/\r\n/g, "\n");
+  if (!normalized) {
+    return {
+      text: "",
+      hasMore: false,
+    };
+  }
+
+  const safeMaxLines = Math.max(1, Math.trunc(maxLines) || 1);
+  const lines = normalized.split("\n");
+  const hasMore = lines.length > safeMaxLines;
+  if (!hasMore || expanded) {
+    return {
+      text: normalized,
+      hasMore,
+    };
+  }
+
+  return {
+    text: lines.slice(0, safeMaxLines).join("\n"),
+    hasMore: true,
+  };
 }
 
 function resolveOwnerCompanyLabel(record: ClientRecord): string {

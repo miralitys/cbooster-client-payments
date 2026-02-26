@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
-import { getClientManagers } from "@/shared/api";
+import { getClientManagers, patchClients, postGhlClientPhoneRefresh } from "@/shared/api";
+import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
 import {
   formatDate,
   formatKpiMoney,
@@ -183,6 +184,8 @@ export default function ClientPaymentsPage() {
   const [isManagersLoading, setIsManagersLoading] = useState(false);
   const [managersError, setManagersError] = useState("");
   const [managersRefreshMode, setManagersRefreshMode] = useState<ClientManagersRefreshMode>("none");
+  const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
+  const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
   const [showAllPayments, setShowAllPayments] = useState(false);
   const [clientManagersState, setClientManagersState] = useState<ClientManagersState>({
     byClientName: new Map(),
@@ -190,6 +193,8 @@ export default function ClientPaymentsPage() {
     refreshed: 0,
   });
   const canSyncClientManagers = Boolean(session?.permissions?.sync_client_managers);
+  const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
+  const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
 
   const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
     () =>
@@ -351,6 +356,121 @@ export default function ClientPaymentsPage() {
       }
     },
     [],
+  );
+
+  const refreshSingleClientManager = useCallback(
+    async (clientName: string) => {
+      const clientNameDisplay = (clientName || "").toString().trim();
+      const comparableClientName = normalizeComparableClientName(clientNameDisplay);
+      if (!comparableClientName) {
+        throw new Error("Client name is required.");
+      }
+      if (!canRefreshClientManagerInCard) {
+        throw new Error("Only owner/admin/client-service department head can refresh Client Manager.");
+      }
+
+      setRefreshingCardClientManagerKey(comparableClientName);
+      try {
+        const payload = await getClientManagers("full", {
+          clientName: clientNameDisplay,
+        });
+        const rows = Array.isArray(payload.items) ? payload.items : [];
+        const partialLookup = buildClientManagersLookup(rows);
+        const nextLabel = partialLookup.get(comparableClientName);
+        if (!nextLabel) {
+          throw new Error("Client manager was not returned by GoHighLevel.");
+        }
+
+        setClientManagersState((previous) => {
+          const mergedLookup = new Map(previous.byClientName);
+          for (const [key, value] of partialLookup.entries()) {
+            mergedLookup.set(key, value);
+          }
+
+          const refreshedClientsCountRaw = Number(payload?.refresh?.refreshedClientsCount);
+          const refreshedCount =
+            Number.isFinite(refreshedClientsCountRaw) && refreshedClientsCountRaw > 0
+              ? refreshedClientsCountRaw
+              : 1;
+
+          return {
+            byClientName: mergedLookup,
+            total: Math.max(previous.total, mergedLookup.size),
+            refreshed: previous.refreshed + refreshedCount,
+          };
+        });
+
+        showToast({
+          type: "success",
+          message: `Client Manager updated: ${nextLabel}`,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to refresh Client Manager.";
+        showToast({
+          type: "error",
+          message,
+        });
+        throw new Error(message);
+      } finally {
+        setRefreshingCardClientManagerKey("");
+      }
+    },
+    [canRefreshClientManagerInCard],
+  );
+
+  const refreshSingleClientPhone = useCallback(
+    async (clientName: string) => {
+      const clientNameDisplay = (clientName || "").toString().trim();
+      const comparableClientName = normalizeComparableClientName(clientNameDisplay);
+      if (!comparableClientName) {
+        throw new Error("Client name is required.");
+      }
+      if (!canRefreshClientPhoneInCard) {
+        throw new Error("Only owner/admin/client-service department head can refresh Phone.");
+      }
+      if (!activeRecord || normalizeComparableClientName(activeRecord.clientName) !== comparableClientName) {
+        throw new Error("Active client record is not available.");
+      }
+
+      setRefreshingCardClientPhoneKey(comparableClientName);
+      try {
+        const payload = await postGhlClientPhoneRefresh(clientNameDisplay);
+        const nextPhone = (payload?.phone || "").toString().trim();
+        if (payload?.status !== "found" || !nextPhone) {
+          throw new Error("Phone was not returned by GoHighLevel.");
+        }
+
+        const nextRecord: ClientRecord = {
+          ...activeRecord,
+          clientPhoneNumber: nextPhone,
+        };
+        await patchClients(
+          [
+            {
+              type: "upsert",
+              id: activeRecord.id,
+              record: nextRecord,
+            },
+          ],
+          null,
+        );
+        await forceRefresh();
+        showToast({
+          type: "success",
+          message: `Phone updated: ${nextPhone}`,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to refresh Phone.";
+        showToast({
+          type: "error",
+          message,
+        });
+        throw new Error(message);
+      } finally {
+        setRefreshingCardClientPhoneKey("");
+      }
+    },
+    [activeRecord, canRefreshClientPhoneInCard, forceRefresh],
   );
 
   const counters = useMemo(() => {
@@ -952,7 +1072,16 @@ export default function ClientPaymentsPage() {
         }
       >
         {isViewMode && activeRecord ? (
-          <RecordDetails record={activeRecord} clientManagerLabel={activeRecordClientManagerLabel} />
+          <RecordDetails
+            record={activeRecord}
+            clientManagerLabel={activeRecordClientManagerLabel}
+            canRefreshClientManager={canRefreshClientManagerInCard}
+            isRefreshingClientManager={refreshingCardClientManagerKey === normalizeComparableClientName(activeRecord.clientName)}
+            onRefreshClientManager={refreshSingleClientManager}
+            canRefreshClientPhone={canRefreshClientPhoneInCard}
+            isRefreshingClientPhone={refreshingCardClientPhoneKey === normalizeComparableClientName(activeRecord.clientName)}
+            onRefreshClientPhone={refreshSingleClientPhone}
+          />
         ) : null}
         {!isViewMode ? <RecordEditorForm draft={modalState.draft} onChange={updateDraftField} /> : null}
       </Modal>
