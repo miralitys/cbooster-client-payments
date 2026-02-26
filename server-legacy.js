@@ -1902,6 +1902,7 @@ const webAppDistRoot = path.join(__dirname, "webapp", "dist");
 const webAppIndexFile = path.join(webAppDistRoot, "index.html");
 const webAppDistAvailable = fs.existsSync(webAppIndexFile);
 const WEB_STATIC_ASSET_ALLOWLIST = new Map([
+  ["/mini.css", "mini.css"],
   ["/mini.js", "mini.js"],
 ]);
 
@@ -14612,6 +14613,7 @@ function isPublicWebAuthPath(pathname) {
     pathname === "/favicon.ico" ||
     pathname === "/mini" ||
     pathname === "/mini.html" ||
+    pathname === "/mini.css" ||
     pathname === "/mini.js" ||
     pathname === "/api/auth/login" ||
     pathname === "/api/auth/logout" ||
