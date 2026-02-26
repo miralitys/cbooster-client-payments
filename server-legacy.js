@@ -15828,6 +15828,39 @@ function buildPhoneLookupSearchName(rawClientName) {
   return compactClientName;
 }
 
+function buildPhoneLookupSearchCandidates(rawClientName) {
+  const normalizedClientName = sanitizeTextValue(rawClientName, 300);
+  const preferredSearchName = buildPhoneLookupSearchName(normalizedClientName);
+  const candidates = [];
+  const seen = new Set();
+
+  const appendCandidate = (rawValue) => {
+    const value = sanitizeTextValue(rawValue, 300);
+    const comparable = normalizeAssistantComparableText(value, 220);
+    if (!value || !comparable || seen.has(comparable)) {
+      return;
+    }
+    seen.add(comparable);
+    candidates.push(value);
+  };
+
+  // Preferred per requirement: LastName FirstName
+  appendCandidate(preferredSearchName);
+
+  // Fallback for GHL tenants where search is order-sensitive.
+  appendCandidate(
+    sanitizeTextValue(
+      normalizedClientName
+        .replace(/[^\p{L}\p{N}\s,'-]+/gu, " ")
+        .replace(/,/g, " ")
+        .replace(/\s+/g, " "),
+      300,
+    ),
+  );
+
+  return candidates;
+}
+
 async function searchGhlContactsByClientName(clientName, options = {}) {
   const normalizedClientName = sanitizeTextValue(clientName, 300);
   if (!normalizedClientName) {
@@ -16054,20 +16087,31 @@ async function findGhlClientPhoneByClientName(clientName) {
     maxRetries: Math.max(4, GHL_HTTP_MAX_RETRIES),
     timeoutMs: Math.max(25000, GHL_REQUEST_TIMEOUT_MS),
   };
-  const phoneLookupSearchName = buildPhoneLookupSearchName(normalizedClientName) || normalizedClientName;
+  const phoneLookupSearchCandidates = buildPhoneLookupSearchCandidates(normalizedClientName);
 
   let contacts = [];
-  try {
-    contacts = await searchGhlContactsByClientName(phoneLookupSearchName, requestOverrides);
-  } catch (error) {
-    if (isGhlRateLimitError(error)) {
-      throw createHttpError(
-        "GoHighLevel rate limit reached while refreshing Phone. Please retry in 1-2 minutes.",
-        429,
-        "ghl_phone_lookup_rate_limited",
-      );
+  let lastLookupError = null;
+  for (const searchName of phoneLookupSearchCandidates) {
+    try {
+      contacts = await searchGhlContactsByClientName(searchName, requestOverrides);
+      if (contacts.length) {
+        break;
+      }
+    } catch (error) {
+      if (isGhlRateLimitError(error)) {
+        throw createHttpError(
+          "GoHighLevel rate limit reached while refreshing Phone. Please retry in 1-2 minutes.",
+          429,
+          "ghl_phone_lookup_rate_limited",
+        );
+      }
+      lastLookupError = error;
+      continue;
     }
-    throw error;
+  }
+
+  if (!contacts.length && lastLookupError) {
+    throw lastLookupError;
   }
 
   if (!contacts.length) {
