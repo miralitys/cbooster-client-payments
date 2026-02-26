@@ -719,6 +719,10 @@ const GHL_HTTP_RETRY_JITTER_MS = Math.min(
   5000,
 );
 const GHL_CONTACT_SEARCH_LIMIT = Math.min(Math.max(parsePositiveInteger(process.env.GHL_CONTACT_SEARCH_LIMIT, 20), 1), 100);
+const GHL_CLIENT_PHONE_LOOKUP_MAX_CONTACTS = Math.min(
+  Math.max(parsePositiveInteger(process.env.GHL_CLIENT_PHONE_LOOKUP_MAX_CONTACTS, 8), 1),
+  40,
+);
 const GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY = Math.min(
   Math.max(parsePositiveInteger(process.env.GHL_CLIENT_MANAGER_LOOKUP_CONCURRENCY, 4), 1),
   12,
@@ -15162,6 +15166,27 @@ function isGhlRetryableNetworkError(error) {
   return GHL_HTTP_RETRYABLE_ERROR_CODES.has(errorCode);
 }
 
+function isGhlRateLimitError(error) {
+  const statusCode = Number.parseInt(sanitizeTextValue(error?.httpStatus ?? error?.status, 20), 10);
+  return Number.isFinite(statusCode) && statusCode === 429;
+}
+
+function buildGhlRequestOverrides(rawOptions = {}) {
+  const maxRetriesRaw = Number.parseInt(sanitizeTextValue(rawOptions?.maxRetries, 20), 10);
+  const timeoutMsRaw = Number.parseInt(sanitizeTextValue(rawOptions?.timeoutMs, 20), 10);
+  const overrides = {};
+
+  if (Number.isFinite(maxRetriesRaw) && maxRetriesRaw >= 0) {
+    overrides.maxRetries = Math.min(maxRetriesRaw, 10);
+  }
+
+  if (Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0) {
+    overrides.timeoutMs = Math.min(Math.max(timeoutMsRaw, 500), 120000);
+  }
+
+  return overrides;
+}
+
 async function requestGhlApi(pathname, options = {}) {
   const method = (options.method || "GET").toString().toUpperCase();
   ghlReadOnlyGuard.assertAllowedRequest({
@@ -15758,11 +15783,12 @@ async function resolveGhlManagerName(managerId, usersIndex, managerNameCache) {
   return managerName;
 }
 
-async function searchGhlContactsByClientName(clientName) {
+async function searchGhlContactsByClientName(clientName, options = {}) {
   const normalizedClientName = sanitizeTextValue(clientName, 300);
   if (!normalizedClientName) {
     return [];
   }
+  const requestOverrides = buildGhlRequestOverrides(options);
 
   const attempts = [
     () =>
@@ -15775,6 +15801,7 @@ async function searchGhlContactsByClientName(clientName) {
           query: normalizedClientName,
         },
         tolerateNotFound: true,
+        ...requestOverrides,
       }),
     () =>
       requestGhlApi("/contacts/search", {
@@ -15786,6 +15813,7 @@ async function searchGhlContactsByClientName(clientName) {
           query: normalizedClientName,
         },
         tolerateNotFound: true,
+        ...requestOverrides,
       }),
     () =>
       requestGhlApi("/contacts/", {
@@ -15797,6 +15825,7 @@ async function searchGhlContactsByClientName(clientName) {
           limit: GHL_CONTACT_SEARCH_LIMIT,
         },
         tolerateNotFound: true,
+        ...requestOverrides,
       }),
     () =>
       requestGhlApi("/contacts", {
@@ -15808,6 +15837,7 @@ async function searchGhlContactsByClientName(clientName) {
           limit: GHL_CONTACT_SEARCH_LIMIT,
         },
         tolerateNotFound: true,
+        ...requestOverrides,
       }),
   ];
 
@@ -15821,7 +15851,7 @@ async function searchGhlContactsByClientName(clientName) {
       response = await attempt();
     } catch (error) {
       lastError = error;
-      if (Number(error?.httpStatus) === 429) {
+      if (isGhlRateLimitError(error)) {
         break;
       }
       continue;
@@ -15975,7 +16005,25 @@ async function findGhlClientPhoneByClientName(clientName) {
     };
   }
 
-  const contacts = await searchGhlContactsByClientName(normalizedClientName);
+  const requestOverrides = {
+    maxRetries: Math.max(4, GHL_HTTP_MAX_RETRIES),
+    timeoutMs: Math.max(25000, GHL_REQUEST_TIMEOUT_MS),
+  };
+
+  let contacts = [];
+  try {
+    contacts = await searchGhlContactsByClientName(normalizedClientName, requestOverrides);
+  } catch (error) {
+    if (isGhlRateLimitError(error)) {
+      throw createHttpError(
+        "GoHighLevel rate limit reached while refreshing Phone. Please retry in 1-2 minutes.",
+        429,
+        "ghl_phone_lookup_rate_limited",
+      );
+    }
+    throw error;
+  }
+
   if (!contacts.length) {
     return {
       status: "not_found",
@@ -15989,7 +16037,7 @@ async function findGhlClientPhoneByClientName(clientName) {
     };
   }
 
-  const contactsToInspect = contacts.slice(0, 40);
+  const contactsToInspect = contacts.slice(0, GHL_CLIENT_PHONE_LOOKUP_MAX_CONTACTS);
   let inspectedContacts = 0;
   let fallbackContactName = "";
   let fallbackContactId = "";
@@ -16022,7 +16070,19 @@ async function findGhlClientPhoneByClientName(clientName) {
       continue;
     }
 
-    const detailedContact = await fetchGhlContactById(contactId).catch(() => null);
+    let detailedContact = null;
+    try {
+      detailedContact = await fetchGhlContactById(contactId, requestOverrides);
+    } catch (error) {
+      if (isGhlRateLimitError(error)) {
+        throw createHttpError(
+          "GoHighLevel rate limit reached while refreshing Phone. Please retry in 1-2 minutes.",
+          429,
+          "ghl_phone_lookup_rate_limited",
+        );
+      }
+      detailedContact = null;
+    }
     const mergedContact = mergeGhlContactSnapshots(rawContact, detailedContact);
     const phoneFromDetails = resolveGhlPhoneFromContact(mergedContact);
     if (phoneFromDetails) {
@@ -19362,11 +19422,12 @@ function pickBestGhlContractCandidate(candidates) {
   };
 }
 
-async function fetchGhlContactById(contactId) {
+async function fetchGhlContactById(contactId, options = {}) {
   const normalizedContactId = sanitizeTextValue(contactId, 160);
   if (!normalizedContactId) {
     return null;
   }
+  const requestOverrides = buildGhlRequestOverrides(options);
 
   const encodedContactId = encodeURIComponent(normalizedContactId);
   const attempts = [
@@ -19377,6 +19438,7 @@ async function fetchGhlContactById(contactId) {
           locationId: GHL_LOCATION_ID,
         },
         tolerateNotFound: true,
+        ...requestOverrides,
       }),
     () =>
       requestGhlApi(`/contacts/${encodedContactId}/`, {
@@ -19385,6 +19447,7 @@ async function fetchGhlContactById(contactId) {
           locationId: GHL_LOCATION_ID,
         },
         tolerateNotFound: true,
+        ...requestOverrides,
       }),
   ];
 
@@ -19392,7 +19455,14 @@ async function fetchGhlContactById(contactId) {
     let response;
     try {
       response = await attempt();
-    } catch {
+    } catch (error) {
+      if (isGhlRateLimitError(error)) {
+        throw createHttpError(
+          "GoHighLevel rate limit reached while refreshing Phone. Please retry in 1-2 minutes.",
+          429,
+          "ghl_phone_lookup_rate_limited",
+        );
+      }
       continue;
     }
 
