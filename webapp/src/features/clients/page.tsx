@@ -58,6 +58,7 @@ const SCORE_FILTER_OPTIONS: Array<{ key: ScoreFilter; label: string }> = [
   { key: "60-99", label: "60-99" },
   { key: "100", label: "100" },
 ];
+const CLIENTS_STATUS_FILTER_OPTIONS = STATUS_FILTER_OPTIONS.filter((option) => option.key !== "active");
 const PAYMENT_COLUMN_MATCH = /^payment(\d+)(Date)?$/;
 const PAYMENT_COLUMN_HIDE_MATCH = /^payment\d+(Date)?$/;
 const CLIENTS_TABLE_HIDDEN_COLUMNS = new Set<keyof ClientRecord>([
@@ -842,11 +843,11 @@ export default function ClientsPage() {
                   </div>
 
                   <div className="clients-status-controls">
-                    <SegmentedControl
-                      value={filters.status}
-                      options={STATUS_FILTER_OPTIONS}
-                      onChange={(value) => updateFilter("status", value as typeof filters.status)}
-                    />
+              <SegmentedControl
+                value={filters.status}
+                options={CLIENTS_STATUS_FILTER_OPTIONS}
+                onChange={(value) => updateFilter("status", value as typeof filters.status)}
+              />
                     <button
                       type="button"
                       className={`cb-segmented__item clients-status-controls__toggle ${isActiveOnly ? "is-active" : ""}`.trim()}

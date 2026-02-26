@@ -9,6 +9,7 @@ export const REMOTE_SYNC_MAX_RETRIES = 5;
 export const REMOTE_SYNC_MAX_RETRY_DELAY_MS = 30_000;
 
 export const STATUS_FILTER_ALL = "all";
+export const STATUS_FILTER_ACTIVE = "active";
 export const STATUS_FILTER_WRITTEN_OFF = "written-off";
 export const STATUS_FILTER_FULLY_PAID = "fully-paid";
 export const STATUS_FILTER_AFTER_RESULT = "after-result";
@@ -16,6 +17,7 @@ export const STATUS_FILTER_OVERDUE = "overdue";
 
 export type StatusFilter =
   | typeof STATUS_FILTER_ALL
+  | typeof STATUS_FILTER_ACTIVE
   | typeof STATUS_FILTER_WRITTEN_OFF
   | typeof STATUS_FILTER_FULLY_PAID
   | typeof STATUS_FILTER_AFTER_RESULT
@@ -78,6 +80,7 @@ export type OverviewPeriodKey = (typeof OVERVIEW_PERIOD_OPTIONS)[number]["key"];
 
 export const STATUS_FILTER_OPTIONS: Array<{ key: StatusFilter; label: string }> = [
   { key: STATUS_FILTER_ALL, label: "All" },
+  { key: STATUS_FILTER_ACTIVE, label: "Active" },
   { key: STATUS_FILTER_WRITTEN_OFF, label: "Written Off" },
   { key: STATUS_FILTER_FULLY_PAID, label: "Fully Paid" },
   { key: STATUS_FILTER_AFTER_RESULT, label: "After Result" },

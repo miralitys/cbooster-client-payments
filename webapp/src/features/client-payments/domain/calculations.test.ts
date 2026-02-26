@@ -350,4 +350,25 @@ describe("calculations", () => {
     });
     expect(ssnFiltered.map((item) => item.id)).toEqual(["ssn-hit"]);
   });
+
+  it("filters only active clients when status is active", () => {
+    const records: ClientRecord[] = [
+      makeRecord({ id: "active-1", active: "Active", clientName: "Active Client" }),
+      makeRecord({ id: "inactive-1", active: "Inactive", clientName: "Inactive Client" }),
+      makeRecord({ id: "active-2", active: "Yes", clientName: "Legacy Active Client" }),
+    ];
+
+    const filtered = filterRecords(records, {
+      search: "",
+      status: "active",
+      overdueRange: "",
+      closedBy: "",
+      createdAtRange: { from: "", to: "" },
+      paymentDateRange: { from: "", to: "" },
+      writtenOffDateRange: { from: "", to: "" },
+      fullyPaidDateRange: { from: "", to: "" },
+    });
+
+    expect(filtered.map((item) => item.id)).toEqual(["active-1", "active-2"]);
+  });
 });

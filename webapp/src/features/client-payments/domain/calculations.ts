@@ -4,6 +4,7 @@ import {
   FIELD_DEFINITIONS,
   OVERDUE_RANGE_OPTIONS,
   PAYMENT_PAIRS,
+  STATUS_FILTER_ACTIVE,
   STATUS_FILTER_AFTER_RESULT,
   STATUS_FILTER_ALL,
   STATUS_FILTER_FULLY_PAID,
@@ -349,6 +350,10 @@ function matchesStatusFilterByStatus(
 
   if (statusFilter === STATUS_FILTER_ALL) {
     return true;
+  }
+
+  if (statusFilter === STATUS_FILTER_ACTIVE) {
+    return status.isActive;
   }
 
   if (statusFilter === STATUS_FILTER_WRITTEN_OFF) {
