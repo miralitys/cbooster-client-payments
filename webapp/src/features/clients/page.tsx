@@ -371,6 +371,16 @@ export default function ClientsPage() {
     }
     return filteredRecords.length;
   }, [filteredRecords.length, scoreFilter, totalRecordsCount]);
+
+  useEffect(() => {
+    if (scoreFilter === "all") {
+      return;
+    }
+    if (isPageLoading || isLoadingMoreRecords || loadError || !hasMoreRecords) {
+      return;
+    }
+    void loadMoreRecords();
+  }, [hasMoreRecords, isLoadingMoreRecords, isPageLoading, loadError, loadMoreRecords, scoreFilter]);
   const summedColumnValues = useMemo(() => {
     const totals = new Map<keyof ClientRecord, number | null>();
     const runningTotals = new Map<keyof ClientRecord, number>();
