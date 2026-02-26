@@ -159,6 +159,7 @@ export default function ClientsPage() {
   const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("all");
   const [managerFilter, setManagerFilter] = useState<string>(MANAGER_FILTER_ALL);
   const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
+  const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
   const [isManagersLoading, setIsManagersLoading] = useState(false);
   const [managersError, setManagersError] = useState("");
   const [managersRefreshMode, setManagersRefreshMode] = useState<ClientManagersRefreshMode>("none");
@@ -628,12 +629,25 @@ export default function ClientsPage() {
                   onChange={(event) => updateFilter("search", event.target.value)}
                   placeholder="For example: John Smith, john@email.com, +1(555)555-5555, 123-45-6789"
                 />
-                <Button type="button" variant="secondary" size="sm" onClick={clearAllFilters}>
-                  Reset
-                </Button>
+                <div className="search-row__actions">
+                  <Button type="button" variant="secondary" size="sm" onClick={clearAllFilters}>
+                    Reset
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={isMoreFiltersOpen ? "primary" : "secondary"}
+                    size="sm"
+                    aria-expanded={isMoreFiltersOpen}
+                    onClick={() => setIsMoreFiltersOpen((prev) => !prev)}
+                  >
+                    {isMoreFiltersOpen ? "Less" : "More"}
+                  </Button>
+                </div>
               </div>
 
-              <div className="filters-grid-react">
+              {isMoreFiltersOpen ? (
+                <>
+                  <div className="filters-grid-react">
                 <div className="filter-field">
                   <label htmlFor="created-from-input">New Client From</label>
                   <DateInput
@@ -700,88 +714,90 @@ export default function ClientsPage() {
                     ))}
                   </Select>
                 </div>
-              </div>
-
-              <SegmentedControl
-                value={filters.status}
-                options={STATUS_FILTER_OPTIONS}
-                onChange={(value) => updateFilter("status", value as typeof filters.status)}
-              />
-
-              {filters.status === STATUS_FILTER_OVERDUE ? (
-                <SegmentedControl
-                  value={filters.overdueRange}
-                  options={OVERDUE_RANGE_OPTIONS}
-                  onChange={(value) => updateFilter("overdueRange", value as typeof filters.overdueRange)}
-                />
-              ) : null}
-
-              {filters.status === "written-off" ? (
-                <div className="written-off-date-filter-react">
-                  <div className="filter-field">
-                    <label htmlFor="written-off-from-input">Written Off Date From</label>
-                    <DateInput
-                      id="written-off-from-input"
-                      value={filters.writtenOffDateRange.from}
-                      onChange={(nextValue) => setDateRange("writtenOffDateRange", "from", nextValue)}
-                      placeholder="MM/DD/YYYY"
-                    />
                   </div>
-                  <div className="filter-field">
-                    <label htmlFor="written-off-to-input">To</label>
-                    <DateInput
-                      id="written-off-to-input"
-                      value={filters.writtenOffDateRange.to}
-                      onChange={(nextValue) => setDateRange("writtenOffDateRange", "to", nextValue)}
-                      placeholder="MM/DD/YYYY"
-                    />
-                  </div>
-                </div>
-              ) : null}
 
-              {filters.status === "fully-paid" ? (
-                <div className="written-off-date-filter-react">
-                  <div className="filter-field">
-                    <label htmlFor="fully-paid-from-input">Fully Paid Date From</label>
-                    <DateInput
-                      id="fully-paid-from-input"
-                      value={filters.fullyPaidDateRange.from}
-                      onChange={(nextValue) => setDateRange("fullyPaidDateRange", "from", nextValue)}
-                      placeholder="MM/DD/YYYY"
-                    />
-                  </div>
-                  <div className="filter-field">
-                    <label htmlFor="fully-paid-to-input">To</label>
-                    <DateInput
-                      id="fully-paid-to-input"
-                      value={filters.fullyPaidDateRange.to}
-                      onChange={(nextValue) => setDateRange("fullyPaidDateRange", "to", nextValue)}
-                      placeholder="MM/DD/YYYY"
-                    />
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="score-filter-block">
-                <div className="score-filter-block__header">
-                  <p className="search-label">Score</p>
-                  <Button
-                    type="button"
-                    variant={isScoreFilterOpen ? "primary" : "secondary"}
-                    size="sm"
-                    onClick={() => setIsScoreFilterOpen((prev) => !prev)}
-                  >
-                    Score
-                  </Button>
-                </div>
-                {isScoreFilterOpen ? (
                   <SegmentedControl
-                    value={scoreFilter}
-                    options={SCORE_FILTER_OPTIONS}
-                    onChange={(value) => setScoreFilter(value as ScoreFilter)}
+                    value={filters.status}
+                    options={STATUS_FILTER_OPTIONS}
+                    onChange={(value) => updateFilter("status", value as typeof filters.status)}
                   />
-                ) : null}
-              </div>
+
+                  {filters.status === STATUS_FILTER_OVERDUE ? (
+                    <SegmentedControl
+                      value={filters.overdueRange}
+                      options={OVERDUE_RANGE_OPTIONS}
+                      onChange={(value) => updateFilter("overdueRange", value as typeof filters.overdueRange)}
+                    />
+                  ) : null}
+
+                  {filters.status === "written-off" ? (
+                    <div className="written-off-date-filter-react">
+                      <div className="filter-field">
+                        <label htmlFor="written-off-from-input">Written Off Date From</label>
+                        <DateInput
+                          id="written-off-from-input"
+                          value={filters.writtenOffDateRange.from}
+                          onChange={(nextValue) => setDateRange("writtenOffDateRange", "from", nextValue)}
+                          placeholder="MM/DD/YYYY"
+                        />
+                      </div>
+                      <div className="filter-field">
+                        <label htmlFor="written-off-to-input">To</label>
+                        <DateInput
+                          id="written-off-to-input"
+                          value={filters.writtenOffDateRange.to}
+                          onChange={(nextValue) => setDateRange("writtenOffDateRange", "to", nextValue)}
+                          placeholder="MM/DD/YYYY"
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {filters.status === "fully-paid" ? (
+                    <div className="written-off-date-filter-react">
+                      <div className="filter-field">
+                        <label htmlFor="fully-paid-from-input">Fully Paid Date From</label>
+                        <DateInput
+                          id="fully-paid-from-input"
+                          value={filters.fullyPaidDateRange.from}
+                          onChange={(nextValue) => setDateRange("fullyPaidDateRange", "from", nextValue)}
+                          placeholder="MM/DD/YYYY"
+                        />
+                      </div>
+                      <div className="filter-field">
+                        <label htmlFor="fully-paid-to-input">To</label>
+                        <DateInput
+                          id="fully-paid-to-input"
+                          value={filters.fullyPaidDateRange.to}
+                          onChange={(nextValue) => setDateRange("fullyPaidDateRange", "to", nextValue)}
+                          placeholder="MM/DD/YYYY"
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="score-filter-block">
+                    <div className="score-filter-block__header">
+                      <p className="search-label">Score</p>
+                      <Button
+                        type="button"
+                        variant={isScoreFilterOpen ? "primary" : "secondary"}
+                        size="sm"
+                        onClick={() => setIsScoreFilterOpen((prev) => !prev)}
+                      >
+                        Score
+                      </Button>
+                    </div>
+                    {isScoreFilterOpen ? (
+                      <SegmentedControl
+                        value={scoreFilter}
+                        options={SCORE_FILTER_OPTIONS}
+                        onChange={(value) => setScoreFilter(value as ScoreFilter)}
+                      />
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
             </div>
         </Panel>
 

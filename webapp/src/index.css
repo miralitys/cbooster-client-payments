@@ -1099,6 +1099,12 @@ a {
   align-items: center;
 }
 
+.clients-react-page .search-row__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .clients-react-page .search-row .cb-input {
   min-width: 0;
 }
@@ -1136,6 +1142,12 @@ a {
   .clients-react-page .filters-grid-react,
   .clients-react-page .written-off-date-filter-react {
     grid-template-columns: 1fr;
+  }
+
+  .clients-react-page .search-row__actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
   }
 
   .clients-react-page .search-row .cb-button,
