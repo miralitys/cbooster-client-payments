@@ -1,7 +1,12 @@
 import type { Session } from "@/shared/types/session";
 
+function isAdminRoleSession(session: Session | null | undefined): boolean {
+  const roleId = normalizeSessionIdentity(session?.user?.roleId);
+  return roleId === "admin" || roleId === "administrator";
+}
+
 export function isOwnerOrAdminSession(session: Session | null | undefined): boolean {
-  return Boolean(session?.user?.isOwner || session?.permissions?.manage_access_control);
+  return Boolean(session?.user?.isOwner || isAdminRoleSession(session) || session?.permissions?.manage_access_control);
 }
 
 function normalizeSessionIdentity(rawValue: string | null | undefined): string {
@@ -20,11 +25,11 @@ export function isClientServiceDepartmentHeadSession(session: Session | null | u
 
 export function isAccountingDepartmentSession(session: Session | null | undefined): boolean {
   const departmentId = normalizeSessionIdentity(session?.user?.departmentId);
-  return departmentId === "accounting";
+  return departmentId === "accounting" || departmentId === "accounting_department";
 }
 
 export function canViewClientMatchSession(session: Session | null | undefined): boolean {
-  return isOwnerOrAdminSession(session) || isAccountingDepartmentSession(session);
+  return Boolean(session?.user?.isOwner || isAdminRoleSession(session) || isAccountingDepartmentSession(session));
 }
 
 export function canRefreshClientManagerFromGhlSession(session: Session | null | undefined): boolean {
