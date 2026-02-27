@@ -15481,6 +15481,10 @@ function isGhlConfigured() {
   return Boolean(GHL_API_KEY && GHL_LOCATION_ID);
 }
 
+function resolveGhlLocationId(rawLocationId) {
+  return sanitizeTextValue(rawLocationId, 160) || sanitizeTextValue(GHL_LOCATION_ID, 160);
+}
+
 const ghlReadOnlyGuard = createGhlReadOnlyGuard({
   logger: {
     warn: (message) => {
@@ -16274,13 +16278,14 @@ async function searchGhlContactsByClientName(clientName, options = {}) {
     return [];
   }
   const requestOverrides = buildGhlRequestOverrides(options);
+  const locationId = resolveGhlLocationId(options?.locationId);
 
   const attempts = [
     () =>
       requestGhlApi("/contacts/search", {
         method: "POST",
         body: {
-          locationId: GHL_LOCATION_ID,
+          locationId,
           page: 1,
           pageLimit: GHL_CONTACT_SEARCH_LIMIT,
           query: normalizedClientName,
@@ -16292,7 +16297,7 @@ async function searchGhlContactsByClientName(clientName, options = {}) {
       requestGhlApi("/contacts/search", {
         method: "POST",
         body: {
-          locationId: GHL_LOCATION_ID,
+          locationId,
           page: 1,
           limit: GHL_CONTACT_SEARCH_LIMIT,
           query: normalizedClientName,
@@ -16304,7 +16309,7 @@ async function searchGhlContactsByClientName(clientName, options = {}) {
       requestGhlApi("/contacts/", {
         method: "GET",
         query: {
-          locationId: GHL_LOCATION_ID,
+          locationId,
           query: normalizedClientName,
           page: 1,
           limit: GHL_CONTACT_SEARCH_LIMIT,
@@ -16316,7 +16321,7 @@ async function searchGhlContactsByClientName(clientName, options = {}) {
       requestGhlApi("/contacts", {
         method: "GET",
         query: {
-          locationId: GHL_LOCATION_ID,
+          locationId,
           query: normalizedClientName,
           page: 1,
           limit: GHL_CONTACT_SEARCH_LIMIT,
@@ -20101,8 +20106,9 @@ async function listGhlContractCandidatesForContact(contactId, options = {}) {
   const debugTrace = options?.debugTrace && typeof options.debugTrace === "object" ? options.debugTrace : null;
   const normalizedContactName = sanitizeTextValue(options?.contactName, 300);
   const normalizedClientName = sanitizeTextValue(options?.clientName, 300);
+  const locationId = resolveGhlLocationId(options?.locationId);
   const candidates = [];
-  const locationWideCandidates = await listGhlLocationContractCandidates();
+  const locationWideCandidates = await listGhlLocationContractCandidates({ locationId });
   if (locationWideCandidates.length) {
     for (const candidate of locationWideCandidates) {
       if (
@@ -20131,14 +20137,18 @@ async function listGhlContractCandidatesForContact(contactId, options = {}) {
   return deduped;
 }
 
-async function listGhlLocationContractCandidates() {
+async function listGhlLocationContractCandidates(options = {}) {
+  const locationId = resolveGhlLocationId(options?.locationId);
+  const useCache = !options?.locationId || locationId === resolveGhlLocationId();
   const now = Date.now();
-  if (
-    ghlLocationDocumentCandidatesCache.expiresAt > now &&
-    Array.isArray(ghlLocationDocumentCandidatesCache.items) &&
-    ghlLocationDocumentCandidatesCache.items.length
-  ) {
-    return ghlLocationDocumentCandidatesCache.items;
+  if (useCache) {
+    if (
+      ghlLocationDocumentCandidatesCache.expiresAt > now &&
+      Array.isArray(ghlLocationDocumentCandidatesCache.items) &&
+      ghlLocationDocumentCandidatesCache.items.length
+    ) {
+      return ghlLocationDocumentCandidatesCache.items;
+    }
   }
 
   const attempts = [];
@@ -20146,7 +20156,7 @@ async function listGhlLocationContractCandidates() {
     attempts.push({
       source: `proposals.document.location.contract.status_${status}`,
       query: {
-        locationId: GHL_LOCATION_ID,
+        locationId,
         status,
         query: "contract",
         skip: 0,
@@ -20157,7 +20167,7 @@ async function listGhlLocationContractCandidates() {
   attempts.push({
     source: "proposals.document.location.contract.no_status",
     query: {
-      locationId: GHL_LOCATION_ID,
+      locationId,
       query: "contract",
       skip: 0,
       limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
@@ -20188,10 +20198,12 @@ async function listGhlLocationContractCandidates() {
   }
 
   const deduped = dedupeGhlContractCandidates(candidates);
-  ghlLocationDocumentCandidatesCache = {
-    expiresAt: now + GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS,
-    items: deduped,
-  };
+  if (useCache) {
+    ghlLocationDocumentCandidatesCache = {
+      expiresAt: now + GHL_LOCATION_DOCUMENTS_CACHE_TTL_MS,
+      items: deduped,
+    };
+  }
   return deduped;
 }
 
@@ -33407,6 +33419,72 @@ async function fetchGhlContractTextViaBrowserSession(payload) {
   }
 }
 
+async function fetchGhlContractTextViaApiKey(payload) {
+  const clientName = sanitizeTextValue(payload?.clientName, 300);
+  const locationId = resolveGhlLocationId(payload?.locationId);
+  const startedAt = Date.now();
+
+  if (!clientName) {
+    throw toGhlContractTextOperationError("clientName is required.", {
+      code: "ghl_contract_text_invalid_payload",
+      httpStatus: 400,
+    });
+  }
+  if (!GHL_API_KEY) {
+    throw toGhlContractTextOperationError("GHL integration is not configured. Set GHL_API_KEY.", {
+      code: "ghl_contract_text_missing_api_key",
+      httpStatus: 503,
+    });
+  }
+  if (!locationId) {
+    throw toGhlContractTextOperationError("GHL locationId is not configured. Set GHL_LOCATION_ID or pass locationId.", {
+      code: "ghl_contract_text_missing_location",
+      httpStatus: 503,
+    });
+  }
+
+  const resolved = await resolveGhlContractTextForDownloadFallback(clientName, null, {
+    locationId,
+  });
+  if (!resolved?.text) {
+    throw toGhlContractTextOperationError(
+      "Contract text was not found for this client via GHL API key.",
+      {
+        code: "ghl_contract_text_not_found",
+        httpStatus: 404,
+      },
+    );
+  }
+
+  const normalizedText = normalizeGhlContractTextFragment(resolved.text);
+  const score = computeGhlContractTextQualityScore(normalizedText);
+  const contractTitle =
+    sanitizeTextValue(resolved?.lookupRow?.contractTitle, 320) ||
+    sanitizeTextValue(resolved?.contractTitle, 320) ||
+    "-";
+  const dashboardUrl = sanitizeTextValue(resolved?.lookupRow?.contractUrl, 2000);
+  const contactName = sanitizeTextValue(resolved?.contactName, 300) || clientName;
+  const contactId = sanitizeTextValue(resolved?.contactId, 160);
+
+  return {
+    provider: "gohighlevel",
+    status: score >= 5 ? "ok" : "partial",
+    clientName,
+    contactName,
+    contactId,
+    contractTitle,
+    candidateId: sanitizeTextValue(resolved?.candidateId, 160) || "",
+    source: sanitizeTextValue(resolved?.source, 220) || "api_key",
+    fallbackMode: sanitizeTextValue(resolved?.fallbackMode, 80) || "api_key",
+    contractText: normalizedText,
+    textLength: Number.isFinite(resolved?.textLength) ? resolved.textLength : normalizedText.length,
+    dashboardUrl,
+    fetchedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+    note: "Contract text extracted via GoHighLevel API key.",
+  };
+}
+
 const handleGhlContractTextPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
@@ -33429,15 +33507,8 @@ const handleGhlContractTextPost = async (req, res) => {
   }
 
   const clientName = sanitizeTextValue(req.body?.clientName, 300);
-  const login = normalizeGhlAppLogin(req.body?.login || req.body?.email || process.env.GHL_ADMIN_LOGIN || process.env.GHL_ADMIN_EMAIL);
-  const password = sanitizeTextValue(req.body?.password || process.env.GHL_ADMIN_PASSWORD, 260);
-  const mfaCode = normalizeGhlMfaCode(
-    req.body?.mfaCode || req.body?.verificationCode || req.body?.otp || process.env.GHL_ADMIN_MFA_CODE,
-  );
-  const mfaSessionId = sanitizeTextValue(req.body?.mfaSessionId, 160);
-  const locationId = sanitizeTextValue(req.body?.locationId || process.env.GHL_LOCATION_ID, 160);
-
-  if (!clientName && !mfaSessionId) {
+  const locationId = sanitizeTextValue(req.body?.locationId, 160);
+  if (!clientName) {
     res.status(400).json({
       error: "clientName is required for a new extraction request.",
       code: "ghl_contract_text_invalid_payload",
@@ -33445,24 +33516,11 @@ const handleGhlContractTextPost = async (req, res) => {
     return;
   }
 
-  if (!mfaSessionId && (!login || !password)) {
-    res.status(400).json({
-      error: "GoHighLevel admin login and password are required (payload or env GHL_ADMIN_LOGIN/GHL_ADMIN_PASSWORD).",
-      code: "ghl_contract_text_missing_credentials",
-    });
-    return;
-  }
-
   try {
-    const result = await fetchGhlContractTextViaBrowserSession({
+    const result = await fetchGhlContractTextViaApiKey({
       clientName,
-      login,
-      password,
-      mfaCode,
-      mfaSessionId,
       locationId,
     });
-
     res.json({
       ok: true,
       result,
@@ -33474,15 +33532,11 @@ const handleGhlContractTextPost = async (req, res) => {
       message: sanitizeTextValue(error?.message, 320),
       user: sanitizeTextValue(req.webAuthUser, 160),
       clientName,
-      loginMasked: maskGhlAppLogin(login),
-      mfaSessionId: sanitizeTextValue(error?.mfaSessionId, 160) || mfaSessionId,
     });
-    const responsePayload = {
+    res.status(error?.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 400) || "Failed to load GoHighLevel contract text.",
       code: sanitizeTextValue(error?.code, 80) || "ghl_contract_text_request_failed",
-      ...(sanitizeTextValue(error?.mfaSessionId, 160) ? { mfaSessionId: sanitizeTextValue(error?.mfaSessionId, 160) } : {}),
-    };
-    res.status(error?.httpStatus || 502).json(responsePayload);
+    });
   }
 };
 
@@ -37875,6 +37929,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
   const normalizedContactId = sanitizeTextValue(context?.contactId, 160);
   const normalizedContactName = sanitizeTextValue(context?.contactName, 300);
   const normalizedClientName = sanitizeTextValue(context?.clientName, 300);
+  const locationId = resolveGhlLocationId(context?.locationId);
   const encodedCandidateId = encodeURIComponent(normalizedCandidateId);
   const sharedRequestOptions = {
     method: "GET",
@@ -37892,7 +37947,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi(`/contacts/${encodedContactId}/documents/${encodedCandidateId}`, {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
           },
         }),
     });
@@ -37902,7 +37957,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi(`/contacts/${encodedContactId}/files/${encodedCandidateId}`, {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
           },
         }),
     });
@@ -37912,7 +37967,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi(`/contacts/${encodedContactId}/attachments/${encodedCandidateId}`, {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
           },
         }),
     });
@@ -37926,7 +37981,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi("/proposals/document", {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
             query: baseSearchQuery,
             skip: 0,
             limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
@@ -37939,7 +37994,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi("/proposals/document", {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
             id: normalizedCandidateId,
             skip: 0,
             limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
@@ -37952,7 +38007,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi("/proposals/document", {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
             documentId: normalizedCandidateId,
             skip: 0,
             limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
@@ -37965,7 +38020,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi("/proposals/document", {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
             proposalId: normalizedCandidateId,
             skip: 0,
             limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
@@ -37978,7 +38033,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi(`/proposals/document/${encodedCandidateId}`, {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
           },
         }),
     },
@@ -37988,7 +38043,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi(`/proposals/documents/${encodedCandidateId}`, {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
           },
         }),
     },
@@ -37998,7 +38053,7 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
         requestGhlApi("/proposals/documents", {
           ...sharedRequestOptions,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
             id: normalizedCandidateId,
             skip: 0,
             limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
@@ -38011,34 +38066,34 @@ async function resolveGhlContractTextByCandidateId(candidateId, context = {}, de
     attempts.push(
       {
         source: "contract_text.proposals.document.by_id.preview",
-        request: () =>
-          requestGhlApi(`/proposals/document/${encodedCandidateId}/preview`, {
-            ...sharedRequestOptions,
-            query: {
-              locationId: GHL_LOCATION_ID,
-            },
-          }),
+      request: () =>
+        requestGhlApi(`/proposals/document/${encodedCandidateId}/preview`, {
+          ...sharedRequestOptions,
+          query: {
+            locationId,
+          },
+        }),
       },
       {
         source: "contract_text.proposals.document.by_id.content",
-        request: () =>
-          requestGhlApi(`/proposals/document/${encodedCandidateId}/content`, {
-            ...sharedRequestOptions,
-            query: {
-              locationId: GHL_LOCATION_ID,
-            },
-          }),
+      request: () =>
+        requestGhlApi(`/proposals/document/${encodedCandidateId}/content`, {
+          ...sharedRequestOptions,
+          query: {
+            locationId,
+          },
+        }),
       },
       {
         source: "contract_text.proposals.document.by_id.query_html",
-        request: () =>
-          requestGhlApi(`/proposals/document/${encodedCandidateId}`, {
-            ...sharedRequestOptions,
-            query: {
-              locationId: GHL_LOCATION_ID,
-              format: "html",
-            },
-          }),
+      request: () =>
+        requestGhlApi(`/proposals/document/${encodedCandidateId}`, {
+          ...sharedRequestOptions,
+          query: {
+            locationId,
+            format: "html",
+          },
+        }),
       },
     );
   }
@@ -38141,6 +38196,7 @@ async function resolveGhlContractTextFromProposalSearch(context = {}, options = 
 
   const normalizedContactName = sanitizeTextValue(context?.contactName, 300) || normalizedClientName;
   const normalizedContactId = sanitizeTextValue(context?.contactId, 160);
+  const locationId = resolveGhlLocationId(context?.locationId);
   const fastMode = Boolean(options?.fastMode);
   const deadlineAtMs = parsePositiveInteger(options?.deadlineAtMs, 0);
   const parsedMaxRetries = Number.parseInt(sanitizeTextValue(options?.maxRetries, 20), 10);
@@ -38186,7 +38242,7 @@ async function resolveGhlContractTextFromProposalSearch(context = {}, options = 
           maxRetries: requestMaxRetries,
           tolerateNotFound: true,
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
             status,
             query: queryValue,
             skip: 0,
@@ -38256,12 +38312,14 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
 
   const normalizedPreferredContactId = sanitizeTextValue(options?.preferredContactId, 160);
   const requestedCandidateId = extractLikelyGhlEntityId(options?.candidateId);
+  const locationId = resolveGhlLocationId(options?.locationId);
   const normalizedLookupRow =
     lookupRow && typeof lookupRow === "object"
       ? lookupRow
       : await resolveGhlClientContractDownloadRow(normalizedClientName, {
           preferredContactId: normalizedPreferredContactId,
           debugEnabled: true,
+          locationId,
         });
 
   const lookupStatus = normalizeGhlClientContractDownloadStatus(normalizedLookupRow?.status);
@@ -38419,6 +38477,7 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
       clientName: normalizedClientName,
       contactName: resolvedContactName,
       quickMode: true,
+      locationId,
     });
     for (const candidate of quickApiCandidates.slice(0, 20)) {
       pushCandidate(candidate, {
@@ -38439,15 +38498,16 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
         break;
       }
 
-      const textResult = await resolveGhlContractTextByCandidateId(candidate.candidateId, {
-        contactId: candidate.contactId || resolvedContactId,
-        contactName: candidate.contactName || resolvedContactName,
-        clientName: normalizedClientName,
-      }, null, {
-        fastMode: true,
-        deadlineAtMs,
-        requestTimeoutMs: GHL_CLIENT_CONTRACT_TEXT_FALLBACK_REQUEST_TIMEOUT_MS,
-        maxRetries: 0,
+    const textResult = await resolveGhlContractTextByCandidateId(candidate.candidateId, {
+      contactId: candidate.contactId || resolvedContactId,
+      contactName: candidate.contactName || resolvedContactName,
+      clientName: normalizedClientName,
+      locationId,
+    }, null, {
+      fastMode: true,
+      deadlineAtMs,
+      requestTimeoutMs: GHL_CLIENT_CONTRACT_TEXT_FALLBACK_REQUEST_TIMEOUT_MS,
+      maxRetries: 0,
       });
       if (!textResult?.text) {
         continue;
@@ -38477,6 +38537,7 @@ async function resolveGhlContractTextForDownloadFallback(clientName, lookupRow, 
         clientName: normalizedClientName,
         contactName: resolvedContactName,
         contactId: resolvedContactId,
+        locationId,
       },
       {
         fastMode: true,
@@ -38514,6 +38575,7 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
 
   const normalizedContactName = sanitizeTextValue(options?.contactName, 300);
   const normalizedClientName = sanitizeTextValue(options?.clientName, 300);
+  const locationId = resolveGhlLocationId(options?.locationId);
   const proposalNameQuery = [normalizedContactName, normalizedClientName].filter(Boolean).join(" ").trim();
   const encodedContactId = encodeURIComponent(normalizedContactId);
 
@@ -38524,7 +38586,7 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
         requestGhlApi(`/contacts/${encodedContactId}/documents`, {
           method: "GET",
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
           },
           tolerateNotFound: true,
         }),
@@ -38535,7 +38597,7 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
         requestGhlApi(`/contacts/${encodedContactId}/files`, {
           method: "GET",
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
           },
           tolerateNotFound: true,
         }),
@@ -38546,7 +38608,7 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
         requestGhlApi(`/contacts/${encodedContactId}/attachments`, {
           method: "GET",
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
           },
           tolerateNotFound: true,
         }),
@@ -38564,7 +38626,7 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
           requestGhlApi("/proposals/document", {
             method: "GET",
             query: {
-              locationId: GHL_LOCATION_ID,
+              locationId,
               status,
               query: queryText,
               skip: 0,
@@ -38583,7 +38645,7 @@ async function listGhlContractDownloadCandidatesForContact(contactId, options = 
           requestGhlApi("/proposals/document", {
             method: "GET",
             query: {
-              locationId: GHL_LOCATION_ID,
+              locationId,
               query: queryText,
               skip: 0,
               limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
@@ -38712,6 +38774,7 @@ async function listGhlContractDownloadCandidatesForClientName(clientName, option
     return [];
   }
   const debugTrace = options?.debugTrace && typeof options.debugTrace === "object" ? options.debugTrace : null;
+  const locationId = resolveGhlLocationId(options?.locationId);
 
   const attempts = [];
   const queryVariants = [...new Set([normalizedClientName, `${normalizedClientName} contract`, "contract"])];
@@ -38723,7 +38786,7 @@ async function listGhlContractDownloadCandidatesForClientName(clientName, option
           requestGhlApi("/proposals/document", {
             method: "GET",
             query: {
-              locationId: GHL_LOCATION_ID,
+              locationId,
               status,
               query: queryText,
               skip: 0,
@@ -38741,7 +38804,7 @@ async function listGhlContractDownloadCandidatesForClientName(clientName, option
         requestGhlApi("/proposals/document", {
           method: "GET",
           query: {
-            locationId: GHL_LOCATION_ID,
+            locationId,
             query: queryText,
             skip: 0,
             limit: GHL_PROPOSAL_DOCUMENT_QUERY_LIMIT,
@@ -38840,6 +38903,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
   const normalizedClientName = sanitizeTextValue(clientName, 300);
   const debugEnabled = Boolean(options?.debugEnabled);
   const fastMode = Boolean(options?.fastMode);
+  const locationId = resolveGhlLocationId(options?.locationId);
   const diagnostics = debugEnabled
     ? {
         clientName: normalizedClientName || sanitizeTextValue(clientName, 300),
@@ -38873,7 +38937,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
   }
 
   try {
-    const contacts = await searchGhlContactsByClientName(normalizedClientName);
+    const contacts = await searchGhlContactsByClientName(normalizedClientName, { locationId });
     if (diagnostics) {
       diagnostics.matchedContacts = contacts.length;
     }
@@ -38970,6 +39034,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
         contactName,
         debugTrace: fromApiTrace,
         quickMode: fastMode,
+        locationId,
       });
       if (contactDiagnostics) {
         contactDiagnostics.fromApiCount = fromApi.length;
@@ -38990,6 +39055,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
           clientName: normalizedClientName,
           contactName,
           debugTrace: fromLegacyApiTrace,
+          locationId,
         });
         if (contactDiagnostics) {
           contactDiagnostics.fromLegacyApiCount = fromLegacyApi.length;
@@ -39117,6 +39183,7 @@ async function resolveGhlClientContractDownloadRow(clientName, options = {}) {
       const byNameTrace = diagnostics ? {} : null;
       const byNameCandidates = await listGhlContractDownloadCandidatesForClientName(normalizedClientName, {
         debugTrace: byNameTrace,
+        locationId,
       });
       const byNameDiagnostics = diagnostics
         ? {
