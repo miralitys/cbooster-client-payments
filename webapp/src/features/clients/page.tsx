@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
 import { getClientFilterOptions, getClientManagers, postGhlClientPhoneRefresh } from "@/shared/api";
-import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
+import {
+  canConfirmQuickBooksPaymentsSession,
+  canRefreshClientManagerFromGhlSession,
+  canRefreshClientPhoneFromGhlSession,
+} from "@/shared/lib/access";
 import {
   formatDate,
   formatMoney,
@@ -222,6 +226,7 @@ export default function ClientsPage() {
 
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
+  const canConfirmPendingQuickBooksPayments = canConfirmQuickBooksPaymentsSession(session);
   const isPageLoading = isFilterOptionsLoading || isLoading;
 
   useEffect(() => {
@@ -1057,6 +1062,7 @@ export default function ClientsPage() {
             canRefreshClientPhone={canRefreshClientPhoneInCard}
             isRefreshingClientPhone={refreshingCardClientPhoneKey === normalizeComparableClientName(activeRecord.clientName)}
             onRefreshClientPhone={refreshSingleClientPhone}
+            canConfirmPendingQuickBooksPayments={canConfirmPendingQuickBooksPayments}
           />
         ) : null}
         {!isViewMode ? <RecordEditorForm draft={modalState.draft} onChange={updateDraftField} /> : null}

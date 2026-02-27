@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
 import { getClientManagers, postGhlClientPhoneRefresh, startClientManagersRefreshBackgroundJob } from "@/shared/api";
-import { canRefreshClientManagerFromGhlSession, canRefreshClientPhoneFromGhlSession } from "@/shared/lib/access";
+import {
+  canConfirmQuickBooksPaymentsSession,
+  canRefreshClientManagerFromGhlSession,
+  canRefreshClientPhoneFromGhlSession,
+} from "@/shared/lib/access";
 import {
   formatDate,
   formatKpiMoney,
@@ -187,6 +191,7 @@ export default function ClientPaymentsPage() {
   const canSyncClientManagers = Boolean(session?.permissions?.sync_client_managers);
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
+  const canConfirmPendingQuickBooksPayments = canConfirmQuickBooksPaymentsSession(session);
   const canViewRefreshMenu = canRefreshClientManagerInCard;
 
   const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
@@ -1251,6 +1256,7 @@ export default function ClientPaymentsPage() {
             canRefreshClientPhone={canRefreshClientPhoneInCard}
             isRefreshingClientPhone={refreshingCardClientPhoneKey === normalizeComparableClientName(activeRecord.clientName)}
             onRefreshClientPhone={refreshSingleClientPhone}
+            canConfirmPendingQuickBooksPayments={canConfirmPendingQuickBooksPayments}
           />
         ) : null}
         {!isViewMode ? <RecordEditorForm draft={modalState.draft} onChange={updateDraftField} /> : null}

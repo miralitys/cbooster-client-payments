@@ -37,6 +37,10 @@ export function canViewClientMatchSession(session: Session | null | undefined): 
   return Boolean(session?.user?.isOwner || isAdminRoleSession(session) || isAccountingDepartmentSession(session));
 }
 
+export function canConfirmQuickBooksPaymentsSession(session: Session | null | undefined): boolean {
+  return Boolean(session?.user?.isOwner || isAdminRoleSession(session) || isAccountingDepartmentSession(session));
+}
+
 export function canRefreshClientManagerFromGhlSession(session: Session | null | undefined): boolean {
   return isOwnerOrAdminSession(session) || isClientServiceDepartmentHeadSession(session);
 }

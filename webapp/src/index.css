@@ -2273,6 +2273,38 @@ a {
   text-align: right;
 }
 
+.record-payments-panel__pending-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.record-payments-panel__confirm-btn {
+  width: 22px;
+  height: 22px;
+  border: 1px solid #16a34a;
+  border-radius: 9999px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.record-payments-panel__confirm-btn:hover:not(:disabled) {
+  background: #dcfce7;
+}
+
+.record-payments-panel__confirm-btn:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 .record-payments-panel__pending {
   display: inline-flex;
   justify-content: flex-end;
@@ -2285,6 +2317,12 @@ a {
   font-weight: 600;
   line-height: 1.3;
   white-space: nowrap;
+}
+
+.record-payments-panel__error {
+  margin: 0;
+  color: #b91c1c;
+  font-size: var(--font-size-xs);
 }
 
 .record-details-ghl-note {
@@ -5202,6 +5240,7 @@ a {
 
   .record-payments-panel__amount,
   .record-payments-panel__date,
+  .record-payments-panel__pending-actions,
   .record-payments-panel__pending {
     text-align: left;
     justify-content: flex-start;

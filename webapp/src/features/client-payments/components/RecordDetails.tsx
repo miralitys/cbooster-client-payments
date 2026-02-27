@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  confirmQuickBooksRecentPayment,
   getGhlClientBasicNote,
   getGhlClientCommunications,
   getQuickBooksPendingConfirmations,
@@ -18,6 +19,7 @@ import type { QuickBooksPendingConfirmationRow } from "@/shared/types/quickbooks
 import type { ClientRecord } from "@/shared/types/records";
 import { FIELD_DEFINITIONS, PAYMENT_PAIRS } from "@/features/client-payments/domain/constants";
 import { formatDate, formatMoney, getRecordStatusFlags, parseMoneyValue } from "@/features/client-payments/domain/calculations";
+import { showToast } from "@/shared/lib/toast";
 import { Badge, Button, Modal } from "@/shared/ui";
 
 interface RecordDetailsProps {
@@ -29,6 +31,7 @@ interface RecordDetailsProps {
   canRefreshClientPhone?: boolean;
   isRefreshingClientPhone?: boolean;
   onRefreshClientPhone?: (clientName: string) => Promise<void>;
+  canConfirmPendingQuickBooksPayments?: boolean;
 }
 
 const HEADER_FIELD_KEYS = new Set<keyof ClientRecord>([
@@ -111,6 +114,7 @@ export function RecordDetails({
   canRefreshClientPhone = false,
   isRefreshingClientPhone = false,
   onRefreshClientPhone,
+  canConfirmPendingQuickBooksPayments = false,
 }: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
   const [isLoadingGhlBasicNote, setIsLoadingGhlBasicNote] = useState(false);
@@ -132,6 +136,8 @@ export function RecordDetails({
   const [isAboutClientExpanded, setIsAboutClientExpanded] = useState(false);
   const [clientManagerRefreshError, setClientManagerRefreshError] = useState("");
   const [clientPhoneRefreshError, setClientPhoneRefreshError] = useState("");
+  const [confirmingPendingPaymentField, setConfirmingPendingPaymentField] = useState("");
+  const [pendingQuickBooksConfirmationError, setPendingQuickBooksConfirmationError] = useState("");
   const transcriptNormalizationByClientRef = useRef<Record<string, boolean>>({});
 
   const normalizedClientName = useMemo(() => (record.clientName || "").trim(), [record.clientName]);
@@ -631,15 +637,15 @@ export function RecordDetails({
     [record.afterResult, record.contractCompleted, record.dateWhenFullyPaid, record.writtenOff],
   );
   const workflowNotes = useMemo(() => getOptionalRecordText(record, "notes"), [record]);
-  const pendingQuickBooksFields = useMemo(() => {
-    const fields = new Set<string>();
+  const pendingQuickBooksByPaymentField = useMemo(() => {
+    const map = new Map<string, QuickBooksPendingConfirmationRow>();
     for (const item of pendingQuickBooksMatches) {
       const paymentField = String(item?.matchedPaymentField || "").trim();
-      if (paymentField) {
-        fields.add(paymentField);
+      if (paymentField && !map.has(paymentField)) {
+        map.set(paymentField, item);
       }
     }
-    return fields;
+    return map;
   }, [pendingQuickBooksMatches]);
   const paymentScheduleRows = useMemo(
     () =>
@@ -649,9 +655,10 @@ export function RecordDetails({
         label: `Payment ${index + 1}`,
         amount: record[paymentField] ? formatMoneyCell(record[paymentField]) : "-",
         date: record[paymentDateField] ? formatDate(record[paymentDateField]) : "-",
-        pending: pendingQuickBooksFields.has(String(paymentField)),
+        pendingMatch: pendingQuickBooksByPaymentField.get(String(paymentField)) || null,
+        pending: pendingQuickBooksByPaymentField.has(String(paymentField)),
       })),
-    [pendingQuickBooksFields, record],
+    [pendingQuickBooksByPaymentField, record],
   );
   const visiblePaymentScheduleRows = useMemo(() => {
     const rowsWithValues = paymentScheduleRows.filter((payment) => payment.amount !== "-" || payment.date !== "-");
@@ -667,11 +674,12 @@ export function RecordDetails({
     const recordId = String(record.id || "").trim();
     if (!recordId) {
       setPendingQuickBooksMatches([]);
+      setPendingQuickBooksConfirmationError("");
       return;
     }
 
     let isActive = true;
-    const abortController = new AbortController();
+    setPendingQuickBooksConfirmationError("");
 
     void getQuickBooksPendingConfirmations(recordId)
       .then((payload) => {
@@ -689,7 +697,6 @@ export function RecordDetails({
 
     return () => {
       isActive = false;
-      abortController.abort();
     };
   }, [record.id]);
 
@@ -716,6 +723,61 @@ export function RecordDetails({
       await onRefreshClientPhone(normalizedClientName);
     } catch (error) {
       setClientPhoneRefreshError(error instanceof Error ? error.message : "Failed to refresh Phone.");
+    }
+  }
+
+  async function handleConfirmPendingQuickBooksPayment(pendingMatch: QuickBooksPendingConfirmationRow) {
+    if (!canConfirmPendingQuickBooksPayments) {
+      showToast({
+        type: "error",
+        message: "You do not have permission to confirm payments.",
+        dedupeKey: "record-details-confirm-permission-denied",
+      });
+      return;
+    }
+
+    const transactionId = String(pendingMatch.transactionId || "").trim();
+    if (!transactionId) {
+      showToast({
+        type: "error",
+        message: "Payment confirmation is unavailable for this row.",
+        dedupeKey: "record-details-confirm-transaction-missing",
+      });
+      return;
+    }
+
+    const shouldConfirm = window.confirm("Confirm payment? Yes/No");
+    if (!shouldConfirm) {
+      return;
+    }
+
+    const matchedPaymentField = String(pendingMatch.matchedPaymentField || "").trim();
+    setPendingQuickBooksConfirmationError("");
+    setConfirmingPendingPaymentField(matchedPaymentField || transactionId);
+
+    try {
+      await confirmQuickBooksRecentPayment({
+        transactionId,
+        transactionType: String(pendingMatch.transactionType || "").trim() || "payment",
+      });
+      setPendingQuickBooksMatches((previous) =>
+        previous.filter((item) => String(item.transactionId || "").trim() !== transactionId),
+      );
+      showToast({
+        type: "success",
+        message: "Payment confirmed.",
+        dedupeKey: "record-details-payment-confirmed",
+        cooldownMs: 1200,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to confirm payment.";
+      setPendingQuickBooksConfirmationError(message);
+      showToast({
+        type: "error",
+        message,
+      });
+    } finally {
+      setConfirmingPendingPaymentField("");
     }
   }
 
@@ -844,17 +906,37 @@ export function RecordDetails({
               <h4 className="record-payments-panel__title">Payments</h4>
             </div>
             <div className="record-payments-panel__rows" role="list">
-              {visiblePaymentScheduleRows.map((payment) => (
-                <div key={payment.id} className="record-payments-panel__row" role="listitem">
-                  <span className="record-payments-panel__label">{payment.label}</span>
-                  <span className="record-payments-panel__amount">{payment.amount}</span>
-                  <span className="record-payments-panel__date">{payment.date}</span>
-                  {payment.pending ? (
-                    <span className="record-payments-panel__pending">Not Confirmed</span>
-                  ) : null}
-                </div>
-              ))}
+              {visiblePaymentScheduleRows.map((payment) => {
+                const pendingMatch = payment.pendingMatch;
+                return (
+                  <div key={payment.id} className="record-payments-panel__row" role="listitem">
+                    <span className="record-payments-panel__label">{payment.label}</span>
+                    <span className="record-payments-panel__amount">{payment.amount}</span>
+                    <span className="record-payments-panel__date">{payment.date}</span>
+                    {payment.pending ? (
+                      <span className="record-payments-panel__pending-actions">
+                        {canConfirmPendingQuickBooksPayments && pendingMatch ? (
+                          <button
+                            type="button"
+                            className="record-payments-panel__confirm-btn"
+                            onClick={() => void handleConfirmPendingQuickBooksPayment(pendingMatch)}
+                            disabled={confirmingPendingPaymentField === payment.paymentField}
+                            title="Confirm payment"
+                            aria-label={`Confirm ${payment.label}`}
+                          >
+                            {confirmingPendingPaymentField === payment.paymentField ? "..." : "✓"}
+                          </button>
+                        ) : null}
+                        <span className="record-payments-panel__pending">Not Confirmed</span>
+                      </span>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
+            {pendingQuickBooksConfirmationError ? (
+              <p className="record-payments-panel__error">{pendingQuickBooksConfirmationError}</p>
+            ) : null}
             {hiddenPaymentRowsCount > 0 ? (
               <p className="react-user-footnote">Hidden empty payment rows: {hiddenPaymentRowsCount}</p>
             ) : null}
