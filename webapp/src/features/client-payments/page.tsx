@@ -187,7 +187,7 @@ export default function ClientPaymentsPage() {
   const canSyncClientManagers = Boolean(session?.permissions?.sync_client_managers);
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
-  const canUseRefreshMenu = canSyncClientManagers || canRefreshClientPhoneInCard;
+  const canViewRefreshMenu = canRefreshClientManagerInCard;
 
   const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
     () =>
@@ -1084,64 +1084,65 @@ export default function ClientPaymentsPage() {
               <Button variant="secondary" size="sm" onClick={() => exportRecordsToPdf(filteredRecords)}>
                 Export PDF
               </Button>
-              <div ref={refreshMenuRef} className={`refresh-manager-menu ${isRefreshMenuOpen ? "is-open" : ""}`.trim()}>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="refresh-manager-menu__toggle"
-                  onClick={() => setIsRefreshMenuOpen((prev) => !prev)}
-                  disabled={!canUseRefreshMenu}
-                  isLoading={isManagersLoading || isPhonesRefreshLoading}
-                  aria-haspopup="menu"
-                  aria-expanded={isRefreshMenuOpen}
-                  aria-controls="client-payments-refresh-manager-menu"
-                >
-                  {`Refresh ${isRefreshMenuOpen ? "▴" : "▾"}`}
-                </Button>
-                <div
-                  id="client-payments-refresh-manager-menu"
-                  className="refresh-manager-menu__panel"
-                  role="menu"
-                  hidden={!isRefreshMenuOpen}
-                >
-                  <button
-                    type="button"
-                    className="refresh-manager-menu__item"
-                    role="menuitem"
-                    onClick={() => {
-                      setIsRefreshMenuOpen(false);
-                      void refreshClientManagers("incremental");
-                    }}
-                    disabled={isManagersLoading || isPhonesRefreshLoading || !canSyncClientManagers}
+              {canViewRefreshMenu ? (
+                <div ref={refreshMenuRef} className={`refresh-manager-menu ${isRefreshMenuOpen ? "is-open" : ""}`.trim()}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="refresh-manager-menu__toggle"
+                    onClick={() => setIsRefreshMenuOpen((prev) => !prev)}
+                    isLoading={isManagersLoading || isPhonesRefreshLoading}
+                    aria-haspopup="menu"
+                    aria-expanded={isRefreshMenuOpen}
+                    aria-controls="client-payments-refresh-manager-menu"
                   >
-                    Refresh Manager
-                  </button>
-                  <button
-                    type="button"
-                    className="refresh-manager-menu__item"
-                    role="menuitem"
-                    onClick={() => {
-                      setIsRefreshMenuOpen(false);
-                      void startBackgroundClientManagersRefresh();
-                    }}
-                    disabled={isManagersLoading || isPhonesRefreshLoading || !canSyncClientManagers}
+                    {`Refresh ${isRefreshMenuOpen ? "▴" : "▾"}`}
+                  </Button>
+                  <div
+                    id="client-payments-refresh-manager-menu"
+                    className="refresh-manager-menu__panel"
+                    role="menu"
+                    hidden={!isRefreshMenuOpen}
                   >
-                    Total Refresh Manager
-                  </button>
-                  <button
-                    type="button"
-                    className="refresh-manager-menu__item"
-                    role="menuitem"
-                    onClick={() => {
-                      setIsRefreshMenuOpen(false);
-                      void refreshFilteredClientPhones();
-                    }}
-                    disabled={isManagersLoading || isPhonesRefreshLoading || !canRefreshClientPhoneInCard}
-                  >
-                    Add/Refresh Phones
-                  </button>
+                    <button
+                      type="button"
+                      className="refresh-manager-menu__item"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsRefreshMenuOpen(false);
+                        void refreshClientManagers("incremental");
+                      }}
+                      disabled={isManagersLoading || isPhonesRefreshLoading || !canSyncClientManagers}
+                    >
+                      Refresh Manager
+                    </button>
+                    <button
+                      type="button"
+                      className="refresh-manager-menu__item"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsRefreshMenuOpen(false);
+                        void startBackgroundClientManagersRefresh();
+                      }}
+                      disabled={isManagersLoading || isPhonesRefreshLoading || !canSyncClientManagers}
+                    >
+                      Total Refresh Manager
+                    </button>
+                    <button
+                      type="button"
+                      className="refresh-manager-menu__item"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsRefreshMenuOpen(false);
+                        void refreshFilteredClientPhones();
+                      }}
+                      disabled={isManagersLoading || isPhonesRefreshLoading || !canRefreshClientPhoneInCard}
+                    >
+                      Add/Refresh Phones
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : null}
             </div>
           }
         >
