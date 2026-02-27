@@ -40144,6 +40144,11 @@ const handleGhlClientPhonesRefreshPost = async (req, res) => {
 };
 
 const handleGhlClientContractsArchivePost = async (req, res) => {
+  console.warn("GHL contract archive webhook payload preview:", {
+    hasBody: Boolean(req.body),
+    keys: req.body && typeof req.body === "object" ? Object.keys(req.body).slice(0, 30) : [],
+    clientName: sanitizeTextValue(req.body?.clientName, 200) || null,
+  });
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
