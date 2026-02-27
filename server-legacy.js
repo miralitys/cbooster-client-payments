@@ -539,6 +539,15 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
 const WEB_AUTH_CANONICAL_DISPLAY_NAME_BY_USERNAME = Object.freeze({
   "marynau@creditbooster.com": "Maryna Urvantseva",
 });
+const WEB_AUTH_CANONICAL_MIDDLE_MANAGER_TEAM_DISPLAY_NAMES_BY_USERNAME = Object.freeze({
+  "marynau@creditbooster.com": Object.freeze([
+    "Kristina Troinova",
+    "Liudmyla Sidachenko",
+    "Liudmyla Sydachenko",
+    "Ruanna Ordukhanova-Aslanyan",
+    "Vadim Kozorezov",
+  ]),
+});
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
 const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
@@ -6875,8 +6884,38 @@ function getWebAuthTeamIdentityValues(userProfile) {
     return [];
   }
 
+  const username = normalizeWebAuthUsername(userProfile.username);
+  const canonicalTeamDisplayNames = username
+    ? WEB_AUTH_CANONICAL_MIDDLE_MANAGER_TEAM_DISPLAY_NAMES_BY_USERNAME[username]
+    : null;
   const principalDepartmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
-  const teamUsernames = normalizeWebAuthTeamUsernames(userProfile.teamUsernames);
+  const canonicalTeamDisplayNameSet = new Set(
+    (Array.isArray(canonicalTeamDisplayNames) ? canonicalTeamDisplayNames : [])
+      .map((value) => normalizeWebAuthIdentityText(value))
+      .filter(Boolean),
+  );
+  const teamUsernames =
+    canonicalTeamDisplayNameSet.size > 0
+      ? listWebAuthUsers()
+          .filter((candidate) => {
+            if (!candidate || typeof candidate !== "object" || candidate.isOwner) {
+              return false;
+            }
+            const teammateDepartmentId = normalizeWebAuthDepartmentId(candidate.departmentId);
+            const teammateRoleId = normalizeWebAuthRoleId(candidate.roleId, teammateDepartmentId);
+            if (principalDepartmentId && teammateDepartmentId !== principalDepartmentId) {
+              return false;
+            }
+            if (teammateRoleId !== WEB_AUTH_ROLE_MANAGER) {
+              return false;
+            }
+
+            const candidateDisplayName = normalizeWebAuthIdentityText(candidate.displayName);
+            return candidateDisplayName && canonicalTeamDisplayNameSet.has(candidateDisplayName);
+          })
+          .map((candidate) => normalizeWebAuthUsername(candidate.username))
+          .filter(Boolean)
+      : normalizeWebAuthTeamUsernames(userProfile.teamUsernames);
   const values = [];
 
   for (const teamUsername of teamUsernames) {

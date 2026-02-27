@@ -470,6 +470,33 @@ test("authz regression: client-service manager scope uses clientManager only and
           payment1Date: "02/12/2026",
         },
         {
+          id: "authz-cs-rec-kristina",
+          clientName: "Visible For Maryna Canonical Team Kristina",
+          closedBy: "unrelated.sales.manager",
+          clientManager: "Kristina Troinova",
+          contractTotals: "$1,410.00",
+          payment1: "$141.00",
+          payment1Date: "02/12/2026",
+        },
+        {
+          id: "authz-cs-rec-liudmyla",
+          clientName: "Visible For Maryna Canonical Team Liudmyla",
+          closedBy: "unrelated.sales.manager",
+          clientManager: "Liudmyla Sidachenko",
+          contractTotals: "$1,420.00",
+          payment1: "$142.00",
+          payment1Date: "02/12/2026",
+        },
+        {
+          id: "authz-cs-rec-vadim",
+          clientName: "Visible For Maryna Canonical Team Vadim",
+          closedBy: "unrelated.sales.manager",
+          clientManager: "Vadim Kozorezov",
+          contractTotals: "$1,430.00",
+          payment1: "$143.00",
+          payment1Date: "02/12/2026",
+        },
+        {
           id: "authz-cs-rec-4",
           clientName: "Must Stay Hidden When Only closedBy Matches",
           closedBy: "Ruanna Ordukhanova-Aslanyan",
@@ -521,7 +548,13 @@ test("authz regression: client-service manager scope uses clientManager only and
     assert.equal(middleManagerRecords.response.status, 200);
     assert.deepEqual(
       middleManagerRecords.body.records.map((item) => item.id).sort(),
-      ["authz-cs-rec-1", "authz-cs-rec-2"],
+      [
+        "authz-cs-rec-1",
+        "authz-cs-rec-2",
+        "authz-cs-rec-kristina",
+        "authz-cs-rec-liudmyla",
+        "authz-cs-rec-vadim",
+      ],
     );
 
     const managerClients = await getClients(baseUrl, manager);
@@ -535,7 +568,13 @@ test("authz regression: client-service manager scope uses clientManager only and
     assert.equal(middleManagerClients.response.status, 200);
     assert.deepEqual(
       middleManagerClients.body.records.map((item) => item.id).sort(),
-      ["authz-cs-rec-1", "authz-cs-rec-2"],
+      [
+        "authz-cs-rec-1",
+        "authz-cs-rec-2",
+        "authz-cs-rec-kristina",
+        "authz-cs-rec-liudmyla",
+        "authz-cs-rec-vadim",
+      ],
     );
 
     const managerClientFilters = await getClientsFilters(baseUrl, manager);
@@ -544,10 +583,16 @@ test("authz regression: client-service manager scope uses clientManager only and
 
     const middleManagerClientFilters = await getClientsFilters(baseUrl, middleManager);
     assert.equal(middleManagerClientFilters.response.status, 200);
-    assert.deepEqual(middleManagerClientFilters.body.clientManagerOptions, [
-      "Maryna Urvantseva",
-      "Ruanna Ordukhanova-Aslanyan",
-    ]);
+    assert.deepEqual(
+      middleManagerClientFilters.body.clientManagerOptions,
+      [
+        "Kristina Troinova",
+        "Liudmyla Sidachenko",
+        "Maryna Urvantseva",
+        "Ruanna Ordukhanova-Aslanyan",
+        "Vadim Kozorezov",
+      ],
+    );
     },
   );
 });
