@@ -548,6 +548,7 @@ const WEB_AUTH_CANONICAL_MIDDLE_MANAGER_TEAM_DISPLAY_NAMES_BY_USERNAME = Object.
     "Vadim Kozorezov",
   ]),
 });
+const WEB_AUTH_CANONICAL_CLIENT_SERVICE_HEAD_DISPLAY_NAMES = Object.freeze(["Nataly Regush"]);
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
 const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
@@ -6664,7 +6665,18 @@ function isWebAuthClientServiceDepartmentHeadProfile(userProfile) {
   }
 
   const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
-  return roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD;
+  if (roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD) {
+    return true;
+  }
+
+  const normalizedDisplayName = normalizeWebAuthIdentityText(userProfile.displayName);
+  if (!normalizedDisplayName) {
+    return false;
+  }
+
+  return WEB_AUTH_CANONICAL_CLIENT_SERVICE_HEAD_DISPLAY_NAMES.some(
+    (displayName) => normalizeWebAuthIdentityText(displayName) === normalizedDisplayName,
+  );
 }
 
 function getWebAuthRoleName(roleId, departmentId = "") {
@@ -7014,7 +7026,7 @@ function canWebAuthUserViewClientRecord(userProfile, record) {
       : { useClosedBy: true, useClientManager: false };
   const ownIdentityValues = getWebAuthPrincipalIdentityValues(userProfile);
 
-  if (roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD) {
+  if (roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD || isWebAuthClientServiceDepartmentHeadProfile(userProfile)) {
     return true;
   }
 

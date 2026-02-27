@@ -23,6 +23,8 @@ const TEST_CS_MANAGER_USERNAME = "cs.manager.authz.security@test.local";
 const TEST_CS_MANAGER_PASSWORD = "CsManager!AuthZ123";
 const TEST_CS_MIDDLE_MANAGER_USERNAME = "marynau@creditbooster.com";
 const TEST_CS_MIDDLE_MANAGER_PASSWORD = "CsMiddle!AuthZ123";
+const TEST_CS_HEAD_USERNAME = "nataly.regush@creditbooster.com";
+const TEST_CS_HEAD_PASSWORD = "CsHead!AuthZ123";
 const TEST_WEB_AUTH_SESSION_SECRET = "authz-security-test-web-auth-session-secret-abcdefghijklmnopqrstuvwxyz";
 const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
 
@@ -428,6 +430,13 @@ test("authz regression: client-service manager scope uses clientManager only and
           displayName: "Marina Urvanceva",
           teamUsernames: [TEST_CS_MANAGER_USERNAME, TEST_SALES_VLAD_USERNAME, "yurii kis"],
         },
+        {
+          username: TEST_CS_HEAD_USERNAME,
+          password: TEST_CS_HEAD_PASSWORD,
+          departmentId: "client_service",
+          roleId: "manager",
+          displayName: "Nataly Regush",
+        },
       ]),
     },
     async ({ baseUrl }) => {
@@ -536,6 +545,10 @@ test("authz regression: client-service manager scope uses clientManager only and
       username: TEST_CS_MIDDLE_MANAGER_USERNAME,
       password: TEST_CS_MIDDLE_MANAGER_PASSWORD,
     });
+    const clientServiceHead = await loginApi(baseUrl, {
+      username: TEST_CS_HEAD_USERNAME,
+      password: TEST_CS_HEAD_PASSWORD,
+    });
 
     const managerRecords = await getRecords(baseUrl, manager);
     assert.equal(managerRecords.response.status, 200);
@@ -551,6 +564,23 @@ test("authz regression: client-service manager scope uses clientManager only and
       [
         "authz-cs-rec-1",
         "authz-cs-rec-2",
+        "authz-cs-rec-kristina",
+        "authz-cs-rec-liudmyla",
+        "authz-cs-rec-vadim",
+      ],
+    );
+
+    const clientServiceHeadRecords = await getRecords(baseUrl, clientServiceHead);
+    assert.equal(clientServiceHeadRecords.response.status, 200);
+    assert.deepEqual(
+      clientServiceHeadRecords.body.records.map((item) => item.id).sort(),
+      [
+        "authz-cs-rec-1",
+        "authz-cs-rec-2",
+        "authz-cs-rec-3",
+        "authz-cs-rec-4",
+        "authz-cs-rec-5",
+        "authz-cs-rec-6",
         "authz-cs-rec-kristina",
         "authz-cs-rec-liudmyla",
         "authz-cs-rec-vadim",
@@ -577,6 +607,23 @@ test("authz regression: client-service manager scope uses clientManager only and
       ],
     );
 
+    const clientServiceHeadClients = await getClients(baseUrl, clientServiceHead);
+    assert.equal(clientServiceHeadClients.response.status, 200);
+    assert.deepEqual(
+      clientServiceHeadClients.body.records.map((item) => item.id).sort(),
+      [
+        "authz-cs-rec-1",
+        "authz-cs-rec-2",
+        "authz-cs-rec-3",
+        "authz-cs-rec-4",
+        "authz-cs-rec-5",
+        "authz-cs-rec-6",
+        "authz-cs-rec-kristina",
+        "authz-cs-rec-liudmyla",
+        "authz-cs-rec-vadim",
+      ],
+    );
+
     const managerClientFilters = await getClientsFilters(baseUrl, manager);
     assert.equal(managerClientFilters.response.status, 200);
     assert.deepEqual(managerClientFilters.body.clientManagerOptions, ["Ruanna Ordukhanova-Aslanyan"]);
@@ -591,6 +638,22 @@ test("authz regression: client-service manager scope uses clientManager only and
         "Maryna Urvantseva",
         "Ruanna Ordukhanova-Aslanyan",
         "Vadim Kozorezov",
+      ],
+    );
+
+    const clientServiceHeadClientFilters = await getClientsFilters(baseUrl, clientServiceHead);
+    assert.equal(clientServiceHeadClientFilters.response.status, 200);
+    assert.deepEqual(
+      clientServiceHeadClientFilters.body.clientManagerOptions,
+      [
+        "Another Manager",
+        "Kristina Troinova",
+        "Liudmyla Sidachenko",
+        "Maryna Urvantseva",
+        "Ruanna Ordukhanova-Aslanyan",
+        "Vadim Kozorezov",
+        "Vlad Burnis",
+        "Yurii Kis",
       ],
     );
     },
