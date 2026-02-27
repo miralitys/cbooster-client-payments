@@ -102,14 +102,6 @@ function createRecordsController(dependencies = {}) {
   }
 
   async function handleRecordsPatch(req, res) {
-    if (!recordsPatchEnabled) {
-      res.status(404).json({
-        error: "API route not found",
-        code: "records_patch_disabled",
-      });
-      return;
-    }
-
     if (!enforceRecordsWriteRateLimit(req, res)) {
       return;
     }
@@ -130,6 +122,17 @@ function createRecordsController(dependencies = {}) {
         code: validationResult.code,
       });
       return;
+    }
+
+    if (!recordsPatchEnabled) {
+      const hasNonUpsertOperation = validationResult.operations.some((operation) => operation?.type !== "upsert");
+      if (hasNonUpsertOperation) {
+        res.status(404).json({
+          error: "API route not found",
+          code: "records_patch_disabled",
+        });
+        return;
+      }
     }
 
     try {
