@@ -6,6 +6,7 @@ const { spawn } = require("child_process");
 const bcrypt = require("bcryptjs");
 const fs = require("fs");
 const { Transform, Writable, pipeline } = require("stream");
+const { EventEmitter } = require("events");
 const express = require("express");
 const compression = require("compression");
 const helmet = require("helmet");
@@ -28,6 +29,7 @@ const {
   buildAttachmentStorageUrl,
   normalizeAttachmentStorageBaseUrl,
   resolveAttachmentStoragePath,
+  sanitizeAttachmentStorageSegment,
 } = require("./attachments-storage-utils");
 const {
   computeRecordHash,
@@ -39,6 +41,7 @@ const { registerCustomDashboardModule } = require("./custom-dashboard-module");
 const { registerAuthPublicRoutes, registerAuthProtectedRoutes } = require("./server/routes/auth.routes");
 const { registerRecordsRoutes } = require("./server/routes/records.routes");
 const { registerNotificationsRoutes } = require("./server/routes/notifications.routes");
+const { registerSupportRoutes } = require("./server/routes/support.routes");
 const { registerAssistantRoutes } = require("./server/routes/assistant.routes");
 const { registerGhlRoutes } = require("./server/routes/ghl.routes");
 const { registerQuickBooksRoutes } = require("./server/routes/quickbooks.routes");
@@ -59,6 +62,9 @@ const { createRecordsRepo } = require("./server/domains/records/records.repo");
 const { createNotificationsRepo } = require("./server/domains/notifications/notifications.repo");
 const { createNotificationsService } = require("./server/domains/notifications/notifications.service");
 const { createNotificationsController } = require("./server/domains/notifications/notifications.controller");
+const { createSupportRepo } = require("./server/domains/support/support.repo");
+const { createSupportService } = require("./server/domains/support/support.service");
+const { createSupportController } = require("./server/domains/support/support.controller");
 
 const PORT = Number.parseInt(process.env.PORT || "10000", 10);
 const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
@@ -836,6 +842,21 @@ const MODERATION_FILES_TABLE_NAME = resolveTableName(
   process.env.DB_MODERATION_FILES_TABLE_NAME,
   DEFAULT_MODERATION_FILES_TABLE_NAME,
 );
+const DEFAULT_SUPPORT_REQUESTS_TABLE_NAME = "support_requests";
+const SUPPORT_REQUESTS_TABLE_NAME = resolveTableName(
+  process.env.DB_SUPPORT_REQUESTS_TABLE_NAME,
+  DEFAULT_SUPPORT_REQUESTS_TABLE_NAME,
+);
+const DEFAULT_SUPPORT_ATTACHMENTS_TABLE_NAME = "support_attachments";
+const SUPPORT_ATTACHMENTS_TABLE_NAME = resolveTableName(
+  process.env.DB_SUPPORT_ATTACHMENTS_TABLE_NAME,
+  DEFAULT_SUPPORT_ATTACHMENTS_TABLE_NAME,
+);
+const DEFAULT_SUPPORT_HISTORY_TABLE_NAME = "support_history";
+const SUPPORT_HISTORY_TABLE_NAME = resolveTableName(
+  process.env.DB_SUPPORT_HISTORY_TABLE_NAME,
+  DEFAULT_SUPPORT_HISTORY_TABLE_NAME,
+);
 const DEFAULT_CLIENT_RECORDS_V2_TABLE_NAME = "client_records_v2";
 const CLIENT_RECORDS_V2_TABLE_NAME = resolveTableName(
   process.env.DB_CLIENT_RECORDS_V2_TABLE_NAME,
@@ -916,6 +937,9 @@ const DB_SCHEMA = resolveSchemaName(process.env.DB_SCHEMA, "public");
 const STATE_TABLE = qualifyTableName(DB_SCHEMA, TABLE_NAME);
 const MODERATION_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_TABLE_NAME);
 const MODERATION_FILES_TABLE = qualifyTableName(DB_SCHEMA, MODERATION_FILES_TABLE_NAME);
+const SUPPORT_REQUESTS_TABLE = qualifyTableName(DB_SCHEMA, SUPPORT_REQUESTS_TABLE_NAME);
+const SUPPORT_ATTACHMENTS_TABLE = qualifyTableName(DB_SCHEMA, SUPPORT_ATTACHMENTS_TABLE_NAME);
+const SUPPORT_HISTORY_TABLE = qualifyTableName(DB_SCHEMA, SUPPORT_HISTORY_TABLE_NAME);
 const CLIENT_RECORDS_V2_TABLE = qualifyTableName(DB_SCHEMA, CLIENT_RECORDS_V2_TABLE_NAME);
 const QUICKBOOKS_TRANSACTIONS_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_TRANSACTIONS_TABLE_NAME);
 const QUICKBOOKS_CUSTOMERS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, QUICKBOOKS_CUSTOMERS_CACHE_TABLE_NAME);
@@ -1184,6 +1208,23 @@ const ATTACHMENTS_STORAGE_PROVIDER_LOCAL_FS = "local_fs";
 const DEFAULT_MODERATION_LIST_LIMIT = 200;
 const MINI_MAX_ATTACHMENTS_COUNT = 10;
 const MINI_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+const SUPPORT_MAX_ATTACHMENTS_COUNT = Math.min(
+  Math.max(parsePositiveInteger(process.env.SUPPORT_ATTACHMENTS_MAX_COUNT, 12), 1),
+  40,
+);
+const SUPPORT_MAX_ATTACHMENT_SIZE_BYTES = Math.min(
+  Math.max(parsePositiveInteger(process.env.SUPPORT_ATTACHMENTS_MAX_BYTES, 25 * 1024 * 1024), 1024 * 1024),
+  150 * 1024 * 1024,
+);
+const SUPPORT_ALLOWED_ATTACHMENT_MIME_TYPES = (process.env.SUPPORT_ALLOWED_ATTACHMENT_MIME_TYPES || "")
+  .toString()
+  .split(/[|,;/]+/)
+  .map((value) => value.trim())
+  .filter(Boolean);
+const SUPPORT_SUPABASE_URL = (process.env.SUPABASE_URL || "").toString().trim();
+const SUPPORT_SUPABASE_SERVICE_ROLE_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").toString().trim();
+const SUPPORT_SUPABASE_BUCKET = (process.env.SUPABASE_SUPPORT_BUCKET || "support").toString().trim() || "support";
+const SUPPORT_SUPABASE_PUBLIC_BASE_URL = (process.env.SUPABASE_STORAGE_PUBLIC_BASE_URL || "").toString().trim();
 const MINI_MAX_ATTACHMENTS_TOTAL_SIZE_BYTES = 40 * 1024 * 1024;
 const MINI_UPLOAD_TOKEN_HEADER_NAME = "x-mini-upload-token";
 const MINI_UPLOAD_TOKEN_TTL_SEC = Math.min(
@@ -1919,6 +1960,7 @@ const miniAttachmentsUploadDiskMiddleware = ATTACHMENTS_STREAMING_ENABLED
       useDisk: true,
     })
   : null;
+const supportAttachmentsUploadMiddleware = createSupportAttachmentsUploadMiddleware();
 
 let dbReadyPromise = null;
 let webAuthUsersDirectoryHydrationPromise = null;
@@ -4422,6 +4464,31 @@ function createMiniAttachmentsUploadMiddleware(options = {}) {
   };
 
   return multer(multerOptions).array("attachments", MINI_MAX_ATTACHMENTS_COUNT);
+}
+
+function createSupportAttachmentsUploadMiddleware() {
+  const destination = ATTACHMENTS_UPLOAD_TMP_DIR || path.resolve(os.tmpdir(), "cbooster-support-attachments");
+  try {
+    fs.mkdirSync(destination, { recursive: true });
+  } catch {
+    // Best-effort; multer will error if it cannot write.
+  }
+
+  const storage = multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, destination),
+    filename: (_req, file, cb) => {
+      const suffix = sanitizeAttachmentStorageSegment(file?.originalname, "attachment");
+      cb(null, `${Date.now()}-${crypto.randomUUID()}-${suffix}`);
+    },
+  });
+
+  return multer({
+    storage,
+    limits: {
+      files: SUPPORT_MAX_ATTACHMENTS_COUNT,
+      fileSize: SUPPORT_MAX_ATTACHMENT_SIZE_BYTES,
+    },
+  }).array("attachments", SUPPORT_MAX_ATTACHMENTS_COUNT);
 }
 
 function parseMiniMultipartRequest(req, res) {
@@ -24108,6 +24175,110 @@ async function ensureDatabaseReady() {
         ON ${WEB_PUSH_SUBSCRIPTIONS_TABLE} (updated_at DESC)
       `);
 
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE} (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT NOT NULL,
+          priority TEXT NOT NULL DEFAULT 'low',
+          urgency_reason TEXT NOT NULL DEFAULT '',
+          desired_due_date TIMESTAMPTZ NOT NULL,
+          status TEXT NOT NULL DEFAULT 'review',
+          created_by TEXT NOT NULL,
+          created_by_display_name TEXT NOT NULL DEFAULT '',
+          created_by_department_id TEXT NOT NULL DEFAULT '',
+          created_by_department_name TEXT NOT NULL DEFAULT '',
+          created_by_role_id TEXT NOT NULL DEFAULT '',
+          created_by_role_name TEXT NOT NULL DEFAULT '',
+          is_from_head BOOLEAN NOT NULL DEFAULT false,
+          assigned_to TEXT NOT NULL DEFAULT '',
+          assigned_to_display_name TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          time_in_progress_start TIMESTAMPTZ,
+          time_done_at TIMESTAMPTZ,
+          last_needs_revision_reason TEXT NOT NULL DEFAULT '',
+          last_rejected_reason TEXT NOT NULL DEFAULT '',
+          last_needs_revision_at TIMESTAMPTZ,
+          last_rejected_at TIMESTAMPTZ,
+          withdrawn_at TIMESTAMPTZ
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE_NAME}_created_at_idx
+        ON ${SUPPORT_REQUESTS_TABLE} (created_at DESC)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE_NAME}_status_idx
+        ON ${SUPPORT_REQUESTS_TABLE} (status)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE_NAME}_priority_idx
+        ON ${SUPPORT_REQUESTS_TABLE} (priority)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE_NAME}_created_by_idx
+        ON ${SUPPORT_REQUESTS_TABLE} (created_by)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE_NAME}_assigned_to_idx
+        ON ${SUPPORT_REQUESTS_TABLE} (assigned_to)
+      `);
+
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${SUPPORT_ATTACHMENTS_TABLE} (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          mime_type TEXT NOT NULL DEFAULT '',
+          size_bytes BIGINT NOT NULL DEFAULT 0,
+          content BYTEA,
+          storage_provider TEXT NOT NULL DEFAULT 'bytea',
+          storage_key TEXT NOT NULL DEFAULT '',
+          storage_url TEXT NOT NULL DEFAULT '',
+          uploaded_by TEXT NOT NULL DEFAULT '',
+          uploaded_by_display_name TEXT NOT NULL DEFAULT '',
+          uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_ATTACHMENTS_TABLE_NAME}_request_id_idx
+        ON ${SUPPORT_ATTACHMENTS_TABLE} (request_id)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_ATTACHMENTS_TABLE_NAME}_uploaded_at_idx
+        ON ${SUPPORT_ATTACHMENTS_TABLE} (uploaded_at DESC)
+      `);
+
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${SUPPORT_HISTORY_TABLE} (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          actor_username TEXT NOT NULL DEFAULT '',
+          actor_display_name TEXT NOT NULL DEFAULT '',
+          payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_HISTORY_TABLE_NAME}_request_id_idx
+        ON ${SUPPORT_HISTORY_TABLE} (request_id)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_HISTORY_TABLE_NAME}_created_at_idx
+        ON ${SUPPORT_HISTORY_TABLE} (created_at DESC)
+      `);
+
       await sharedDbQuery(
         `
           INSERT INTO ${STATE_TABLE} (id, records)
@@ -24281,6 +24452,90 @@ async function ensureDatabaseReady() {
       await sharedDbQuery(`
         CREATE INDEX IF NOT EXISTS ${MODERATION_FILES_TABLE_NAME}_submission_idx
         ON ${MODERATION_FILES_TABLE} (submission_id)
+      `);
+
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE} (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT NOT NULL,
+          priority TEXT NOT NULL DEFAULT 'normal',
+          urgency_reason TEXT NOT NULL DEFAULT '',
+          desired_due_date TIMESTAMPTZ NOT NULL,
+          status TEXT NOT NULL DEFAULT 'review',
+          created_by TEXT NOT NULL,
+          created_by_display_name TEXT NOT NULL DEFAULT '',
+          created_by_department_id TEXT NOT NULL DEFAULT '',
+          created_by_department_name TEXT NOT NULL DEFAULT '',
+          created_by_role_id TEXT NOT NULL DEFAULT '',
+          created_by_role_name TEXT NOT NULL DEFAULT '',
+          is_from_head BOOLEAN NOT NULL DEFAULT FALSE,
+          assigned_to TEXT NOT NULL DEFAULT '',
+          assigned_to_display_name TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          time_in_progress_start TIMESTAMPTZ,
+          time_done_at TIMESTAMPTZ,
+          last_needs_revision_reason TEXT NOT NULL DEFAULT '',
+          last_rejected_reason TEXT NOT NULL DEFAULT '',
+          last_needs_revision_at TIMESTAMPTZ,
+          last_rejected_at TIMESTAMPTZ,
+          withdrawn_at TIMESTAMPTZ
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE_NAME}_status_created_idx
+        ON ${SUPPORT_REQUESTS_TABLE} (status, created_at DESC, id DESC)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE_NAME}_created_by_idx
+        ON ${SUPPORT_REQUESTS_TABLE} (created_by)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_REQUESTS_TABLE_NAME}_assigned_to_idx
+        ON ${SUPPORT_REQUESTS_TABLE} (assigned_to)
+      `);
+
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${SUPPORT_ATTACHMENTS_TABLE} (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL REFERENCES ${SUPPORT_REQUESTS_TABLE}(id) ON DELETE CASCADE,
+          file_name TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+          content BYTEA,
+          storage_provider TEXT NOT NULL DEFAULT 'bytea',
+          storage_key TEXT NOT NULL DEFAULT '',
+          storage_url TEXT NOT NULL DEFAULT '',
+          uploaded_by TEXT NOT NULL DEFAULT '',
+          uploaded_by_display_name TEXT NOT NULL DEFAULT '',
+          uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_ATTACHMENTS_TABLE_NAME}_request_idx
+        ON ${SUPPORT_ATTACHMENTS_TABLE} (request_id)
+      `);
+
+      await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${SUPPORT_HISTORY_TABLE} (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL REFERENCES ${SUPPORT_REQUESTS_TABLE}(id) ON DELETE CASCADE,
+          action TEXT NOT NULL,
+          actor_username TEXT NOT NULL,
+          actor_display_name TEXT NOT NULL DEFAULT '',
+          payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${SUPPORT_HISTORY_TABLE_NAME}_request_idx
+        ON ${SUPPORT_HISTORY_TABLE} (request_id, created_at DESC)
       `);
 
       const quickBooksSchemaState = await quickBooksRepo.ensureQuickBooksSchema({
@@ -24707,6 +24962,21 @@ const notificationsRepo = createNotificationsRepo({
   },
 });
 
+const supportRepo = createSupportRepo({
+  db: {
+    query: sharedDbQuery,
+  },
+  ensureDatabaseReady,
+  tables: {
+    supportRequestsTable: SUPPORT_REQUESTS_TABLE,
+    supportAttachmentsTable: SUPPORT_ATTACHMENTS_TABLE,
+    supportHistoryTable: SUPPORT_HISTORY_TABLE,
+  },
+  helpers: {
+    sanitizeTextValue,
+  },
+});
+
 const notificationsService = createNotificationsService({
   notificationsRepo,
   sanitizeTextValue,
@@ -24723,6 +24993,44 @@ const notificationsController = createNotificationsController({
   notificationsService,
   sanitizeTextValue,
   buildPublicErrorPayload,
+});
+
+const supportEventBus = new EventEmitter();
+supportEventBus.setMaxListeners(200);
+
+const supportService = createSupportService({
+  supportRepo,
+  notificationsService,
+  sanitizeTextValue,
+  listWebAuthUsers,
+  getWebAuthUserByUsername,
+  normalizeWebAuthDepartmentId,
+  normalizeWebAuthRoleId,
+  isWebAuthOwnerOrAdminProfile,
+  webAuthRoleDepartmentHead: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
+  attachmentsStorageRoot: ATTACHMENTS_STORAGE_ROOT,
+  attachmentsStoragePublicBaseUrl: ATTACHMENTS_STORAGE_PUBLIC_BASE_URL,
+  attachmentsUploadTmpDir: ATTACHMENTS_UPLOAD_TMP_DIR,
+  supportAttachmentsMaxBytes: SUPPORT_MAX_ATTACHMENT_SIZE_BYTES,
+  supportAttachmentsMaxCount: SUPPORT_MAX_ATTACHMENTS_COUNT,
+  supportAllowedAttachmentMimeTypes: SUPPORT_ALLOWED_ATTACHMENT_MIME_TYPES.length
+    ? SUPPORT_ALLOWED_ATTACHMENT_MIME_TYPES
+    : undefined,
+  supportSupabaseUrl: SUPPORT_SUPABASE_URL,
+  supportSupabaseServiceRoleKey: SUPPORT_SUPABASE_SERVICE_ROLE_KEY,
+  supportSupabaseBucket: SUPPORT_SUPABASE_BUCKET,
+  supportSupabasePublicBaseUrl: SUPPORT_SUPABASE_PUBLIC_BASE_URL,
+  logWarn: (message) => {
+    console.warn(message);
+  },
+});
+
+const supportController = createSupportController({
+  supportService,
+  buildPublicErrorPayload,
+  resolveDbHttpStatus,
+  supportEventBus,
+  sanitizeTextValue,
 });
 
 const assistantRepo = createAssistantRepo({
@@ -33888,6 +34196,27 @@ registerNotificationsRoutes({
   },
 });
 
+registerSupportRoutes({
+  app,
+  requireWebPermission,
+  permissionKeys: {
+    WEB_AUTH_PERMISSION_VIEW_DASHBOARD,
+  },
+  supportUpload: supportAttachmentsUploadMiddleware,
+  handlers: {
+    handleSupportRequestsGet: supportController.handleSupportRequestsGet,
+    handleSupportRequestGet: supportController.handleSupportRequestGet,
+    handleSupportRequestPost: supportController.handleSupportRequestPost,
+    handleSupportRequestPatch: supportController.handleSupportRequestPatch,
+    handleSupportRequestMoveToPost: supportController.handleSupportRequestMoveToPost,
+    handleSupportRequestAttachmentsPost: supportController.handleSupportRequestAttachmentsPost,
+    handleSupportRequestCommentPost: supportController.handleSupportRequestCommentPost,
+    handleSupportReportsGet: supportController.handleSupportReportsGet,
+    handleSupportAttachmentGet: supportController.handleSupportAttachmentGet,
+    handleSupportStreamGet: supportController.handleSupportStreamGet,
+  },
+});
+
 async function respondGhlLeads(req, res, refreshMode = "none", routeLabel = "GET /api/ghl/leads", options = {}) {
   const rangeMode = normalizeGhlLeadsRangeMode(options?.rangeMode, options?.todayOnly === false ? "all" : "today");
   const todayOnly = rangeMode === "today";
@@ -40452,6 +40781,10 @@ app.get("/client-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT
 
 app.get("/client-health", requireOwnerAdminOrClientServiceHeadAccess(), (_req, res) => {
   res.redirect(302, "/app/client-health");
+});
+
+app.get("/support", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {
+  res.redirect(302, "/app/support");
 });
 
 app.get("/dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {

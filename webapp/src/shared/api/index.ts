@@ -8,6 +8,17 @@ export {
   subscribeNotificationsPush,
   unsubscribeNotificationsPush,
 } from "@/shared/api/notifications";
+export {
+  getSupportRequests,
+  getSupportRequest,
+  createSupportRequest,
+  updateSupportRequest,
+  moveSupportRequest,
+  addSupportAttachments,
+  addSupportComment,
+  getSupportReports,
+  getSupportAttachmentDownloadUrl,
+} from "@/shared/api/support";
 export { getRecords, patchRecords, putRecords } from "@/shared/api/records";
 export { getClientHealth } from "@/shared/api/clientHealth";
 export { getClients, getClientsPage, getClientFilterOptions, patchClients, putClients } from "@/shared/api/clients";

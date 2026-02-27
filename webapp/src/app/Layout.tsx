@@ -17,6 +17,7 @@ interface NavigationItem {
 
 const NAV_ITEMS: NavigationItem[] = [
   { to: "/dashboard", label: "Dashboard", hint: "Overview", group: "operations" },
+  { to: "/support", label: "Support", hint: "Requests", group: "operations" },
   { to: "/custom-dashboard", label: "Custom Dashboard", hint: "Personalized", group: "operations" },
   { to: "/leads", label: "Leads", hint: "Pipeline", group: "operations" },
   { to: "/client-payments", label: "Client Payments", hint: "Collections", group: "clients" },
@@ -72,6 +73,10 @@ function readCookieValueByName(name: string): string {
 function resolvePageTitle(pathname: string): string {
   if (pathname.startsWith("/dashboard")) {
     return "Dashboard";
+  }
+
+  if (pathname.startsWith("/support")) {
+    return "Support";
   }
 
   if (pathname.startsWith("/custom-dashboard")) {

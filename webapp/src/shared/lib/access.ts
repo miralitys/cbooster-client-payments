@@ -23,6 +23,11 @@ export function isClientServiceDepartmentHeadSession(session: Session | null | u
   return roleId === "department_head" && departmentId === "client_service";
 }
 
+export function isDepartmentHeadSession(session: Session | null | undefined): boolean {
+  const roleId = normalizeSessionIdentity(session?.user?.roleId);
+  return roleId === "department_head";
+}
+
 export function isAccountingDepartmentSession(session: Session | null | undefined): boolean {
   const departmentId = normalizeSessionIdentity(session?.user?.departmentId);
   return departmentId === "accounting" || departmentId === "accounting_department";

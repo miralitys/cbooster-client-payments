@@ -16,6 +16,7 @@ import GhlContractsPage from "@/features/ghl-contracts/page";
 import IdentityIqScorePage from "@/features/identityiq-score/page";
 import LeadsPage from "@/features/leads/page";
 import QuickBooksPage from "@/features/quickbooks/page";
+import SupportPage from "@/features/support/page";
 
 export function AppRouter() {
   return (
@@ -38,6 +39,7 @@ export function AppRouter() {
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="custom-dashboard" element={<CustomDashboardPage />} />
         <Route path="clients" element={<ClientsPage />} />
+        <Route path="support" element={<SupportPage />} />
         <Route
           path="client-match"
           element={(
