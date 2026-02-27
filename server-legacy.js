@@ -35662,25 +35662,40 @@ function extractGhlContractArchiveIngestPayload(rawPayload) {
   const data = payload?.data && typeof payload.data === "object" ? payload.data : {};
   const contract = payload?.contract && typeof payload.contract === "object" ? payload.contract : {};
   const contact = payload?.contact && typeof payload.contact === "object" ? payload.contact : {};
+  const customData = payload?.customData && typeof payload.customData === "object" ? payload.customData : {};
   const root = Object.keys(data).length ? data : payload;
+  const combined = {
+    ...root,
+    ...customData,
+  };
+  const fallbackFullName = pickFirstSanitizedTextValue(
+    300,
+    [combined.first_name, combined.last_name].filter(Boolean).join(" "),
+    [root.first_name, root.last_name].filter(Boolean).join(" "),
+  );
 
   const clientName = pickFirstSanitizedTextValue(
     300,
-    root.clientName,
-    root.client_name,
+    combined.clientName,
+    combined.client_name,
     contract.clientName,
     contract.client_name,
     payload.clientName,
     payload.client_name,
-    root.contactName,
-    root.contact_name,
+    combined.contactName,
+    combined.contact_name,
     contact.name,
     contact.fullName,
+    combined.full_name,
+    combined.fullName,
+    root.full_name,
+    root.fullName,
+    fallbackFullName,
   );
   const contactName = pickFirstSanitizedTextValue(
     300,
-    root.contactName,
-    root.contact_name,
+    combined.contactName,
+    combined.contact_name,
     contact.name,
     contact.fullName,
     payload.contactName,
@@ -35689,8 +35704,8 @@ function extractGhlContractArchiveIngestPayload(rawPayload) {
   );
   const contactId = pickFirstSanitizedTextValue(
     200,
-    root.contactId,
-    root.contact_id,
+    combined.contactId,
+    combined.contact_id,
     contact.id,
     contact.contactId,
     payload.contactId,
@@ -35698,35 +35713,35 @@ function extractGhlContractArchiveIngestPayload(rawPayload) {
   );
   const contractTitle = pickFirstSanitizedTextValue(
     300,
-    root.contractTitle,
-    root.contract_title,
-    root.documentTitle,
-    root.document_title,
+    combined.contractTitle,
+    combined.contract_title,
+    combined.documentTitle,
+    combined.document_title,
     contract.title,
     contract.name,
-    root.title,
+    combined.title,
     payload.contractTitle,
     payload.contract_title,
   );
   const contractUrl = pickFirstSanitizedTextValue(
     2000,
-    root.contractUrl,
-    root.contract_url,
-    root.documentUrl,
-    root.document_url,
-    root.downloadUrl,
-    root.download_url,
+    combined.contractUrl,
+    combined.contract_url,
+    combined.documentUrl,
+    combined.document_url,
+    combined.downloadUrl,
+    combined.download_url,
     contract.url,
     payload.contractUrl,
     payload.contract_url,
   );
-  const source = pickFirstSanitizedTextValue(200, root.source, payload.source) || "gohighlevel.webhook";
+  const source = pickFirstSanitizedTextValue(200, combined.source, payload.source) || "gohighlevel.webhook";
   const eventType = pickFirstSanitizedTextValue(
     120,
-    root.eventType,
-    root.event_type,
-    root.event,
-    root.type,
+    combined.eventType,
+    combined.event_type,
+    combined.event,
+    combined.type,
     payload.eventType,
     payload.event_type,
     payload.event,
@@ -35735,13 +35750,13 @@ function extractGhlContractArchiveIngestPayload(rawPayload) {
   const externalId =
     pickFirstSanitizedTextValue(
       240,
-      root.externalId,
-      root.external_id,
-      root.documentId,
-      root.document_id,
-      root.proposalId,
-      root.proposal_id,
-      root.id,
+      combined.externalId,
+      combined.external_id,
+      combined.documentId,
+      combined.document_id,
+      combined.proposalId,
+      combined.proposal_id,
+      combined.id,
       payload.externalId,
       payload.external_id,
       payload.documentId,
@@ -35750,29 +35765,29 @@ function extractGhlContractArchiveIngestPayload(rawPayload) {
     ) || "";
   const fileName = pickFirstSanitizedTextValue(
     260,
-    root.fileName,
-    root.file_name,
-    root.documentName,
-    root.document_name,
+    combined.fileName,
+    combined.file_name,
+    combined.documentName,
+    combined.document_name,
     payload.fileName,
     payload.file_name,
   );
   const mimeType = pickFirstSanitizedTextValue(
     120,
-    root.mimeType,
-    root.mime_type,
+    combined.mimeType,
+    combined.mime_type,
     payload.mimeType,
     payload.mime_type,
     "application/pdf",
   );
   const archivedAt = pickFirstSanitizedTextValue(
     80,
-    root.archivedAt,
-    root.archived_at,
-    root.signedAt,
-    root.signed_at,
-    root.completedAt,
-    root.completed_at,
+    combined.archivedAt,
+    combined.archived_at,
+    combined.signedAt,
+    combined.signed_at,
+    combined.completedAt,
+    combined.completed_at,
     payload.archivedAt,
     payload.archived_at,
   );
