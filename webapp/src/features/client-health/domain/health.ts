@@ -228,7 +228,7 @@ function buildClientHealthRow(source: ClientHealthSource, nowMs: number, index: 
   const clientName = normalizeText(record?.clientName) || `Клиент ${index + 1}`;
   const clientId = normalizeText(record?.id) || `safe-client-${index + 1}`;
   const clientSurname = resolveClientSurname(clientName);
-  const aboutClient = resolveAboutClientContext(record);
+  const aboutClient = resolveAboutClientContext(record, memo);
 
   const saleAt = resolveSaleDate(record);
   const startAt = resolveStartDate(record, memo, aboutClient);
@@ -489,10 +489,16 @@ function buildClientExplanation(input: BuildClientExplanationInput): ClientHealt
   };
 }
 
-function resolveAboutClientContext(record: ClientRecord): AboutClientContext {
-  const notes = readRecordTextByKeys(record, ABOUT_CLIENT_NOTES_KEYS);
+function resolveAboutClientContext(
+  record: ClientRecord,
+  memo: GhlClientBasicNotePayload | null,
+): AboutClientContext {
+  const memoNotes = normalizeText(memo?.aboutClientBody) || normalizeText(memo?.aboutClientTitle);
+  const recordNotes = readRecordTextByKeys(record, ABOUT_CLIENT_NOTES_KEYS);
+  const notes = memoNotes || recordNotes;
+  const memoNegotiationAt = parseDateValue(memo?.aboutClientCreatedAt || "");
   const directNegotiationDateValue = readRecordTextByKeys(record, ABOUT_CLIENT_DATE_KEYS);
-  const directNegotiationAt = parseDateValue(directNegotiationDateValue);
+  const directNegotiationAt = memoNegotiationAt ?? parseDateValue(directNegotiationDateValue);
   const fallbackNegotiationAt =
     directNegotiationAt !== null
       ? directNegotiationAt

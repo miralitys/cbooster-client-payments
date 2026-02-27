@@ -100,4 +100,42 @@ describe("buildClientHealthRows", () => {
     expect(row.explanation.aboutClient.join(" ")).toContain("About Client");
     expect(row.explanation.when.join(" ")).toContain("Дата переговоров (About Client)");
   });
+
+  it("uses About Client from GHL notes when record fields are empty", () => {
+    const row = buildClientHealthRows(
+      [
+        {
+          record: makeRecord({
+            id: "about-client-ghl",
+            clientName: "Lema Israpilov",
+          }),
+          memo: {
+            ok: true,
+            status: "found",
+            clientName: "Lema Israpilov",
+            contactName: "Lema Israpilov",
+            contactId: "contact-1",
+            noteTitle: "",
+            noteBody: "",
+            noteCreatedAt: "",
+            memoTitle: "",
+            memoBody: "",
+            memoCreatedAt: "",
+            aboutClientTitle: "About Client",
+            aboutClientBody: "Переговоры 02/18/2026, договорились о графике контактов и отчётности.",
+            aboutClientCreatedAt: "2026-02-18T09:00:00Z",
+            source: "test",
+            matchedContacts: 1,
+            inspectedContacts: 1,
+          },
+          communications: null,
+        },
+      ],
+      new Date("2026-02-20T12:00:00Z"),
+    )[0];
+
+    expect(row.explanation.aboutClient.join(" ")).toContain("Заметки менеджера (About Client)");
+    expect(row.explanation.aboutClient.join(" ")).not.toContain("не заполнены");
+    expect(row.explanation.aboutClient.join(" ")).toContain("Дата переговоров из About Client");
+  });
 });
