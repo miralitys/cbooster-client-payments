@@ -172,6 +172,10 @@ const WEB_AUTH_MOBILE_REPLAY_MAX_KEYS = Math.min(
   Math.max(parsePositiveInteger(process.env.WEB_AUTH_MOBILE_REPLAY_MAX_KEYS, 100000), 1000),
   500000,
 );
+const WEB_AUTH_REVOKED_SESSION_MAX_KEYS = Math.min(
+  Math.max(parsePositiveInteger(process.env.WEB_AUTH_REVOKED_SESSION_MAX_KEYS, 20000), 500),
+  200000,
+);
 const WEB_AUTH_COOKIE_SECURE = resolveOptionalBoolean(process.env.WEB_AUTH_COOKIE_SECURE);
 const WEB_AUTH_SESSION_COOKIE_SAME_SITE = resolveWebAuthCookieSameSite(
   process.env.WEB_AUTH_SESSION_COOKIE_SAMESITE,
@@ -1352,6 +1356,17 @@ if (ATTACHMENTS_STREAMING_REQUESTED && !ATTACHMENTS_STREAMING_ENABLED) {
   );
 }
 
+const RECORD_PAYMENT_FIELD_COUNT = 36;
+const RECORD_PAYMENT_FIELDS = Object.freeze(
+  Array.from({ length: RECORD_PAYMENT_FIELD_COUNT }, (_, index) => `payment${index + 1}`),
+);
+const RECORD_PAYMENT_DATE_FIELDS = Object.freeze(RECORD_PAYMENT_FIELDS.map((fieldName) => `${fieldName}Date`));
+const RECORD_PAYMENT_FIELD_MAX_LENGTH = Object.freeze(
+  Object.fromEntries(RECORD_PAYMENT_FIELDS.map((fieldName) => [fieldName, 120])),
+);
+const RECORD_PAYMENT_DATE_FIELD_MAX_LENGTH = Object.freeze(
+  Object.fromEntries(RECORD_PAYMENT_DATE_FIELDS.map((fieldName) => [fieldName, 40])),
+);
 const RECORD_TEXT_FIELDS = [
   "clientName",
   "clientManager",
@@ -1368,26 +1383,14 @@ const RECORD_TEXT_FIELDS = [
   "scoreUpdatedAt",
   "contractTotals",
   "totalPayments",
-  "payment1",
-  "payment2",
-  "payment3",
-  "payment4",
-  "payment5",
-  "payment6",
-  "payment7",
+  ...RECORD_PAYMENT_FIELDS,
   "futurePayments",
   "notes",
   "collection",
   "dateWhenFullyPaid",
 ];
 const RECORD_DATE_FIELDS = [
-  "payment1Date",
-  "payment2Date",
-  "payment3Date",
-  "payment4Date",
-  "payment5Date",
-  "payment6Date",
-  "payment7Date",
+  ...RECORD_PAYMENT_DATE_FIELDS,
   "dateOfCollection",
   "dateWhenWrittenOff",
 ];
@@ -1418,7 +1421,7 @@ const RECORDS_ALLOWED_FIELDS_SET = new Set([
 const RECORDS_DATE_VALIDATION_FIELD_SET = new Set([...RECORD_DATE_FIELDS, ...RECORD_EXTRA_DATE_FIELDS]);
 const RECORDS_PUT_MAX_COUNT = Math.min(Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_COUNT, 5000), 1), 20000);
 const RECORDS_PUT_MAX_RECORD_KEYS = Math.min(
-  Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_RECORD_KEYS, 64), 8),
+  Math.max(parsePositiveInteger(process.env.RECORDS_PUT_MAX_RECORD_KEYS, 160), 8),
   200,
 );
 const RECORDS_PUT_MAX_RECORD_CHARS = Math.min(
@@ -1457,20 +1460,8 @@ const RECORDS_PUT_FIELD_MAX_LENGTH = Object.freeze({
   creditMonitoringPassword: 260,
   contractTotals: 120,
   totalPayments: 120,
-  payment1: 120,
-  payment2: 120,
-  payment3: 120,
-  payment4: 120,
-  payment5: 120,
-  payment6: 120,
-  payment7: 120,
-  payment1Date: 40,
-  payment2Date: 40,
-  payment3Date: 40,
-  payment4Date: 40,
-  payment5Date: 40,
-  payment6Date: 40,
-  payment7Date: 40,
+  ...RECORD_PAYMENT_FIELD_MAX_LENGTH,
+  ...RECORD_PAYMENT_DATE_FIELD_MAX_LENGTH,
   futurePayments: 120,
   afterResult: 10,
   writtenOff: 10,
@@ -1791,6 +1782,12 @@ const TELEGRAM_NOTIFICATION_FIELD_ORDER = [
   ...RECORD_CHECKBOX_FIELDS,
   ...MINI_EXTRA_TEXT_FIELDS,
 ];
+const TELEGRAM_PAYMENT_FIELD_LABELS = Object.freeze(
+  Object.fromEntries(RECORD_PAYMENT_FIELDS.map((fieldName, index) => [fieldName, `Payment ${index + 1}`])),
+);
+const TELEGRAM_PAYMENT_DATE_FIELD_LABELS = Object.freeze(
+  Object.fromEntries(RECORD_PAYMENT_DATE_FIELDS.map((fieldName, index) => [fieldName, `Payment ${index + 1} date`])),
+);
 const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
   clientName: "Client name",
   clientManager: "Client manager",
@@ -1802,24 +1799,12 @@ const TELEGRAM_NOTIFICATION_FIELD_LABELS = {
   active: "Active client",
   contractTotals: "Contract totals",
   totalPayments: "Total payments",
-  payment1: "Payment 1",
-  payment2: "Payment 2",
-  payment3: "Payment 3",
-  payment4: "Payment 4",
-  payment5: "Payment 5",
-  payment6: "Payment 6",
-  payment7: "Payment 7",
+  ...TELEGRAM_PAYMENT_FIELD_LABELS,
   futurePayments: "Future payments",
   notes: "Notes",
   collection: "Collection",
   dateWhenFullyPaid: "Date when fully paid",
-  payment1Date: "Payment 1 date",
-  payment2Date: "Payment 2 date",
-  payment3Date: "Payment 3 date",
-  payment4Date: "Payment 4 date",
-  payment5Date: "Payment 5 date",
-  payment6Date: "Payment 6 date",
-  payment7Date: "Payment 7 date",
+  ...TELEGRAM_PAYMENT_DATE_FIELD_LABELS,
   dateOfCollection: "Date of collection",
   dateWhenWrittenOff: "Date when written off",
   afterResult: "After result",
@@ -1980,6 +1965,7 @@ const loginStepUpTokenReplayByKey = new Map();
 const authProtectionAnomalyWindowByKey = new Map();
 let authProtectionAlertQueueDepth = 0;
 let authProtectionAlertQueue = Promise.resolve();
+const webAuthRevokedSessionTokenByToken = new Map();
 const webAuthMobileSessionById = new Map();
 const webAuthMobileReplayByKey = new Map();
 let miniUploadParseInFlight = 0;
@@ -5534,9 +5520,50 @@ function createWebAuthSessionToken(username) {
   });
 }
 
+function sweepRevokedWebAuthSessionTokens(nowMs = Date.now()) {
+  for (const [token, expiresAt] of webAuthRevokedSessionTokenByToken.entries()) {
+    if (!token || !Number.isFinite(expiresAt) || expiresAt <= nowMs) {
+      webAuthRevokedSessionTokenByToken.delete(token);
+    }
+  }
+
+  while (webAuthRevokedSessionTokenByToken.size > WEB_AUTH_REVOKED_SESSION_MAX_KEYS) {
+    const oldestToken = webAuthRevokedSessionTokenByToken.keys().next().value;
+    if (!oldestToken) {
+      break;
+    }
+    webAuthRevokedSessionTokenByToken.delete(oldestToken);
+  }
+}
+
+function isWebAuthSessionTokenRevoked(rawToken) {
+  const normalizedToken = sanitizeTextValue(rawToken, 1600);
+  if (!normalizedToken) {
+    return false;
+  }
+
+  sweepRevokedWebAuthSessionTokens();
+  return webAuthRevokedSessionTokenByToken.has(normalizedToken);
+}
+
+function revokeWebAuthSessionByToken(rawToken) {
+  const parsedToken = parseWebAuthToken(rawToken);
+  if (!parsedToken || parsedToken.tokenType !== "w" || !parsedToken.token) {
+    return false;
+  }
+
+  sweepRevokedWebAuthSessionTokens();
+  webAuthRevokedSessionTokenByToken.set(parsedToken.token, parsedToken.expiresAt);
+  return true;
+}
+
 function parseWebAuthSessionToken(rawToken) {
   const parsedToken = parseWebAuthToken(rawToken);
   if (!parsedToken || parsedToken.tokenType === "m") {
+    return "";
+  }
+
+  if (isWebAuthSessionTokenRevoked(parsedToken.token)) {
     return "";
   }
 
@@ -28991,6 +29018,11 @@ function handleApiAuthLogout(req, res) {
     return;
   }
 
+  const sessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+  if (sessionToken) {
+    revokeWebAuthSessionByToken(sessionToken);
+  }
+
   clearWebAuthSessionCookie(req, res);
   logAuthProtectionEvent("log", "logout_success", {
     path: normalizeRequestPathname(req, 260),
@@ -29006,6 +29038,11 @@ function handleApiAuthLogout(req, res) {
 }
 
 function handleWebLogout(req, res) {
+  const sessionToken = getRequestCookie(req, WEB_AUTH_SESSION_COOKIE_NAME);
+  if (sessionToken) {
+    revokeWebAuthSessionByToken(sessionToken);
+  }
+
   logAuthProtectionEvent("log", "logout_success", {
     path: normalizeRequestPathname(req, 260),
     method: req.method,
@@ -33754,6 +33791,8 @@ const recordsValidation = createRecordsValidation({
   recordsPatchMaxOperations: RECORDS_PATCH_MAX_OPERATIONS,
   patchOperationUpsert: PATCH_OPERATION_UPSERT,
   patchOperationDelete: PATCH_OPERATION_DELETE,
+  paymentFieldNames: RECORD_PAYMENT_FIELDS,
+  paymentDateFieldNames: RECORD_PAYMENT_DATE_FIELDS,
   recordsMoneyMaxAbsoluteCents: RECORDS_PAYMENT_MAX_ABS_CENTS,
   sanitizeTextValue,
   toCheckboxValue,
