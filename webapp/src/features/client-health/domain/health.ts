@@ -33,6 +33,22 @@ const FAILED_PAYMENT_TOKENS = [
   "ошибка платеж",
 ];
 const TRUE_VALUES = new Set(["1", "true", "yes", "on", "active", "completed"]);
+const ABOUT_CLIENT_NOTES_KEYS = [
+  "aboutClient",
+  "aboutClientNotes",
+  "about_client",
+  "about_client_notes",
+  "about client",
+  "About Client",
+] as const;
+const ABOUT_CLIENT_DATE_KEYS = [
+  "aboutClientDate",
+  "aboutClientNegotiationDate",
+  "about_client_date",
+  "about_client_negotiation_date",
+  "negotiationDate",
+  "dateOfNegotiation",
+] as const;
 
 export const CLIENT_HEALTH_SQL_EXAMPLE = `-- SAFE MODE: LIMITED TO 5 CLIENTS
 SELECT id, record, source_state_updated_at, updated_at
@@ -82,6 +98,7 @@ export interface ClientHealthExplanation {
   what: string[];
   when: string[];
   why: string[];
+  aboutClient: string[];
   launch: string[];
   payments: string[];
   execution: string[];
@@ -189,6 +206,11 @@ interface CommunicationAnalysis {
   contactsTotal: number;
 }
 
+interface AboutClientContext {
+  notes: string;
+  negotiationAt: number | null;
+}
+
 export function buildClientHealthRows(sources: ClientHealthSource[], asOfDate = new Date()): ClientHealthRow[] {
   const now = Number.isFinite(asOfDate.getTime()) ? asOfDate.getTime() : Date.now();
 
@@ -206,13 +228,14 @@ function buildClientHealthRow(source: ClientHealthSource, nowMs: number, index: 
   const clientName = normalizeText(record?.clientName) || `Клиент ${index + 1}`;
   const clientId = normalizeText(record?.id) || `safe-client-${index + 1}`;
   const clientSurname = resolveClientSurname(clientName);
+  const aboutClient = resolveAboutClientContext(record);
 
   const saleAt = resolveSaleDate(record);
-  const startAt = resolveStartDate(record, memo);
+  const startAt = resolveStartDate(record, memo, aboutClient);
   const daysSaleToStart = saleAt !== null && startAt !== null ? Math.max(0, diffDays(startAt, saleAt)) : null;
   const daysInWork = resolveDaysInWork(startAt, saleAt, nowMs);
 
-  const paymentAnalysis = analyzePayments(record, memo, communications, nowMs);
+  const paymentAnalysis = analyzePayments(record, memo, communications, nowMs, aboutClient.notes);
   const communicationAnalysis = analyzeCommunications(communications, nowMs);
   const memoTimestamp = parseDateValue(memo?.memoCreatedAt || memo?.noteCreatedAt || "");
 
@@ -221,6 +244,7 @@ function buildClientHealthRow(source: ClientHealthSource, nowMs: number, index: 
     communicationAnalysis.lastContactAt,
     memoTimestamp,
     parseDateValue(record?.scoreUpdatedAt),
+    aboutClient.negotiationAt,
   ]);
 
   const daysSinceLastActivity = lastActivityAt !== null ? diffDays(nowMs, lastActivityAt) : null;
@@ -231,7 +255,7 @@ function buildClientHealthRow(source: ClientHealthSource, nowMs: number, index: 
 
   const launchSpeed = scoreLaunchSpeed(daysSaleToStart);
   const engagementScore100 = scoreEngagement(daysSinceLastActivity, communicationAnalysis.contacts30d);
-  const execution = analyzeExecution(record, memo, communicationAnalysis, paymentAnalysis, daysInWork);
+  const execution = analyzeExecution(record, memo, communicationAnalysis, paymentAnalysis, daysInWork, aboutClient.notes);
 
   const healthIndex = clampNumber(
     Math.round(
@@ -298,6 +322,7 @@ function buildClientHealthRow(source: ClientHealthSource, nowMs: number, index: 
     communicationAnalysis,
     risks,
     scoreBreakdown,
+    aboutClient,
   });
 
   return {
@@ -367,6 +392,7 @@ interface BuildClientExplanationInput {
   communicationAnalysis: CommunicationAnalysis;
   risks: ClientHealthRow["risks"];
   scoreBreakdown: ClientHealthScoreBreakdown;
+  aboutClient: AboutClientContext;
 }
 
 function buildClientExplanation(input: BuildClientExplanationInput): ClientHealthExplanation {
@@ -380,6 +406,7 @@ function buildClientExplanation(input: BuildClientExplanationInput): ClientHealt
   const when = [
     `Дата продажи: ${formatDateSafe(input.saleAt)}.`,
     `Дата старта: ${formatDateSafe(input.startAt)}.`,
+    `Дата переговоров (About Client): ${formatDateSafe(input.aboutClient.negotiationAt)}.`,
     `Дней от продажи до старта: ${formatOptionalNumber(input.daysSaleToStart)}.`,
     `Дней в работе: ${input.daysInWork}.`,
     `С последней активности: ${formatOptionalNumber(input.daysSinceLastActivity)} дн.`,
@@ -397,7 +424,10 @@ function buildClientExplanation(input: BuildClientExplanationInput): ClientHealt
     `Скорость запуска: ${input.scoreBreakdown.launchSpeed}/100, исполнение: ${input.scoreBreakdown.execution}/100,` +
       ` платежи: ${input.scoreBreakdown.payments}/100, вовлечённость: ${input.scoreBreakdown.engagement}/100,` +
       ` коммуникация: ${input.scoreBreakdown.communication}/100.`,
+    "Контекст из блока About Client использован для интерпретации договорённостей и даты переговоров.",
   ];
+
+  const aboutClient = buildAboutClientExplanation(input.aboutClient);
 
   const launch: string[] = [];
   if (input.daysSaleToStart === null) {
@@ -449,6 +479,7 @@ function buildClientExplanation(input: BuildClientExplanationInput): ClientHealt
     what,
     when,
     why,
+    aboutClient,
     launch,
     payments,
     execution,
@@ -458,11 +489,45 @@ function buildClientExplanation(input: BuildClientExplanationInput): ClientHealt
   };
 }
 
+function resolveAboutClientContext(record: ClientRecord): AboutClientContext {
+  const notes = readRecordTextByKeys(record, ABOUT_CLIENT_NOTES_KEYS);
+  const directNegotiationDateValue = readRecordTextByKeys(record, ABOUT_CLIENT_DATE_KEYS);
+  const directNegotiationAt = parseDateValue(directNegotiationDateValue);
+  const fallbackNegotiationAt =
+    directNegotiationAt !== null
+      ? directNegotiationAt
+      : parseDateFromText(notes, ["переговор", "договор", "meeting", "call", "agreement", "agreed"]);
+
+  return {
+    notes,
+    negotiationAt: fallbackNegotiationAt,
+  };
+}
+
+function buildAboutClientExplanation(context: AboutClientContext): string[] {
+  const lines: string[] = [];
+
+  if (context.notes) {
+    lines.push(`Заметки менеджера (About Client): ${truncateExplanationText(context.notes, 380)}.`);
+  } else {
+    lines.push("В карточке About Client заметки менеджера не заполнены.");
+  }
+
+  if (context.negotiationAt !== null) {
+    lines.push(`Дата переговоров из About Client: ${formatDateSafe(context.negotiationAt)}.`);
+  } else {
+    lines.push("Дата переговоров в блоке About Client не найдена.");
+  }
+
+  return lines;
+}
+
 function analyzePayments(
   record: ClientRecord,
   memo: GhlClientBasicNotePayload | null,
   communications: GhlClientCommunicationsPayload | null,
   nowMs: number,
+  aboutClientNotes: string,
 ): PaymentAnalysis {
   const paymentEvents: Array<{ slot: number; amount: number; actualAt: number | null; expectedAt: number | null; delayDays: number | null }> = [];
 
@@ -509,6 +574,7 @@ function analyzePayments(
 
   const textCorpus = [
     record?.notes,
+    aboutClientNotes,
     memo?.noteBody,
     memo?.memoBody,
     extractCommunicationCorpus(communications),
@@ -568,8 +634,11 @@ function analyzeExecution(
   communicationAnalysis: CommunicationAnalysis,
   paymentAnalysis: PaymentAnalysis,
   daysInWork: number,
+  aboutClientNotes: string,
 ): ClientHealthRow["execution"] & { score100: number } {
-  const promisedText = [memo?.memoBody, memo?.noteBody, record?.notes].map((value) => normalizeText(value)).join(" \n");
+  const promisedText = [memo?.memoBody, memo?.noteBody, record?.notes, aboutClientNotes]
+    .map((value) => normalizeText(value))
+    .join(" \n");
   const promisedWorkVolume = parsePromisedWorkVolume(promisedText);
   const expectedTermDays = parseExpectedTermDays(promisedText);
   const elapsedTermPercent = expectedTermDays > 0
@@ -884,16 +953,24 @@ function resolveSaleDate(record: ClientRecord): number | null {
   return parseDateValue(record?.createdAt) ?? parseDateValue(record?.payment1Date);
 }
 
-function resolveStartDate(record: ClientRecord, memo: GhlClientBasicNotePayload | null): number | null {
+function resolveStartDate(
+  record: ClientRecord,
+  memo: GhlClientBasicNotePayload | null,
+  aboutClient: AboutClientContext,
+): number | null {
   const directRecordDate = parseDateValue(record?.startedInWork);
   if (directRecordDate !== null) {
     return directRecordDate;
   }
 
-  const text = `${normalizeText(memo?.memoBody)} ${normalizeText(memo?.noteBody)}`;
+  const text = `${normalizeText(memo?.memoBody)} ${normalizeText(memo?.noteBody)} ${normalizeText(aboutClient.notes)}`;
   const parsedFromText = parseDateFromText(text, ["start", "старт", "начал", "started"]);
   if (parsedFromText !== null) {
     return parsedFromText;
+  }
+
+  if (aboutClient.negotiationAt !== null) {
+    return aboutClient.negotiationAt;
   }
 
   return parseDateValue(record?.payment1Date);
@@ -1167,6 +1244,29 @@ function resolveClientSurname(clientNameRaw: string): string {
     return "Без фамилии";
   }
   return parts.length > 1 ? parts[parts.length - 1] : parts[0];
+}
+
+function readRecordTextByKeys(record: ClientRecord, keys: readonly string[]): string {
+  const source = record as unknown as Record<string, unknown>;
+  for (const key of keys) {
+    const value = normalizeText(source[key]);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function truncateExplanationText(value: string, maxChars: number): string {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return "";
+  }
+  const limit = Math.max(40, Math.trunc(maxChars || 380));
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+  return `${normalized.slice(0, limit - 1).trim()}…`;
 }
 
 function normalizeText(value: unknown): string {

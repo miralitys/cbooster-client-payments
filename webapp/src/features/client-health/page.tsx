@@ -566,6 +566,14 @@ export default function ClientHealthPage() {
                             </ul>
                           </section>
                           <section>
+                            <h3>About Client (договорённости)</h3>
+                            <ul>
+                              {row.explanation.aboutClient.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                          <section>
                             <h3>Логика оценки запуска</h3>
                             <ul>
                               {row.explanation.launch.map((line) => (

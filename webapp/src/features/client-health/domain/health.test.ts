@@ -37,7 +37,11 @@ describe("buildClientHealthRows", () => {
     const row = buildClientHealthRows(
       [
         {
-          record: makeRecord({ id: "risk-client", clientName: "Риск Клиент" }),
+          record: {
+            ...makeRecord({ id: "risk-client", clientName: "Риск Клиент" }),
+            aboutClient: "Переговоры 02/17/2026. Договорились о плане на 3 месяца и SLA по ответам.",
+            aboutClientDate: "02/17/2026",
+          } as ClientRecord,
           memo: null,
           communications: {
             ok: true,
@@ -93,5 +97,7 @@ describe("buildClientHealthRows", () => {
     expect(row.clientSurname).toBe("Клиент");
     expect(row.explanation.why.length).toBeGreaterThan(0);
     expect(row.explanation.scoreBreakdown.total).toBe(row.overview.healthIndex);
+    expect(row.explanation.aboutClient.join(" ")).toContain("About Client");
+    expect(row.explanation.when.join(" ")).toContain("Дата переговоров (About Client)");
   });
 });
