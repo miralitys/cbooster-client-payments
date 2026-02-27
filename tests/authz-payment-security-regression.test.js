@@ -388,7 +388,7 @@ test("authz regression: user/admin entity boundaries and BOLA visibility", async
   });
 });
 
-test("authz regression: client-service manager scope includes clientManager and middle-manager team", async () => {
+test("authz regression: client-service manager scope uses clientManager only and middle-manager team", async () => {
   await withServer(
     {
       WEB_AUTH_USERS_JSON: JSON.stringify([
@@ -459,6 +459,15 @@ test("authz regression: client-service manager scope includes clientManager and 
           contractTotals: "$1,400.00",
           payment1: "$140.00",
           payment1Date: "02/12/2026",
+        },
+        {
+          id: "authz-cs-rec-4",
+          clientName: "Must Stay Hidden When Only closedBy Matches",
+          closedBy: "Ruanna Ordukhanova-Aslanyan",
+          clientManager: "Another Manager",
+          contractTotals: "$1,500.00",
+          payment1: "$150.00",
+          payment1Date: "02/13/2026",
         },
       ],
     });

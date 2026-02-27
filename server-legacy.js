@@ -6906,11 +6906,14 @@ function splitClientRecordIdentityValues(rawValue) {
 }
 
 function extractClientRecordOwnerValues(record, options = {}) {
-  const includeClientManager = options?.includeClientManager === true;
+  const useClosedBy = options?.useClosedBy !== false;
+  const useClientManager = options?.useClientManager === true;
   const values = [];
 
-  values.push(...splitClientRecordIdentityValues(record?.closedBy));
-  if (includeClientManager) {
+  if (useClosedBy) {
+    values.push(...splitClientRecordIdentityValues(record?.closedBy));
+  }
+  if (useClientManager) {
     values.push(...splitClientRecordIdentityValues(record?.clientManager));
   }
 
@@ -6958,7 +6961,10 @@ function canWebAuthUserViewClientRecord(userProfile, record) {
 
   const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
   const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
-  const includeClientManagerForAssignment = departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE;
+  const assignmentOptions =
+    departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE
+      ? { useClosedBy: false, useClientManager: true }
+      : { useClosedBy: true, useClientManager: false };
   const ownIdentityValues = getWebAuthPrincipalIdentityValues(userProfile);
 
   if (roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD) {
@@ -6970,14 +6976,14 @@ function canWebAuthUserViewClientRecord(userProfile, record) {
     return isClientRecordAssignedToPrincipal(
       record,
       [...ownIdentityValues, ...teamIdentityValues],
-      { includeClientManager: includeClientManagerForAssignment },
+      assignmentOptions,
     );
   }
 
   return isClientRecordAssignedToPrincipal(
     record,
     ownIdentityValues,
-    { includeClientManager: includeClientManagerForAssignment },
+    assignmentOptions,
   );
 }
 
