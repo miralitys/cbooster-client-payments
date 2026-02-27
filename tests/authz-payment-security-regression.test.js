@@ -17,6 +17,10 @@ const TEST_ADMIN_USERNAME = "admin.authz.security@test.local";
 const TEST_ADMIN_PASSWORD = "Admin!AuthZ123";
 const TEST_SALES_USERNAME = "sales.authz.security@test.local";
 const TEST_SALES_PASSWORD = "Sales!AuthZ123";
+const TEST_CS_MANAGER_USERNAME = "cs.manager.authz.security@test.local";
+const TEST_CS_MANAGER_PASSWORD = "CsManager!AuthZ123";
+const TEST_CS_MIDDLE_MANAGER_USERNAME = "cs.middle.authz.security@test.local";
+const TEST_CS_MIDDLE_MANAGER_PASSWORD = "CsMiddle!AuthZ123";
 const TEST_WEB_AUTH_SESSION_SECRET = "authz-security-test-web-auth-session-secret-abcdefghijklmnopqrstuvwxyz";
 const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
 
@@ -153,8 +157,15 @@ async function stopServer(child) {
   }
 }
 
-async function withServer(callback) {
-  const server = await startServer();
+async function withServer(envOverridesOrCallback, maybeCallback) {
+  const hasOverrides = typeof envOverridesOrCallback !== "function";
+  const envOverrides = hasOverrides ? envOverridesOrCallback || {} : {};
+  const callback = hasOverrides ? maybeCallback : envOverridesOrCallback;
+  if (typeof callback !== "function") {
+    throw new TypeError("withServer requires callback function.");
+  }
+
+  const server = await startServer(envOverrides);
   try {
     await callback(server);
   } finally {
@@ -349,6 +360,109 @@ test("authz regression: user/admin entity boundaries and BOLA visibility", async
     assert.equal(adminRecords.response.status, 200);
     assert.equal(adminRecords.body.records.length, 2);
   });
+});
+
+test("authz regression: client-service manager scope includes clientManager and middle-manager team", async () => {
+  await withServer(
+    {
+      WEB_AUTH_USERS_JSON: JSON.stringify([
+        {
+          username: TEST_ADMIN_USERNAME,
+          password: TEST_ADMIN_PASSWORD,
+          departmentId: "accounting",
+          roleId: "admin",
+        },
+        {
+          username: TEST_SALES_USERNAME,
+          password: TEST_SALES_PASSWORD,
+          departmentId: "sales",
+          roleId: "manager",
+        },
+        {
+          username: TEST_CS_MANAGER_USERNAME,
+          password: TEST_CS_MANAGER_PASSWORD,
+          departmentId: "client_service",
+          roleId: "manager",
+          displayName: "Ruanna Ordukhanova-Aslanyan",
+        },
+        {
+          username: TEST_CS_MIDDLE_MANAGER_USERNAME,
+          password: TEST_CS_MIDDLE_MANAGER_PASSWORD,
+          departmentId: "client_service",
+          roleId: "middle_manager",
+          displayName: "Maryna Urvantseva",
+          teamUsernames: [TEST_CS_MANAGER_USERNAME],
+        },
+      ]),
+    },
+    async ({ baseUrl }) => {
+    const owner = await loginApi(baseUrl, {
+      username: TEST_OWNER_USERNAME,
+      password: TEST_OWNER_PASSWORD,
+    });
+
+    const initial = await getRecords(baseUrl, owner);
+    assert.equal(initial.response.status, 200);
+
+    const seedResult = await putRecords(baseUrl, owner, {
+      expectedUpdatedAt: initial.body?.updatedAt || null,
+      records: [
+        {
+          id: "authz-cs-rec-1",
+          clientName: "Visible For Client-Service Manager",
+          closedBy: "unrelated.sales.manager",
+          clientManager: "Ruanna Ordukhanova-Aslanyan",
+          contractTotals: "$1,000.00",
+          payment1: "$100.00",
+          payment1Date: "02/10/2026",
+        },
+        {
+          id: "authz-cs-rec-2",
+          clientName: "Visible For Middle Manager Self",
+          closedBy: "unrelated.sales.manager",
+          clientManager: "Maryna Urvantseva",
+          contractTotals: "$1,200.00",
+          payment1: "$120.00",
+          payment1Date: "02/11/2026",
+        },
+        {
+          id: "authz-cs-rec-3",
+          clientName: "Hidden For Client-Service Scope",
+          closedBy: "unrelated.sales.manager",
+          clientManager: "Another Manager",
+          contractTotals: "$1,400.00",
+          payment1: "$140.00",
+          payment1Date: "02/12/2026",
+        },
+      ],
+    });
+    assert.equal(seedResult.response.status, 200);
+    assert.equal(seedResult.body?.ok, true);
+
+    const manager = await loginApi(baseUrl, {
+      username: TEST_CS_MANAGER_USERNAME,
+      password: TEST_CS_MANAGER_PASSWORD,
+    });
+    const middleManager = await loginApi(baseUrl, {
+      username: TEST_CS_MIDDLE_MANAGER_USERNAME,
+      password: TEST_CS_MIDDLE_MANAGER_PASSWORD,
+    });
+
+    const managerRecords = await getRecords(baseUrl, manager);
+    assert.equal(managerRecords.response.status, 200);
+    assert.deepEqual(
+      managerRecords.body.records.map((item) => item.id).sort(),
+      ["authz-cs-rec-1"],
+    );
+
+    const middleManagerRecords = await getRecords(baseUrl, middleManager);
+    assert.equal(middleManagerRecords.response.status, 200);
+    assert.deepEqual(
+      middleManagerRecords.body.records.map((item) => item.id).sort(),
+      ["authz-cs-rec-1", "authz-cs-rec-2"],
+    );
+    },
+  );
 });
 
 test("payment security regression: amount/status invariants and race protections", async () => {

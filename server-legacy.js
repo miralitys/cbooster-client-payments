@@ -525,7 +525,7 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
     roleId: WEB_AUTH_ROLE_DEPARTMENT_HEAD,
   },
   {
-    displayName: "Marina Urvanceva",
+    displayName: "Maryna Urvantseva",
     username: "marynau@creditbooster.com",
     departmentId: WEB_AUTH_DEPARTMENT_CLIENT_SERVICE,
     roleId: WEB_AUTH_ROLE_MIDDLE_MANAGER,
@@ -6882,21 +6882,37 @@ function getWebAuthTeamIdentityValues(userProfile) {
   return values;
 }
 
-function extractClientRecordOwnerValues(record) {
-  const closedByRaw = sanitizeTextValue(record?.closedBy, 220);
-  if (!closedByRaw) {
+function splitClientRecordIdentityValues(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 220);
+  if (!normalized) {
     return [];
   }
 
-  const parts = closedByRaw
+  const parts = normalized
     .split(/[|,;/]+/)
     .map((item) => sanitizeTextValue(item, 220))
     .filter(Boolean);
-  return parts.length ? parts : [closedByRaw];
+  return parts.length ? parts : [normalized];
 }
 
-function isClientRecordAssignedToPrincipal(record, principalIdentityValues) {
-  const ownerValues = extractClientRecordOwnerValues(record);
+function extractClientRecordOwnerValues(record, options = {}) {
+  const includeClientManager = options?.includeClientManager === true;
+  const values = [];
+
+  values.push(...splitClientRecordIdentityValues(record?.closedBy));
+  if (includeClientManager) {
+    values.push(...splitClientRecordIdentityValues(record?.clientManager));
+  }
+
+  if (!values.length) {
+    return [];
+  }
+
+  return [...new Set(values)];
+}
+
+function isClientRecordAssignedToPrincipal(record, principalIdentityValues, options = {}) {
+  const ownerValues = extractClientRecordOwnerValues(record, options);
   if (!ownerValues.length) {
     return false;
   }
@@ -6932,6 +6948,7 @@ function canWebAuthUserViewClientRecord(userProfile, record) {
 
   const departmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
   const roleId = normalizeWebAuthRoleId(userProfile.roleId, departmentId);
+  const includeClientManagerForAssignment = departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE;
   const ownIdentityValues = getWebAuthPrincipalIdentityValues(userProfile);
 
   if (roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD) {
@@ -6940,10 +6957,18 @@ function canWebAuthUserViewClientRecord(userProfile, record) {
 
   if (roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER) {
     const teamIdentityValues = getWebAuthTeamIdentityValues(userProfile);
-    return isClientRecordAssignedToPrincipal(record, [...ownIdentityValues, ...teamIdentityValues]);
+    return isClientRecordAssignedToPrincipal(
+      record,
+      [...ownIdentityValues, ...teamIdentityValues],
+      { includeClientManager: includeClientManagerForAssignment },
+    );
   }
 
-  return isClientRecordAssignedToPrincipal(record, ownIdentityValues);
+  return isClientRecordAssignedToPrincipal(
+    record,
+    ownIdentityValues,
+    { includeClientManager: includeClientManagerForAssignment },
+  );
 }
 
 function filterClientRecordsForWebAuthUser(records, userProfile) {
