@@ -73,7 +73,24 @@ describe("calculations", () => {
     expect(normalized.dateWhenFullyPaid).toBe("");
   });
 
-  it("calculates overdue status and range for stale balances", () => {
+  it("calculates overdue status and range after 30-day grace period", () => {
+    const record = normalizeFormRecord(
+      makeRecord({
+        contractTotals: "500",
+        payment1: "100",
+        payment1Date: formatUsDateFromUtcDaysAgo(38),
+      }),
+    );
+
+    const status = getRecordStatusFlags(record);
+    expect(status.isOverdue).toBe(true);
+    expect(status.overdueRange).toBe("8-30");
+    expect(status.overdueDays).toBe(8);
+    expect(status.isWrittenOff).toBe(false);
+    expect(status.isFullyPaid).toBe(false);
+  });
+
+  it("does not mark overdue during the first 30 days after latest payment", () => {
     const record = normalizeFormRecord(
       makeRecord({
         contractTotals: "500",
@@ -83,10 +100,9 @@ describe("calculations", () => {
     );
 
     const status = getRecordStatusFlags(record);
-    expect(status.isOverdue).toBe(true);
-    expect(status.overdueRange).toBe("8-30");
-    expect(status.isWrittenOff).toBe(false);
-    expect(status.isFullyPaid).toBe(false);
+    expect(status.isOverdue).toBe(false);
+    expect(status.overdueRange).toBe("");
+    expect(status.overdueDays).toBe(0);
   });
 
   it("computes table totals with mixed number formats", () => {

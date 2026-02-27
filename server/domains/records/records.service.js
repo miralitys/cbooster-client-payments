@@ -1,5 +1,7 @@
 "use strict";
 
+const OVERDUE_GRACE_DAYS = 30;
+
 function createRecordsService(dependencies = {}) {
   const {
     simulateSlowRecords,
@@ -593,7 +595,7 @@ function getRecordStatusFlags(record) {
   const latestPaymentDate = getLatestPaymentDateTimestamp(record);
   const overdueDays =
     !isAfterResult && !isWrittenOff && !isFullyPaid && !isContractCompleted && latestPaymentDate !== null
-      ? getDaysSinceDate(latestPaymentDate)
+      ? Math.max(0, getDaysSinceDate(latestPaymentDate) - OVERDUE_GRACE_DAYS)
       : 0;
   const overdueRange = getOverdueRangeLabel(overdueDays);
 

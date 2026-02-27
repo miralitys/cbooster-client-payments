@@ -78,6 +78,8 @@ const DATE_LIKE_FIELDS: ReadonlySet<keyof ClientRecord> = new Set([
   ...PAYMENT_PAIRS.map(([, paymentDateFieldKey]) => paymentDateFieldKey),
 ]);
 
+const OVERDUE_GRACE_DAYS = 30;
+
 export interface DateRange {
   from: string;
   to: string;
@@ -314,7 +316,7 @@ export function getRecordStatusFlags(record: ClientRecord): RecordStatusFlags {
 
   const latestPaymentDate = getLatestPaymentDateTimestamp(record);
   const overdueDays = !isAfterResult && !isWrittenOff && !isFullyPaid && !isContractCompleted && latestPaymentDate !== null
-    ? getDaysSinceDate(latestPaymentDate)
+    ? Math.max(0, getDaysSinceDate(latestPaymentDate) - OVERDUE_GRACE_DAYS)
     : 0;
   const overdueRange = getOverdueRangeLabel(overdueDays);
   const isOverdue = Boolean(overdueRange);
