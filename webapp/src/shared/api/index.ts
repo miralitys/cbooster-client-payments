@@ -19,7 +19,9 @@ export {
   rejectModerationSubmission,
 } from "@/shared/api/moderation";
 export {
+  confirmQuickBooksRecentPayment,
   createQuickBooksSyncJob,
+  getQuickBooksPendingConfirmations,
   getQuickBooksOutgoingPayments,
   getQuickBooksPayments,
   getQuickBooksSyncJob,

@@ -9,6 +9,12 @@ export interface QuickBooksPaymentRow {
   paymentAmount: number;
   paymentDate: string;
   transactionType: string;
+  matchedRecordId?: string;
+  matchedPaymentField?: string;
+  matchedPaymentDateField?: string;
+  matchedConfirmed?: boolean;
+  matchedConfirmedAt?: string;
+  matchedConfirmedBy?: string;
 }
 
 export interface QuickBooksSyncMeta {
@@ -74,4 +80,39 @@ export interface QuickBooksTransactionInsightRequest {
 export interface QuickBooksTransactionInsightPayload {
   ok: boolean;
   insight: string;
+}
+
+export interface QuickBooksPendingConfirmationRow {
+  transactionType: string;
+  transactionId: string;
+  matchedPaymentField: string;
+  matchedPaymentDateField: string;
+  paymentAmount: number;
+  paymentDate: string;
+}
+
+export interface QuickBooksPendingConfirmationsPayload {
+  ok: boolean;
+  recordId: string;
+  count: number;
+  items: QuickBooksPendingConfirmationRow[];
+}
+
+export interface QuickBooksConfirmPaymentRequest {
+  transactionId: string;
+  transactionType?: string;
+}
+
+export interface QuickBooksConfirmPaymentPayload {
+  ok: boolean;
+  item: {
+    transactionType: string;
+    transactionId: string;
+    matchedRecordId: string;
+    matchedPaymentField: string;
+    matchedPaymentDateField: string;
+    matchedConfirmed: boolean;
+    matchedConfirmedAt?: string;
+    matchedConfirmedBy?: string;
+  };
 }

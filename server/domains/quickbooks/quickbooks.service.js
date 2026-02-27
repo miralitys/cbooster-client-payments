@@ -41,6 +41,18 @@ function createQuickBooksService(dependencies = {}) {
     requestOpenAiQuickBooksInsight(payload) {
       return requestOpenAiQuickBooksInsight(payload);
     },
+    confirmQuickBooksPaymentMatch(payload) {
+      if (typeof repo.confirmQuickBooksPaymentMatch !== "function") {
+        return Promise.resolve(null);
+      }
+      return repo.confirmQuickBooksPaymentMatch(payload);
+    },
+    listPendingQuickBooksPaymentMatchesByRecordId(recordId) {
+      if (typeof repo.listPendingQuickBooksPaymentMatchesByRecordId !== "function") {
+        return Promise.resolve([]);
+      }
+      return repo.listPendingQuickBooksPaymentMatchesByRecordId(recordId);
+    },
   };
 }
 

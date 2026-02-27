@@ -4,6 +4,7 @@ import { showToast } from "@/shared/lib/toast";
 import { requestOpenClientCard } from "@/shared/lib/openClientCard";
 import { withStableRowKeys, type RowWithKey } from "@/shared/lib/stableRowKeys";
 import {
+  confirmQuickBooksRecentPayment,
   approveModerationSubmission,
   getModerationSubmissionFiles,
   getModerationSubmissions,
@@ -102,6 +103,7 @@ function mergeModerationSubmissions(
 
 export default function DashboardPage() {
   const [sessionCanReview, setSessionCanReview] = useState(false);
+  const [sessionCanConfirmQuickBooksPayments, setSessionCanConfirmQuickBooksPayments] = useState(false);
 
   const [overviewPeriod, setOverviewPeriod] = useState<OverviewPeriodKey>("currentWeek");
   const [records, setRecords] = useState<ClientRecord[]>([]);
@@ -121,6 +123,7 @@ export default function DashboardPage() {
   const [todayPayments, setTodayPayments] = useState<DashboardQuickBooksViewRow[]>([]);
   const [todayPaymentsLoading, setTodayPaymentsLoading] = useState(true);
   const [todayPaymentsError, setTodayPaymentsError] = useState("");
+  const [confirmingPaymentIds, setConfirmingPaymentIds] = useState<Record<string, boolean>>({});
 
   const [activeSubmission, setActiveSubmission] = useState<ModerationSubmission | null>(null);
   const [submissionFiles, setSubmissionFiles] = useState<ModerationSubmissionFile[]>([]);
@@ -326,9 +329,11 @@ export default function DashboardPage() {
     void getSession()
       .then((payload) => {
         setSessionCanReview(Boolean(payload?.permissions?.review_moderation));
+        setSessionCanConfirmQuickBooksPayments(Boolean(payload?.permissions?.sync_quickbooks));
       })
       .catch(() => {
         setSessionCanReview(false);
+        setSessionCanConfirmQuickBooksPayments(false);
       });
     void reloadDashboard();
   }, [reloadDashboard]);
@@ -403,6 +408,64 @@ export default function DashboardPage() {
       setIsModerationActionRunning(false);
     }
   }
+
+  const runQuickBooksPaymentConfirm = useCallback(
+    async (payment: DashboardQuickBooksViewRow) => {
+      if (!sessionCanConfirmQuickBooksPayments) {
+        showDashboardMessage("You do not have permission to confirm payments.", "error");
+        return;
+      }
+
+      const transactionId = String(payment.transactionId || "").trim();
+      if (!transactionId) {
+        showDashboardMessage("Payment confirmation is unavailable for this row.", "error");
+        return;
+      }
+
+      if (payment.matchedConfirmed) {
+        return;
+      }
+
+      const confirmed = window.confirm("Confirm payment? Yes/No");
+      if (!confirmed) {
+        return;
+      }
+
+      setConfirmingPaymentIds((previous) => ({
+        ...previous,
+        [transactionId]: true,
+      }));
+
+      try {
+        await confirmQuickBooksRecentPayment({
+          transactionId,
+          transactionType: payment.transactionType || "payment",
+        });
+
+        setTodayPayments((previousRows) =>
+          previousRows.map((row) =>
+            String(row.transactionId || "").trim() === transactionId
+              ? {
+                  ...row,
+                  matchedConfirmed: true,
+                }
+              : row,
+          ),
+        );
+        showDashboardMessage("Payment confirmed.", "success");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to confirm payment.";
+        showDashboardMessage(message, "error");
+      } finally {
+        setConfirmingPaymentIds((previous) => {
+          const next = { ...previous };
+          delete next[transactionId];
+          return next;
+        });
+      }
+    },
+    [sessionCanConfirmQuickBooksPayments, showDashboardMessage],
+  );
 
   const submissionsColumns = useMemo<TableColumn<ModerationSubmission>[]>(() => {
     return [
@@ -490,10 +553,40 @@ export default function DashboardPage() {
         key: "paymentDate",
         label: "Date",
         align: "center",
-        cell: (item) => formatDate(item.paymentDate || ""),
+        cell: (item) => {
+          const transactionId = String(item.transactionId || "").trim();
+          const isConfirming = Boolean(transactionId && confirmingPaymentIds[transactionId]);
+          const matchedRecordId = String(item.matchedRecordId || "").trim();
+          const canConfirm =
+            sessionCanConfirmQuickBooksPayments &&
+            Boolean(transactionId) &&
+            Boolean(matchedRecordId) &&
+            !item.matchedConfirmed;
+
+          return (
+            <span className="payments-today-date-cell">
+              <span>{formatDate(item.paymentDate || "")}</span>
+              {canConfirm ? (
+                <button
+                  type="button"
+                  className="payments-today-confirm-btn"
+                  disabled={isConfirming}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void runQuickBooksPaymentConfirm(item);
+                  }}
+                  aria-label={`Confirm payment for ${String(item.clientName || "").trim() || "client"}`}
+                  title="Confirm payment"
+                >
+                  {isConfirming ? "..." : "✓"}
+                </button>
+              ) : null}
+            </span>
+          );
+        },
       },
     ];
-  }, []);
+  }, [confirmingPaymentIds, runQuickBooksPaymentConfirm, sessionCanConfirmQuickBooksPayments]);
 
   const isReloading = submissionsLoading || recordsLoading || todayPaymentsLoading;
 

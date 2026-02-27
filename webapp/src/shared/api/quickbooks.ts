@@ -1,5 +1,8 @@
 import { apiRequest } from "@/shared/api/fetcher";
 import type {
+  QuickBooksConfirmPaymentPayload,
+  QuickBooksConfirmPaymentRequest,
+  QuickBooksPendingConfirmationsPayload,
   QuickBooksPaymentsPayload,
   QuickBooksSyncJobPayload,
   QuickBooksTransactionInsightPayload,
@@ -64,5 +67,29 @@ export async function getQuickBooksTransactionInsight(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+  });
+}
+
+export async function getQuickBooksPendingConfirmations(recordId: string): Promise<QuickBooksPendingConfirmationsPayload> {
+  const query = new URLSearchParams({
+    recordId: String(recordId || "").trim(),
+  });
+  return apiRequest<QuickBooksPendingConfirmationsPayload>(
+    `/api/quickbooks/payments/pending-confirmations?${query.toString()}`,
+  );
+}
+
+export async function confirmQuickBooksRecentPayment(
+  payload: QuickBooksConfirmPaymentRequest,
+): Promise<QuickBooksConfirmPaymentPayload> {
+  return apiRequest<QuickBooksConfirmPaymentPayload>("/api/quickbooks/payments/recent/confirm", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      transactionId: String(payload.transactionId || "").trim(),
+      transactionType: String(payload.transactionType || "").trim() || "payment",
+    }),
   });
 }

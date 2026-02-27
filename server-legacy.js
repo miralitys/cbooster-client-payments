@@ -22476,12 +22476,17 @@ function mapQuickBooksTransactionRow(row) {
   }
 
   return {
+    transactionId: normalized.transactionId,
     clientName: normalized.clientName,
     clientPhone: normalized.clientPhone,
     clientEmail: normalized.clientEmail,
     paymentAmount: normalized.paymentAmount,
     paymentDate: normalized.paymentDate,
     transactionType: normalized.transactionType,
+    matchedRecordId: sanitizeTextValue(row?.matched_record_id, 180),
+    matchedPaymentField: sanitizeTextValue(row?.matched_payment_field, 40),
+    matchedPaymentDateField: sanitizeTextValue(row?.matched_payment_date_field, 40),
+    matchedConfirmed: row?.matched_confirmed === true,
   };
 }
 
@@ -25418,6 +25423,232 @@ async function upsertQuickBooksTransactions(items) {
   return quickBooksRepo.upsertQuickBooksTransactions(normalizedItems);
 }
 
+const QUICKBOOKS_AUTO_MATCH_PAYMENT_MAX_SLOTS = 36;
+const QUICKBOOKS_AUTO_MATCH_RECORD_WRITE_MAX_RETRIES = 3;
+const QUICKBOOKS_AUTO_MATCH_PAYMENT_FIELD_PAIRS = Object.freeze(
+  Array.from({ length: QUICKBOOKS_AUTO_MATCH_PAYMENT_MAX_SLOTS }, (_, index) => {
+    const slot = index + 1;
+    return {
+      paymentField: `payment${slot}`,
+      paymentDateField: `payment${slot}Date`,
+    };
+  }),
+);
+
+function formatQuickBooksPaymentAmountForRecord(rawValue) {
+  const numeric = Number.parseFloat(String(rawValue ?? "").trim());
+  if (!Number.isFinite(numeric)) {
+    return "";
+  }
+  const sign = numeric < 0 ? "-" : "";
+  const absolute = Math.abs(numeric);
+  return `${sign}$${absolute.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function formatQuickBooksPaymentDateForRecord(rawValue) {
+  const isoDate = sanitizeTextValue(rawValue, 20);
+  if (!isValidIsoDateString(isoDate)) {
+    return "";
+  }
+  const [year, month, day] = isoDate.split("-");
+  return `${month}/${day}/${year}`;
+}
+
+function findQuickBooksExistingPaymentSlot(record, amountValue, dateValue) {
+  if (!record || typeof record !== "object") {
+    return null;
+  }
+  const normalizedAmount = sanitizeTextValue(amountValue, 120);
+  const normalizedDate = sanitizeTextValue(dateValue, 40);
+  if (!normalizedAmount || !normalizedDate) {
+    return null;
+  }
+
+  for (const pair of QUICKBOOKS_AUTO_MATCH_PAYMENT_FIELD_PAIRS) {
+    const currentAmount = sanitizeTextValue(record?.[pair.paymentField], 120);
+    const currentDate = sanitizeTextValue(record?.[pair.paymentDateField], 40);
+    if (!currentAmount || !currentDate) {
+      continue;
+    }
+    if (currentAmount === normalizedAmount && currentDate === normalizedDate) {
+      return pair;
+    }
+  }
+
+  return null;
+}
+
+function findQuickBooksNextFreePaymentSlot(record) {
+  if (!record || typeof record !== "object") {
+    return null;
+  }
+  for (const pair of QUICKBOOKS_AUTO_MATCH_PAYMENT_FIELD_PAIRS) {
+    const amountValue = sanitizeTextValue(record?.[pair.paymentField], 120);
+    const dateValue = sanitizeTextValue(record?.[pair.paymentDateField], 40);
+    if (!amountValue && !dateValue) {
+      return pair;
+    }
+  }
+  return null;
+}
+
+function buildQuickBooksRecordIndexesByClientKey(records) {
+  const index = new Map();
+  const sourceRecords = Array.isArray(records) ? records : [];
+  for (let recordIndex = 0; recordIndex < sourceRecords.length; recordIndex += 1) {
+    const record = sourceRecords[recordIndex];
+    const clientKey = normalizePaymentClientNameForLookup(record?.clientName);
+    if (!clientKey) {
+      continue;
+    }
+    const list = index.get(clientKey) || [];
+    list.push(recordIndex);
+    index.set(clientKey, list);
+  }
+  return index;
+}
+
+async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
+  const unmatchedRows = await quickBooksRepo.listUnmatchedQuickBooksPositivePaymentsInRange(fromDate, toDate);
+  if (!unmatchedRows.length) {
+    return {
+      matchedCount: 0,
+      skippedCount: 0,
+      updatedAt: null,
+    };
+  }
+
+  for (let attempt = 1; attempt <= QUICKBOOKS_AUTO_MATCH_RECORD_WRITE_MAX_RETRIES; attempt += 1) {
+    const state = await getStoredRecords();
+    const sourceRecords = Array.isArray(state?.records) ? state.records : [];
+    const nextRecords = sourceRecords.map((record) =>
+      record && typeof record === "object" && !Array.isArray(record) ? { ...record } : {},
+    );
+    const recordsByClientKey = buildQuickBooksRecordIndexesByClientKey(nextRecords);
+
+    let recordsChanged = false;
+    let matchedCount = 0;
+    const matchedOperations = [];
+
+    for (const rawRow of unmatchedRows) {
+      const transactionType = sanitizeTextValue(rawRow?.transaction_type, 40).toLowerCase() || "payment";
+      const transactionId = sanitizeTextValue(rawRow?.transaction_id, 160);
+      const clientKey = normalizePaymentClientNameForLookup(rawRow?.client_name);
+      const paymentAmount = formatQuickBooksPaymentAmountForRecord(rawRow?.payment_amount);
+      const paymentDate = formatQuickBooksPaymentDateForRecord(rawRow?.payment_date);
+      if (!transactionId || !clientKey || !paymentAmount || !paymentDate) {
+        continue;
+      }
+
+      const candidateIndexes = recordsByClientKey.get(clientKey) || [];
+      if (!candidateIndexes.length) {
+        continue;
+      }
+
+      let matchedRecord = null;
+      let matchedSlot = null;
+
+      for (const recordIndex of candidateIndexes) {
+        const candidateRecord = nextRecords[recordIndex];
+        const existingSlot = findQuickBooksExistingPaymentSlot(candidateRecord, paymentAmount, paymentDate);
+        if (!existingSlot) {
+          continue;
+        }
+        matchedRecord = candidateRecord;
+        matchedSlot = existingSlot;
+        break;
+      }
+
+      if (!matchedRecord || !matchedSlot) {
+        for (const recordIndex of candidateIndexes) {
+          const candidateRecord = nextRecords[recordIndex];
+          const freeSlot = findQuickBooksNextFreePaymentSlot(candidateRecord);
+          if (!freeSlot) {
+            continue;
+          }
+          candidateRecord[freeSlot.paymentField] = paymentAmount;
+          candidateRecord[freeSlot.paymentDateField] = paymentDate;
+          recordsChanged = true;
+          matchedRecord = candidateRecord;
+          matchedSlot = freeSlot;
+          break;
+        }
+      }
+
+      if (!matchedRecord || !matchedSlot) {
+        continue;
+      }
+
+      const recordId = sanitizeTextValue(matchedRecord?.id, 180);
+      if (!recordId) {
+        continue;
+      }
+
+      matchedCount += 1;
+      matchedOperations.push({
+        transactionType,
+        transactionId,
+        recordId,
+        paymentField: matchedSlot.paymentField,
+        paymentDateField: matchedSlot.paymentDateField,
+      });
+    }
+
+    if (!matchedOperations.length) {
+      return {
+        matchedCount: 0,
+        skippedCount: unmatchedRows.length,
+        updatedAt: sanitizeTextValue(state?.updatedAt, 80) || null,
+      };
+    }
+
+    let updatedAt = sanitizeTextValue(state?.updatedAt, 80) || null;
+    if (recordsChanged) {
+      try {
+        updatedAt = await saveStoredRecords(nextRecords, {
+          expectedUpdatedAt: state?.updatedAt || null,
+        });
+      } catch (error) {
+        if (sanitizeTextValue(error?.code, 80) === "records_conflict" && attempt < QUICKBOOKS_AUTO_MATCH_RECORD_WRITE_MAX_RETRIES) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    let markedCount = 0;
+    for (const operation of matchedOperations) {
+      try {
+        const marked = await quickBooksRepo.markQuickBooksPaymentMatched(operation);
+        if (marked) {
+          markedCount += 1;
+        }
+      } catch (error) {
+        console.warn(
+          `[QuickBooks Auto Match] failed to mark matched transaction ${operation.transactionType}/${operation.transactionId}: ${
+            sanitizeTextValue(error?.message, 320) || "unknown error"
+          }`,
+        );
+      }
+    }
+
+    return {
+      matchedCount: markedCount,
+      skippedCount: Math.max(0, unmatchedRows.length - markedCount),
+      updatedAt,
+    };
+  }
+
+  return {
+    matchedCount: 0,
+    skippedCount: unmatchedRows.length,
+    updatedAt: null,
+  };
+}
+
 function buildQuickBooksSyncMeta(options = {}) {
   const requested = Boolean(options?.requested);
   const syncMode = (options?.syncMode || "").toString().trim().toLowerCase() === "full" ? "full" : "incremental";
@@ -25484,6 +25715,16 @@ async function syncQuickBooksTransactionsInRange(range, options = {}) {
     reconciledCount: reconcileResult.reconciledCount,
     reconciledWrittenCount: reconcileResult.writtenCount,
   };
+
+  try {
+    await autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate);
+  } catch (error) {
+    console.warn(
+      `[QuickBooks Auto Match] failed for range ${fromDate}..${toDate}: ${
+        sanitizeTextValue(error?.message, 320) || "unknown error"
+      }`,
+    );
+  }
 
   return syncMeta;
 }
@@ -29058,13 +29299,17 @@ registerQuickBooksRoutes({
   requireWebPermission,
   permissionKeys: {
     WEB_AUTH_PERMISSION_VIEW_DASHBOARD,
+    WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS,
     WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS,
+    WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS,
   },
   handlers: {
     handleQuickbooksReadonlyGuard: quickBooksController.handleQuickbooksReadonlyGuard,
     handleQuickBooksRecentPaymentsGet: quickBooksController.handleQuickBooksRecentPaymentsGet,
     handleQuickBooksOutgoingPaymentsGet: quickBooksController.handleQuickBooksOutgoingPaymentsGet,
     handleQuickBooksRecentPaymentsSyncPost: quickBooksController.handleQuickBooksRecentPaymentsSyncPost,
+    handleQuickBooksRecentPaymentsConfirmPost: quickBooksController.handleQuickBooksRecentPaymentsConfirmPost,
+    handleQuickBooksPendingConfirmationsGet: quickBooksController.handleQuickBooksPendingConfirmationsGet,
     handleQuickBooksSyncJobGet: quickBooksController.handleQuickBooksSyncJobGet,
     handleQuickBooksTransactionInsightPost: quickBooksController.handleQuickBooksTransactionInsightPost,
   },

@@ -50,9 +50,15 @@ function registerQuickBooksRoutes(context) {
   const requireQuickBooksViewAccess = permissionKeys.WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS
     ? requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_QUICKBOOKS)
     : requireQuickBooksAccess;
+  const requireQuickBooksSyncAccess = permissionKeys.WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS
+    ? requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_SYNC_QUICKBOOKS)
+    : requireQuickBooksAccess;
   const requireDashboardAccess = permissionKeys.WEB_AUTH_PERMISSION_VIEW_DASHBOARD
     ? requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_DASHBOARD)
     : requireQuickBooksAccess;
+  const requireClientPaymentsAccess = permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS
+    ? requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS)
+    : requireDashboardAccess;
 
   function requireQuickBooksRecentReadAccess(req, res, next) {
     if (isDashboardTodayRangeRequest(req)) {
@@ -80,6 +86,18 @@ function registerQuickBooksRoutes(context) {
     "/api/quickbooks/payments/recent/sync",
     requireQuickBooksAccess,
     handlers.handleQuickBooksRecentPaymentsSyncPost,
+  );
+
+  app.post(
+    "/api/quickbooks/payments/recent/confirm",
+    requireQuickBooksSyncAccess,
+    handlers.handleQuickBooksRecentPaymentsConfirmPost,
+  );
+
+  app.get(
+    "/api/quickbooks/payments/pending-confirmations",
+    requireClientPaymentsAccess,
+    handlers.handleQuickBooksPendingConfirmationsGet,
   );
 
   app.get(

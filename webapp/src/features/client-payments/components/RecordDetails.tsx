@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getGhlClientBasicNote,
   getGhlClientCommunications,
+  getQuickBooksPendingConfirmations,
   postGhlClientCommunicationNormalizeTranscripts,
   postGhlClientCommunicationTranscript,
 } from "@/shared/api";
@@ -13,6 +14,7 @@ import type {
   GhlClientCommunicationItem,
   GhlClientCommunicationsPayload,
 } from "@/shared/types/ghlCommunications";
+import type { QuickBooksPendingConfirmationRow } from "@/shared/types/quickbooks";
 import type { ClientRecord } from "@/shared/types/records";
 import { FIELD_DEFINITIONS, PAYMENT_PAIRS } from "@/features/client-payments/domain/constants";
 import { formatDate, formatMoney, getRecordStatusFlags, parseMoneyValue } from "@/features/client-payments/domain/calculations";
@@ -124,6 +126,7 @@ export function RecordDetails({
   const [isNormalizingTranscripts, setIsNormalizingTranscripts] = useState(false);
   const [transcriptNormalizeError, setTranscriptNormalizeError] = useState("");
   const [activeCommunicationFilter, setActiveCommunicationFilter] = useState<CommunicationFilter>("all");
+  const [pendingQuickBooksMatches, setPendingQuickBooksMatches] = useState<QuickBooksPendingConfirmationRow[]>([]);
   const [isBasicInfoExpanded, setIsBasicInfoExpanded] = useState(false);
   const [isMemoExpanded, setIsMemoExpanded] = useState(false);
   const [clientManagerRefreshError, setClientManagerRefreshError] = useState("");
@@ -622,15 +625,27 @@ export function RecordDetails({
     [record.afterResult, record.contractCompleted, record.dateWhenFullyPaid, record.writtenOff],
   );
   const workflowNotes = useMemo(() => getOptionalRecordText(record, "notes"), [record]);
+  const pendingQuickBooksFields = useMemo(() => {
+    const fields = new Set<string>();
+    for (const item of pendingQuickBooksMatches) {
+      const paymentField = String(item?.matchedPaymentField || "").trim();
+      if (paymentField) {
+        fields.add(paymentField);
+      }
+    }
+    return fields;
+  }, [pendingQuickBooksMatches]);
   const paymentScheduleRows = useMemo(
     () =>
       PAYMENT_PAIRS.map(([paymentField, paymentDateField], index) => ({
         id: `payment-${index + 1}`,
+        paymentField: String(paymentField),
         label: `Payment ${index + 1}`,
         amount: record[paymentField] ? formatMoneyCell(record[paymentField]) : "-",
         date: record[paymentDateField] ? formatDate(record[paymentDateField]) : "-",
+        pending: pendingQuickBooksFields.has(String(paymentField)),
       })),
-    [record],
+    [pendingQuickBooksFields, record],
   );
   const visiblePaymentScheduleRows = useMemo(() => {
     const rowsWithValues = paymentScheduleRows.filter((payment) => payment.amount !== "-" || payment.date !== "-");
@@ -641,6 +656,36 @@ export function RecordDetails({
   }, [paymentScheduleRows]);
   const hiddenPaymentRowsCount = Math.max(0, paymentScheduleRows.length - visiblePaymentScheduleRows.length);
   const activeClientDisplay = useMemo(() => formatActiveClientValue(record.active), [record.active]);
+
+  useEffect(() => {
+    const recordId = String(record.id || "").trim();
+    if (!recordId) {
+      setPendingQuickBooksMatches([]);
+      return;
+    }
+
+    let isActive = true;
+    const abortController = new AbortController();
+
+    void getQuickBooksPendingConfirmations(recordId)
+      .then((payload) => {
+        if (!isActive) {
+          return;
+        }
+        setPendingQuickBooksMatches(Array.isArray(payload?.items) ? payload.items : []);
+      })
+      .catch(() => {
+        if (!isActive) {
+          return;
+        }
+        setPendingQuickBooksMatches([]);
+      });
+
+    return () => {
+      isActive = false;
+      abortController.abort();
+    };
+  }, [record.id]);
 
   async function handleRefreshClientManagerClick() {
     if (!canRefreshClientManagerForCurrentRecord || !onRefreshClientManager) {
@@ -798,6 +843,9 @@ export function RecordDetails({
                   <span className="record-payments-panel__label">{payment.label}</span>
                   <span className="record-payments-panel__amount">{payment.amount}</span>
                   <span className="record-payments-panel__date">{payment.date}</span>
+                  {payment.pending ? (
+                    <span className="record-payments-panel__pending">Not Confirmed</span>
+                  ) : null}
                 </div>
               ))}
             </div>

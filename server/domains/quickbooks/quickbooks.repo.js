@@ -103,6 +103,41 @@ function createQuickBooksRepo(dependencies = {}) {
     `);
 
     await query(`
+      ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      ADD COLUMN IF NOT EXISTS matched_record_id TEXT NOT NULL DEFAULT ''
+    `);
+
+    await query(`
+      ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      ADD COLUMN IF NOT EXISTS matched_payment_field TEXT NOT NULL DEFAULT ''
+    `);
+
+    await query(`
+      ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      ADD COLUMN IF NOT EXISTS matched_payment_date_field TEXT NOT NULL DEFAULT ''
+    `);
+
+    await query(`
+      ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      ADD COLUMN IF NOT EXISTS matched_confirmed BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+
+    await query(`
+      ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      ADD COLUMN IF NOT EXISTS matched_confirmed_at TIMESTAMPTZ
+    `);
+
+    await query(`
+      ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      ADD COLUMN IF NOT EXISTS matched_confirmed_by TEXT NOT NULL DEFAULT ''
+    `);
+
+    await query(`
+      ALTER TABLE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+      ADD COLUMN IF NOT EXISTS matched_at TIMESTAMPTZ
+    `);
+
+    await query(`
       CREATE INDEX IF NOT EXISTS ${QUICKBOOKS_TRANSACTIONS_TABLE_NAME}_payment_date_idx
       ON ${QUICKBOOKS_TRANSACTIONS_TABLE} (payment_date DESC)
     `);
@@ -294,7 +329,13 @@ function createQuickBooksRepo(dependencies = {}) {
           client_phone,
           client_email,
           payment_amount,
-          payment_date::text AS payment_date
+          payment_date::text AS payment_date,
+          matched_record_id,
+          matched_payment_field,
+          matched_payment_date_field,
+          matched_confirmed,
+          matched_confirmed_at,
+          matched_confirmed_by
         FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
         WHERE payment_date >= $1::date
           AND payment_date <= $2::date
@@ -418,6 +459,136 @@ function createQuickBooksRepo(dependencies = {}) {
     });
   }
 
+  async function listUnmatchedQuickBooksPositivePaymentsInRange(fromDate, toDate) {
+    await ensureReady();
+    const result = await query(
+      `
+        SELECT
+          transaction_type,
+          transaction_id,
+          customer_id,
+          client_name,
+          client_phone,
+          client_email,
+          payment_amount,
+          payment_date::text AS payment_date
+        FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        WHERE transaction_type = 'payment'
+          AND payment_amount >= $3
+          AND payment_date >= $1::date
+          AND payment_date <= $2::date
+          AND COALESCE(matched_record_id, '') = ''
+        ORDER BY payment_date ASC, updated_at ASC, transaction_id ASC
+      `,
+      [fromDate, toDate, QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT],
+    );
+    return Array.isArray(result.rows) ? result.rows : [];
+  }
+
+  async function markQuickBooksPaymentMatched(payload = {}) {
+    const transactionType = sanitizeTextValue(payload.transactionType, 40).toLowerCase();
+    const transactionId = sanitizeTextValue(payload.transactionId, 160);
+    const recordId = sanitizeTextValue(payload.recordId, 180);
+    const paymentField = sanitizeTextValue(payload.paymentField, 40);
+    const paymentDateField = sanitizeTextValue(payload.paymentDateField, 40);
+    if (!transactionType || !transactionId || !recordId || !paymentField || !paymentDateField) {
+      return null;
+    }
+
+    await ensureReady();
+    const result = await query(
+      `
+        UPDATE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        SET
+          matched_record_id = $3,
+          matched_payment_field = $4,
+          matched_payment_date_field = $5,
+          matched_confirmed = FALSE,
+          matched_confirmed_at = NULL,
+          matched_confirmed_by = '',
+          matched_at = NOW(),
+          updated_at = NOW()
+        WHERE transaction_type = $1
+          AND transaction_id = $2
+        RETURNING
+          transaction_type,
+          transaction_id,
+          matched_record_id,
+          matched_payment_field,
+          matched_payment_date_field,
+          matched_confirmed,
+          matched_confirmed_at,
+          matched_confirmed_by
+      `,
+      [transactionType, transactionId, recordId, paymentField, paymentDateField],
+    );
+    return result?.rows?.[0] || null;
+  }
+
+  async function confirmQuickBooksPaymentMatch(payload = {}) {
+    const transactionType = sanitizeTextValue(payload.transactionType, 40).toLowerCase();
+    const transactionId = sanitizeTextValue(payload.transactionId, 160);
+    const confirmedBy = sanitizeTextValue(payload.confirmedBy, 200);
+    if (!transactionType || !transactionId) {
+      return null;
+    }
+
+    await ensureReady();
+    const result = await query(
+      `
+        UPDATE ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        SET
+          matched_confirmed = TRUE,
+          matched_confirmed_at = NOW(),
+          matched_confirmed_by = $3,
+          updated_at = NOW()
+        WHERE transaction_type = $1
+          AND transaction_id = $2
+          AND COALESCE(matched_record_id, '') <> ''
+        RETURNING
+          transaction_type,
+          transaction_id,
+          matched_record_id,
+          matched_payment_field,
+          matched_payment_date_field,
+          matched_confirmed,
+          matched_confirmed_at,
+          matched_confirmed_by
+      `,
+      [transactionType, transactionId, confirmedBy],
+    );
+    return result?.rows?.[0] || null;
+  }
+
+  async function listPendingQuickBooksPaymentMatchesByRecordId(recordId) {
+    const normalizedRecordId = sanitizeTextValue(recordId, 180);
+    if (!normalizedRecordId) {
+      return [];
+    }
+
+    await ensureReady();
+    const result = await query(
+      `
+        SELECT
+          transaction_type,
+          transaction_id,
+          payment_amount,
+          payment_date::text AS payment_date,
+          matched_payment_field,
+          matched_payment_date_field,
+          matched_confirmed,
+          matched_confirmed_at,
+          matched_confirmed_by
+        FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        WHERE matched_record_id = $1
+          AND matched_confirmed = FALSE
+        ORDER BY payment_date DESC, updated_at DESC, transaction_id ASC
+      `,
+      [normalizedRecordId],
+    );
+    return Array.isArray(result.rows) ? result.rows : [];
+  }
+
   return {
     ensureQuickBooksSchema,
     persistQuickBooksRefreshToken,
@@ -428,6 +599,10 @@ function createQuickBooksRepo(dependencies = {}) {
     getLatestCachedQuickBooksPaymentDate,
     listCachedQuickBooksZeroPaymentsInRange,
     upsertQuickBooksTransactions,
+    listUnmatchedQuickBooksPositivePaymentsInRange,
+    markQuickBooksPaymentMatched,
+    confirmQuickBooksPaymentMatch,
+    listPendingQuickBooksPaymentMatchesByRecordId,
   };
 }
 
