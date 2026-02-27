@@ -5476,6 +5476,7 @@ a {
   display: grid;
   gap: 24px;
   grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  align-items: start;
 }
 
 .support-kanban {
@@ -5612,6 +5613,12 @@ a {
 .support-file-count {
   color: #5b647a;
   font-size: 0.9rem;
+}
+
+.support-overlay__history-reason {
+  color: #475569;
+  font-size: 12px;
+  margin-top: 4px;
 }
 
 .support-form__error {

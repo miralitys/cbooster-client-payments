@@ -141,6 +141,9 @@ export default function SupportPage() {
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const supportEventRef = useRef<EventSource | null>(null);
+  const closeMoveModal = useCallback(() => setMoveModalOpen(false), []);
+  const closeEditModal = useCallback(() => setEditModalOpen(false), []);
+  const closeOverlay = useCallback(() => setIsOverlayOpen(false), []);
 
   const loadRequests = useCallback(async () => {
     setIsRefreshing(true);
@@ -718,7 +721,7 @@ export default function SupportPage() {
         <Modal
           open={moveModalOpen}
           title={moveTargetStatus === "rejected" ? "Reason for rejection" : "Reason for revision"}
-          onClose={() => setMoveModalOpen(false)}
+          onClose={closeMoveModal}
         >
           <div className="support-modal">
             <Textarea
@@ -730,7 +733,15 @@ export default function SupportPage() {
                   : "Reason for revision"
               }
             />
-            <input type="file" multiple onChange={(event) => setMoveAttachments(Array.from(event.target.files || []))} />
+            <div className="support-file-row">
+              <label className="support-file-button">
+                Attach files
+                <input type="file" multiple onChange={(event) => setMoveAttachments(Array.from(event.target.files || []))} />
+              </label>
+              <span className="support-file-count">
+                {moveAttachments.length ? `${moveAttachments.length} file(s) selected` : "No files selected"}
+              </span>
+            </div>
             <Button onClick={handleMoveSubmit} isLoading={moveSaving}>
               Confirm
             </Button>
@@ -739,7 +750,7 @@ export default function SupportPage() {
       ) : null}
 
       {editModalOpen ? (
-        <Modal open={editModalOpen} title="Edit request" onClose={() => setEditModalOpen(false)}>
+        <Modal open={editModalOpen} title="Edit request" onClose={closeEditModal}>
           <div className="support-modal">
             <Input
               value={editDraft.title}
@@ -779,7 +790,7 @@ export default function SupportPage() {
       ) : null}
 
       {isOverlayOpen && selectedRequest ? (
-        <Modal open={isOverlayOpen} title="Support Request" onClose={() => setIsOverlayOpen(false)}>
+        <Modal open={isOverlayOpen} title="Support Request" onClose={closeOverlay}>
           <div className="support-overlay">
             <div className="support-overlay__header">
               <h3>{selectedRequest.title}</h3>
@@ -855,12 +866,20 @@ export default function SupportPage() {
                   ))}
                 </ul>
               )}
-              <input
-                type="file"
-                multiple
-                disabled={attachmentUploading}
-                onChange={(event) => void uploadOverlayAttachments(Array.from(event.target.files || []))}
-              />
+              <div className="support-file-row">
+                <label className="support-file-button">
+                  Attach files
+                  <input
+                    type="file"
+                    multiple
+                    disabled={attachmentUploading}
+                    onChange={(event) => void uploadOverlayAttachments(Array.from(event.target.files || []))}
+                  />
+                </label>
+                <span className="support-file-count">
+                  {attachmentUploading ? "Uploading..." : " "}
+                </span>
+              </div>
             </div>
 
             <div className="support-overlay__comments">
@@ -874,9 +893,16 @@ export default function SupportPage() {
                     </div>
                     {entry.action === "comment" ? <p>{String(entry.payload?.comment || "")}</p> : null}
                     {entry.action === "status_change" ? (
-                      <p>
-                        Status: {String(entry.payload?.from || "")} → {String(entry.payload?.to || "")}
-                      </p>
+                      <div>
+                        <p>
+                          Status: {String(entry.payload?.from || "")} → {String(entry.payload?.to || "")}
+                        </p>
+                        {entry.payload?.reason ? (
+                          <p className="support-overlay__history-reason">
+                            Reason: {String(entry.payload.reason)}
+                          </p>
+                        ) : null}
+                      </div>
                     ) : null}
                   </div>
                 ))}
