@@ -14841,6 +14841,10 @@ function isPublicWebAuthPath(pathname) {
     return true;
   }
 
+  if (pathname.startsWith("/api/ghl/client-contracts/archive")) {
+    return true;
+  }
+
   if (pathname.startsWith("/api/mini/")) {
     return true;
   }
