@@ -5351,6 +5351,8 @@ async function runMiniRetentionSweep() {
         `[mini retention] purged submissions=${deletedSubmissionsCount} files=${deletedFilesCount} storage_objects=${removedStoredAttachmentsCount} scanned=${scannedSubmissionCount}.`,
       );
     }
+  } catch (error) {
+    console.error("[mini retention] sweep failed:", error);
   } finally {
     miniRetentionSweepInFlight = false;
   }

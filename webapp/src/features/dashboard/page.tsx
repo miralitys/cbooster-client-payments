@@ -436,11 +436,31 @@ export default function DashboardPage() {
         [transactionId]: true,
       }));
 
-      try {
+      const shouldRetryConfirmRequest = (error: unknown): boolean => {
+        const status = Number((error as { status?: unknown })?.status);
+        const code = String((error as { code?: unknown })?.code || "").trim().toLowerCase();
+        return status === 502 || status === 503 || code === "network_error" || code === "timeout";
+      };
+
+      const sendConfirmRequest = async (): Promise<void> => {
         await confirmQuickBooksRecentPayment({
           transactionId,
           transactionType: payment.transactionType || "payment",
         });
+      };
+
+      try {
+        try {
+          await sendConfirmRequest();
+        } catch (error) {
+          if (!shouldRetryConfirmRequest(error)) {
+            throw error;
+          }
+          await new Promise<void>((resolve) => {
+            globalThis.setTimeout(resolve, 450);
+          });
+          await sendConfirmRequest();
+        }
 
         setTodayPayments((previousRows) =>
           previousRows.map((row) =>
