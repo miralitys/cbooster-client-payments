@@ -182,10 +182,12 @@ export default function ClientPaymentsPage() {
   const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
   const [showAllPayments, setShowAllPayments] = useState(false);
   const [isRefreshMenuOpen, setIsRefreshMenuOpen] = useState(false);
+  const [isPhonesRefreshLoading, setIsPhonesRefreshLoading] = useState(false);
   const refreshMenuRef = useRef<HTMLDivElement | null>(null);
   const canSyncClientManagers = Boolean(session?.permissions?.sync_client_managers);
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
+  const canUseRefreshMenu = canSyncClientManagers || canRefreshClientPhoneInCard;
 
   const visibleTableColumns = useMemo<Array<keyof ClientRecord>>(
     () =>
@@ -258,6 +260,25 @@ export default function ClientPaymentsPage() {
   }, [managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
+  const filteredClientNamesForPhoneRefresh = useMemo<string[]>(() => {
+    const uniqueByComparable = new Map<string, string>();
+
+    for (const record of filteredRecords) {
+      const clientName = (record?.clientName || "").toString().trim();
+      if (!clientName) {
+        continue;
+      }
+
+      const comparableClientName = normalizeComparableClientName(clientName);
+      if (!comparableClientName || uniqueByComparable.has(comparableClientName)) {
+        continue;
+      }
+
+      uniqueByComparable.set(comparableClientName, clientName);
+    }
+
+    return [...uniqueByComparable.values()];
+  }, [filteredRecords]);
   const summedColumnValues = useMemo(() => {
     const totals = new Map<keyof ClientRecord, number | null>();
     const runningTotals = new Map<keyof ClientRecord, number>();
@@ -487,6 +508,72 @@ export default function ClientPaymentsPage() {
     [activeRecord, canRefreshClientPhoneInCard, forceRefresh],
   );
 
+  const refreshFilteredClientPhones = useCallback(async () => {
+    if (!canRefreshClientPhoneInCard) {
+      showToast({
+        type: "error",
+        message: "Only owner/admin/client-service department head can refresh Phone.",
+      });
+      return;
+    }
+
+    if (!filteredClientNamesForPhoneRefresh.length) {
+      showToast({
+        type: "info",
+        message: "No filtered clients to refresh phone.",
+      });
+      return;
+    }
+
+    setIsPhonesRefreshLoading(true);
+    try {
+      let refreshedClientsCount = 0;
+      let notFoundClientsCount = 0;
+      let failedClientsCount = 0;
+      const refreshedClientPhones = new Set<string>();
+
+      for (const clientName of filteredClientNamesForPhoneRefresh) {
+        try {
+          const payload = await postGhlClientPhoneRefresh(clientName);
+          const nextPhone = (payload?.phone || "").toString().trim();
+          if (payload?.status === "found" && nextPhone) {
+            refreshedClientsCount += 1;
+            refreshedClientPhones.add(normalizeComparableClientName(clientName));
+          } else {
+            notFoundClientsCount += 1;
+          }
+        } catch {
+          failedClientsCount += 1;
+        }
+      }
+
+      await forceRefresh();
+
+      let savedRecordsCount = 0;
+      for (const record of filteredRecords) {
+        const comparableClientName = normalizeComparableClientName(record?.clientName || "");
+        if (!comparableClientName || !refreshedClientPhones.has(comparableClientName)) {
+          continue;
+        }
+        savedRecordsCount += 1;
+      }
+
+      const summary = `Phones refresh finished for filtered clients. Refreshed: ${refreshedClientsCount}. Not found: ${notFoundClientsCount}. Failed: ${failedClientsCount}. Saved records: ${savedRecordsCount}.`;
+      showToast({
+        type: failedClientsCount > 0 ? "info" : "success",
+        message: summary,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to refresh filtered client phones.";
+      showToast({
+        type: "error",
+        message,
+      });
+    } finally {
+      setIsPhonesRefreshLoading(false);
+    }
+  }, [canRefreshClientPhoneInCard, filteredClientNamesForPhoneRefresh, filteredRecords, forceRefresh]);
+
   const counters = useMemo(() => {
     let writtenOffCount = 0;
     let fullyPaidCount = 0;
@@ -642,10 +729,10 @@ export default function ClientPaymentsPage() {
   }, []);
 
   useEffect(() => {
-    if (isManagersLoading) {
+    if (isManagersLoading || isPhonesRefreshLoading) {
       setIsRefreshMenuOpen(false);
     }
-  }, [isManagersLoading]);
+  }, [isManagersLoading, isPhonesRefreshLoading]);
 
   useEffect(() => {
     if (!saveError) {
@@ -1003,8 +1090,8 @@ export default function ClientPaymentsPage() {
                   size="sm"
                   className="refresh-manager-menu__toggle"
                   onClick={() => setIsRefreshMenuOpen((prev) => !prev)}
-                  disabled={!canSyncClientManagers}
-                  isLoading={isManagersLoading}
+                  disabled={!canUseRefreshMenu}
+                  isLoading={isManagersLoading || isPhonesRefreshLoading}
                   aria-haspopup="menu"
                   aria-expanded={isRefreshMenuOpen}
                   aria-controls="client-payments-refresh-manager-menu"
@@ -1025,7 +1112,7 @@ export default function ClientPaymentsPage() {
                       setIsRefreshMenuOpen(false);
                       void refreshClientManagers("incremental");
                     }}
-                    disabled={isManagersLoading}
+                    disabled={isManagersLoading || isPhonesRefreshLoading || !canSyncClientManagers}
                   >
                     Refresh Manager
                   </button>
@@ -1037,9 +1124,21 @@ export default function ClientPaymentsPage() {
                       setIsRefreshMenuOpen(false);
                       void startBackgroundClientManagersRefresh();
                     }}
-                    disabled={isManagersLoading}
+                    disabled={isManagersLoading || isPhonesRefreshLoading || !canSyncClientManagers}
                   >
                     Total Refresh Manager
+                  </button>
+                  <button
+                    type="button"
+                    className="refresh-manager-menu__item"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsRefreshMenuOpen(false);
+                      void refreshFilteredClientPhones();
+                    }}
+                    disabled={isManagersLoading || isPhonesRefreshLoading || !canRefreshClientPhoneInCard}
+                  >
+                    Add/Refresh Phones
                   </button>
                 </div>
               </div>
