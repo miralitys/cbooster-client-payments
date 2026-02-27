@@ -154,20 +154,16 @@ export function computeLegacyPaymentProbabilities(features: PaymentFeatures): Pa
 
 export function evaluateClientScore(record: ClientRecord, asOfDate = new Date()): ClientScoreResult {
   const status = getRecordStatusFlags(record);
+  if (!status.isActive) {
+    return unavailableScore("Inactive client.");
+  }
+
   if (status.isContractCompleted) {
     return unavailableScore("Inactive client.");
   }
 
   if (status.isWrittenOff) {
     return unavailableScore("Written Off client.");
-  }
-
-  if (status.isAfterResult) {
-    return unavailableScore("After Result client.");
-  }
-
-  if (status.isFullyPaid) {
-    return unavailableScore("Fully Paid client.");
   }
 
   const contractTotal = parseMoneyValue(record.contractTotals);

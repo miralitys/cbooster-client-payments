@@ -7,6 +7,7 @@ import type { ClientRecord } from "@/shared/types/records";
 function makeRecord(patch: Partial<ClientRecord>): ClientRecord {
   return {
     ...createEmptyRecord(),
+    active: "Active",
     contractTotals: "1000",
     payment1: "200",
     payment1Date: "01/10/2026",
@@ -15,6 +16,19 @@ function makeRecord(patch: Partial<ClientRecord>): ClientRecord {
 }
 
 describe("evaluateClientScore", () => {
+  it("returns no score for inactive clients", () => {
+    const result = evaluateClientScore(
+      makeRecord({
+        active: "No",
+      }),
+      new Date("2026-02-19T12:00:00Z"),
+    );
+
+    expect(result.score).toBeNull();
+    expect(result.displayScore).toBeNull();
+    expect(result.explanation).toContain("Inactive");
+  });
+
   it("returns no score for written off clients", () => {
     const result = evaluateClientScore(
       makeRecord({
@@ -28,7 +42,7 @@ describe("evaluateClientScore", () => {
     expect(result.explanation).toContain("Written Off");
   });
 
-  it("returns no score for after result clients", () => {
+  it("keeps score for after result clients when active", () => {
     const result = evaluateClientScore(
       makeRecord({
         afterResult: "Yes",
@@ -36,12 +50,11 @@ describe("evaluateClientScore", () => {
       new Date("2026-02-19T12:00:00Z"),
     );
 
-    expect(result.score).toBeNull();
-    expect(result.displayScore).toBeNull();
-    expect(result.explanation).toContain("After Result");
+    expect(result.score).not.toBeNull();
+    expect(result.displayScore).not.toBeNull();
   });
 
-  it("returns no score for fully paid clients", () => {
+  it("keeps score for fully paid clients when active", () => {
     const result = evaluateClientScore(
       makeRecord({
         payment1: "1000",
@@ -49,8 +62,7 @@ describe("evaluateClientScore", () => {
       new Date("2026-02-19T12:00:00Z"),
     );
 
-    expect(result.score).toBeNull();
-    expect(result.displayScore).toBeNull();
-    expect(result.explanation).toContain("Fully Paid");
+    expect(result.score).not.toBeNull();
+    expect(result.displayScore).not.toBeNull();
   });
 });

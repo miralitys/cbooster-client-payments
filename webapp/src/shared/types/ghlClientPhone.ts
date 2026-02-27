@@ -11,3 +11,20 @@ export interface GhlClientPhoneRefreshPayload {
   savedRecordsCount?: number;
   updatedAt?: string | null;
 }
+
+export interface GhlClientPhonesBulkRefreshPayload {
+  ok: boolean;
+  requestedClientsCount: number;
+  scopedClientsCount: number;
+  refreshedClientsCount: number;
+  notFoundClientsCount: number;
+  failedClientsCount: number;
+  savedRecordsCount: number;
+  updatedAt?: string | null;
+  failures?: Array<{
+    clientName: string;
+    error: string;
+    code?: string;
+    status?: number;
+  }>;
+}

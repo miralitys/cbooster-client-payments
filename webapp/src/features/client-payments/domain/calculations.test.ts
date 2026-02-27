@@ -136,6 +136,7 @@ describe("calculations", () => {
     const today = formatUsDateFromUtcDaysAgo(0);
     const record = normalizeFormRecord(
       makeRecord({
+        active: "Active",
         contractTotals: "1000",
         payment1: "250",
         payment1Date: today,
@@ -146,6 +147,30 @@ describe("calculations", () => {
     expect(metrics.sales).toBeGreaterThanOrEqual(1000);
     expect(metrics.received).toBeGreaterThanOrEqual(250);
     expect(metrics.debt).toBeGreaterThanOrEqual(750);
+  });
+
+  it("counts debt only for active clients in overview metrics", () => {
+    const today = formatUsDateFromUtcDaysAgo(0);
+    const activeRecord = normalizeFormRecord(
+      makeRecord({
+        active: "Active",
+        contractTotals: "1000",
+        payment1: "200",
+        payment1Date: today,
+      }),
+    );
+    const inactiveRecord = normalizeFormRecord(
+      makeRecord({
+        active: "No",
+        contractTotals: "1500",
+        payment1: "500",
+        payment1Date: today,
+      }),
+    );
+
+    const metrics = calculateOverviewMetrics([activeRecord, inactiveRecord], "currentWeek");
+
+    expect(metrics.debt).toBe(800);
   });
 
   it("filters New Client range by Payment 1 Date (not createdAt)", () => {

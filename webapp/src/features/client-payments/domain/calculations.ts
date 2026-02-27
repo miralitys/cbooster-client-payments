@@ -450,11 +450,12 @@ export function calculateOverviewMetrics(records: ClientRecord[], period: Overvi
   const ranges = getPeriodRanges();
   const selectedRange = ranges[period];
   const periodMetrics = calculatePeriodMetrics(records, selectedRange.from, selectedRange.to);
+  const activeRecords = records.filter((record) => getRecordStatusFlags(record).isActive);
 
   return {
     sales: periodMetrics.sales,
     received: periodMetrics.received,
-    debt: calculateOverallDebt(records),
+    debt: calculateOverallDebt(activeRecords),
   };
 }
 

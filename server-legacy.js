@@ -1040,7 +1040,7 @@ const SCORE_CACHE_SYNC_HOUR = Math.min(
   23,
 );
 const SCORE_CACHE_SYNC_MINUTE = Math.min(
-  Math.max(parsePositiveInteger(process.env.SCORE_CACHE_SYNC_MINUTE, 35), 0),
+  Math.max(parsePositiveInteger(process.env.SCORE_CACHE_SYNC_MINUTE, 0), 0),
   59,
 );
 const SCORE_CACHE_SYNC_TRIGGER_WINDOW_MINUTES = Math.min(
@@ -26029,6 +26029,11 @@ function isScoreCacheTruthyFlag(rawValue) {
   return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on";
 }
 
+function isScoreCacheActiveEnabled(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 30).toLowerCase();
+  return normalized === "yes" || normalized === "true" || normalized === "1" || normalized === "on" || normalized === "active";
+}
+
 function isScoreCacheContractCompletedEnabled(rawValue) {
   const normalized = sanitizeTextValue(rawValue, 30).toLowerCase();
   return (
@@ -26099,6 +26104,7 @@ function computeScoreCacheFutureAmount(record, options = {}) {
 }
 
 function getScoreCacheRecordStatus(record) {
+  const isActive = isScoreCacheActiveEnabled(record?.active);
   const normalizedClientName = normalizeAssistantComparableText(record?.clientName, 220);
   const isAfterResult =
     isScoreCacheTruthyFlag(record?.afterResult) || ASSISTANT_AFTER_RESULT_CLIENT_NAMES.has(normalizedClientName);
@@ -26115,6 +26121,7 @@ function getScoreCacheRecordStatus(record) {
     futureAmount <= SCORE_CACHE_ZERO_TOLERANCE;
 
   return {
+    isActive,
     isAfterResult,
     isWrittenOff,
     isContractCompleted,
@@ -26279,7 +26286,7 @@ function scoreCacheToDisplayScore(internalScore) {
 
 function evaluateScoreCacheRecord(record, asOfDate = new Date()) {
   const status = getScoreCacheRecordStatus(record);
-  if (status.isContractCompleted || status.isWrittenOff || status.isAfterResult || status.isFullyPaid) {
+  if (!status.isActive || status.isContractCompleted || status.isWrittenOff) {
     return {
       displayScore: null,
       tone: "neutral",
