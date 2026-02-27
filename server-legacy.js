@@ -12285,6 +12285,11 @@ function buildPaymentNotificationRecipientContext(users = [], clientManagerNames
 }
 
 function resolvePaymentClientManagerNames(record, clientNameHint, context = {}) {
+  const namesFromRecord = extractPaymentClientManagerNamesFromRecord(record);
+  if (namesFromRecord.length) {
+    return namesFromRecord;
+  }
+
   const clientName = sanitizeTextValue(clientNameHint || record?.clientName, 300);
   const clientKey = normalizePaymentClientNameForLookup(clientName);
   const namesFromCache = clientKey ? context?.clientManagerNamesByClientKey?.get(clientKey) : null;
@@ -12292,7 +12297,7 @@ function resolvePaymentClientManagerNames(record, clientNameHint, context = {}) 
     return namesFromCache;
   }
 
-  return extractPaymentClientManagerNamesFromRecord(record);
+  return [];
 }
 
 function doesManagerNameMatchIdentitySet(managerName, identitySet) {
