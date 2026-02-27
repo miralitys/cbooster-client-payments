@@ -140,6 +140,8 @@ export default function SupportPage() {
   const [commentSaving, setCommentSaving] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const moveFileInputRef = useRef<HTMLInputElement | null>(null);
+  const overlayFileInputRef = useRef<HTMLInputElement | null>(null);
   const supportEventRef = useRef<EventSource | null>(null);
   const closeMoveModal = useCallback(() => setMoveModalOpen(false), []);
   const closeEditModal = useCallback(() => setEditModalOpen(false), []);
@@ -631,16 +633,23 @@ export default function SupportPage() {
                 onChange={(event) => setFormState((prev) => ({ ...prev, description: event.target.value }))}
                 placeholder="Description"
               />
-              <Select
-                value={formState.priority}
-                onChange={(event) => setFormState((prev) => ({ ...prev, priority: event.target.value }))}
-              >
-                {PRIORITY_OPTIONS.filter((option) => (option.value === "critical" ? isHead : true)).map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </Select>
+              <div className="support-form__row">
+                <Select
+                  value={formState.priority}
+                  onChange={(event) => setFormState((prev) => ({ ...prev, priority: event.target.value }))}
+                >
+                  {PRIORITY_OPTIONS.filter((option) => (option.value === "critical" ? isHead : true)).map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+                <Input
+                  type="datetime-local"
+                  value={formState.desiredDueDate}
+                  onChange={(event) => setFormState((prev) => ({ ...prev, desiredDueDate: event.target.value }))}
+                />
+              </div>
               {(formState.priority === "urgent" || formState.priority === "critical") ? (
                 <Textarea
                   value={formState.urgencyReason}
@@ -648,24 +657,25 @@ export default function SupportPage() {
                   placeholder="Explain urgency"
                 />
               ) : null}
-              <Input
-                type="datetime-local"
-                value={formState.desiredDueDate}
-                onChange={(event) => setFormState((prev) => ({ ...prev, desiredDueDate: event.target.value }))}
-              />
               <div className="support-file-row">
-                <label className="support-file-button">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => fileInputRef.current?.click()}
+                >
                   Attach files
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    onChange={(event) => setFormAttachments(Array.from(event.target.files || []))}
-                  />
-                </label>
+                </Button>
                 <span className="support-file-count">
                   {formAttachments.length ? `${formAttachments.length} file(s) selected` : "No files selected"}
                 </span>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  onChange={(event) => setFormAttachments(Array.from(event.target.files || []))}
+                  hidden
+                />
               </div>
               {formError ? <div className="support-form__error">{formError}</div> : null}
               <Button type="submit" isLoading={formSubmitting}>
@@ -723,24 +733,35 @@ export default function SupportPage() {
           title={moveTargetStatus === "rejected" ? "Reason for rejection" : "Reason for revision"}
           onClose={closeMoveModal}
         >
-          <div className="support-modal">
-            <Textarea
-              value={moveReason}
-              onChange={(event) => setMoveReason(event.target.value)}
-              placeholder={
-                moveTargetStatus === "rejected"
-                  ? "Reason for rejection"
-                  : "Reason for revision"
-              }
-            />
-            <div className="support-file-row">
-              <label className="support-file-button">
+            <div className="support-modal">
+              <Textarea
+                value={moveReason}
+                onChange={(event) => setMoveReason(event.target.value)}
+                placeholder={
+                  moveTargetStatus === "rejected"
+                    ? "Reason for rejection"
+                    : "Reason for revision"
+                }
+              />
+              <div className="support-file-row">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => moveFileInputRef.current?.click()}
+              >
                 Attach files
-                <input type="file" multiple onChange={(event) => setMoveAttachments(Array.from(event.target.files || []))} />
-              </label>
+              </Button>
               <span className="support-file-count">
                 {moveAttachments.length ? `${moveAttachments.length} file(s) selected` : "No files selected"}
               </span>
+              <input
+                ref={moveFileInputRef}
+                type="file"
+                multiple
+                onChange={(event) => setMoveAttachments(Array.from(event.target.files || []))}
+                hidden
+              />
             </div>
             <Button onClick={handleMoveSubmit} isLoading={moveSaving}>
               Confirm
@@ -867,18 +888,26 @@ export default function SupportPage() {
                 </ul>
               )}
               <div className="support-file-row">
-                <label className="support-file-button">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => overlayFileInputRef.current?.click()}
+                  disabled={attachmentUploading}
+                >
                   Attach files
-                  <input
-                    type="file"
-                    multiple
-                    disabled={attachmentUploading}
-                    onChange={(event) => void uploadOverlayAttachments(Array.from(event.target.files || []))}
-                  />
-                </label>
+                </Button>
                 <span className="support-file-count">
                   {attachmentUploading ? "Uploading..." : " "}
                 </span>
+                <input
+                  ref={overlayFileInputRef}
+                  type="file"
+                  multiple
+                  disabled={attachmentUploading}
+                  onChange={(event) => void uploadOverlayAttachments(Array.from(event.target.files || []))}
+                  hidden
+                />
               </div>
             </div>
 
