@@ -6875,18 +6875,26 @@ function getWebAuthTeamIdentityValues(userProfile) {
     return [];
   }
 
+  const principalDepartmentId = normalizeWebAuthDepartmentId(userProfile.departmentId);
   const teamUsernames = normalizeWebAuthTeamUsernames(userProfile.teamUsernames);
   const values = [];
 
   for (const teamUsername of teamUsernames) {
     const teammate = getWebAuthUserByUsername(teamUsername);
-    if (teammate) {
-      values.push(...getWebAuthPrincipalIdentityValues(teammate));
+    if (!teammate || typeof teammate !== "object") {
       continue;
     }
 
-    const fallbackLocalPart = teamUsername.includes("@") ? teamUsername.split("@")[0] : teamUsername;
-    values.push(teamUsername, fallbackLocalPart, fallbackLocalPart.replace(/[._-]+/g, " "));
+    const teammateDepartmentId = normalizeWebAuthDepartmentId(teammate.departmentId);
+    const teammateRoleId = normalizeWebAuthRoleId(teammate.roleId, teammateDepartmentId);
+    if (principalDepartmentId && teammateDepartmentId !== principalDepartmentId) {
+      continue;
+    }
+    if (teammateRoleId !== WEB_AUTH_ROLE_MANAGER) {
+      continue;
+    }
+
+    values.push(...getWebAuthPrincipalIdentityValues(teammate));
   }
 
   return values;

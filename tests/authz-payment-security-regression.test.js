@@ -17,6 +17,8 @@ const TEST_ADMIN_USERNAME = "admin.authz.security@test.local";
 const TEST_ADMIN_PASSWORD = "Admin!AuthZ123";
 const TEST_SALES_USERNAME = "sales.authz.security@test.local";
 const TEST_SALES_PASSWORD = "Sales!AuthZ123";
+const TEST_SALES_VLAD_USERNAME = "vlad.burnis@creditbooster.com";
+const TEST_SALES_VLAD_PASSWORD = "SalesVlad!AuthZ123";
 const TEST_CS_MANAGER_USERNAME = "cs.manager.authz.security@test.local";
 const TEST_CS_MANAGER_PASSWORD = "CsManager!AuthZ123";
 const TEST_CS_MIDDLE_MANAGER_USERNAME = "marynau@creditbooster.com";
@@ -405,6 +407,13 @@ test("authz regression: client-service manager scope uses clientManager only and
           roleId: "manager",
         },
         {
+          username: TEST_SALES_VLAD_USERNAME,
+          password: TEST_SALES_VLAD_PASSWORD,
+          departmentId: "sales",
+          roleId: "manager",
+          displayName: "Vlad Burnis",
+        },
+        {
           username: TEST_CS_MANAGER_USERNAME,
           password: TEST_CS_MANAGER_PASSWORD,
           departmentId: "client_service",
@@ -417,7 +426,7 @@ test("authz regression: client-service manager scope uses clientManager only and
           departmentId: "client_service",
           roleId: "middle_manager",
           displayName: "Marina Urvanceva",
-          teamUsernames: [TEST_CS_MANAGER_USERNAME],
+          teamUsernames: [TEST_CS_MANAGER_USERNAME, TEST_SALES_VLAD_USERNAME, "yurii kis"],
         },
       ]),
     },
@@ -468,6 +477,24 @@ test("authz regression: client-service manager scope uses clientManager only and
           contractTotals: "$1,500.00",
           payment1: "$150.00",
           payment1Date: "02/13/2026",
+        },
+        {
+          id: "authz-cs-rec-5",
+          clientName: "Must Stay Hidden For Cross Department Team Username",
+          closedBy: "unrelated.sales.manager",
+          clientManager: "Vlad Burnis",
+          contractTotals: "$1,600.00",
+          payment1: "$160.00",
+          payment1Date: "02/14/2026",
+        },
+        {
+          id: "authz-cs-rec-6",
+          clientName: "Must Stay Hidden For Unresolved Team String",
+          closedBy: "unrelated.sales.manager",
+          clientManager: "Yurii Kis",
+          contractTotals: "$1,700.00",
+          payment1: "$170.00",
+          payment1Date: "02/15/2026",
         },
       ],
     });
