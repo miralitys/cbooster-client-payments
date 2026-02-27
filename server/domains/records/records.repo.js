@@ -752,7 +752,11 @@ function createRecordsRepo(dependencies = {}) {
       }
     }
     const normalizedPreferredClientNames = Array.from(preferredClientDisplayByNormalized.keys());
-    const preferredClientLikePatterns = normalizedPreferredClientNames.map((name) => `%${name}%`);
+    const preferredClientLikePatterns = normalizedPreferredClientNames.map((name) => {
+      const tokens = name.split(" ").filter(Boolean);
+      const patternBody = tokens.length > 0 ? tokens.join("%") : name;
+      return `%${patternBody}%`;
+    });
 
     let activeRowsResult;
     let sampleMode = "latest_active_only";
@@ -764,7 +768,7 @@ function createRecordsRepo(dependencies = {}) {
           SELECT id, record, source_state_updated_at, updated_at
           FROM ${CLIENT_RECORDS_V2_TABLE}
           WHERE source_state_row_id = $1
-            AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
+            AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on', 'active')
             AND (
               REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\s+', ' ', 'g') = ANY($3::text[])
               OR REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\s+', ' ', 'g') LIKE ANY($4::text[])
@@ -781,7 +785,7 @@ function createRecordsRepo(dependencies = {}) {
           SELECT id, record, source_state_updated_at, updated_at
           FROM ${CLIENT_RECORDS_V2_TABLE}
           WHERE source_state_row_id = $1
-            AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
+            AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on', 'active')
           ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
           LIMIT $2
         `,

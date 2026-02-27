@@ -54,7 +54,7 @@ export const CLIENT_HEALTH_SQL_EXAMPLE = `-- SAFE MODE: LIMITED TO 5 CLIENTS
 SELECT id, record, source_state_updated_at, updated_at
 FROM public.client_records_v2
 WHERE source_state_row_id = $1
-  AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
+  AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on', 'active')
   AND (
     REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\\s+', ' ', 'g') = ANY($3::text[])
     OR REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\\s+', ' ', 'g') LIKE ANY($4::text[])
