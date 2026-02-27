@@ -39,7 +39,14 @@ export function AppRouter() {
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="custom-dashboard" element={<CustomDashboardPage />} />
         <Route path="clients" element={<ClientsPage />} />
-        <Route path="support" element={<SupportPage />} />
+        <Route
+          path="support"
+          element={(
+            <OwnerAdminRoute>
+              <SupportPage />
+            </OwnerAdminRoute>
+          )}
+        />
         <Route
           path="client-match"
           element={(

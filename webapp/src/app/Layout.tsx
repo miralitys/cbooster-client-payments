@@ -17,7 +17,7 @@ interface NavigationItem {
 
 const NAV_ITEMS: NavigationItem[] = [
   { to: "/dashboard", label: "Dashboard", hint: "Overview", group: "operations" },
-  { to: "/support", label: "Support", hint: "Requests", group: "operations" },
+  { to: "/support", label: "Support", hint: "Requests", group: "operations", visibility: "owner-admin" },
   { to: "/custom-dashboard", label: "Custom Dashboard", hint: "Personalized", group: "operations" },
   { to: "/leads", label: "Leads", hint: "Pipeline", group: "operations" },
   { to: "/client-payments", label: "Client Payments", hint: "Collections", group: "clients" },
