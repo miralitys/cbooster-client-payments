@@ -97,7 +97,7 @@ function createRecordsService(dependencies = {}) {
           limit: 5,
           safeMode: true,
           source: "simulated",
-          sampleMode: "latest_active",
+          sampleMode: "latest_active_only",
         },
       };
     }
@@ -117,21 +117,19 @@ function createRecordsService(dependencies = {}) {
         const safeSnapshot = await listClientHealthRecordsSafeMode({ limit: safeLimit });
         const roleScopedRecords = filterClientRecordsForWebAuthUser(safeSnapshot.records, webAuthProfile);
         const sampledRecords = selectSafeModeClientSample(roleScopedRecords, safeLimit);
-        const sampleMode = sanitizeTextValue(safeSnapshot.sampleMode, 40) || "latest_active";
+        const sampleMode = sanitizeTextValue(safeSnapshot.sampleMode, 40) || "latest_active_only";
 
-        if (sampledRecords.length) {
-          return {
-            status: 200,
-            body: {
-              records: sampledRecords,
-              updatedAt: safeSnapshot.updatedAt || null,
-              limit: safeLimit,
-              safeMode: true,
-              source: "v2_safe_sql",
-              sampleMode,
-            },
-          };
-        }
+        return {
+          status: 200,
+          body: {
+            records: sampledRecords,
+            updatedAt: safeSnapshot.updatedAt || null,
+            limit: safeLimit,
+            safeMode: true,
+            source: "v2_safe_sql",
+            sampleMode,
+          },
+        };
       } catch (error) {
         const safeMessage = sanitizeTextValue(error?.message, 240) || "unknown error";
         warn(
@@ -152,7 +150,7 @@ function createRecordsService(dependencies = {}) {
         limit: safeLimit,
         safeMode: true,
         source: "legacy_fallback",
-        sampleMode: "latest_active",
+        sampleMode: "latest_active_only",
       },
     };
   }
@@ -630,27 +628,7 @@ function selectSafeModeClientSample(records, limit = 5) {
     .sort((left, right) => resolveRecordRecencyTimestamp(right) - resolveRecordRecencyTimestamp(left));
 
   const activeRows = normalized.filter((record) => isActiveEnabled(record?.active));
-  if (activeRows.length >= maxRows) {
-    return activeRows.slice(0, maxRows);
-  }
-
-  const seenIds = new Set(activeRows.map((record) => String(record?.id || "").trim()).filter(Boolean));
-  const combined = [...activeRows];
-  for (const record of normalized) {
-    if (combined.length >= maxRows) {
-      break;
-    }
-    const recordId = String(record?.id || "").trim();
-    if (recordId && seenIds.has(recordId)) {
-      continue;
-    }
-    if (recordId) {
-      seenIds.add(recordId);
-    }
-    combined.push(record);
-  }
-
-  return combined.slice(0, maxRows);
+  return activeRows.slice(0, maxRows);
 }
 
 function resolveRecordRecencyTimestamp(record) {

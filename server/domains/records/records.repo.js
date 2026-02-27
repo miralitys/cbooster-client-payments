@@ -749,24 +749,8 @@ function createRecordsRepo(dependencies = {}) {
       [STATE_ROW_ID, limit],
     );
 
-    let rows = Array.isArray(activeRowsResult.rows) ? activeRowsResult.rows : [];
-    let sampleMode = "latest_active";
-
-    if (!rows.length) {
-      const fallbackRowsResult = await query(
-        `
-          -- SAFE MODE: LIMITED TO 5 CLIENTS
-          SELECT id, record, source_state_updated_at, updated_at
-          FROM ${CLIENT_RECORDS_V2_TABLE}
-          WHERE source_state_row_id = $1
-          ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
-          LIMIT $2
-        `,
-        [STATE_ROW_ID, limit],
-      );
-      rows = Array.isArray(fallbackRowsResult.rows) ? fallbackRowsResult.rows : [];
-      sampleMode = "latest_any";
-    }
+    const rows = Array.isArray(activeRowsResult.rows) ? activeRowsResult.rows : [];
+    const sampleMode = "latest_active_only";
 
     const records = [];
     const updatedAtCandidates = [];
