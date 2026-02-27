@@ -199,6 +199,42 @@ function createRecordsService(dependencies = {}) {
     };
   }
 
+  async function getClientManagerKpiForApi({ webAuthProfile }) {
+    if (simulateSlowRecords) {
+      await delayMs(simulateSlowRecordsDelayMs);
+      return {
+        status: 200,
+        body: {
+          month: resolveChicagoCurrentMonthLabel(),
+          rows: [],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+    }
+
+    if (!hasDatabase()) {
+      return {
+        status: 503,
+        body: {
+          error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+        },
+      };
+    }
+
+    const state = await getStoredRecordsForApiRecordsRoute();
+    const roleFilteredRecords = filterClientRecordsForWebAuthUser(state.records, webAuthProfile);
+    const rows = buildClientManagerKpiRows(roleFilteredRecords);
+
+    return {
+      status: 200,
+      body: {
+        month: resolveChicagoCurrentMonthLabel(),
+        rows,
+        updatedAt: state.updatedAt || null,
+      },
+    };
+  }
+
   async function saveRecordsForApi({ records, expectedUpdatedAt }) {
     if (simulateSlowRecords) {
       await delayMs(simulateSlowRecordsDelayMs);
@@ -307,6 +343,7 @@ function createRecordsService(dependencies = {}) {
     getRecordsForApi,
     getClientHealthSnapshotForApi,
     getClientFilterOptionsForApi,
+    getClientManagerKpiForApi,
     saveRecordsForApi,
     patchRecordsForApi,
   };
@@ -325,6 +362,7 @@ const STATUS_FILTER_AFTER_RESULT = "after-result";
 const STATUS_FILTER_OVERDUE = "overdue";
 const NO_MANAGER_LABEL = "No manager";
 const ZERO_TOLERANCE = 1e-6;
+const KPI_CHICAGO_TIMEZONE = "America/Chicago";
 
 function applyClientApiFilters(records, rawFilters) {
   if (!Array.isArray(records) || !records.length) {
@@ -845,6 +883,125 @@ function extractClientFilterOptions(records) {
     closedByOptions,
     clientManagerOptions: hasNoManager ? [NO_MANAGER_LABEL, ...managerOptions] : managerOptions,
   };
+}
+
+function buildClientManagerKpiRows(records) {
+  const source = Array.isArray(records) ? records : [];
+  const monthRange = resolveChicagoCurrentMonthRange();
+  const managerRows = new Map();
+
+  for (const record of source) {
+    const managerNames = splitClientManagerNames(record?.clientManager);
+    const status = getRecordStatusFlags(record);
+    const hasPaymentThisMonth = hasAnyPositivePaymentInMonth(record, monthRange);
+
+    for (const managerName of managerNames) {
+      const managerKey = normalizeComparableText(managerName) || NO_MANAGER_LABEL.toLowerCase();
+      if (!managerRows.has(managerKey)) {
+        managerRows.set(managerKey, {
+          managerName,
+          totalClients: 0,
+          fullyPaidClients: 0,
+          kpiBaseClients: 0,
+          clientsPaidThisMonth: 0,
+        });
+      }
+
+      const row = managerRows.get(managerKey);
+      row.totalClients += 1;
+
+      if (status.isFullyPaid) {
+        row.fullyPaidClients += 1;
+        continue;
+      }
+
+      row.kpiBaseClients += 1;
+      if (hasPaymentThisMonth) {
+        row.clientsPaidThisMonth += 1;
+      }
+    }
+  }
+
+  const collator = new Intl.Collator("en-US", {
+    sensitivity: "base",
+    numeric: true,
+  });
+  return Array.from(managerRows.values())
+    .map((item) => {
+      const kpiPercent = item.kpiBaseClients > 0
+        ? Number(((item.clientsPaidThisMonth / item.kpiBaseClients) * 100).toFixed(2))
+        : 100;
+      let bonusUsd = 0;
+      if (kpiPercent >= 76) {
+        bonusUsd = 300;
+      } else if (kpiPercent >= 70) {
+        bonusUsd = 150;
+      }
+
+      return {
+        managerName: item.managerName,
+        totalClients: item.totalClients,
+        fullyPaidClients: item.fullyPaidClients,
+        kpiBaseClients: item.kpiBaseClients,
+        clientsPaidThisMonth: item.clientsPaidThisMonth,
+        kpiPercent,
+        bonusUsd,
+        isKpiReached: kpiPercent >= 70,
+      };
+    })
+    .sort((left, right) => collator.compare(left.managerName, right.managerName));
+}
+
+function hasAnyPositivePaymentInMonth(record, monthRange) {
+  for (let index = 0; index < PAYMENT_DATE_FIELD_KEYS.length; index += 1) {
+    const dateField = PAYMENT_DATE_FIELD_KEYS[index];
+    const paymentTimestamp = parseDateValue(record?.[dateField]);
+    if (paymentTimestamp === null) {
+      continue;
+    }
+    if (paymentTimestamp < monthRange.fromTs || paymentTimestamp > monthRange.toTs) {
+      continue;
+    }
+
+    const amountField = PAYMENT_FIELD_KEYS[index];
+    const amountValue = parseMoneyValue(record?.[amountField]);
+    if (amountValue !== null && amountValue > ZERO_TOLERANCE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveChicagoCurrentMonthRange(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: KPI_CHICAGO_TIMEZONE,
+    year: "numeric",
+    month: "numeric",
+  })
+    .formatToParts(now)
+    .reduce((acc, part) => {
+      if (part.type === "year" || part.type === "month") {
+        acc[part.type] = Number.parseInt(part.value, 10);
+      }
+      return acc;
+    }, {});
+
+  const year = Number.isFinite(parts.year) ? parts.year : now.getUTCFullYear();
+  const month = Number.isFinite(parts.month) ? parts.month : now.getUTCMonth() + 1;
+  const fromTs = Date.UTC(year, month - 1, 1);
+  const toTs = Date.UTC(year, month, 0);
+
+  return {
+    year,
+    month,
+    fromTs,
+    toTs,
+  };
+}
+
+function resolveChicagoCurrentMonthLabel(now = new Date()) {
+  const monthRange = resolveChicagoCurrentMonthRange(now);
+  return `${monthRange.year}-${String(monthRange.month).padStart(2, "0")}`;
 }
 
 async function readCurrentRecordsForNotificationDiff(options = {}) {

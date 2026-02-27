@@ -15,6 +15,7 @@ import DashboardPage from "@/features/dashboard/page";
 import GhlContractsPage from "@/features/ghl-contracts/page";
 import IdentityIqScorePage from "@/features/identityiq-score/page";
 import LeadsPage from "@/features/leads/page";
+import ClientManagerKpiPage from "@/features/client-manager-kpi/page";
 import QuickBooksPage from "@/features/quickbooks/page";
 import SupportPage from "@/features/support/page";
 
@@ -36,6 +37,14 @@ export function AppRouter() {
         <Route path="payment-probability" element={<ClientScorePage />} />
         <Route path="identityiq-score" element={<IdentityIqScorePage />} />
         <Route path="ghl-contracts" element={<GhlContractsPage />} />
+        <Route
+          path="kpi-client-manager"
+          element={(
+            <OwnerAdminRoute>
+              <ClientManagerKpiPage />
+            </OwnerAdminRoute>
+          )}
+        />
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="custom-dashboard" element={<CustomDashboardPage />} />
         <Route path="clients" element={<ClientsPage />} />

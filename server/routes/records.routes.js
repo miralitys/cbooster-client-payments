@@ -49,6 +49,11 @@ function registerRecordsRoutes(context) {
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
     handlers.handleClientsFiltersGet,
   );
+  app.get(
+    "/api/clients/kpi-client-manager",
+    requireOwnerOrAdminAccess("Owner or admin access is required."),
+    handlers.handleClientManagerKpiGet,
+  );
 
   app.put(
     "/api/records",

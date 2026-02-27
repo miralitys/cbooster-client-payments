@@ -57,6 +57,7 @@ export {
   updateCustomDashboardTasksSource,
   uploadCustomDashboardFile,
 } from "@/shared/api/customDashboard";
+export { getClientManagerKpi } from "@/shared/api/clientManagerKpi";
 export { getIdentityIqCreditScore } from "@/shared/api/identityIq";
 export { getGhlContractText } from "@/shared/api/ghlContractText";
 export { postGhlClientPhoneRefresh } from "@/shared/api/ghlClientPhone";

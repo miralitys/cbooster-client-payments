@@ -34228,6 +34228,7 @@ registerRecordsRoutes({
     handleRecordsGet: recordsController.handleRecordsGet,
     handleClientHealthGet: recordsController.handleClientHealthGet,
     handleClientsFiltersGet: recordsController.handleClientsFiltersGet,
+    handleClientManagerKpiGet: recordsController.handleClientManagerKpiGet,
     handleRecordsPut: recordsController.handleRecordsPut,
     handleRecordsPatch: recordsController.handleRecordsPatch,
   },

@@ -25,6 +25,7 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/clients", label: "Clients", hint: "Directory", group: "clients" },
   { to: "/client-match", label: "Client Match", hint: "Matching", group: "clients", visibility: "owner-admin-or-accounting" },
   { to: "/payment-probability", label: "Client Payment Probability", hint: "Forecast", group: "analytics" },
+  { to: "/kpi-client-manager", label: "KPI Client Manager", hint: "KPI", group: "analytics", visibility: "owner-admin" },
   { to: "/identityiq-score", label: "IdentityIQ Scores", hint: "Scores", group: "analytics" },
   { to: "/ghl-contracts", label: "GHL Contract Text", hint: "Contracts", group: "analytics" },
   { to: "/quickbooks", label: "QuickBooks", hint: "Accounting", group: "system", visibility: "owner-admin" },
@@ -97,6 +98,10 @@ function resolvePageTitle(pathname: string): string {
 
   if (pathname.startsWith("/payment-probability") || pathname.startsWith("/client-score")) {
     return "Client Payment Probability";
+  }
+
+  if (pathname.startsWith("/kpi-client-manager")) {
+    return "KPI Client Manager";
   }
 
   if (pathname.startsWith("/identityiq-score")) {

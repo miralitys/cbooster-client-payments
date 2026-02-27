@@ -83,6 +83,18 @@ function createRecordsController(dependencies = {}) {
     }
   }
 
+  async function handleClientManagerKpiGet(req, res) {
+    try {
+      const result = await recordsService.getClientManagerKpiForApi({
+        webAuthProfile: req.webAuthProfile,
+      });
+      res.status(result.status).json(result.body);
+    } catch (error) {
+      console.error("GET /api/clients/kpi-client-manager failed:", error);
+      res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load KPI data"));
+    }
+  }
+
   async function handleRecordsPut(req, res) {
     if (!enforceRecordsWriteRateLimit(req, res)) {
       return;
@@ -176,6 +188,7 @@ function createRecordsController(dependencies = {}) {
     handleRecordsGet,
     handleClientHealthGet,
     handleClientsFiltersGet,
+    handleClientManagerKpiGet,
     handleRecordsPut,
     handleRecordsPatch,
   };
