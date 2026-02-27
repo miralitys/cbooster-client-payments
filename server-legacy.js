@@ -40164,6 +40164,21 @@ const handleGhlClientContractsArchivePost = async (req, res) => {
     keys: req.body && typeof req.body === "object" ? Object.keys(req.body).slice(0, 30) : [],
     clientName: sanitizeTextValue(req.body?.clientName, 200) || null,
   });
+  const triggerData = req.body?.triggerData && typeof req.body.triggerData === "object" ? req.body.triggerData : {};
+  const customData = req.body?.customData && typeof req.body.customData === "object" ? req.body.customData : {};
+  const previewUrlCandidates = [];
+  const urlKeys = ["url", "downloadUrl", "documentUrl", "contractUrl", "fileUrl", "link", "href"];
+  for (const key of urlKeys) {
+    const triggerValue = sanitizeTextValue(triggerData?.[key], 2000);
+    if (triggerValue) {
+      previewUrlCandidates.push({ source: `triggerData.${key}`, value: triggerValue });
+    }
+    const customValue = sanitizeTextValue(customData?.[key], 2000);
+    if (customValue) {
+      previewUrlCandidates.push({ source: `customData.${key}`, value: customValue });
+    }
+  }
+  console.warn("GHL contract archive webhook url candidates:", previewUrlCandidates.slice(0, 6));
   if (!pool) {
     res.status(503).json({
       error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
