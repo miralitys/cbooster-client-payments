@@ -9,9 +9,10 @@ import {
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
+import { shouldFallbackToPutFromPatch } from "@/features/client-payments/domain/recordsPatch";
 import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
 import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
-import { getClients, getQuickBooksPayments, patchClients } from "@/shared/api";
+import { getClients, getQuickBooksPayments, patchClients, putClients } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
 import type { QuickBooksPaymentRow } from "@/shared/types/quickbooks";
 import type { ClientRecord } from "@/shared/types/records";
@@ -248,6 +249,50 @@ export default function ClientMatchPage() {
     });
   }, []);
 
+  const persistClientRecordPatch = useCallback(
+    async (recordId: string, patchRecord: Partial<ClientRecord>): Promise<string | null> => {
+      try {
+        const patchPayload = await patchClients(
+          [
+            {
+              type: "upsert",
+              id: recordId,
+              record: patchRecord,
+            },
+          ],
+          clientsUpdatedAt,
+        );
+        return typeof patchPayload?.updatedAt === "string" ? patchPayload.updatedAt : clientsUpdatedAt;
+      } catch (error) {
+        if (!shouldFallbackToPutFromPatch(error)) {
+          throw error;
+        }
+
+        let hasTargetRecord = false;
+        const nextRecords = clientRecords.map((record) => {
+          if (record.id !== recordId) {
+            return record;
+          }
+          hasTargetRecord = true;
+          return {
+            ...record,
+            ...patchRecord,
+            id: record.id,
+            createdAt: record.createdAt,
+          };
+        });
+
+        if (!hasTargetRecord) {
+          throw new Error("Client record was not found for save fallback.");
+        }
+
+        const putPayload = await putClients(nextRecords, clientsUpdatedAt);
+        return typeof putPayload?.updatedAt === "string" ? putPayload.updatedAt : clientsUpdatedAt;
+      }
+    },
+    [clientRecords, clientsUpdatedAt],
+  );
+
   const saveSelectedClientDraft = useCallback(async () => {
     if (!selectedClientRecord || !selectedClientDraft || isSavingSelectedClient) {
       return;
@@ -259,18 +304,7 @@ export default function ClientMatchPage() {
 
     setIsSavingSelectedClient(true);
     try {
-      const patchPayload = await patchClients(
-        [
-          {
-            type: "upsert",
-            id: selectedClientRecord.id,
-            record: patchRecord,
-          },
-        ],
-        clientsUpdatedAt,
-      );
-
-      const nextUpdatedAt = typeof patchPayload?.updatedAt === "string" ? patchPayload.updatedAt : clientsUpdatedAt;
+      const nextUpdatedAt = await persistClientRecordPatch(selectedClientRecord.id, patchRecord);
       setClientsUpdatedAt(nextUpdatedAt);
 
       const nextRecord: ClientRecord = {
@@ -304,7 +338,7 @@ export default function ClientMatchPage() {
     } finally {
       setIsSavingSelectedClient(false);
     }
-  }, [clientsUpdatedAt, isSavingSelectedClient, selectedClientDraft, selectedClientRecord]);
+  }, [isSavingSelectedClient, persistClientRecordPatch, selectedClientDraft, selectedClientRecord]);
 
   const beginEditCell = useCallback((rowId: string, slotIndex: number, fieldType: EditableDbFieldType, initialValue: string) => {
     setEditingCell({
@@ -389,18 +423,8 @@ export default function ClientMatchPage() {
     setEditingCell((previous) => (previous ? { ...previous, isSaving: true, error: "" } : previous));
 
     try {
-      const patchPayload = await patchClients(
-        [
-          {
-            type: "upsert",
-            id: targetPayment.recordId,
-            record: patchRecord,
-          },
-        ],
-        clientsUpdatedAt,
-      );
-
-      setClientsUpdatedAt(typeof patchPayload?.updatedAt === "string" ? patchPayload.updatedAt : clientsUpdatedAt);
+      const nextUpdatedAt = await persistClientRecordPatch(targetPayment.recordId, patchRecord);
+      setClientsUpdatedAt(nextUpdatedAt);
 
       setRows((previousRows) =>
         previousRows.map((row) => {
@@ -430,6 +454,19 @@ export default function ClientMatchPage() {
           };
         }),
       );
+      setClientRecords((previousRecords) =>
+        previousRecords.map((record) => {
+          if (record.id !== targetPayment.recordId) {
+            return record;
+          }
+          return {
+            ...record,
+            ...patchRecord,
+            id: record.id,
+            createdAt: record.createdAt,
+          };
+        }),
+      );
 
       setEditingCell(null);
       showToast({
@@ -448,7 +485,7 @@ export default function ClientMatchPage() {
         cooldownMs: 1500,
       });
     }
-  }, [clientsUpdatedAt, editingCell, rows]);
+  }, [editingCell, persistClientRecordPatch, rows]);
 
   const isEditingCellTarget = useCallback((rowId: string, slotIndex: number, fieldType: EditableDbFieldType) => {
     return Boolean(
