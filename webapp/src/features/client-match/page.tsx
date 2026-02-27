@@ -9,7 +9,7 @@ import {
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
-import { shouldFallbackToPutFromPatch } from "@/features/client-payments/domain/recordsPatch";
+import { buildRecordsPatchOperations, shouldFallbackToPutFromPatch } from "@/features/client-payments/domain/recordsPatch";
 import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
 import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
 import { getClients, getQuickBooksPayments, patchClients, putClients } from "@/shared/api";
@@ -299,20 +299,35 @@ export default function ClientMatchPage() {
     }
 
     const normalizedDraft = normalizeFormRecord(selectedClientDraft);
-    const patchRecord: Partial<ClientRecord> = { ...normalizedDraft };
+    const nextRecord: ClientRecord = {
+      ...selectedClientRecord,
+      ...normalizedDraft,
+      id: selectedClientRecord.id,
+      createdAt: selectedClientRecord.createdAt,
+    };
+    const operations = buildRecordsPatchOperations([selectedClientRecord], [nextRecord]);
+    const upsertOperation = operations.find((operation) => operation.type === "upsert" && operation.id === selectedClientRecord.id);
+    const patchRecord: Partial<ClientRecord> =
+      upsertOperation && upsertOperation.type === "upsert" ? { ...(upsertOperation.record || {}) } : {};
     delete (patchRecord as { id?: string }).id;
+
+    if (Object.keys(patchRecord).length === 0) {
+      setSelectedClientRecord(nextRecord);
+      setSelectedClientDraft(null);
+      setSelectedClientMode("view");
+      showToast({
+        type: "success",
+        message: "No changes to save.",
+        dedupeKey: `client-match-card-save-noop-${selectedClientRecord.id}`,
+        cooldownMs: 800,
+      });
+      return;
+    }
 
     setIsSavingSelectedClient(true);
     try {
       const nextUpdatedAt = await persistClientRecordPatch(selectedClientRecord.id, patchRecord);
       setClientsUpdatedAt(nextUpdatedAt);
-
-      const nextRecord: ClientRecord = {
-        ...selectedClientRecord,
-        ...normalizedDraft,
-        id: selectedClientRecord.id,
-        createdAt: selectedClientRecord.createdAt,
-      };
 
       setClientRecords((previous) =>
         previous.map((record) => (record.id === selectedClientRecord.id ? nextRecord : record)),
