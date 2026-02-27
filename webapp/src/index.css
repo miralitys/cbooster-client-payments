@@ -898,6 +898,61 @@ a {
   gap: var(--space-2);
 }
 
+.refresh-manager-menu {
+  position: relative;
+}
+
+.refresh-manager-menu__toggle {
+  min-width: 132px;
+}
+
+.refresh-manager-menu__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 236px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  z-index: var(--z-dropdown);
+}
+
+.refresh-manager-menu__panel[hidden] {
+  display: none !important;
+}
+
+.refresh-manager-menu__item {
+  display: block;
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  padding: 6px 10px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.refresh-manager-menu__item:hover:not(:disabled),
+.refresh-manager-menu__item:active:not(:disabled),
+.refresh-manager-menu__item:focus-visible {
+  background: var(--color-secondary-hover);
+  border-color: var(--color-border-strong);
+}
+
+.refresh-manager-menu__item:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .cb-table-wrap,
 .table-wrap {
   position: relative;

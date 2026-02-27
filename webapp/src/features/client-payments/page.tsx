@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
 import { getClientManagers, postGhlClientPhoneRefresh, startClientManagersRefreshBackgroundJob } from "@/shared/api";
@@ -181,6 +181,8 @@ export default function ClientPaymentsPage() {
   const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
   const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
   const [showAllPayments, setShowAllPayments] = useState(false);
+  const [isRefreshMenuOpen, setIsRefreshMenuOpen] = useState(false);
+  const refreshMenuRef = useRef<HTMLDivElement | null>(null);
   const canSyncClientManagers = Boolean(session?.permissions?.sync_client_managers);
   const canRefreshClientManagerInCard = canRefreshClientManagerFromGhlSession(session);
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
@@ -614,6 +616,38 @@ export default function ClientPaymentsPage() {
   }, [sortState.direction, sortState.key, sortableColumns, tableColumnKeys, toggleSort]);
 
   useEffect(() => {
+    function onPointerDown(event: MouseEvent) {
+      if (!refreshMenuRef.current) {
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof Node && !refreshMenuRef.current.contains(target)) {
+        setIsRefreshMenuOpen(false);
+      }
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsRefreshMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isManagersLoading) {
+      setIsRefreshMenuOpen(false);
+    }
+  }, [isManagersLoading]);
+
+  useEffect(() => {
     if (!saveError) {
       return;
     }
@@ -963,24 +997,52 @@ export default function ClientPaymentsPage() {
               <Button variant="secondary" size="sm" onClick={() => exportRecordsToPdf(filteredRecords)}>
                 Export PDF
               </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void refreshClientManagers("incremental")}
-                disabled={isManagersLoading || !canSyncClientManagers}
-                isLoading={isManagersLoading && managersRefreshMode === "incremental"}
-              >
-                Refresh Manager
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void startBackgroundClientManagersRefresh()}
-                disabled={isManagersLoading || !canSyncClientManagers}
-                isLoading={isManagersLoading && managersRefreshMode === "full"}
-              >
-                Total Refresh Manager
-              </Button>
+              <div ref={refreshMenuRef} className={`refresh-manager-menu ${isRefreshMenuOpen ? "is-open" : ""}`.trim()}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="refresh-manager-menu__toggle"
+                  onClick={() => setIsRefreshMenuOpen((prev) => !prev)}
+                  disabled={!canSyncClientManagers}
+                  isLoading={isManagersLoading}
+                  aria-haspopup="menu"
+                  aria-expanded={isRefreshMenuOpen}
+                  aria-controls="client-payments-refresh-manager-menu"
+                >
+                  {`Refresh ${isRefreshMenuOpen ? "▴" : "▾"}`}
+                </Button>
+                <div
+                  id="client-payments-refresh-manager-menu"
+                  className="refresh-manager-menu__panel"
+                  role="menu"
+                  hidden={!isRefreshMenuOpen}
+                >
+                  <button
+                    type="button"
+                    className="refresh-manager-menu__item"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsRefreshMenuOpen(false);
+                      void refreshClientManagers("incremental");
+                    }}
+                    disabled={isManagersLoading}
+                  >
+                    Refresh Manager
+                  </button>
+                  <button
+                    type="button"
+                    className="refresh-manager-menu__item"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsRefreshMenuOpen(false);
+                      void startBackgroundClientManagersRefresh();
+                    }}
+                    disabled={isManagersLoading}
+                  >
+                    Total Refresh Manager
+                  </button>
+                </div>
+              </div>
             </div>
           }
         >
