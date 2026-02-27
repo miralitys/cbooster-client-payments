@@ -166,6 +166,14 @@ export function evaluateClientScore(record: ClientRecord, asOfDate = new Date())
     return unavailableScore("Written Off client.");
   }
 
+  if (status.isAfterResult) {
+    return unavailableScore("After Result client.");
+  }
+
+  if (status.isFullyPaid) {
+    return unavailableScore("Fully Paid client.");
+  }
+
   const contractTotal = parseMoneyValue(record.contractTotals);
   if (contractTotal === null || contractTotal <= 0) {
     return unavailableScore("No contract amount.");

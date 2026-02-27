@@ -42,7 +42,7 @@ describe("evaluateClientScore", () => {
     expect(result.explanation).toContain("Written Off");
   });
 
-  it("keeps score for after result clients when active", () => {
+  it("returns no score for after result clients", () => {
     const result = evaluateClientScore(
       makeRecord({
         afterResult: "Yes",
@@ -50,11 +50,12 @@ describe("evaluateClientScore", () => {
       new Date("2026-02-19T12:00:00Z"),
     );
 
-    expect(result.score).not.toBeNull();
-    expect(result.displayScore).not.toBeNull();
+    expect(result.score).toBeNull();
+    expect(result.displayScore).toBeNull();
+    expect(result.explanation).toContain("After Result");
   });
 
-  it("keeps score for fully paid clients when active", () => {
+  it("returns no score for fully paid clients", () => {
     const result = evaluateClientScore(
       makeRecord({
         payment1: "1000",
@@ -62,7 +63,8 @@ describe("evaluateClientScore", () => {
       new Date("2026-02-19T12:00:00Z"),
     );
 
-    expect(result.score).not.toBeNull();
-    expect(result.displayScore).not.toBeNull();
+    expect(result.score).toBeNull();
+    expect(result.displayScore).toBeNull();
+    expect(result.explanation).toContain("Fully Paid");
   });
 });

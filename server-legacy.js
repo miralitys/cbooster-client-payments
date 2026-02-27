@@ -26286,7 +26286,7 @@ function scoreCacheToDisplayScore(internalScore) {
 
 function evaluateScoreCacheRecord(record, asOfDate = new Date()) {
   const status = getScoreCacheRecordStatus(record);
-  if (!status.isActive || status.isContractCompleted || status.isWrittenOff) {
+  if (!status.isActive || status.isContractCompleted || status.isWrittenOff || status.isAfterResult || status.isFullyPaid) {
     return {
       displayScore: null,
       tone: "neutral",
