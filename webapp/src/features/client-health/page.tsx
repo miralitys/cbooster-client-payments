@@ -46,6 +46,7 @@ export default function ClientHealthPage() {
   const [rows, setRows] = useState<ClientHealthRow[]>([]);
   const [loadPhase, setLoadPhase] = useState<LoadPhase>("loading");
   const [loadError, setLoadError] = useState("");
+  const [expandedClientId, setExpandedClientId] = useState<string | null>(null);
   const [meta, setMeta] = useState<ClientHealthMeta>({
     updatedAt: "",
     source: "",
@@ -96,6 +97,22 @@ export default function ClientHealthPage() {
     }
     return new Date(timestamp).toLocaleString("ru-RU");
   }, [meta.updatedAt]);
+
+  useEffect(() => {
+    setExpandedClientId((current) => {
+      if (!rows.length) {
+        return null;
+      }
+      if (current && rows.some((row) => row.clientId === current)) {
+        return current;
+      }
+      return rows[0].clientId;
+    });
+  }, [rows]);
+
+  const toggleExpandedClient = useCallback((clientId: string) => {
+    setExpandedClientId((current) => (current === clientId ? null : clientId));
+  }, []);
 
   const overviewColumns = useMemo<TableColumn<ClientHealthRow>[]>(
     () => [
@@ -499,6 +516,133 @@ export default function ClientHealthPage() {
             <Table columns={riskColumns} rows={rows} rowKey={(row) => row.clientId} />
           </Panel>
 
+          <Panel title="7. Подробное саммари по клиенту (по фамилии)">
+            <div className="client-health-summary-list">
+              {rows.map((row) => {
+                const panelId = `client-health-summary-${toDomId(row.clientId)}`;
+                const isExpanded = expandedClientId === row.clientId;
+                const score = row.explanation.scoreBreakdown;
+
+                return (
+                  <article key={row.clientId} className={`client-health-summary-item${isExpanded ? " is-expanded" : ""}`}>
+                    <button
+                      type="button"
+                      className="client-health-summary-toggle"
+                      aria-expanded={isExpanded}
+                      aria-controls={panelId}
+                      onClick={() => toggleExpandedClient(row.clientId)}
+                    >
+                      <span className="client-health-summary-surname">{row.clientSurname}</span>
+                      <span className="client-health-summary-name">{row.clientName}</span>
+                      <span className="client-health-summary-status">
+                        <Badge tone={resolveStatusTone(row.overview.status)}>{row.overview.status}</Badge>
+                      </span>
+                    </button>
+                    <div id={panelId} className="client-health-summary-panel">
+                      <div className="client-health-summary-panel-inner">
+                        <div className="client-health-summary-grid">
+                          <section>
+                            <h3>Что</h3>
+                            <ul>
+                              {row.explanation.what.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                          <section>
+                            <h3>Когда</h3>
+                            <ul>
+                              {row.explanation.when.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                          <section>
+                            <h3>Зачем и почему</h3>
+                            <ul>
+                              {row.explanation.why.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                          <section>
+                            <h3>Логика оценки запуска</h3>
+                            <ul>
+                              {row.explanation.launch.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                          <section>
+                            <h3>Логика оценки платежей</h3>
+                            <ul>
+                              {row.explanation.payments.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                          <section>
+                            <h3>Логика оценки исполнения</h3>
+                            <ul>
+                              {row.explanation.execution.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                          <section>
+                            <h3>Логика оценки коммуникации</h3>
+                            <ul>
+                              {row.explanation.communication.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                          <section>
+                            <h3>Активные риски</h3>
+                            <ul>
+                              {row.explanation.risks.map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </section>
+                        </div>
+                        <section className="client-health-summary-score">
+                          <h3>Разбор формулы индекса здоровья</h3>
+                          <dl>
+                            <div>
+                              <dt>Скорость запуска</dt>
+                              <dd>{score.launchSpeed} × 0.15 = {score.launchContribution}</dd>
+                            </div>
+                            <div>
+                              <dt>Исполнение</dt>
+                              <dd>{score.execution} × 0.30 = {score.executionContribution}</dd>
+                            </div>
+                            <div>
+                              <dt>Платежи</dt>
+                              <dd>{score.payments} × 0.25 = {score.paymentsContribution}</dd>
+                            </div>
+                            <div>
+                              <dt>Вовлечённость</dt>
+                              <dd>{score.engagement} × 0.15 = {score.engagementContribution}</dd>
+                            </div>
+                            <div>
+                              <dt>Коммуникация</dt>
+                              <dd>{score.communication} × 0.15 = {score.communicationContribution}</dd>
+                            </div>
+                            <div>
+                              <dt>Итоговый индекс</dt>
+                              <dd>{score.total}</dd>
+                            </div>
+                          </dl>
+                        </section>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </Panel>
+
           <Panel title="Безопасный режим / Техническая спецификация" className="client-health-tech-panel">
             <div className="client-health-tech-grid">
               <article>
@@ -635,4 +779,12 @@ function resolveRiskCategoryTone(category: ClientHealthRow["risks"]["churnCatego
     return "warning";
   }
   return "danger";
+}
+
+function toDomId(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }

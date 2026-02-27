@@ -64,9 +64,36 @@ export interface ClientHealthSource {
 
 export type ClientHealthStatus = "Здоровый" | "Предупреждение" | "Риск" | "Критично";
 
+export interface ClientHealthScoreBreakdown {
+  launchSpeed: number;
+  execution: number;
+  payments: number;
+  engagement: number;
+  communication: number;
+  launchContribution: number;
+  executionContribution: number;
+  paymentsContribution: number;
+  engagementContribution: number;
+  communicationContribution: number;
+  total: number;
+}
+
+export interface ClientHealthExplanation {
+  what: string[];
+  when: string[];
+  why: string[];
+  launch: string[];
+  payments: string[];
+  execution: string[];
+  communication: string[];
+  risks: string[];
+  scoreBreakdown: ClientHealthScoreBreakdown;
+}
+
 export interface ClientHealthRow {
   clientId: string;
   clientName: string;
+  clientSurname: string;
   overview: {
     status: ClientHealthStatus;
     healthIndex: number;
@@ -127,6 +154,7 @@ export interface ClientHealthRow {
     warnings: string[];
     churnCategory: "Стабильно" | "Наблюдать" | "Высокий риск";
   };
+  explanation: ClientHealthExplanation;
 }
 
 interface PaymentAnalysis {
@@ -177,6 +205,7 @@ function buildClientHealthRow(source: ClientHealthSource, nowMs: number, index: 
 
   const clientName = normalizeText(record?.clientName) || `Клиент ${index + 1}`;
   const clientId = normalizeText(record?.id) || `safe-client-${index + 1}`;
+  const clientSurname = resolveClientSurname(clientName);
 
   const saleAt = resolveSaleDate(record);
   const startAt = resolveStartDate(record, memo);
@@ -239,9 +268,42 @@ function buildClientHealthRow(source: ClientHealthSource, nowMs: number, index: 
     churnProbability,
   });
 
+  const scoreBreakdown: ClientHealthScoreBreakdown = {
+    launchSpeed,
+    execution: execution.score100,
+    payments: paymentAnalysis.disciplineScore100,
+    engagement: engagementScore100,
+    communication: communicationAnalysis.score100,
+    launchContribution: roundTo1(launchSpeed * 0.15),
+    executionContribution: roundTo1(execution.score100 * 0.3),
+    paymentsContribution: roundTo1(paymentAnalysis.disciplineScore100 * 0.25),
+    engagementContribution: roundTo1(engagementScore100 * 0.15),
+    communicationContribution: roundTo1(communicationAnalysis.score100 * 0.15),
+    total: healthIndex,
+  };
+
+  const explanation = buildClientExplanation({
+    status,
+    healthIndex,
+    churnProbability,
+    saleAt,
+    startAt,
+    daysSaleToStart,
+    daysInWork,
+    daysSinceLastActivity,
+    daysSinceLastContact,
+    daysSinceLastPayment,
+    paymentAnalysis,
+    execution,
+    communicationAnalysis,
+    risks,
+    scoreBreakdown,
+  });
+
   return {
     clientId,
     clientName,
+    clientSurname,
     overview: {
       status,
       healthIndex,
@@ -285,6 +347,114 @@ function buildClientHealthRow(source: ClientHealthSource, nowMs: number, index: 
       flags: communicationAnalysis.flags,
     },
     risks,
+    explanation,
+  };
+}
+
+interface BuildClientExplanationInput {
+  status: ClientHealthStatus;
+  healthIndex: number;
+  churnProbability: number;
+  saleAt: number | null;
+  startAt: number | null;
+  daysSaleToStart: number | null;
+  daysInWork: number;
+  daysSinceLastActivity: number | null;
+  daysSinceLastContact: number | null;
+  daysSinceLastPayment: number | null;
+  paymentAnalysis: PaymentAnalysis;
+  execution: ClientHealthRow["execution"] & { score100: number };
+  communicationAnalysis: CommunicationAnalysis;
+  risks: ClientHealthRow["risks"];
+  scoreBreakdown: ClientHealthScoreBreakdown;
+}
+
+function buildClientExplanation(input: BuildClientExplanationInput): ClientHealthExplanation {
+  const what = [
+    `Статус клиента: ${input.status}.`,
+    `Индекс здоровья: ${input.healthIndex}/100.`,
+    `Вероятность отмены: ${input.churnProbability}%.`,
+    `Категория риска: ${input.risks.churnCategory}.`,
+  ];
+
+  const when = [
+    `Дата продажи: ${formatDateSafe(input.saleAt)}.`,
+    `Дата старта: ${formatDateSafe(input.startAt)}.`,
+    `Дней от продажи до старта: ${formatOptionalNumber(input.daysSaleToStart)}.`,
+    `Дней в работе: ${input.daysInWork}.`,
+    `С последней активности: ${formatOptionalNumber(input.daysSinceLastActivity)} дн.`,
+    `С последнего контакта: ${formatOptionalNumber(input.daysSinceLastContact)} дн.`,
+    `С последнего платежа: ${formatOptionalNumber(input.daysSinceLastPayment)} дн.`,
+  ];
+
+  const formulaLine =
+    `Индекс = запуск ${input.scoreBreakdown.launchContribution} + исполнение ${input.scoreBreakdown.executionContribution}` +
+    ` + платежи ${input.scoreBreakdown.paymentsContribution} + вовлечённость ${input.scoreBreakdown.engagementContribution}` +
+    ` + коммуникация ${input.scoreBreakdown.communicationContribution} = ${input.scoreBreakdown.total}.`;
+
+  const why = [
+    formulaLine,
+    `Скорость запуска: ${input.scoreBreakdown.launchSpeed}/100, исполнение: ${input.scoreBreakdown.execution}/100,` +
+      ` платежи: ${input.scoreBreakdown.payments}/100, вовлечённость: ${input.scoreBreakdown.engagement}/100,` +
+      ` коммуникация: ${input.scoreBreakdown.communication}/100.`,
+  ];
+
+  const launch: string[] = [];
+  if (input.daysSaleToStart === null) {
+    launch.push("Не удалось точно определить дату запуска, поэтому метрика запуска усреднена.");
+  } else if (input.daysSaleToStart <= 7) {
+    launch.push(`Запуск без критичной задержки (${input.daysSaleToStart} дн.), поэтому штраф за старт минимальный.`);
+  } else {
+    launch.push(`Запуск с задержкой ${input.daysSaleToStart} дн. (> 7), это снижает индекс и повышает риск отмены.`);
+  }
+
+  const payments: string[] = [
+    `Платёжная дисциплина: ${input.paymentAnalysis.disciplineScore.toFixed(1)}/10.`,
+    `Оплаты вовремя: ${input.paymentAnalysis.onTimePercent}%, средняя задержка: ${input.paymentAnalysis.averageDelayDays.toFixed(1)} дн.`,
+    `Просрочек: ${input.paymentAnalysis.overdueCount}, подряд: ${input.paymentAnalysis.consecutiveOverdue}.`,
+  ];
+  if (input.paymentAnalysis.riskFlags.length > 0) {
+    payments.push(`Причины риска оплаты: ${input.paymentAnalysis.riskFlags.join("; ")}.`);
+  } else {
+    payments.push("Критичных платёжных флагов не обнаружено.");
+  }
+
+  const execution: string[] = [
+    `Оценка исполнения: ${input.execution.score.toFixed(1)}/10.`,
+    `Ожидаемый срок: ${input.execution.expectedTermDays} дн., прошедшая доля срока: ${input.execution.elapsedTermPercent}%.`,
+    `Активностей всего: ${input.execution.activityCount}, за 30 дней: ${input.execution.activity30d}.`,
+  ];
+  if (input.execution.riskFlag) {
+    execution.push("Сработал флаг исполнения: прошло >50% срока при низкой активности.");
+  } else {
+    execution.push("Флаг исполнения не сработал: активность соответствует текущему этапу срока.");
+  }
+
+  const communication: string[] = [
+    `Оценка коммуникации: ${input.communicationAnalysis.score.toFixed(1)}/10.`,
+    `Контактов за 30 дней: ${input.communicationAnalysis.contacts30d}, негативных подряд: ${input.communicationAnalysis.negativeStreak}.`,
+    `Тональность: ${input.communicationAnalysis.sentimentIndex.toFixed(2)}, среднее время ответа: ${input.communicationAnalysis.avgResponseHours.toFixed(1)} ч.`,
+  ];
+  if (input.communicationAnalysis.flags.length > 0) {
+    communication.push(`Причины риска коммуникации: ${input.communicationAnalysis.flags.join("; ")}.`);
+  } else {
+    communication.push("Критичных коммуникационных флагов не обнаружено.");
+  }
+
+  const risks = input.risks.warnings.length
+    ? input.risks.warnings.map((warning) => `Активный риск: ${warning}.`)
+    : ["Активных предупреждений нет."];
+
+  return {
+    what,
+    when,
+    why,
+    launch,
+    payments,
+    execution,
+    communication,
+    risks,
+    scoreBreakdown: input.scoreBreakdown,
   };
 }
 
@@ -980,6 +1150,23 @@ function formatDateSafe(timestamp: number | null): string {
   }
 
   return new Date(timestamp).toLocaleDateString("ru-RU");
+}
+
+function formatOptionalNumber(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  return String(Math.max(0, Math.trunc(value)));
+}
+
+function resolveClientSurname(clientNameRaw: string): string {
+  const parts = normalizeText(clientNameRaw)
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!parts.length) {
+    return "Без фамилии";
+  }
+  return parts.length > 1 ? parts[parts.length - 1] : parts[0];
 }
 
 function normalizeText(value: unknown): string {

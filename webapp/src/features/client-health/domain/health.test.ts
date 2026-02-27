@@ -90,5 +90,8 @@ describe("buildClientHealthRows", () => {
     expect(row.communication.riskPhrases).toContain("refund");
     expect(row.communication.negativeStreak).toBeGreaterThanOrEqual(2);
     expect(row.communication.flags.length).toBeGreaterThan(0);
+    expect(row.clientSurname).toBe("Клиент");
+    expect(row.explanation.why.length).toBeGreaterThan(0);
+    expect(row.explanation.scoreBreakdown.total).toBe(row.overview.healthIndex);
   });
 });
