@@ -243,6 +243,32 @@ async function getRecords(baseUrl, auth) {
   return { response, body };
 }
 
+async function getClients(baseUrl, auth, query = "") {
+  const normalizedQuery = String(query || "");
+  const url = `${baseUrl}/api/clients${normalizedQuery ? `?${normalizedQuery}` : ""}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Cookie: auth.cookieHeader,
+    },
+  });
+  const body = await response.json();
+  return { response, body };
+}
+
+async function getClientsFilters(baseUrl, auth) {
+  const response = await fetch(`${baseUrl}/api/clients/filters`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Cookie: auth.cookieHeader,
+    },
+  });
+  const body = await response.json();
+  return { response, body };
+}
+
 async function putRecords(baseUrl, auth, payload) {
   const response = await fetch(`${baseUrl}/api/records`, {
     method: "PUT",
@@ -461,6 +487,31 @@ test("authz regression: client-service manager scope includes clientManager and 
       middleManagerRecords.body.records.map((item) => item.id).sort(),
       ["authz-cs-rec-1", "authz-cs-rec-2"],
     );
+
+    const managerClients = await getClients(baseUrl, manager);
+    assert.equal(managerClients.response.status, 200);
+    assert.deepEqual(
+      managerClients.body.records.map((item) => item.id).sort(),
+      ["authz-cs-rec-1"],
+    );
+
+    const middleManagerClients = await getClients(baseUrl, middleManager);
+    assert.equal(middleManagerClients.response.status, 200);
+    assert.deepEqual(
+      middleManagerClients.body.records.map((item) => item.id).sort(),
+      ["authz-cs-rec-1", "authz-cs-rec-2"],
+    );
+
+    const managerClientFilters = await getClientsFilters(baseUrl, manager);
+    assert.equal(managerClientFilters.response.status, 200);
+    assert.deepEqual(managerClientFilters.body.clientManagerOptions, ["Ruanna Ordukhanova-Aslanyan"]);
+
+    const middleManagerClientFilters = await getClientsFilters(baseUrl, middleManager);
+    assert.equal(middleManagerClientFilters.response.status, 200);
+    assert.deepEqual(middleManagerClientFilters.body.clientManagerOptions, [
+      "Maryna Urvantseva",
+      "Ruanna Ordukhanova-Aslanyan",
+    ]);
     },
   );
 });
