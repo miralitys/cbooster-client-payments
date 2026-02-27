@@ -19,7 +19,7 @@ const TEST_SALES_USERNAME = "sales.authz.security@test.local";
 const TEST_SALES_PASSWORD = "Sales!AuthZ123";
 const TEST_CS_MANAGER_USERNAME = "cs.manager.authz.security@test.local";
 const TEST_CS_MANAGER_PASSWORD = "CsManager!AuthZ123";
-const TEST_CS_MIDDLE_MANAGER_USERNAME = "cs.middle.authz.security@test.local";
+const TEST_CS_MIDDLE_MANAGER_USERNAME = "marynau@creditbooster.com";
 const TEST_CS_MIDDLE_MANAGER_PASSWORD = "CsMiddle!AuthZ123";
 const TEST_WEB_AUTH_SESSION_SECRET = "authz-security-test-web-auth-session-secret-abcdefghijklmnopqrstuvwxyz";
 const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
@@ -390,7 +390,7 @@ test("authz regression: client-service manager scope includes clientManager and 
           password: TEST_CS_MIDDLE_MANAGER_PASSWORD,
           departmentId: "client_service",
           roleId: "middle_manager",
-          displayName: "Maryna Urvantseva",
+          displayName: "Marina Urvanceva",
           teamUsernames: [TEST_CS_MANAGER_USERNAME],
         },
       ]),

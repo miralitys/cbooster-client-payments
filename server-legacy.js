@@ -536,6 +536,9 @@ const WEB_AUTH_BOOTSTRAP_USERS = [
     roleId: WEB_AUTH_ROLE_MIDDLE_MANAGER,
   },
 ];
+const WEB_AUTH_CANONICAL_DISPLAY_NAME_BY_USERNAME = Object.freeze({
+  "marynau@creditbooster.com": "Maryna Urvantseva",
+});
 const QUICKBOOKS_CLIENT_ID = (process.env.QUICKBOOKS_CLIENT_ID || "").toString().trim();
 const QUICKBOOKS_CLIENT_SECRET = (process.env.QUICKBOOKS_CLIENT_SECRET || "").toString().trim();
 const QUICKBOOKS_REFRESH_TOKEN = (process.env.QUICKBOOKS_REFRESH_TOKEN || "").toString().trim();
@@ -6443,6 +6446,13 @@ function normalizeWebAuthUsername(rawValue) {
   return normalizeWebAuthConfigValue(rawValue).toLowerCase();
 }
 
+function resolveWebAuthCanonicalDisplayName(rawUsername, rawDisplayName) {
+  const username = normalizeWebAuthUsername(rawUsername);
+  const canonicalDisplayName = username ? WEB_AUTH_CANONICAL_DISPLAY_NAME_BY_USERNAME[username] : "";
+  const displayName = sanitizeTextValue(rawDisplayName, 140);
+  return sanitizeTextValue(canonicalDisplayName, 140) || displayName || username;
+}
+
 function normalizeWebAuthUsernameSeed(rawValue) {
   return sanitizeTextValue(rawValue, 140)
     .toLowerCase()
@@ -11742,7 +11752,7 @@ function normalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
     return null;
   }
 
-  const displayName = sanitizeTextValue(rawUser.displayName || rawUser.name, 140) || username;
+  const displayName = resolveWebAuthCanonicalDisplayName(username, rawUser.displayName || rawUser.name);
   const password = normalizeWebAuthConfigValue(rawUser.password);
   const passwordHash = normalizeWebAuthPasswordHashValue(rawUser.passwordHash || rawUser.password_hash);
   const isPasswordHashValid = isWebAuthPasswordHash(passwordHash);
@@ -11805,7 +11815,7 @@ function finalizeWebAuthDirectoryUser(rawUser, ownerUsername) {
   const password = normalizeWebAuthConfigValue(rawUser?.password);
   const passwordHash = normalizeWebAuthPasswordHashValue(rawUser?.passwordHash || rawUser?.password_hash);
   const hasValidPasswordHash = isWebAuthPasswordHash(passwordHash);
-  const displayName = sanitizeTextValue(rawUser?.displayName, 140) || username;
+  const displayName = resolveWebAuthCanonicalDisplayName(username, rawUser?.displayName);
   const isOwner = Boolean(rawUser?.isOwner) || username === ownerUsername;
   let departmentId = isOwner ? "" : normalizeWebAuthDepartmentId(rawUser?.departmentId);
   let roleId = isOwner ? WEB_AUTH_ROLE_OWNER : normalizeWebAuthRoleId(rawUser?.roleId, departmentId);
