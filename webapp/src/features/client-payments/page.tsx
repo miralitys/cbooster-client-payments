@@ -287,10 +287,10 @@ export default function ClientPaymentsPage() {
   const managerStatusText = useMemo(() => {
     if (isManagersLoading) {
       if (managersRefreshMode === "full") {
-        return "Client managers: running total refresh...";
+        return "Client managers: running total active-client refresh...";
       }
       if (managersRefreshMode === "incremental") {
-        return "Client managers: starting active-client refresh...";
+        return "Client managers: starting active No-manager refresh...";
       }
       return "Client managers: loading saved data...";
     }
@@ -320,14 +320,15 @@ export default function ClientPaymentsPage() {
         if (mode === "incremental") {
           const payload = await startClientManagersRefreshBackgroundJob({
             activeOnly: true,
+            noManagerOnly: true,
           });
           const totalClientsRaw = Number(payload?.job?.totalClients);
           const totalClients = Number.isFinite(totalClientsRaw) && totalClientsRaw > 0 ? totalClientsRaw : null;
-          const detail = totalClients === null ? "" : ` for ${totalClients} active clients`;
+          const detail = totalClients === null ? "" : ` for ${totalClients} active clients with No manager`;
           const message =
             payload?.reused === true
-              ? "Active-client refresh is already running in background. You will receive a notification when it finishes."
-              : `Active-client refresh started in background${detail}. You will receive a notification when it finishes.`;
+              ? "Active No-manager refresh is already running in background. You will receive a notification when it finishes."
+              : `Active No-manager refresh started in background${detail}. You will receive a notification when it finishes.`;
 
           showToast({
             type: "success",
@@ -372,14 +373,16 @@ export default function ClientPaymentsPage() {
     setManagersRefreshMode("full");
 
     try {
-      const payload = await startClientManagersRefreshBackgroundJob();
+      const payload = await startClientManagersRefreshBackgroundJob({
+        activeOnly: true,
+      });
       const totalClientsRaw = Number(payload?.job?.totalClients);
       const totalClients = Number.isFinite(totalClientsRaw) && totalClientsRaw > 0 ? totalClientsRaw : null;
-      const detail = totalClients === null ? "" : ` for ${totalClients} clients`;
+      const detail = totalClients === null ? "" : ` for ${totalClients} active clients`;
       const message =
         payload?.reused === true
-          ? "Total refresh is already running in background. You will receive a notification when it finishes."
-          : `Total refresh started in background${detail}. You will receive a notification when it finishes.`;
+          ? "Total active-client refresh is already running in background. You will receive a notification when it finishes."
+          : `Total active-client refresh started in background${detail}. You will receive a notification when it finishes.`;
 
       showToast({
         type: "success",

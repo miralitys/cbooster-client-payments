@@ -38,6 +38,7 @@ interface GetClientManagersOptions {
   clientName?: string;
   clientNames?: string[];
   activeOnly?: boolean;
+  noManagerOnly?: boolean;
 }
 
 export async function getClientManagers(
@@ -60,6 +61,7 @@ export async function getClientManagers(
       body: JSON.stringify({
         refresh,
         ...(options.activeOnly === true ? { activeOnly: true } : {}),
+        ...(options.noManagerOnly === true ? { noManagerOnly: true } : {}),
         ...(clientName ? { clientName } : {}),
         ...(clientNames.length ? { clientNames } : {}),
       }),
@@ -69,7 +71,9 @@ export async function getClientManagers(
   return apiRequest<ClientManagersPayload>("/api/ghl/client-managers");
 }
 
-export async function startClientManagersRefreshBackgroundJob(options: { activeOnly?: boolean } = {}): Promise<StartClientManagersRefreshJobPayload> {
+export async function startClientManagersRefreshBackgroundJob(
+  options: { activeOnly?: boolean; noManagerOnly?: boolean } = {},
+): Promise<StartClientManagersRefreshJobPayload> {
   return apiRequest<StartClientManagersRefreshJobPayload>("/api/ghl/client-managers/refresh/background", {
     method: "POST",
     headers: {
@@ -78,6 +82,7 @@ export async function startClientManagersRefreshBackgroundJob(options: { activeO
     body: JSON.stringify({
       refresh: "full",
       ...(options.activeOnly === true ? { activeOnly: true } : {}),
+      ...(options.noManagerOnly === true ? { noManagerOnly: true } : {}),
     }),
   });
 }

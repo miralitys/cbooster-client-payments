@@ -33552,8 +33552,73 @@ function resolveActiveClientNamesFromRecords(records) {
   return [...uniqueByComparable.values()];
 }
 
+function resolveNoManagerClientNamesFromRecords(records, options = {}) {
+  const activeOnly = options.activeOnly === true;
+  const uniqueByComparable = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    if (activeOnly && !isGhlClientManagerActiveEnabled(record?.active)) {
+      continue;
+    }
+
+    const clientName = sanitizeTextValue(record?.clientName, 300);
+    if (!clientName) {
+      continue;
+    }
+
+    if (splitPaymentClientManagerNames(record?.clientManager).length > 0) {
+      continue;
+    }
+
+    const comparable = normalizeAssistantComparableText(clientName, 220);
+    if (!comparable || uniqueByComparable.has(comparable)) {
+      continue;
+    }
+    uniqueByComparable.set(comparable, clientName);
+  }
+
+  return [...uniqueByComparable.values()];
+}
+
 function normalizeGhlClientManagersRefreshScope(rawScope) {
-  return sanitizeTextValue(rawScope, 20).toLowerCase() === "active" ? "active" : "all";
+  const normalizedScope = sanitizeTextValue(rawScope, 40).toLowerCase();
+  if (normalizedScope === "active_no_manager" || normalizedScope === "active-no-manager") {
+    return "active_no_manager";
+  }
+  if (normalizedScope === "no_manager" || normalizedScope === "no-manager") {
+    return "no_manager";
+  }
+  if (normalizedScope === "active") {
+    return "active";
+  }
+  return "all";
+}
+
+function getGhlClientManagersRefreshScopeLabel(rawScope) {
+  const scope = normalizeGhlClientManagersRefreshScope(rawScope);
+  if (scope === "active_no_manager") {
+    return "active clients with No manager label";
+  }
+  if (scope === "no_manager") {
+    return "clients with No manager label";
+  }
+  if (scope === "active") {
+    return "active clients";
+  }
+  return "clients";
+}
+
+function getGhlClientManagersRefreshScopeActionLabel(rawScope) {
+  const scope = normalizeGhlClientManagersRefreshScope(rawScope);
+  if (scope === "active_no_manager") {
+    return "active-no-manager";
+  }
+  if (scope === "no_manager") {
+    return "no-manager";
+  }
+  if (scope === "active") {
+    return "active-client";
+  }
+  return "total";
 }
 
 async function refreshGhlClientManagersCacheForClientNames(clientNames, refreshMode = "incremental") {
@@ -33774,7 +33839,7 @@ function buildGhlClientManagersRefreshNotificationEntry(job) {
 
   const refreshMeta = job.refresh && typeof job.refresh === "object" ? job.refresh : null;
   const scope = normalizeGhlClientManagersRefreshScope(job.scope);
-  const scopeLabel = scope === "active" ? "active clients" : "clients";
+  const scopeLabel = getGhlClientManagersRefreshScopeLabel(scope);
   const refreshedClientsCount = normalizeDualWriteSummaryValue(refreshMeta?.refreshedClientsCount);
   const refreshedRowsWritten = normalizeDualWriteSummaryValue(refreshMeta?.refreshedRowsWritten);
   const totalClients = Array.isArray(job.clientNames) ? job.clientNames.length : 0;
@@ -33968,6 +34033,7 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
 
   try {
     const refreshActiveOnly = refreshMode !== "none" && parseBooleanFlag(req.body?.activeOnly, false);
+    const refreshNoManagerOnly = refreshMode !== "none" && parseBooleanFlag(req.body?.noManagerOnly, false);
     const requestedClientNames =
       refreshMode !== "none"
         ? resolveRequestedGhlClientManagerNames(req.body?.clientNames || req.body?.clientName)
@@ -33987,8 +34053,14 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
     const state = await getStoredRecords();
     const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
     let clientNames = scopeVisibleClientNamesByRequestedSubset(visibilityContext.visibleClientNames, requestedClientNames);
-    if (refreshMode !== "none" && refreshActiveOnly && !isScopedRefreshRequest) {
-      clientNames = resolveActiveClientNamesFromRecords(visibilityContext.visibleRecords);
+    if (refreshMode !== "none" && !isScopedRefreshRequest) {
+      if (refreshNoManagerOnly) {
+        clientNames = resolveNoManagerClientNamesFromRecords(visibilityContext.visibleRecords, {
+          activeOnly: refreshActiveOnly,
+        });
+      } else if (refreshActiveOnly) {
+        clientNames = resolveActiveClientNamesFromRecords(visibilityContext.visibleRecords);
+      }
     }
     if (refreshMode !== "none" && isScopedRefreshRequest && !clientNames.length) {
       res.status(404).json({
@@ -34034,6 +34106,7 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
       refresh: {
         ...refreshMeta,
         activeOnly: refreshActiveOnly,
+        noManagerOnly: refreshNoManagerOnly,
         savedRecordsCount: normalizeDualWriteSummaryValue(persisted?.savedRecordsCount),
         recordsUpdatedAt: sanitizeTextValue(persisted?.updatedAt, 80) || null,
       },
@@ -38488,20 +38561,26 @@ const handleGhlClientManagersRefreshBackgroundPost = async (req, res) => {
     return;
   }
   const activeOnly = parseBooleanFlag(req.body?.activeOnly, false);
+  const noManagerOnly = parseBooleanFlag(req.body?.noManagerOnly, false);
 
   try {
     const state = await getStoredRecords();
     const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
-    const targetClientNames = activeOnly
-      ? resolveActiveClientNamesFromRecords(visibilityContext.visibleRecords)
-      : visibilityContext.visibleClientNames;
+    const scope = noManagerOnly ? (activeOnly ? "active_no_manager" : "no_manager") : activeOnly ? "active" : "all";
+    const targetClientNames = noManagerOnly
+      ? resolveNoManagerClientNamesFromRecords(visibilityContext.visibleRecords, {
+          activeOnly,
+        })
+      : activeOnly
+        ? resolveActiveClientNamesFromRecords(visibilityContext.visibleRecords)
+        : visibilityContext.visibleClientNames;
     const enqueueResult = enqueueGhlClientManagersRefreshJob(targetClientNames, {
       requestedBy: req.webAuthUser || req.webAuthProfile?.username,
-      scope: activeOnly ? "active" : "all",
+      scope,
     });
     const payload = buildGhlClientManagersRefreshJobPayload(enqueueResult.job);
 
-    const scopeLabel = activeOnly ? "active-client" : "total";
+    const scopeLabel = getGhlClientManagersRefreshScopeActionLabel(payload?.scope || scope);
     res.status(enqueueResult.reused ? 200 : 202).json({
       ok: true,
       reused: enqueueResult.reused === true,
