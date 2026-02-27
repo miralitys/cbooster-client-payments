@@ -14835,6 +14835,7 @@ function isPublicWebAuthPath(pathname) {
     pathname === "/api/auth/logout" ||
     pathname === "/api/mobile/auth/login" ||
     pathname === "/api/mobile/auth/logout" ||
+    pathname === "/api/ghl/client-contracts/archive" ||
     pathname === "/api/health"
   ) {
     return true;
