@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { Layout } from "@/app/Layout";
 import { OwnerAdminRoute } from "@/app/OwnerAdminRoute";
+import { OwnerAdminOrClientServiceHeadRoute } from "@/app/OwnerAdminOrClientServiceHeadRoute";
 import { OwnerAdminOrAccountingRoute } from "@/app/OwnerAdminOrAccountingRoute";
 import AccessControlPage from "@/features/access-control/page";
 import ClientsPage from "@/features/clients/page";
@@ -22,7 +23,14 @@ export function AppRouter() {
       <Route element={<Layout />}>
         <Route index element={<Navigate to="client-payments" replace />} />
         <Route path="client-payments" element={<ClientPaymentsPage />} />
-        <Route path="client-health" element={<ClientHealthPage />} />
+        <Route
+          path="client-health"
+          element={(
+            <OwnerAdminOrClientServiceHeadRoute>
+              <ClientHealthPage />
+            </OwnerAdminOrClientServiceHeadRoute>
+          )}
+        />
         <Route path="client-score" element={<ClientScorePage />} />
         <Route path="payment-probability" element={<ClientScorePage />} />
         <Route path="identityiq-score" element={<IdentityIqScorePage />} />

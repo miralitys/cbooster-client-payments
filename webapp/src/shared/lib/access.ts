@@ -39,3 +39,7 @@ export function canRefreshClientManagerFromGhlSession(session: Session | null | 
 export function canRefreshClientPhoneFromGhlSession(session: Session | null | undefined): boolean {
   return canRefreshClientManagerFromGhlSession(session);
 }
+
+export function canViewClientHealthSession(session: Session | null | undefined): boolean {
+  return isOwnerOrAdminSession(session) || isClientServiceDepartmentHeadSession(session);
+}

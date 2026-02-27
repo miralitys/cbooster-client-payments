@@ -13238,6 +13238,20 @@ function requireOwnerOrAdminAccess(message = "Owner or admin access is required.
   };
 }
 
+function requireOwnerAdminOrClientServiceHeadAccess(
+  message = "Owner, admin, or Client Service Department Head access is required.",
+) {
+  return (req, res, next) => {
+    const profile = req.webAuthProfile;
+    if (isWebAuthOwnerOrAdminProfile(profile) || isWebAuthClientServiceDepartmentHeadProfile(profile)) {
+      next();
+      return;
+    }
+
+    denyWebPermission(req, res, message);
+  };
+}
+
 function resolveRateLimitClientIp(req) {
   const directIp = sanitizeTextValue(req?.ip, 160);
   if (directIp) {
@@ -33237,6 +33251,8 @@ const recordsController = createRecordsController({
   recordsService,
   buildPublicErrorPayload,
   resolveDbHttpStatus,
+  canAccessClientHealthProfile: (profile) =>
+    isWebAuthOwnerOrAdminProfile(profile) || isWebAuthClientServiceDepartmentHeadProfile(profile),
 });
 
 registerRecordsRoutes({
@@ -39838,7 +39854,7 @@ app.get("/client-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT
   res.redirect(302, "/app/client-payments");
 });
 
-app.get("/client-health", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
+app.get("/client-health", requireOwnerAdminOrClientServiceHeadAccess(), (_req, res) => {
   res.redirect(302, "/app/client-health");
 });
 

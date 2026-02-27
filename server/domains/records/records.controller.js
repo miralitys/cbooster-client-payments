@@ -11,6 +11,7 @@ function createRecordsController(dependencies = {}) {
     recordsService,
     buildPublicErrorPayload,
     resolveDbHttpStatus,
+    canAccessClientHealthProfile,
   } = dependencies;
 
   function enforceRecordsWriteRateLimit(req, res) {
@@ -50,6 +51,13 @@ function createRecordsController(dependencies = {}) {
   }
 
   async function handleClientHealthGet(req, res) {
+    if (typeof canAccessClientHealthProfile === "function" && !canAccessClientHealthProfile(req.webAuthProfile)) {
+      res.status(403).json({
+        error: "Access denied. Owner, admin, or Client Service Department Head role is required.",
+      });
+      return;
+    }
+
     try {
       const result = await recordsService.getClientHealthSnapshotForApi({
         webAuthProfile: req.webAuthProfile,

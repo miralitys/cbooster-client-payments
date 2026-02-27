@@ -3,21 +3,21 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { AssistantWidget } from "@/features/assistant/AssistantWidget";
 import { getSession } from "@/shared/api/session";
-import { canViewClientMatchSession, isOwnerOrAdminSession } from "@/shared/lib/access";
+import { canViewClientHealthSession, canViewClientMatchSession, isOwnerOrAdminSession } from "@/shared/lib/access";
 import { ModalStackProvider, NotificationCenter, ToastHost } from "@/shared/ui";
 
 interface NavigationItem {
   to: string;
   label: string;
   external?: boolean;
-  visibility?: "owner-admin" | "owner-admin-or-accounting";
+  visibility?: "owner-admin" | "owner-admin-or-accounting" | "owner-admin-or-client-service-head";
 }
 
 const NAV_ITEMS: NavigationItem[] = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/custom-dashboard", label: "Custom Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
-  { to: "/client-health", label: "Здоровье клиента" },
+  { to: "/client-health", label: "Здоровье клиента", visibility: "owner-admin-or-client-service-head" },
   { to: "/clients", label: "Clients" },
   { to: "/client-match", label: "Client Match", visibility: "owner-admin-or-accounting" },
   { to: "/payment-probability", label: "Client Payment Probability" },
@@ -84,6 +84,7 @@ export function Layout() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [canViewOwnerAdminOnly, setCanViewOwnerAdminOnly] = useState(false);
   const [canViewClientMatch, setCanViewClientMatch] = useState(false);
+  const [canViewClientHealth, setCanViewClientHealth] = useState(false);
   const [canViewNotifications, setCanViewNotifications] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const pageTitle = resolvePageTitle(location.pathname);
@@ -125,6 +126,7 @@ export function Layout() {
         const ownerOrAdmin = isOwnerOrAdminSession(payload);
         setCanViewOwnerAdminOnly(ownerOrAdmin);
         setCanViewClientMatch(canViewClientMatchSession(payload));
+        setCanViewClientHealth(canViewClientHealthSession(payload));
         setCanViewNotifications(Boolean(payload?.permissions?.view_client_payments));
       })
       .catch(() => {
@@ -133,6 +135,7 @@ export function Layout() {
         }
         setCanViewOwnerAdminOnly(false);
         setCanViewClientMatch(false);
+        setCanViewClientHealth(false);
         setCanViewNotifications(false);
       });
 
@@ -176,6 +179,9 @@ export function Layout() {
                     }
                     if (item.visibility === "owner-admin-or-accounting") {
                       return canViewClientMatch;
+                    }
+                    if (item.visibility === "owner-admin-or-client-service-head") {
+                      return canViewClientHealth;
                     }
                     return true;
                   }).map((item) => {
