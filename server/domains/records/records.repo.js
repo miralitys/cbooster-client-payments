@@ -752,16 +752,32 @@ function createRecordsRepo(dependencies = {}) {
       }
     }
     const normalizedPreferredClientNames = Array.from(preferredClientDisplayByNormalized.keys());
-    const preferredClientLikePatterns = normalizedPreferredClientNames.map((name) => {
-      const tokens = name.split(" ").filter(Boolean);
-      const patternBody = tokens.length > 0 ? tokens.join("%") : name;
-      return `%${patternBody}%`;
-    });
+    const tokenizedPreferredClientNames = normalizedPreferredClientNames
+      .map((name) => name.split(" ").filter(Boolean))
+      .filter((tokens) => tokens.length > 0);
+    const normalizedClientNameExpression =
+      "REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\\s+', ' ', 'g')";
 
     let activeRowsResult;
     let sampleMode = "latest_active_only";
     if (normalizedPreferredClientNames.length > 0) {
       sampleMode = "pinned_named_active_only";
+
+      const tokenLikeParams = [];
+      const tokenLikeClauses = tokenizedPreferredClientNames
+        .map((tokens) => {
+          const tokenPlaceholders = tokens.map((token) => {
+            tokenLikeParams.push(`%${token}%`);
+            return `$${tokenLikeParams.length + 3}`;
+          });
+          if (!tokenPlaceholders.length) {
+            return "";
+          }
+          return `(${tokenPlaceholders.map((placeholder) => `${normalizedClientNameExpression} LIKE ${placeholder}`).join(" AND ")})`;
+        })
+        .filter(Boolean);
+      const tokenClause = tokenLikeClauses.length > 0 ? ` OR ${tokenLikeClauses.join(" OR ")}` : "";
+
       activeRowsResult = await query(
         `
           -- SAFE MODE: LIMITED TO 5 CLIENTS
@@ -770,13 +786,12 @@ function createRecordsRepo(dependencies = {}) {
           WHERE source_state_row_id = $1
             AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on', 'active')
             AND (
-              REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\s+', ' ', 'g') = ANY($3::text[])
-              OR REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\s+', ' ', 'g') LIKE ANY($4::text[])
+              ${normalizedClientNameExpression} = ANY($3::text[])${tokenClause}
             )
           ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
           LIMIT $2
         `,
-        [STATE_ROW_ID, limit, normalizedPreferredClientNames, preferredClientLikePatterns],
+        [STATE_ROW_ID, limit, normalizedPreferredClientNames, ...tokenLikeParams],
       );
     } else {
       activeRowsResult = await query(
@@ -805,9 +820,7 @@ function createRecordsRepo(dependencies = {}) {
         if (normalizedPreferredClientNames.length > 0 && normalizedMappedClientName) {
           const matchedPreferredClientName = normalizedPreferredClientNames.find(
             (preferredName) =>
-              preferredName === normalizedMappedClientName ||
-              normalizedMappedClientName.includes(preferredName) ||
-              preferredName.includes(normalizedMappedClientName),
+              isSafeModePreferredNameMatch(normalizedMappedClientName, preferredName),
           );
           if (matchedPreferredClientName) {
             const displayPreferredClientName = preferredClientDisplayByNormalized.get(matchedPreferredClientName);
@@ -839,6 +852,27 @@ function createRecordsRepo(dependencies = {}) {
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  function isSafeModePreferredNameMatch(normalizedRecordClientName, normalizedPreferredClientName) {
+    if (!normalizedRecordClientName || !normalizedPreferredClientName) {
+      return false;
+    }
+
+    if (
+      normalizedPreferredClientName === normalizedRecordClientName ||
+      normalizedRecordClientName.includes(normalizedPreferredClientName) ||
+      normalizedPreferredClientName.includes(normalizedRecordClientName)
+    ) {
+      return true;
+    }
+
+    const preferredTokens = normalizedPreferredClientName.split(" ").filter(Boolean);
+    if (!preferredTokens.length) {
+      return false;
+    }
+
+    return preferredTokens.every((token) => normalizedRecordClientName.includes(token));
   }
 
   async function saveStoredRecordsUsingV2(records, options = {}) {
