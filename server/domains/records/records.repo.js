@@ -737,10 +737,22 @@ function createRecordsRepo(dependencies = {}) {
     const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 5, 1), 5);
     const preferredClientNames = Array.isArray(options.preferredClientNames)
       ? options.preferredClientNames
-          .map((value) => sanitizeTextValue(value, 300).toLowerCase().replace(/\s+/g, " ").trim())
+          .map((value) => sanitizeTextValue(value, 300))
           .filter(Boolean)
       : [];
-    const normalizedPreferredClientNames = Array.from(new Set(preferredClientNames)).slice(0, 5);
+    const preferredClientDisplayByNormalized = new Map();
+    for (const name of preferredClientNames) {
+      const normalizedName = normalizeSafeModeClientName(name);
+      if (!normalizedName || preferredClientDisplayByNormalized.has(normalizedName)) {
+        continue;
+      }
+      preferredClientDisplayByNormalized.set(normalizedName, name);
+      if (preferredClientDisplayByNormalized.size >= 5) {
+        break;
+      }
+    }
+    const normalizedPreferredClientNames = Array.from(preferredClientDisplayByNormalized.keys());
+    const preferredClientLikePatterns = normalizedPreferredClientNames.map((name) => `%${name}%`);
 
     let activeRowsResult;
     let sampleMode = "latest_active_only";
@@ -753,11 +765,14 @@ function createRecordsRepo(dependencies = {}) {
           FROM ${CLIENT_RECORDS_V2_TABLE}
           WHERE source_state_row_id = $1
             AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
-            AND REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\s+', ' ', 'g') = ANY($3::text[])
+            AND (
+              REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\s+', ' ', 'g') = ANY($3::text[])
+              OR REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\s+', ' ', 'g') LIKE ANY($4::text[])
+            )
           ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
           LIMIT $2
         `,
-        [STATE_ROW_ID, limit, normalizedPreferredClientNames],
+        [STATE_ROW_ID, limit, normalizedPreferredClientNames, preferredClientLikePatterns],
       );
     } else {
       activeRowsResult = await query(
@@ -782,6 +797,21 @@ function createRecordsRepo(dependencies = {}) {
       const record = normalizeRecordFromV2Row(row?.record);
       if (record) {
         const mappedRecord = { ...record };
+        const normalizedMappedClientName = normalizeSafeModeClientName(mappedRecord.clientName);
+        if (normalizedPreferredClientNames.length > 0 && normalizedMappedClientName) {
+          const matchedPreferredClientName = normalizedPreferredClientNames.find(
+            (preferredName) =>
+              preferredName === normalizedMappedClientName ||
+              normalizedMappedClientName.includes(preferredName) ||
+              preferredName.includes(normalizedMappedClientName),
+          );
+          if (matchedPreferredClientName) {
+            const displayPreferredClientName = preferredClientDisplayByNormalized.get(matchedPreferredClientName);
+            if (displayPreferredClientName) {
+              mappedRecord.clientName = displayPreferredClientName;
+            }
+          }
+        }
         const rowId = sanitizeTextValue(row?.id, 180);
         if (!sanitizeTextValue(mappedRecord.id, 180)) {
           mappedRecord.id = rowId || `safe_client_${records.length + 1}`;
@@ -798,6 +828,13 @@ function createRecordsRepo(dependencies = {}) {
       sampleMode,
       limit,
     };
+  }
+
+  function normalizeSafeModeClientName(rawValue) {
+    return sanitizeTextValue(rawValue, 300)
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   async function saveStoredRecordsUsingV2(records, options = {}) {
