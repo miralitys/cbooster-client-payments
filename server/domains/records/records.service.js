@@ -1,6 +1,14 @@
 "use strict";
 
 const OVERDUE_GRACE_DAYS = 30;
+const SAFE_MODE_PINNED_CLIENT_NAMES = Object.freeze([
+  "Roman Gamsakhurdia",
+  "Oleksandr Lychak",
+  "Aman Berdibai",
+  "Evghenii Dascal",
+  "Stanislav Pushkar",
+]);
+const SAFE_MODE_PINNED_SAMPLE_MODE = "pinned_named_active_only";
 
 function createRecordsService(dependencies = {}) {
   const {
@@ -99,7 +107,7 @@ function createRecordsService(dependencies = {}) {
           limit: 5,
           safeMode: true,
           source: "simulated",
-          sampleMode: "latest_active_only",
+          sampleMode: SAFE_MODE_PINNED_SAMPLE_MODE,
         },
       };
     }
@@ -116,10 +124,13 @@ function createRecordsService(dependencies = {}) {
     const safeLimit = 5;
     if (typeof listClientHealthRecordsSafeMode === "function") {
       try {
-        const safeSnapshot = await listClientHealthRecordsSafeMode({ limit: safeLimit });
+        const safeSnapshot = await listClientHealthRecordsSafeMode({
+          limit: safeLimit,
+          preferredClientNames: SAFE_MODE_PINNED_CLIENT_NAMES,
+        });
         const roleScopedRecords = filterClientRecordsForWebAuthUser(safeSnapshot.records, webAuthProfile);
-        const sampledRecords = selectSafeModeClientSample(roleScopedRecords, safeLimit);
-        const sampleMode = sanitizeTextValue(safeSnapshot.sampleMode, 40) || "latest_active_only";
+        const sampledRecords = selectSafeModeClientSample(roleScopedRecords, safeLimit, SAFE_MODE_PINNED_CLIENT_NAMES);
+        const sampleMode = sanitizeTextValue(safeSnapshot.sampleMode, 40) || SAFE_MODE_PINNED_SAMPLE_MODE;
 
         return {
           status: 200,
@@ -142,7 +153,7 @@ function createRecordsService(dependencies = {}) {
 
     const state = await getStoredRecordsForApiRecordsRoute();
     const roleFilteredRecords = filterClientRecordsForWebAuthUser(state.records, webAuthProfile);
-    const sampledRecords = selectSafeModeClientSample(roleFilteredRecords, safeLimit);
+    const sampledRecords = selectSafeModeClientSample(roleFilteredRecords, safeLimit, SAFE_MODE_PINNED_CLIENT_NAMES);
 
     return {
       status: 200,
@@ -152,7 +163,7 @@ function createRecordsService(dependencies = {}) {
         limit: safeLimit,
         safeMode: true,
         source: "legacy_fallback",
-        sampleMode: "latest_active_only",
+        sampleMode: SAFE_MODE_PINNED_SAMPLE_MODE,
       },
     };
   }
@@ -618,7 +629,7 @@ function isActiveEnabled(rawValue) {
   return value === "yes" || value === "true" || value === "1" || value === "on" || value === "active";
 }
 
-function selectSafeModeClientSample(records, limit = 5) {
+function selectSafeModeClientSample(records, limit = 5, preferredClientNames = []) {
   const maxRows = Math.min(Math.max(Number.parseInt(String(limit || 5), 10) || 5, 1), 5);
   if (!Array.isArray(records) || !records.length || maxRows <= 0) {
     return [];
@@ -630,7 +641,53 @@ function selectSafeModeClientSample(records, limit = 5) {
     .sort((left, right) => resolveRecordRecencyTimestamp(right) - resolveRecordRecencyTimestamp(left));
 
   const activeRows = normalized.filter((record) => isActiveEnabled(record?.active));
+  const preferredRows = selectPreferredActiveRows(activeRows, preferredClientNames);
+  if (preferredRows.length > 0) {
+    return preferredRows.slice(0, maxRows);
+  }
   return activeRows.slice(0, maxRows);
+}
+
+function selectPreferredActiveRows(records, preferredClientNames) {
+  const source = Array.isArray(records) ? records : [];
+  const preferred = normalizePreferredClientNames(preferredClientNames);
+  if (!source.length || !preferred.length) {
+    return [];
+  }
+
+  const selected = [];
+  const usedIndexes = new Set();
+
+  for (const preferredName of preferred) {
+    const matchIndex = source.findIndex((record, index) => {
+      if (usedIndexes.has(index)) {
+        return false;
+      }
+      return normalizeSafeClientName(record?.clientName) === preferredName;
+    });
+
+    if (matchIndex >= 0) {
+      usedIndexes.add(matchIndex);
+      selected.push(source[matchIndex]);
+    }
+  }
+
+  return selected;
+}
+
+function normalizePreferredClientNames(rawNames) {
+  const source = Array.isArray(rawNames) ? rawNames : [];
+  const normalized = source
+    .map((value) => normalizeSafeClientName(value))
+    .filter(Boolean);
+  return Array.from(new Set(normalized));
+}
+
+function normalizeSafeClientName(rawValue) {
+  return String(rawValue || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function resolveRecordRecencyTimestamp(record) {

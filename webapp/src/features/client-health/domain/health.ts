@@ -55,6 +55,7 @@ SELECT id, record, source_state_updated_at, updated_at
 FROM public.client_records_v2
 WHERE source_state_row_id = $1
   AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
+  AND REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\\s+', ' ', 'g') = ANY($3::text[])
 ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
 LIMIT 5;`;
 

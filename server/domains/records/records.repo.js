@@ -735,22 +735,46 @@ function createRecordsRepo(dependencies = {}) {
 
     const requestedLimit = Number.parseInt(String(options.limit ?? 5), 10);
     const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 5, 1), 5);
+    const preferredClientNames = Array.isArray(options.preferredClientNames)
+      ? options.preferredClientNames
+          .map((value) => sanitizeTextValue(value, 300).toLowerCase().replace(/\s+/g, " ").trim())
+          .filter(Boolean)
+      : [];
+    const normalizedPreferredClientNames = Array.from(new Set(preferredClientNames)).slice(0, 5);
 
-    const activeRowsResult = await query(
-      `
-        -- SAFE MODE: LIMITED TO 5 CLIENTS
-        SELECT id, record, source_state_updated_at, updated_at
-        FROM ${CLIENT_RECORDS_V2_TABLE}
-        WHERE source_state_row_id = $1
-          AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
-        ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
-        LIMIT $2
-      `,
-      [STATE_ROW_ID, limit],
-    );
+    let activeRowsResult;
+    let sampleMode = "latest_active_only";
+    if (normalizedPreferredClientNames.length > 0) {
+      sampleMode = "pinned_named_active_only";
+      activeRowsResult = await query(
+        `
+          -- SAFE MODE: LIMITED TO 5 CLIENTS
+          SELECT id, record, source_state_updated_at, updated_at
+          FROM ${CLIENT_RECORDS_V2_TABLE}
+          WHERE source_state_row_id = $1
+            AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
+            AND REGEXP_REPLACE(LOWER(BTRIM(COALESCE(record->>'clientName', ''))), '\s+', ' ', 'g') = ANY($3::text[])
+          ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
+          LIMIT $2
+        `,
+        [STATE_ROW_ID, limit, normalizedPreferredClientNames],
+      );
+    } else {
+      activeRowsResult = await query(
+        `
+          -- SAFE MODE: LIMITED TO 5 CLIENTS
+          SELECT id, record, source_state_updated_at, updated_at
+          FROM ${CLIENT_RECORDS_V2_TABLE}
+          WHERE source_state_row_id = $1
+            AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
+          ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
+          LIMIT $2
+        `,
+        [STATE_ROW_ID, limit],
+      );
+    }
 
     const rows = Array.isArray(activeRowsResult.rows) ? activeRowsResult.rows : [];
-    const sampleMode = "latest_active_only";
 
     const records = [];
     const updatedAtCandidates = [];
