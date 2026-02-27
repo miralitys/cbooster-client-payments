@@ -485,6 +485,33 @@ function createQuickBooksRepo(dependencies = {}) {
     return Array.isArray(result.rows) ? result.rows : [];
   }
 
+  async function listQuickBooksWriteOffTransactionsInRange(fromDate, toDate) {
+    await ensureReady();
+    const result = await query(
+      `
+        SELECT
+          transaction_type,
+          transaction_id,
+          customer_id,
+          client_name,
+          client_phone,
+          client_email,
+          payment_amount,
+          payment_date::text AS payment_date
+        FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        WHERE payment_date >= $1::date
+          AND payment_date <= $2::date
+          AND (
+            transaction_type = 'creditmemo'
+            OR (transaction_type = 'payment' AND payment_amount <= -$3)
+          )
+        ORDER BY payment_date DESC, updated_at DESC, transaction_id ASC
+      `,
+      [fromDate, toDate, QUICKBOOKS_MIN_VISIBLE_ABS_AMOUNT],
+    );
+    return Array.isArray(result.rows) ? result.rows : [];
+  }
+
   async function markQuickBooksPaymentMatched(payload = {}) {
     const transactionType = sanitizeTextValue(payload.transactionType, 40).toLowerCase();
     const transactionId = sanitizeTextValue(payload.transactionId, 160);
@@ -600,6 +627,7 @@ function createQuickBooksRepo(dependencies = {}) {
     listCachedQuickBooksZeroPaymentsInRange,
     upsertQuickBooksTransactions,
     listUnmatchedQuickBooksPositivePaymentsInRange,
+    listQuickBooksWriteOffTransactionsInRange,
     markQuickBooksPaymentMatched,
     confirmQuickBooksPaymentMatch,
     listPendingQuickBooksPaymentMatchesByRecordId,

@@ -26053,11 +26053,17 @@ function buildQuickBooksRecordIndexesByClientKey(records) {
 }
 
 async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
-  const unmatchedRows = await quickBooksRepo.listUnmatchedQuickBooksPositivePaymentsInRange(fromDate, toDate);
-  if (!unmatchedRows.length) {
+  const [unmatchedRows, writeOffRows] = await Promise.all([
+    quickBooksRepo.listUnmatchedQuickBooksPositivePaymentsInRange(fromDate, toDate),
+    typeof quickBooksRepo.listQuickBooksWriteOffTransactionsInRange === "function"
+      ? quickBooksRepo.listQuickBooksWriteOffTransactionsInRange(fromDate, toDate)
+      : [],
+  ]);
+  if (!unmatchedRows.length && !writeOffRows.length) {
     return {
       matchedCount: 0,
       skippedCount: 0,
+      writtenOffCount: 0,
       updatedAt: null,
     };
   }
@@ -26072,7 +26078,51 @@ async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
 
     let recordsChanged = false;
     let matchedCount = 0;
+    let writtenOffCount = 0;
+    const writtenOffRecordIds = new Set();
     const matchedOperations = [];
+
+    for (const rawRow of writeOffRows) {
+      const clientKey = normalizePaymentClientNameForLookup(rawRow?.client_name);
+      if (!clientKey) {
+        continue;
+      }
+
+      const candidateIndexes = recordsByClientKey.get(clientKey) || [];
+      if (!candidateIndexes.length) {
+        continue;
+      }
+
+      const writeOffDate = formatQuickBooksPaymentDateForRecord(rawRow?.payment_date) || getTodayDateUs();
+      for (const recordIndex of candidateIndexes) {
+        const candidateRecord = nextRecords[recordIndex];
+        const recordId = sanitizeTextValue(candidateRecord?.id, 180);
+        if (!recordId) {
+          continue;
+        }
+
+        const alreadyWrittenOff = sanitizeTextValue(candidateRecord?.writtenOff, 10).toLowerCase() === "yes";
+        const existingWrittenOffDate = sanitizeTextValue(candidateRecord?.dateWhenWrittenOff, 40);
+
+        let didChange = false;
+        if (!alreadyWrittenOff) {
+          candidateRecord.writtenOff = "Yes";
+          didChange = true;
+        }
+        if (!existingWrittenOffDate) {
+          candidateRecord.dateWhenWrittenOff = writeOffDate;
+          didChange = true;
+        }
+
+        if (didChange) {
+          recordsChanged = true;
+          if (!writtenOffRecordIds.has(recordId)) {
+            writtenOffRecordIds.add(recordId);
+            writtenOffCount += 1;
+          }
+        }
+      }
+    }
 
     for (const rawRow of unmatchedRows) {
       const transactionType = sanitizeTextValue(rawRow?.transaction_type, 40).toLowerCase() || "payment";
@@ -26138,10 +26188,11 @@ async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
       });
     }
 
-    if (!matchedOperations.length) {
+    if (!matchedOperations.length && !recordsChanged) {
       return {
         matchedCount: 0,
         skippedCount: unmatchedRows.length,
+        writtenOffCount,
         updatedAt: sanitizeTextValue(state?.updatedAt, 80) || null,
       };
     }
@@ -26179,6 +26230,7 @@ async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
     return {
       matchedCount: markedCount,
       skippedCount: Math.max(0, unmatchedRows.length - markedCount),
+      writtenOffCount,
       updatedAt,
     };
   }
@@ -26186,6 +26238,7 @@ async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
   return {
     matchedCount: 0,
     skippedCount: unmatchedRows.length,
+    writtenOffCount: 0,
     updatedAt: null,
   };
 }
