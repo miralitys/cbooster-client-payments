@@ -475,14 +475,14 @@ a {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  min-width: 236px;
+  width: min(560px, calc(100vw - 20px));
   display: grid;
-  gap: 4px;
-  padding: 8px;
+  gap: 8px;
+  padding: 10px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
-  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.14);
   z-index: var(--z-dropdown);
 }
 
@@ -490,26 +490,74 @@ a {
   display: none !important;
 }
 
+.account-menu__groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: min(66vh, 560px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.account-menu__group {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+}
+
+.account-menu__group-title {
+  margin: 0;
+  font-size: 0.62rem;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  font-weight: 700;
+}
+
+.account-menu__group-items {
+  display: grid;
+  gap: 4px;
+}
+
 .account-menu__divider {
   height: 1px;
   background: var(--color-border);
-  margin: 2px 0;
+  margin: 0;
 }
 
 .account-menu__item {
-  display: block;
+  display: grid;
+  gap: 1px;
   width: 100%;
-  min-height: 34px;
+  min-height: 42px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text);
   text-align: left;
-  padding: 6px 10px;
-  font-size: var(--font-size-xs);
+  padding: 7px 10px;
+  font-size: var(--font-size-xxs);
   font-weight: 500;
-  line-height: 1.35;
+  line-height: 1.3;
   cursor: pointer;
+}
+
+.account-menu__item-label {
+  font-size: 0.91rem;
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+.account-menu__item-hint {
+  font-size: 0.66rem;
+  line-height: 1.25;
+  color: var(--color-text-muted);
+  letter-spacing: 0.02em;
 }
 
 .account-menu__item:hover,
@@ -524,6 +572,25 @@ a {
 .account-menu.is-open .account-menu__toggle {
   background: var(--color-secondary-hover);
   border-color: var(--color-border-strong);
+}
+
+.account-menu__item.is-active {
+  background: #e9f1ff;
+  border-color: #b9cdf4;
+}
+
+.account-menu__item--logout {
+  width: 100%;
+}
+
+@media (max-width: 860px) {
+  .account-menu__panel {
+    width: min(420px, calc(100vw - 16px));
+  }
+
+  .account-menu__groups {
+    grid-template-columns: 1fr;
+  }
 }
 
 .dashboard-home,

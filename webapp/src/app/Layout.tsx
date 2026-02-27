@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { AssistantWidget } from "@/features/assistant/AssistantWidget";
@@ -9,23 +9,32 @@ import { ModalStackProvider, NotificationCenter, ToastHost } from "@/shared/ui";
 interface NavigationItem {
   to: string;
   label: string;
+  hint?: string;
+  group: "operations" | "clients" | "analytics" | "system";
   external?: boolean;
   visibility?: "owner-admin" | "owner-admin-or-accounting" | "owner-admin-or-client-service-head";
 }
 
 const NAV_ITEMS: NavigationItem[] = [
-  { to: "/dashboard", label: "Dashboard" },
-  { to: "/custom-dashboard", label: "Custom Dashboard" },
-  { to: "/client-payments", label: "Client Payments" },
-  { to: "/client-health", label: "Здоровье клиента", visibility: "owner-admin-or-client-service-head" },
-  { to: "/clients", label: "Clients" },
-  { to: "/client-match", label: "Client Match", visibility: "owner-admin-or-accounting" },
-  { to: "/payment-probability", label: "Client Payment Probability" },
-  { to: "/identityiq-score", label: "IdentityIQ Scores" },
-  { to: "/ghl-contracts", label: "GHL Contract Text" },
-  { to: "/quickbooks", label: "QuickBooks", visibility: "owner-admin" },
-  { to: "/leads", label: "Leads" },
-  { to: "/access-control", label: "Access Control" },
+  { to: "/dashboard", label: "Dashboard", hint: "Overview", group: "operations" },
+  { to: "/custom-dashboard", label: "Custom Dashboard", hint: "Personalized", group: "operations" },
+  { to: "/leads", label: "Leads", hint: "Pipeline", group: "operations" },
+  { to: "/client-payments", label: "Client Payments", hint: "Collections", group: "clients" },
+  { to: "/client-health", label: "Здоровье клиента", hint: "Health", group: "clients", visibility: "owner-admin-or-client-service-head" },
+  { to: "/clients", label: "Clients", hint: "Directory", group: "clients" },
+  { to: "/client-match", label: "Client Match", hint: "Matching", group: "clients", visibility: "owner-admin-or-accounting" },
+  { to: "/payment-probability", label: "Client Payment Probability", hint: "Forecast", group: "analytics" },
+  { to: "/identityiq-score", label: "IdentityIQ Scores", hint: "Scores", group: "analytics" },
+  { to: "/ghl-contracts", label: "GHL Contract Text", hint: "Contracts", group: "analytics" },
+  { to: "/quickbooks", label: "QuickBooks", hint: "Accounting", group: "system", visibility: "owner-admin" },
+  { to: "/access-control", label: "Access Control", hint: "Roles", group: "system" },
+];
+
+const NAV_GROUPS: Array<{ key: NavigationItem["group"]; title: string }> = [
+  { key: "operations", title: "Operations" },
+  { key: "clients", title: "Clients" },
+  { key: "analytics", title: "Analytics" },
+  { key: "system", title: "System" },
 ];
 
 function resolvePageTitle(pathname: string): string {
@@ -88,6 +97,20 @@ export function Layout() {
   const [canViewNotifications, setCanViewNotifications] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const pageTitle = resolvePageTitle(location.pathname);
+  const visibleNavItems = useMemo(() => {
+    return NAV_ITEMS.filter((item) => {
+      if (item.visibility === "owner-admin") {
+        return canViewOwnerAdminOnly;
+      }
+      if (item.visibility === "owner-admin-or-accounting") {
+        return canViewClientMatch;
+      }
+      if (item.visibility === "owner-admin-or-client-service-head") {
+        return canViewClientHealth;
+      }
+      return true;
+    });
+  }, [canViewClientHealth, canViewClientMatch, canViewOwnerAdminOnly]);
 
   useEffect(() => {
     function onPointerDown(event: MouseEvent) {
@@ -173,47 +196,55 @@ export function Layout() {
                 </button>
 
                 <div id="app-account-menu-panel" className="account-menu__panel" role="menu" hidden={!menuOpen}>
-                  {NAV_ITEMS.filter((item) => {
-                    if (item.visibility === "owner-admin") {
-                      return canViewOwnerAdminOnly;
-                    }
-                    if (item.visibility === "owner-admin-or-accounting") {
-                      return canViewClientMatch;
-                    }
-                    if (item.visibility === "owner-admin-or-client-service-head") {
-                      return canViewClientHealth;
-                    }
-                    return true;
-                  }).map((item) => {
-                    if (item.external) {
-                      return (
-                        <a
-                          key={item.to}
-                          href={item.to}
-                          className="account-menu__item"
-                          role="menuitem"
-                          onClick={() => setMenuOpen(false)}
-                        >
-                          {item.label}
-                        </a>
-                      );
-                    }
+                  <div className="account-menu__groups">
+                    {NAV_GROUPS.map((group) => {
+                      const groupItems = visibleNavItems.filter((item) => item.group === group.key);
+                      if (!groupItems.length) {
+                        return null;
+                      }
 
-                    return (
-                      <NavLink
-                        key={item.to}
-                        to={item.to}
-                        className="account-menu__item"
-                        role="menuitem"
-                        onClick={() => setMenuOpen(false)}
-                      >
-                        {item.label}
-                      </NavLink>
-                    );
-                  })}
+                      return (
+                        <section key={group.key} className="account-menu__group" aria-label={group.title}>
+                          <p className="account-menu__group-title">{group.title}</p>
+                          <div className="account-menu__group-items">
+                            {groupItems.map((item) => {
+                              if (item.external) {
+                                return (
+                                  <a
+                                    key={item.to}
+                                    href={item.to}
+                                    className="account-menu__item"
+                                    role="menuitem"
+                                    onClick={() => setMenuOpen(false)}
+                                  >
+                                    <span className="account-menu__item-label">{item.label}</span>
+                                    {item.hint ? <span className="account-menu__item-hint">{item.hint}</span> : null}
+                                  </a>
+                                );
+                              }
+
+                              return (
+                                <NavLink
+                                  key={item.to}
+                                  to={item.to}
+                                  className={({ isActive }) => `account-menu__item ${isActive ? "is-active" : ""}`.trim()}
+                                  role="menuitem"
+                                  onClick={() => setMenuOpen(false)}
+                                >
+                                  <span className="account-menu__item-label">{item.label}</span>
+                                  {item.hint ? <span className="account-menu__item-hint">{item.hint}</span> : null}
+                                </NavLink>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      );
+                    })}
+                  </div>
                   <div className="account-menu__divider" aria-hidden="true" />
-                  <a href="/logout" className="account-menu__item" role="menuitem" onClick={() => setMenuOpen(false)}>
-                    Log Out
+                  <a href="/logout" className="account-menu__item account-menu__item--logout" role="menuitem" onClick={() => setMenuOpen(false)}>
+                    <span className="account-menu__item-label">Log Out</span>
+                    <span className="account-menu__item-hint">Exit session</span>
                   </a>
                 </div>
               </div>
