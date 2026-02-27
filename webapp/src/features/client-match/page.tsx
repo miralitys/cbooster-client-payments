@@ -5,10 +5,12 @@ import {
   formatDate,
   formatMoney,
   normalizeDateForStorage,
+  normalizeFormRecord,
   parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { RecordDetails } from "@/features/client-payments/components/RecordDetails";
+import { RecordEditorForm } from "@/features/client-payments/components/RecordEditorForm";
 import { getClients, getQuickBooksPayments, patchClients } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
 import type { QuickBooksPaymentRow } from "@/shared/types/quickbooks";
@@ -19,6 +21,7 @@ import type { TableColumn } from "@/shared/ui";
 const MATCH_FROM_DATE = "2026-01-01";
 const MATCH_FROM_TIMESTAMP = parseDateValue(MATCH_FROM_DATE) ?? 0;
 const CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY = "client-match-confirmed-v2";
+const CLIENT_MATCH_CONFIRMATIONS_LEGACY_STORAGE_KEY = "client-match-confirmed-v1";
 const NAME_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
 
 interface PaymentPair {
@@ -75,6 +78,9 @@ export default function ClientMatchPage() {
   const [clientsUpdatedAt, setClientsUpdatedAt] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<EditingCellState | null>(null);
   const [selectedClientRecord, setSelectedClientRecord] = useState<ClientRecord | null>(null);
+  const [selectedClientMode, setSelectedClientMode] = useState<"view" | "edit">("view");
+  const [selectedClientDraft, setSelectedClientDraft] = useState<ClientRecord | null>(null);
+  const [isSavingSelectedClient, setIsSavingSelectedClient] = useState(false);
   const [confirmedRowKeys, setConfirmedRowKeys] = useState<string[]>(() => readConfirmedRowKeys());
 
   const loadMatches = useCallback(async () => {
@@ -149,11 +155,11 @@ export default function ClientMatchPage() {
 
   const confirmedRowKeySet = useMemo(() => new Set(confirmedRowKeys), [confirmedRowKeys]);
   const visibleRows = useMemo(
-    () => rows.filter((row) => !confirmedRowKeySet.has(buildClientMatchConfirmationKey(row))),
+    () => rows.filter((row) => !isClientMatchRowConfirmed(row, confirmedRowKeySet)),
     [confirmedRowKeySet, rows],
   );
   const confirmedRowsCount = useMemo(
-    () => rows.reduce((count, row) => (confirmedRowKeySet.has(buildClientMatchConfirmationKey(row)) ? count + 1 : count), 0),
+    () => rows.reduce((count, row) => (isClientMatchRowConfirmed(row, confirmedRowKeySet) ? count + 1 : count), 0),
     [confirmedRowKeySet, rows],
   );
   const maxPaymentColumns = useMemo(() => {
@@ -169,7 +175,7 @@ export default function ClientMatchPage() {
 
   const confirmClientRow = useCallback((row: ClientMatchRow) => {
     const confirmationKey = buildClientMatchConfirmationKey(row);
-    if (confirmedRowKeySet.has(confirmationKey)) {
+    if (isClientMatchRowConfirmed(row, confirmedRowKeySet)) {
       return;
     }
 
@@ -182,7 +188,7 @@ export default function ClientMatchPage() {
       if (previous.includes(confirmationKey)) {
         return previous;
       }
-      return [...previous, confirmationKey];
+      return [...previous.filter((item) => item !== row.id), confirmationKey];
     });
 
     showToast({
@@ -209,7 +215,96 @@ export default function ClientMatchPage() {
       return parseCreatedAtTimestamp(current.createdAt) > parseCreatedAtTimestamp(latest.createdAt) ? current : latest;
     });
     setSelectedClientRecord(bestRecord);
+    setSelectedClientMode("view");
+    setSelectedClientDraft(null);
   }, [clientRecords]);
+
+  const closeSelectedClientCard = useCallback(() => {
+    if (isSavingSelectedClient) {
+      return;
+    }
+    setSelectedClientRecord(null);
+    setSelectedClientMode("view");
+    setSelectedClientDraft(null);
+  }, [isSavingSelectedClient]);
+
+  const startEditSelectedClient = useCallback(() => {
+    if (!selectedClientRecord) {
+      return;
+    }
+    setSelectedClientDraft({ ...selectedClientRecord });
+    setSelectedClientMode("edit");
+  }, [selectedClientRecord]);
+
+  const updateSelectedClientDraftField = useCallback((key: keyof ClientRecord, value: string) => {
+    setSelectedClientDraft((previous) => {
+      if (!previous) {
+        return previous;
+      }
+      return {
+        ...previous,
+        [key]: value,
+      };
+    });
+  }, []);
+
+  const saveSelectedClientDraft = useCallback(async () => {
+    if (!selectedClientRecord || !selectedClientDraft || isSavingSelectedClient) {
+      return;
+    }
+
+    const normalizedDraft = normalizeFormRecord(selectedClientDraft);
+    const patchRecord: Partial<ClientRecord> = { ...normalizedDraft };
+    delete (patchRecord as { id?: string }).id;
+
+    setIsSavingSelectedClient(true);
+    try {
+      const patchPayload = await patchClients(
+        [
+          {
+            type: "upsert",
+            id: selectedClientRecord.id,
+            record: patchRecord,
+          },
+        ],
+        clientsUpdatedAt,
+      );
+
+      const nextUpdatedAt = typeof patchPayload?.updatedAt === "string" ? patchPayload.updatedAt : clientsUpdatedAt;
+      setClientsUpdatedAt(nextUpdatedAt);
+
+      const nextRecord: ClientRecord = {
+        ...selectedClientRecord,
+        ...normalizedDraft,
+        id: selectedClientRecord.id,
+        createdAt: selectedClientRecord.createdAt,
+      };
+
+      setClientRecords((previous) =>
+        previous.map((record) => (record.id === selectedClientRecord.id ? nextRecord : record)),
+      );
+      setSelectedClientRecord(nextRecord);
+      setSelectedClientDraft(null);
+      setSelectedClientMode("view");
+
+      showToast({
+        type: "success",
+        message: "Client card updated.",
+        dedupeKey: `client-match-card-save-${selectedClientRecord.id}`,
+        cooldownMs: 1000,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to update client card.";
+      showToast({
+        type: "error",
+        message,
+        dedupeKey: `client-match-card-save-error-${message}`,
+        cooldownMs: 1200,
+      });
+    } finally {
+      setIsSavingSelectedClient(false);
+    }
+  }, [clientsUpdatedAt, isSavingSelectedClient, selectedClientDraft, selectedClientRecord]);
 
   const beginEditCell = useCallback((rowId: string, slotIndex: number, fieldType: EditableDbFieldType, initialValue: string) => {
     setEditingCell({
@@ -486,7 +581,7 @@ export default function ClientMatchPage() {
         className: "client-match-column-client",
         headerClassName: "client-match-column-client",
         cell: (row) => {
-          const isConfirmed = confirmedRowKeySet.has(buildClientMatchConfirmationKey(row));
+          const isConfirmed = isClientMatchRowConfirmed(row, confirmedRowKeySet);
           return (
             <div className={`client-match-client-name ${isConfirmed ? "is-confirmed" : ""}`.trim()}>
               <input
@@ -623,16 +718,29 @@ export default function ClientMatchPage() {
       <Modal
         open={Boolean(selectedClientRecord)}
         title={selectedClientRecord?.clientName || "Client Details"}
-        onClose={() => setSelectedClientRecord(null)}
+        onClose={closeSelectedClientCard}
         footer={(
           <div className="client-payments__modal-actions">
-            <Button type="button" variant="secondary" size="sm" onClick={() => setSelectedClientRecord(null)}>
+            <Button type="button" variant="secondary" size="sm" onClick={closeSelectedClientCard} disabled={isSavingSelectedClient}>
               Close
             </Button>
+            {selectedClientMode === "view" ? (
+              <Button type="button" size="sm" onClick={startEditSelectedClient} disabled={!selectedClientRecord}>
+                Edit
+              </Button>
+            ) : null}
+            {selectedClientMode === "edit" ? (
+              <Button type="button" size="sm" onClick={() => void saveSelectedClientDraft()} isLoading={isSavingSelectedClient}>
+                Save
+              </Button>
+            ) : null}
           </div>
         )}
       >
-        {selectedClientRecord ? <RecordDetails record={selectedClientRecord} /> : null}
+        {selectedClientRecord && selectedClientMode === "view" ? <RecordDetails record={selectedClientRecord} /> : null}
+        {selectedClientMode === "edit" && selectedClientDraft ? (
+          <RecordEditorForm draft={selectedClientDraft} onChange={updateSelectedClientDraftField} />
+        ) : null}
       </Modal>
     </PageShell>
   );
@@ -835,11 +943,30 @@ function buildEditableAmountValue(rawAmount: number | null | undefined): string 
 }
 
 function readConfirmedRowKeys(): string[] {
+  const current = readClientMatchConfirmationList(CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY);
+  const legacy = readClientMatchConfirmationList(CLIENT_MATCH_CONFIRMATIONS_LEGACY_STORAGE_KEY);
+  return [...current, ...legacy].filter((item, index, array) => Boolean(item) && array.indexOf(item) === index);
+}
+
+function writeConfirmedRowKeys(rowKeys: string[]): void {
   try {
-    const rawValue = globalThis.window?.localStorage?.getItem(CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY) || "";
+    const normalizedRowKeys = rowKeys
+      .map((item) => String(item || "").trim())
+      .filter((item, index, array) => Boolean(item) && array.indexOf(item) === index);
+    globalThis.window?.localStorage?.setItem(CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY, JSON.stringify(normalizedRowKeys));
+    globalThis.window?.localStorage?.removeItem(CLIENT_MATCH_CONFIRMATIONS_LEGACY_STORAGE_KEY);
+  } catch {
+    // Ignore localStorage write errors for this temporary page.
+  }
+}
+
+function readClientMatchConfirmationList(storageKey: string): string[] {
+  try {
+    const rawValue = globalThis.window?.localStorage?.getItem(storageKey) || "";
     if (!rawValue) {
       return [];
     }
+
     const parsedValue: unknown = JSON.parse(rawValue);
     if (!Array.isArray(parsedValue)) {
       return [];
@@ -853,22 +980,16 @@ function readConfirmedRowKeys(): string[] {
   }
 }
 
-function writeConfirmedRowKeys(rowKeys: string[]): void {
-  try {
-    const normalizedRowKeys = rowKeys
-      .map((item) => String(item || "").trim())
-      .filter((item, index, array) => Boolean(item) && array.indexOf(item) === index);
-    globalThis.window?.localStorage?.setItem(CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY, JSON.stringify(normalizedRowKeys));
-  } catch {
-    // Ignore localStorage write errors for this temporary page.
-  }
-}
-
 function buildClientMatchConfirmationKey(row: ClientMatchRow): string {
   const paymentsSignature = row.quickBooksPayments
     .map((payment) => `${normalizeDateForStorage(payment.date) || String(payment.date || "").trim()}|${normalizeConfirmationAmount(payment.amount)}`)
     .join(";");
   return `${row.id}::${paymentsSignature}`;
+}
+
+function isClientMatchRowConfirmed(row: ClientMatchRow, confirmedRowKeySet: ReadonlySet<string>): boolean {
+  const confirmationKey = buildClientMatchConfirmationKey(row);
+  return confirmedRowKeySet.has(confirmationKey) || confirmedRowKeySet.has(row.id);
 }
 
 function normalizeConfirmationAmount(value: number | null | undefined): string {

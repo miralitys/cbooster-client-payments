@@ -1034,7 +1034,7 @@ export default function ClientsPage() {
             <Button variant="secondary" size="sm" onClick={requestCloseModal}>
               Close
             </Button>
-            {isViewMode && canManage ? (
+            {isViewMode ? (
               <Button size="sm" onClick={startEditRecord}>
                 Edit
               </Button>

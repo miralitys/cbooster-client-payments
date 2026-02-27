@@ -484,7 +484,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
   }, [openClientByName]);
 
   const startEditRecord = useCallback(() => {
-    if (!canManage || !activeRecord) {
+    if (!activeRecord) {
       return;
     }
 
@@ -494,7 +494,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
       draft: { ...activeRecord },
       dirty: false,
     }));
-  }, [activeRecord, canManage]);
+  }, [activeRecord]);
 
   const closeModalNow = useCallback(() => {
     setIsDiscardConfirmOpen(false);
