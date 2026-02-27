@@ -37,6 +37,38 @@ const NAV_GROUPS: Array<{ key: NavigationItem["group"]; title: string }> = [
   { key: "system", title: "System" },
 ];
 
+const WEB_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
+
+function readCookieValueByName(name: string): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+
+  const rawCookie = String(document.cookie || "");
+  if (!rawCookie) {
+    return "";
+  }
+
+  const chunks = rawCookie.split(";");
+  for (const chunk of chunks) {
+    const [rawKey, ...rawValueParts] = chunk.split("=");
+    if ((rawKey || "").trim() !== name) {
+      continue;
+    }
+    const rawValue = rawValueParts.join("=").trim();
+    if (!rawValue) {
+      return "";
+    }
+    try {
+      return decodeURIComponent(rawValue);
+    } catch {
+      return rawValue;
+    }
+  }
+
+  return "";
+}
+
 function resolvePageTitle(pathname: string): string {
   if (pathname.startsWith("/dashboard")) {
     return "Dashboard";
@@ -137,6 +169,25 @@ export function Layout() {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, []);
+
+  function handleLogoutClick() {
+    setMenuOpen(false);
+
+    const csrfToken = readCookieValueByName(WEB_CSRF_COOKIE_NAME);
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/logout";
+    form.style.display = "none";
+
+    const csrfInput = document.createElement("input");
+    csrfInput.type = "hidden";
+    csrfInput.name = "_csrf";
+    csrfInput.value = csrfToken;
+    form.appendChild(csrfInput);
+
+    document.body.appendChild(form);
+    form.submit();
+  }
 
   useEffect(() => {
     let active = true;
@@ -242,10 +293,15 @@ export function Layout() {
                     })}
                   </div>
                   <div className="account-menu__divider" aria-hidden="true" />
-                  <a href="/logout" className="account-menu__item account-menu__item--logout" role="menuitem" onClick={() => setMenuOpen(false)}>
+                  <button
+                    type="button"
+                    className="account-menu__item account-menu__item--logout"
+                    role="menuitem"
+                    onClick={handleLogoutClick}
+                  >
                     <span className="account-menu__item-label">Log Out</span>
                     <span className="account-menu__item-hint">Exit session</span>
-                  </a>
+                  </button>
                 </div>
               </div>
             </div>

@@ -29017,10 +29017,109 @@ function handleWebLogout(req, res) {
   res.redirect(302, "/login");
 }
 
+function buildWebLogoutMethodNotAllowedHtml(options = {}) {
+  const safeStyleNonce = sanitizeTextValue(options.styleNonce, 180);
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Logout Method Not Allowed</title>
+    <style nonce="${escapeHtml(safeStyleNonce)}">
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: linear-gradient(135deg, #f5f7fb 0%, #e8f0ff 100%);
+        color: #0f172a;
+      }
+      .card {
+        width: min(560px, 100%);
+        display: grid;
+        gap: 14px;
+        background: #ffffff;
+        border: 1px solid #d6dde6;
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 18px 44px -30px rgba(15, 23, 42, 0.52);
+      }
+      .eyebrow {
+        margin: 0;
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #64748b;
+        font-weight: 700;
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(1.32rem, 2.3vw, 1.78rem);
+        line-height: 1.15;
+      }
+      p {
+        margin: 0;
+        color: #475569;
+        line-height: 1.5;
+      }
+      .actions {
+        display: inline-flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        border: 1px solid #bfd0ec;
+        background: #f8fbff;
+        color: #0f2a57;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 0.94rem;
+        padding: 10px 14px;
+      }
+      .btn:hover {
+        background: #edf4ff;
+      }
+      .btn--primary {
+        border-color: #163f77;
+        background: #163f77;
+        color: #ffffff;
+      }
+      .btn--primary:hover {
+        background: #0f2f5e;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <p class="eyebrow">Credit Booster</p>
+      <h1>Logout is available only via secure POST request</h1>
+      <p>This page was opened with <code>GET /logout</code>. Use the logout button inside the app menu to sign out safely.</p>
+      <div class="actions">
+        <a class="btn btn--primary" href="/login">Go to login</a>
+        <a class="btn" href="/">Go to dashboard</a>
+      </div>
+    </main>
+  </body>
+</html>`;
+}
+
 function handleWebLogoutMethodNotAllowed(_req, res) {
   res.setHeader("Allow", "POST");
   res.setHeader("Cache-Control", "no-store, private");
-  res.status(405).type("text/plain").send("Method Not Allowed");
+  res
+    .status(405)
+    .type("html")
+    .send(
+      buildWebLogoutMethodNotAllowedHtml({
+        styleNonce: resolveCspStyleNonceFromResponse(res),
+      }),
+    );
 }
 
 function resolveSecurityTxtExpiresValue(rawValue) {
