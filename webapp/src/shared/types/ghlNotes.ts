@@ -12,6 +12,9 @@ export interface GhlClientBasicNotePayload {
   memoTitle: string;
   memoBody: string;
   memoCreatedAt: string;
+  aboutClientTitle: string;
+  aboutClientBody: string;
+  aboutClientCreatedAt: string;
   source: string;
   matchedContacts: number;
   inspectedContacts: number;

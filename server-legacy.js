@@ -1003,6 +1003,7 @@ const GHL_API_BASE_HOSTNAME = (() => {
 })();
 const GHL_BASIC_NOTE_KEYWORD_PATTERN = /\bbasic\b/i;
 const GHL_MEMO_NOTE_KEYWORD_PATTERN = /\bmemo\b/i;
+const GHL_ABOUT_CLIENT_NOTE_KEYWORD_PATTERN = /\babout[\s_-]*client\b/i;
 const GHL_BASIC_NOTE_SYNC_TIME_ZONE = "America/Chicago";
 const GHL_BASIC_NOTE_SYNC_HOUR = 2;
 const GHL_BASIC_NOTE_SYNC_MINUTE = 15;
@@ -16634,6 +16635,18 @@ function pickGhlMemoNote(noteCandidates) {
   return notes[0] || null;
 }
 
+function pickGhlAboutClientNote(noteCandidates) {
+  const notes = Array.isArray(noteCandidates) ? noteCandidates : [];
+  for (const note of notes) {
+    const haystack = `${sanitizeTextValue(note.title, 300)}\n${sanitizeTextValue(note.body, 12000)}`;
+    if (GHL_ABOUT_CLIENT_NOTE_KEYWORD_PATTERN.test(haystack)) {
+      return note;
+    }
+  }
+
+  return null;
+}
+
 async function findGhlBasicNoteByClientName(clientName) {
   const normalizedClientName = sanitizeTextValue(clientName, 300);
   if (!normalizedClientName) {
@@ -16647,6 +16660,9 @@ async function findGhlBasicNoteByClientName(clientName) {
       memoTitle: "",
       memoBody: "",
       memoCreatedAt: "",
+      aboutClientTitle: "",
+      aboutClientBody: "",
+      aboutClientCreatedAt: "",
       source: "gohighlevel",
       matchedContacts: 0,
       inspectedContacts: 0,
@@ -16665,6 +16681,9 @@ async function findGhlBasicNoteByClientName(clientName) {
       memoTitle: "",
       memoBody: "",
       memoCreatedAt: "",
+      aboutClientTitle: "",
+      aboutClientBody: "",
+      aboutClientCreatedAt: "",
       source: "gohighlevel",
       matchedContacts: 0,
       inspectedContacts: 0,
@@ -16679,6 +16698,7 @@ async function findGhlBasicNoteByClientName(clientName) {
   let fallbackContactId = "";
   let basicMatch = null;
   let memoMatch = null;
+  let aboutClientMatch = null;
 
   for (const rawContact of contactsToInspect) {
     const contactId = sanitizeTextValue(rawContact?.id || rawContact?._id || rawContact?.contactId, 160);
@@ -16735,7 +16755,18 @@ async function findGhlBasicNoteByClientName(clientName) {
       }
     }
 
-    if (basicMatch && memoMatch) {
+    if (!aboutClientMatch) {
+      const aboutClientNote = pickGhlAboutClientNote(notes);
+      if (aboutClientNote) {
+        aboutClientMatch = {
+          contactName,
+          contactId,
+          note: aboutClientNote,
+        };
+      }
+    }
+
+    if (basicMatch && memoMatch && aboutClientMatch) {
       break;
     }
   }
@@ -16745,18 +16776,27 @@ async function findGhlBasicNoteByClientName(clientName) {
   }
 
   const source =
-    sanitizeTextValue(basicMatch?.note?.source || memoMatch?.note?.source, 120) || "gohighlevel";
+    sanitizeTextValue(basicMatch?.note?.source || memoMatch?.note?.source || aboutClientMatch?.note?.source, 120) || "gohighlevel";
 
   return {
     status: basicMatch ? "found" : "not_found",
-    contactName: sanitizeTextValue(basicMatch?.contactName || memoMatch?.contactName || fallbackContactName, 300),
-    contactId: sanitizeTextValue(basicMatch?.contactId || memoMatch?.contactId || fallbackContactId, 160),
+    contactName: sanitizeTextValue(
+      basicMatch?.contactName || memoMatch?.contactName || aboutClientMatch?.contactName || fallbackContactName,
+      300,
+    ),
+    contactId: sanitizeTextValue(
+      basicMatch?.contactId || memoMatch?.contactId || aboutClientMatch?.contactId || fallbackContactId,
+      160,
+    ),
     noteTitle: sanitizeTextValue(basicMatch?.note?.title, 300),
     noteBody: sanitizeTextValue(basicMatch?.note?.body, 12000),
     noteCreatedAt: sanitizeTextValue(basicMatch?.note?.createdAt, 80),
     memoTitle: sanitizeTextValue(memoMatch?.note?.title, 300),
     memoBody: sanitizeTextValue(memoMatch?.note?.body, 12000),
     memoCreatedAt: sanitizeTextValue(memoMatch?.note?.createdAt, 80),
+    aboutClientTitle: sanitizeTextValue(aboutClientMatch?.note?.title, 300),
+    aboutClientBody: sanitizeTextValue(aboutClientMatch?.note?.body, 12000),
+    aboutClientCreatedAt: sanitizeTextValue(aboutClientMatch?.note?.createdAt, 80),
     source,
     matchedContacts: contacts.length,
     inspectedContacts,
@@ -18459,6 +18499,9 @@ function mapGhlBasicNoteCacheRow(row) {
     memoTitle: sanitizeTextValue(row?.memo_title, 300),
     memoBody: sanitizeTextValue(row?.memo_body, 12000),
     memoCreatedAt: row?.memo_created_at ? new Date(row.memo_created_at).toISOString() : "",
+    aboutClientTitle: sanitizeTextValue(row?.about_client_title, 300),
+    aboutClientBody: sanitizeTextValue(row?.about_client_body, 12000),
+    aboutClientCreatedAt: row?.about_client_created_at ? new Date(row.about_client_created_at).toISOString() : "",
     source: sanitizeTextValue(row?.source, 120) || "gohighlevel",
     matchedContacts: Number.isFinite(matchedContacts) && matchedContacts >= 0 ? matchedContacts : 0,
     inspectedContacts: Number.isFinite(inspectedContacts) && inspectedContacts >= 0 ? inspectedContacts : 0,
@@ -18485,6 +18528,9 @@ function buildGhlBasicNoteApiPayloadFromCacheRow(row, options = {}) {
     memoTitle: cachedRow?.memoTitle || "",
     memoBody: cachedRow?.memoBody || "",
     memoCreatedAt: cachedRow?.memoCreatedAt || "",
+    aboutClientTitle: cachedRow?.aboutClientTitle || "",
+    aboutClientBody: cachedRow?.aboutClientBody || "",
+    aboutClientCreatedAt: cachedRow?.aboutClientCreatedAt || "",
     source: cachedRow?.source || "gohighlevel",
     matchedContacts: cachedRow?.matchedContacts || 0,
     inspectedContacts: cachedRow?.inspectedContacts || 0,
@@ -18516,6 +18562,9 @@ function buildGhlBasicNoteCacheUpsertRow(clientName, lookup, isWrittenOff, nowMs
     memoTitle: sanitizeTextValue(payload.memoTitle, 300),
     memoBody: sanitizeTextValue(payload.memoBody, 12000),
     memoCreatedAt: normalizeIsoTimestampOrNull(payload.memoCreatedAt),
+    aboutClientTitle: sanitizeTextValue(payload.aboutClientTitle, 300),
+    aboutClientBody: sanitizeTextValue(payload.aboutClientBody, 12000),
+    aboutClientCreatedAt: normalizeIsoTimestampOrNull(payload.aboutClientCreatedAt),
     source: sanitizeTextValue(payload.source, 120) || "gohighlevel",
     matchedContacts: Number.isFinite(matchedContacts) && matchedContacts >= 0 ? matchedContacts : 0,
     inspectedContacts: Number.isFinite(inspectedContacts) && inspectedContacts >= 0 ? inspectedContacts : 0,
@@ -18599,6 +18648,9 @@ async function getCachedGhlBasicNoteByClientName(clientName) {
         memo_title,
         memo_body,
         memo_created_at,
+        about_client_title,
+        about_client_body,
+        about_client_created_at,
         source,
         matched_contacts,
         inspected_contacts,
@@ -18644,6 +18696,9 @@ async function listCachedGhlBasicNoteRowsByClientNames(clientNames) {
         memo_title,
         memo_body,
         memo_created_at,
+        about_client_title,
+        about_client_body,
+        about_client_created_at,
         source,
         matched_contacts,
         inspected_contacts,
@@ -18685,6 +18740,9 @@ async function upsertGhlBasicNoteCacheRow(row) {
           memo_title,
           memo_body,
           memo_created_at,
+          about_client_title,
+          about_client_body,
+          about_client_created_at,
           source,
           matched_contacts,
           inspected_contacts,
@@ -18695,7 +18753,29 @@ async function upsertGhlBasicNoteCacheRow(row) {
           updated_at
         )
       VALUES
-        ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9, $10::timestamptz, $11, $12, $13, $14, $15, $16, $17::timestamptz, NOW())
+        (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7::timestamptz,
+          $8,
+          $9,
+          $10::timestamptz,
+          $11,
+          $12,
+          $13::timestamptz,
+          $14,
+          $15,
+          $16,
+          $17,
+          $18,
+          $19,
+          $20::timestamptz,
+          NOW()
+        )
       ON CONFLICT (client_name)
       DO UPDATE SET
         status = EXCLUDED.status,
@@ -18707,6 +18787,9 @@ async function upsertGhlBasicNoteCacheRow(row) {
         memo_title = EXCLUDED.memo_title,
         memo_body = EXCLUDED.memo_body,
         memo_created_at = EXCLUDED.memo_created_at,
+        about_client_title = EXCLUDED.about_client_title,
+        about_client_body = EXCLUDED.about_client_body,
+        about_client_created_at = EXCLUDED.about_client_created_at,
         source = EXCLUDED.source,
         matched_contacts = EXCLUDED.matched_contacts,
         inspected_contacts = EXCLUDED.inspected_contacts,
@@ -18727,6 +18810,9 @@ async function upsertGhlBasicNoteCacheRow(row) {
       sanitizeTextValue(normalizedRow.memoTitle, 300),
       sanitizeTextValue(normalizedRow.memoBody, 12000),
       normalizeIsoTimestampOrNull(normalizedRow.memoCreatedAt),
+      sanitizeTextValue(normalizedRow.aboutClientTitle, 300),
+      sanitizeTextValue(normalizedRow.aboutClientBody, 12000),
+      normalizeIsoTimestampOrNull(normalizedRow.aboutClientCreatedAt),
       sanitizeTextValue(normalizedRow.source, 120) || "gohighlevel",
       Number.isFinite(normalizedRow.matchedContacts) && normalizedRow.matchedContacts >= 0
         ? Math.trunc(normalizedRow.matchedContacts)
@@ -24104,6 +24190,9 @@ async function ensureDatabaseReady() {
           memo_title TEXT NOT NULL DEFAULT '',
           memo_body TEXT NOT NULL DEFAULT '',
           memo_created_at TIMESTAMPTZ,
+          about_client_title TEXT NOT NULL DEFAULT '',
+          about_client_body TEXT NOT NULL DEFAULT '',
+          about_client_created_at TIMESTAMPTZ,
           source TEXT NOT NULL DEFAULT 'gohighlevel',
           matched_contacts INTEGER NOT NULL DEFAULT 0,
           inspected_contacts INTEGER NOT NULL DEFAULT 0,
@@ -24128,6 +24217,21 @@ async function ensureDatabaseReady() {
       await sharedDbQuery(`
         ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
         ADD COLUMN IF NOT EXISTS memo_created_at TIMESTAMPTZ
+      `);
+
+      await sharedDbQuery(`
+        ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS about_client_title TEXT NOT NULL DEFAULT ''
+      `);
+
+      await sharedDbQuery(`
+        ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS about_client_body TEXT NOT NULL DEFAULT ''
+      `);
+
+      await sharedDbQuery(`
+        ALTER TABLE ${GHL_BASIC_NOTE_CACHE_TABLE}
+        ADD COLUMN IF NOT EXISTS about_client_created_at TIMESTAMPTZ
       `);
 
       await sharedDbQuery(`

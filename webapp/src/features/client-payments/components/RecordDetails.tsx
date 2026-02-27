@@ -129,6 +129,7 @@ export function RecordDetails({
   const [pendingQuickBooksMatches, setPendingQuickBooksMatches] = useState<QuickBooksPendingConfirmationRow[]>([]);
   const [isBasicInfoExpanded, setIsBasicInfoExpanded] = useState(false);
   const [isMemoExpanded, setIsMemoExpanded] = useState(false);
+  const [isAboutClientExpanded, setIsAboutClientExpanded] = useState(false);
   const [clientManagerRefreshError, setClientManagerRefreshError] = useState("");
   const [clientPhoneRefreshError, setClientPhoneRefreshError] = useState("");
   const transcriptNormalizationByClientRef = useRef<Record<string, boolean>>({});
@@ -177,6 +178,10 @@ export function RecordDetails({
   const memoPreview = useMemo(
     () => buildMultilinePreview(ghlBasicNote?.memoBody || "", NOTE_PREVIEW_MAX_LINES, isMemoExpanded),
     [ghlBasicNote?.memoBody, isMemoExpanded],
+  );
+  const aboutClientPreview = useMemo(
+    () => buildMultilinePreview(ghlBasicNote?.aboutClientBody || "", NOTE_PREVIEW_MAX_LINES, isAboutClientExpanded),
+    [ghlBasicNote?.aboutClientBody, isAboutClientExpanded],
   );
 
   const detailsFields = useMemo(
@@ -241,6 +246,7 @@ export function RecordDetails({
     setClientPhoneRefreshError("");
     setIsBasicInfoExpanded(false);
     setIsMemoExpanded(false);
+    setIsAboutClientExpanded(false);
   }, [normalizedClientName]);
 
   useEffect(() => {
@@ -943,6 +949,36 @@ export function RecordDetails({
 
           <section className="record-details-ghl-note" aria-live="polite">
             <div className="record-details-ghl-note__header">
+              <h4 className="record-details-ghl-note__title">About Client</h4>
+              {ghlBasicNote?.aboutClientTitle ? <p className="react-user-footnote">{ghlBasicNote.aboutClientTitle}</p> : null}
+            </div>
+
+            {isLoadingGhlBasicNote ? <p className="react-user-footnote">Loading about client...</p> : null}
+            {!isLoadingGhlBasicNote && ghlBasicNoteError ? (
+              <p className="record-details-ghl-note__error">{ghlBasicNoteError}</p>
+            ) : null}
+            {!isLoadingGhlBasicNote && !ghlBasicNoteError && !ghlBasicNote?.aboutClientBody ? (
+              <p className="react-user-footnote">About Client not found in GoHighLevel notes for this client.</p>
+            ) : null}
+            {!isLoadingGhlBasicNote && !ghlBasicNoteError && ghlBasicNote?.aboutClientBody ? (
+              <>
+                <pre className="record-details-ghl-note__body">{aboutClientPreview.text}</pre>
+                {aboutClientPreview.hasMore && !isAboutClientExpanded ? (
+                  <div className="record-details-ghl-note__actions">
+                    <Button type="button" variant="secondary" size="sm" onClick={() => setIsAboutClientExpanded(true)}>
+                      Show more
+                    </Button>
+                  </div>
+                ) : null}
+                {ghlBasicNote.aboutClientCreatedAt ? (
+                  <p className="react-user-footnote">Created: {formatDate(ghlBasicNote.aboutClientCreatedAt)}</p>
+                ) : null}
+              </>
+            ) : null}
+          </section>
+
+          <section className="record-details-ghl-note" aria-live="polite">
+            <div className="record-details-ghl-note__header">
               <h4 className="record-details-ghl-note__title">SMS & Calls</h4>
               {ghlCommunications?.contactName ? (
                 <p className="react-user-footnote">
@@ -1468,7 +1504,9 @@ function resolveContactInfo(record: ClientRecord, ghlBasicNote: GhlClientBasicNo
   phone: string;
   email: string;
 } {
-  const noteText = [ghlBasicNote?.noteBody || "", ghlBasicNote?.memoBody || ""].filter(Boolean).join("\n");
+  const noteText = [ghlBasicNote?.noteBody || "", ghlBasicNote?.memoBody || "", ghlBasicNote?.aboutClientBody || ""]
+    .filter(Boolean)
+    .join("\n");
 
   const phoneFromRecord =
     getOptionalRecordText(record, "clientPhoneNumber") || getOptionalRecordText(record, "clientPhone") || getOptionalRecordText(record, "phone");
