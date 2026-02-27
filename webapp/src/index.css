@@ -5475,6 +5475,7 @@ a {
 .support-user-grid {
   display: grid;
   gap: 24px;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
 }
 
 .support-kanban {
@@ -5571,6 +5572,46 @@ a {
 .support-form {
   display: grid;
   gap: 12px;
+}
+
+.support-file-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.support-file-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  border-radius: 10px;
+  border: 1px solid #cbd5f5;
+  background: #f5f7ff;
+  color: #1f2a5a;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.support-file-button:hover {
+  border-color: #7b8fe8;
+  box-shadow: 0 6px 18px rgba(44, 76, 185, 0.12);
+  transform: translateY(-1px);
+}
+
+.support-file-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.support-file-count {
+  color: #5b647a;
+  font-size: 0.9rem;
 }
 
 .support-form__error {
@@ -5715,6 +5756,9 @@ a {
 
 @media (max-width: 900px) {
   .support-kanban {
+    grid-template-columns: 1fr;
+  }
+  .support-user-grid {
     grid-template-columns: 1fr;
   }
   .support-list-card__row {

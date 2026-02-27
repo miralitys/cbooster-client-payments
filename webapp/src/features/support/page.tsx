@@ -31,16 +31,16 @@ import {
 } from "@/shared/ui";
 
 const PRIORITY_OPTIONS = [
-  { value: "low", label: "не срочно" },
-  { value: "urgent", label: "срочно" },
-  { value: "critical", label: "очень срочно" },
+  { value: "low", label: "Not urgent" },
+  { value: "urgent", label: "Urgent" },
+  { value: "critical", label: "Very urgent" },
 ];
 
 const STATUS_LABELS: Record<string, string> = {
   new: "New",
   review: "Review",
   in_progress: "In Progress",
-  needs_revision: "Needs Revision",
+  needs_revision: "Needs revision",
   done: "Done",
   rejected: "Rejected",
   withdrawn: "Withdrawn",
@@ -597,7 +597,7 @@ export default function SupportPage() {
               </div>
 
               <details className="support-reports__recent">
-                <summary>Показать недавно выполненные</summary>
+                <summary>Show recently completed</summary>
                 <div className="support-reports__table">
                   {(reports?.recent || []).map((item) => (
                     <div key={item.id} className="support-reports__row">
@@ -616,7 +616,7 @@ export default function SupportPage() {
         </div>
       ) : (
         <div className="support-user-grid">
-          <Panel title="Оставить заявку">
+          <Panel title="Create request">
             <form className="support-form" onSubmit={handleFormSubmit}>
               <Input
                 value={formState.title}
@@ -642,7 +642,7 @@ export default function SupportPage() {
                 <Textarea
                   value={formState.urgencyReason}
                   onChange={(event) => setFormState((prev) => ({ ...prev, urgencyReason: event.target.value }))}
-                  placeholder="Опишите причину срочности"
+                  placeholder="Explain urgency"
                 />
               ) : null}
               <Input
@@ -650,12 +650,20 @@ export default function SupportPage() {
                 value={formState.desiredDueDate}
                 onChange={(event) => setFormState((prev) => ({ ...prev, desiredDueDate: event.target.value }))}
               />
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                onChange={(event) => setFormAttachments(Array.from(event.target.files || []))}
-              />
+              <div className="support-file-row">
+                <label className="support-file-button">
+                  Attach files
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    onChange={(event) => setFormAttachments(Array.from(event.target.files || []))}
+                  />
+                </label>
+                <span className="support-file-count">
+                  {formAttachments.length ? `${formAttachments.length} file(s) selected` : "No files selected"}
+                </span>
+              </div>
               {formError ? <div className="support-form__error">{formError}</div> : null}
               <Button type="submit" isLoading={formSubmitting}>
                 Submit
@@ -663,11 +671,11 @@ export default function SupportPage() {
             </form>
           </Panel>
 
-          <Panel title="Мои заявки">
+          <Panel title="My requests">
             {isLoading ? (
               <EmptyState title="Loading..." />
             ) : requests.length === 0 ? (
-              <EmptyState title="Нет заявок" />
+              <EmptyState title="No requests yet" />
             ) : (
               <div className="support-list">
                 {requests.map((request) => (
@@ -718,8 +726,8 @@ export default function SupportPage() {
               onChange={(event) => setMoveReason(event.target.value)}
               placeholder={
                 moveTargetStatus === "rejected"
-                  ? "Причина отклонения"
-                  : "Причина отправки на доработку"
+                  ? "Reason for rejection"
+                  : "Reason for revision"
               }
             />
             <input type="file" multiple onChange={(event) => setMoveAttachments(Array.from(event.target.files || []))} />
@@ -731,7 +739,7 @@ export default function SupportPage() {
       ) : null}
 
       {editModalOpen ? (
-        <Modal open={editModalOpen} title="Edit Request" onClose={() => setEditModalOpen(false)}>
+        <Modal open={editModalOpen} title="Edit request" onClose={() => setEditModalOpen(false)}>
           <div className="support-modal">
             <Input
               value={editDraft.title}
@@ -754,7 +762,7 @@ export default function SupportPage() {
               <Textarea
                 value={editDraft.urgencyReason}
                 onChange={(event) => setEditDraft((prev) => ({ ...prev, urgencyReason: event.target.value }))}
-                placeholder="Опишите причину срочности"
+                placeholder="Explain urgency"
               />
             ) : null}
             <Input
