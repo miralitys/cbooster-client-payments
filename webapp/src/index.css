@@ -2385,6 +2385,21 @@ a {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.record-editor-form__field {
+  min-width: 0;
+}
+
+.record-editor-form__payment-pair {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  padding: var(--space-3);
+}
+
 .client-payments__modal-actions {
   display: flex;
   flex-wrap: wrap;
@@ -5006,6 +5021,10 @@ a {
   .record-details-layout,
   .record-profile-header__contact-row,
   .record-workflow-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .record-editor-form__payment-pair {
     grid-template-columns: 1fr;
   }
 
