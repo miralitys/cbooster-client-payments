@@ -17,6 +17,7 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/custom-dashboard", label: "Custom Dashboard" },
   { to: "/client-payments", label: "Client Payments" },
+  { to: "/client-health", label: "Здоровье клиента" },
   { to: "/clients", label: "Clients" },
   { to: "/client-match", label: "Client Match", visibility: "owner-admin-or-accounting" },
   { to: "/payment-probability", label: "Client Payment Probability" },
@@ -65,6 +66,10 @@ function resolvePageTitle(pathname: string): string {
 
   if (pathname.startsWith("/client-payments")) {
     return "Client Payments";
+  }
+
+  if (pathname.startsWith("/client-health")) {
+    return "Здоровье клиента";
   }
 
   if (pathname.startsWith("/clients")) {

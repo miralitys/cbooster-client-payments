@@ -730,6 +730,68 @@ function createRecordsRepo(dependencies = {}) {
     return records;
   }
 
+  async function listClientHealthRecordsSafeMode(options = {}) {
+    await ensureDatabaseReady();
+
+    const requestedLimit = Number.parseInt(String(options.limit ?? 5), 10);
+    const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 5, 1), 5);
+
+    const activeRowsResult = await query(
+      `
+        -- SAFE MODE: LIMITED TO 5 CLIENTS
+        SELECT id, record, source_state_updated_at, updated_at
+        FROM ${CLIENT_RECORDS_V2_TABLE}
+        WHERE source_state_row_id = $1
+          AND LOWER(BTRIM(COALESCE(record->>'active', ''))) IN ('1', 'true', 'yes', 'on')
+        ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
+        LIMIT $2
+      `,
+      [STATE_ROW_ID, limit],
+    );
+
+    let rows = Array.isArray(activeRowsResult.rows) ? activeRowsResult.rows : [];
+    let sampleMode = "latest_active";
+
+    if (!rows.length) {
+      const fallbackRowsResult = await query(
+        `
+          -- SAFE MODE: LIMITED TO 5 CLIENTS
+          SELECT id, record, source_state_updated_at, updated_at
+          FROM ${CLIENT_RECORDS_V2_TABLE}
+          WHERE source_state_row_id = $1
+          ORDER BY COALESCE(source_state_updated_at, updated_at, created_at) DESC NULLS LAST, id DESC
+          LIMIT $2
+        `,
+        [STATE_ROW_ID, limit],
+      );
+      rows = Array.isArray(fallbackRowsResult.rows) ? fallbackRowsResult.rows : [];
+      sampleMode = "latest_any";
+    }
+
+    const records = [];
+    const updatedAtCandidates = [];
+    for (const row of rows) {
+      const record = normalizeRecordFromV2Row(row?.record);
+      if (record) {
+        const mappedRecord = { ...record };
+        const rowId = sanitizeTextValue(row?.id, 180);
+        if (!sanitizeTextValue(mappedRecord.id, 180)) {
+          mappedRecord.id = rowId || `safe_client_${records.length + 1}`;
+        }
+        records.push(mappedRecord);
+      }
+
+      updatedAtCandidates.push(row?.source_state_updated_at, row?.updated_at);
+    }
+
+    return {
+      records,
+      updatedAt: resolveRecordsV2UpdatedAt(updatedAtCandidates),
+      sampleMode,
+      limit,
+    };
+  }
+
   async function saveStoredRecordsUsingV2(records, options = {}) {
     return runInTransaction(async ({ query: txQuery }) => {
       const stateResult = await txQuery(
@@ -1026,6 +1088,7 @@ function createRecordsRepo(dependencies = {}) {
     prependSingleRecordToLegacyState: prependSingleRecordToLegacyStateByClient,
     upsertSingleRecordToV2: upsertSingleRecordToV2ByClient,
     listCurrentRecordsFromV2ForWrite: listCurrentRecordsFromV2ForWriteByClient,
+    listClientHealthRecordsSafeMode,
     saveStoredRecordsUsingV2,
     saveStoredRecordsPatchUsingV2,
     saveStoredRecords,

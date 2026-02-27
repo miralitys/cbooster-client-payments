@@ -35,6 +35,11 @@ function registerRecordsRoutes(context) {
     handlers.handleRecordsGet,
   );
   app.get(
+    "/api/client-health",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
+    handlers.handleClientHealthGet,
+  );
+  app.get(
     "/api/clients",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
     handlers.handleRecordsGet,

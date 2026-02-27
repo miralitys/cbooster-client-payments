@@ -5,6 +5,7 @@ import { OwnerAdminRoute } from "@/app/OwnerAdminRoute";
 import { OwnerAdminOrAccountingRoute } from "@/app/OwnerAdminOrAccountingRoute";
 import AccessControlPage from "@/features/access-control/page";
 import ClientsPage from "@/features/clients/page";
+import ClientHealthPage from "@/features/client-health/page";
 import ClientMatchPage from "@/features/client-match/page";
 import ClientPaymentsPage from "@/features/client-payments/page";
 import ClientScorePage from "@/features/client-score/page";
@@ -21,6 +22,7 @@ export function AppRouter() {
       <Route element={<Layout />}>
         <Route index element={<Navigate to="client-payments" replace />} />
         <Route path="client-payments" element={<ClientPaymentsPage />} />
+        <Route path="client-health" element={<ClientHealthPage />} />
         <Route path="client-score" element={<ClientScorePage />} />
         <Route path="payment-probability" element={<ClientScorePage />} />
         <Route path="identityiq-score" element={<IdentityIqScorePage />} />

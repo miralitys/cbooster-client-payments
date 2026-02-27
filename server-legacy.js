@@ -25130,6 +25130,10 @@ async function listCurrentRecordsFromV2ForWrite(client) {
   return recordsRepo.listCurrentRecordsFromV2ForWrite(client);
 }
 
+async function listClientHealthRecordsSafeMode(options = {}) {
+  return recordsRepo.listClientHealthRecordsSafeMode(options);
+}
+
 async function saveStoredRecordsUsingV2(records, options = {}) {
   return recordsRepo.saveStoredRecordsUsingV2(records, options);
 }
@@ -33193,6 +33197,7 @@ const recordsService = createRecordsService({
   delayMs,
   hasDatabase: () => Boolean(pool),
   getStoredRecordsForApiRecordsRoute,
+  listClientHealthRecordsSafeMode,
   readV2Enabled: READ_V2_ENABLED,
   scheduleDualReadCompareForLegacyRecords,
   filterClientRecordsForWebAuthUser,
@@ -33248,6 +33253,7 @@ registerRecordsRoutes({
     handleHealthGet,
     handlePerformanceDiagnosticsGet,
     handleRecordsGet: recordsController.handleRecordsGet,
+    handleClientHealthGet: recordsController.handleClientHealthGet,
     handleClientsFiltersGet: recordsController.handleClientsFiltersGet,
     handleRecordsPut: recordsController.handleRecordsPut,
     handleRecordsPatch: recordsController.handleRecordsPatch,
@@ -38747,6 +38753,152 @@ const handleGhlClientPhoneRefreshPost = async (req, res) => {
   }
 };
 
+const handleGhlClientPhonesRefreshPost = async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.client_phone.refresh_bulk",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_SYNC.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_SYNC.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_SYNC.blockMs,
+      },
+      message: "Bulk client phone refresh limit reached. Please wait before retrying.",
+      code: "ghl_client_phone_refresh_bulk_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const requestedClientNames = resolveRequestedGhlClientManagerNames(req.body?.clientNames || req.body?.clientName);
+  if (!requestedClientNames.length) {
+    res.status(400).json({
+      error: "Payload must include `clientNames` with at least one client name.",
+    });
+    return;
+  }
+
+  if (!isWebAuthOwnerOrAdminProfile(req.webAuthProfile) && !isWebAuthClientServiceDepartmentHeadProfile(req.webAuthProfile)) {
+    res.status(403).json({
+      error: "Access denied. Only owner/admin/client-service department head can refresh client phone.",
+    });
+    return;
+  }
+
+  if (!isGhlConfigured()) {
+    res.status(503).json({
+      error: "GHL integration is not configured. Set GHL_API_KEY and GHL_LOCATION_ID.",
+    });
+    return;
+  }
+
+  try {
+    const state = await getStoredRecords();
+    const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
+    const targetClientNames = scopeVisibleClientNamesByRequestedSubset(visibilityContext.visibleClientNames, requestedClientNames);
+    if (!targetClientNames.length) {
+      res.status(404).json({
+        error: "Clients from payload were not found in your visible scope.",
+      });
+      return;
+    }
+
+    const phonesByComparableClientName = new Map();
+    let refreshedClientsCount = 0;
+    let notFoundClientsCount = 0;
+    const failures = [];
+
+    for (const targetClientName of targetClientNames) {
+      try {
+        const result = await findGhlClientPhoneByClientName(targetClientName);
+        const phone = sanitizeTextValue(result?.phone, 80);
+        if (result?.status === "found" && phone) {
+          const comparable = normalizeAssistantComparableText(targetClientName, 220);
+          if (comparable) {
+            phonesByComparableClientName.set(comparable, phone);
+          }
+          refreshedClientsCount += 1;
+        } else {
+          notFoundClientsCount += 1;
+        }
+      } catch (error) {
+        if (error?.httpStatus === 429 || sanitizeTextValue(error?.code, 80) === "ghl_phone_lookup_rate_limited") {
+          throw error;
+        }
+
+        failures.push({
+          clientName: sanitizeTextValue(targetClientName, 300),
+          error: sanitizeTextValue(error?.message, 240) || "Failed to refresh client phone.",
+          code: sanitizeTextValue(error?.code, 80),
+          status: Number.isFinite(error?.httpStatus) ? Number(error.httpStatus) : undefined,
+        });
+      }
+    }
+
+    let savedRecordsCount = 0;
+    let recordsUpdatedAt = null;
+    if (phonesByComparableClientName.size && recordsService && typeof recordsService.patchRecordsForApi === "function") {
+      const visibleRecords = Array.isArray(visibilityContext?.visibleRecords) ? visibilityContext.visibleRecords : [];
+      const operations = [];
+      for (const record of visibleRecords) {
+        const recordId = sanitizeTextValue(record?.id, 120);
+        if (!recordId) {
+          continue;
+        }
+
+        const comparableClientName = normalizeAssistantComparableText(record?.clientName, 220);
+        if (!comparableClientName) {
+          continue;
+        }
+
+        const nextPhone = sanitizeTextValue(phonesByComparableClientName.get(comparableClientName), 80);
+        if (!nextPhone) {
+          continue;
+        }
+
+        operations.push({
+          type: "upsert",
+          id: recordId,
+          record: {
+            clientPhoneNumber: nextPhone,
+          },
+        });
+      }
+
+      if (operations.length) {
+        const saveResult = await recordsService.patchRecordsForApi({
+          operations,
+          expectedUpdatedAt: null,
+        });
+        savedRecordsCount = operations.length;
+        recordsUpdatedAt = sanitizeTextValue(saveResult?.body?.updatedAt, 80) || null;
+      }
+    }
+
+    res.json({
+      ok: true,
+      requestedClientsCount: requestedClientNames.length,
+      scopedClientsCount: targetClientNames.length,
+      refreshedClientsCount,
+      notFoundClientsCount,
+      failedClientsCount: failures.length,
+      savedRecordsCount,
+      updatedAt: recordsUpdatedAt,
+      failures: failures.slice(0, 30),
+    });
+  } catch (error) {
+    console.error("POST /api/ghl/client-phone/refresh/bulk failed:", error);
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to refresh filtered client phones from GoHighLevel.",
+      code: sanitizeTextValue(error?.code, 120) || "ghl_client_phone_refresh_bulk_failed",
+    });
+  }
+};
+
 const handleGhlClientContractsArchivePost = async (req, res) => {
   if (!pool) {
     res.status(503).json({
@@ -39562,6 +39714,7 @@ registerGhlRoutes({
     handleGhlClientManagersRefreshBackgroundPost: ghlLeadsController.handleGhlClientManagersRefreshBackgroundPost,
     handleGhlClientManagersRefreshBackgroundJobGet: ghlLeadsController.handleGhlClientManagersRefreshBackgroundJobGet,
     handleGhlClientPhoneRefreshPost,
+    handleGhlClientPhonesRefreshPost,
     handleGhlClientContractsArchivePost,
     handleGhlClientContractsGet,
     handleGhlClientContractsDownloadGet,
@@ -39683,6 +39836,10 @@ app.get("/Client_Payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT
 
 app.get("/client-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
   res.redirect(302, "/app/client-payments");
+});
+
+app.get("/client-health", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
+  res.redirect(302, "/app/client-health");
 });
 
 app.get("/dashboard", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_DASHBOARD), (_req, res) => {

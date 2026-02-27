@@ -7,6 +7,7 @@ function createRecordsService(dependencies = {}) {
     delayMs,
     hasDatabase,
     getStoredRecordsForApiRecordsRoute,
+    listClientHealthRecordsSafeMode,
     readV2Enabled,
     scheduleDualReadCompareForLegacyRecords,
     filterClientRecordsForWebAuthUser,
@@ -81,6 +82,77 @@ function createRecordsService(dependencies = {}) {
       body: {
         records: filteredRecords,
         updatedAt: state.updatedAt,
+      },
+    };
+  }
+
+  async function getClientHealthSnapshotForApi({ webAuthProfile, webAuthUser }) {
+    if (simulateSlowRecords) {
+      await delayMs(simulateSlowRecordsDelayMs);
+      return {
+        status: 200,
+        body: {
+          records: [],
+          updatedAt: new Date().toISOString(),
+          limit: 5,
+          safeMode: true,
+          source: "simulated",
+          sampleMode: "latest_active",
+        },
+      };
+    }
+
+    if (!hasDatabase()) {
+      return {
+        status: 503,
+        body: {
+          error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+        },
+      };
+    }
+
+    const safeLimit = 5;
+    if (typeof listClientHealthRecordsSafeMode === "function") {
+      try {
+        const safeSnapshot = await listClientHealthRecordsSafeMode({ limit: safeLimit });
+        const roleScopedRecords = filterClientRecordsForWebAuthUser(safeSnapshot.records, webAuthProfile);
+        const sampledRecords = selectSafeModeClientSample(roleScopedRecords, safeLimit);
+        const sampleMode = sanitizeTextValue(safeSnapshot.sampleMode, 40) || "latest_active";
+
+        if (sampledRecords.length) {
+          return {
+            status: 200,
+            body: {
+              records: sampledRecords,
+              updatedAt: safeSnapshot.updatedAt || null,
+              limit: safeLimit,
+              safeMode: true,
+              source: "v2_safe_sql",
+              sampleMode,
+            },
+          };
+        }
+      } catch (error) {
+        const safeMessage = sanitizeTextValue(error?.message, 240) || "unknown error";
+        warn(
+          `[records] SAFE_MODE fallback to legacy snapshot for user=${sanitizeTextValue(webAuthUser, 160) || "unknown"}: ${safeMessage}`,
+        );
+      }
+    }
+
+    const state = await getStoredRecordsForApiRecordsRoute();
+    const roleFilteredRecords = filterClientRecordsForWebAuthUser(state.records, webAuthProfile);
+    const sampledRecords = selectSafeModeClientSample(roleFilteredRecords, safeLimit);
+
+    return {
+      status: 200,
+      body: {
+        records: sampledRecords,
+        updatedAt: state.updatedAt || null,
+        limit: safeLimit,
+        safeMode: true,
+        source: "legacy_fallback",
+        sampleMode: "latest_active",
       },
     };
   }
@@ -222,6 +294,7 @@ function createRecordsService(dependencies = {}) {
 
   return {
     getRecordsForApi,
+    getClientHealthSnapshotForApi,
     getClientFilterOptionsForApi,
     saveRecordsForApi,
     patchRecordsForApi,
@@ -543,6 +616,57 @@ function isTruthy(rawValue) {
 function isActiveEnabled(rawValue) {
   const value = String(rawValue || "").trim().toLowerCase();
   return value === "yes" || value === "true" || value === "1" || value === "on" || value === "active";
+}
+
+function selectSafeModeClientSample(records, limit = 5) {
+  const maxRows = Math.min(Math.max(Number.parseInt(String(limit || 5), 10) || 5, 1), 5);
+  if (!Array.isArray(records) || !records.length || maxRows <= 0) {
+    return [];
+  }
+
+  const normalized = records
+    .filter((record) => record && typeof record === "object")
+    .slice()
+    .sort((left, right) => resolveRecordRecencyTimestamp(right) - resolveRecordRecencyTimestamp(left));
+
+  const activeRows = normalized.filter((record) => isActiveEnabled(record?.active));
+  if (activeRows.length >= maxRows) {
+    return activeRows.slice(0, maxRows);
+  }
+
+  const seenIds = new Set(activeRows.map((record) => String(record?.id || "").trim()).filter(Boolean));
+  const combined = [...activeRows];
+  for (const record of normalized) {
+    if (combined.length >= maxRows) {
+      break;
+    }
+    const recordId = String(record?.id || "").trim();
+    if (recordId && seenIds.has(recordId)) {
+      continue;
+    }
+    if (recordId) {
+      seenIds.add(recordId);
+    }
+    combined.push(record);
+  }
+
+  return combined.slice(0, maxRows);
+}
+
+function resolveRecordRecencyTimestamp(record) {
+  const candidates = [
+    parseDateValue(record?.createdAt),
+    parseDateValue(record?.payment1Date),
+    parseDateValue(record?.startedInWork),
+    parseDateValue(record?.dateWhenFullyPaid),
+    parseDateValue(record?.scoreUpdatedAt),
+  ].filter((value) => value !== null);
+
+  if (!candidates.length) {
+    return 0;
+  }
+
+  return Math.max(...candidates);
 }
 
 function computeFuturePaymentsAmount(record) {

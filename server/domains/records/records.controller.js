@@ -49,6 +49,19 @@ function createRecordsController(dependencies = {}) {
     }
   }
 
+  async function handleClientHealthGet(req, res) {
+    try {
+      const result = await recordsService.getClientHealthSnapshotForApi({
+        webAuthProfile: req.webAuthProfile,
+        webAuthUser: req.webAuthUser,
+      });
+      res.status(result.status).json(result.body);
+    } catch (error) {
+      console.error("GET /api/client-health failed:", error);
+      res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load client health records"));
+    }
+  }
+
   async function handleClientsFiltersGet(req, res) {
     try {
       const result = await recordsService.getClientFilterOptionsForApi({
@@ -153,6 +166,7 @@ function createRecordsController(dependencies = {}) {
 
   return {
     handleRecordsGet,
+    handleClientHealthGet,
     handleClientsFiltersGet,
     handleRecordsPut,
     handleRecordsPatch,
