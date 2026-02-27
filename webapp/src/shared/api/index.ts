@@ -59,4 +59,5 @@ export {
 } from "@/shared/api/customDashboard";
 export { getIdentityIqCreditScore } from "@/shared/api/identityIq";
 export { getGhlContractText } from "@/shared/api/ghlContractText";
+export { getGhlContractPdf } from "@/shared/api/ghlContractPdf";
 export { postGhlClientPhoneRefresh } from "@/shared/api/ghlClientPhone";

@@ -33485,6 +33485,129 @@ async function fetchGhlContractTextViaApiKey(payload) {
   };
 }
 
+async function fetchGhlContractPdfViaApiKey(payload) {
+  const clientName = sanitizeTextValue(payload?.clientName, 300);
+  const locationId = resolveGhlLocationId(payload?.locationId);
+  const startedAt = Date.now();
+
+  if (!clientName) {
+    throw toGhlContractTextOperationError("clientName is required.", {
+      code: "ghl_contract_pdf_invalid_payload",
+      httpStatus: 400,
+    });
+  }
+  if (!GHL_API_KEY) {
+    throw toGhlContractTextOperationError("GHL integration is not configured. Set GHL_API_KEY.", {
+      code: "ghl_contract_pdf_missing_api_key",
+      httpStatus: 503,
+    });
+  }
+  if (!locationId) {
+    throw toGhlContractTextOperationError("GHL locationId is not configured. Set GHL_LOCATION_ID or pass locationId.", {
+      code: "ghl_contract_pdf_missing_location",
+      httpStatus: 503,
+    });
+  }
+
+  let download = null;
+  let source = "";
+  let contractTitle = "-";
+  let contractUrl = "";
+  let contactName = clientName;
+  let contactId = "";
+  let note = "";
+
+  try {
+    const lookupRow = await resolveGhlClientContractDownloadRow(clientName, {
+      locationId,
+      fastMode: true,
+    });
+    if (lookupRow?.status === "ready" && lookupRow.contractUrl) {
+      contractTitle = sanitizeTextValue(lookupRow.contractTitle, 300) || contractTitle;
+      contractUrl = sanitizeTextValue(lookupRow.contractUrl, 2000) || contractUrl;
+      contactName = sanitizeTextValue(lookupRow.contactName, 300) || contactName;
+      contactId = sanitizeTextValue(lookupRow.contactId, 160) || contactId;
+
+      const downloaded = await fetchGhlContractFileForDownload(contractUrl);
+      if (downloaded?.buffer?.length) {
+        download = downloaded;
+        source = "api_download";
+        note = "Contract PDF downloaded via GoHighLevel API.";
+      }
+    }
+  } catch (error) {
+    console.warn("GHL contract PDF API download failed:", sanitizeTextValue(error?.message, 300));
+  }
+
+  if (download?.buffer?.length && pool) {
+    try {
+      await insertGhlContractArchiveRow({
+        clientName,
+        contactName,
+        contactId,
+        contractTitle,
+        contractUrl,
+        source: "gohighlevel.api",
+        fileName: download.fileName || `${clientName} contract.pdf`,
+        mimeType: download.contentType || "application/pdf",
+        content: download.buffer,
+        archivedAt: new Date().toISOString(),
+        metadata: {
+          ingest: "api_download",
+        },
+      });
+    } catch (error) {
+      console.warn("GHL contract PDF archive insert failed:", sanitizeTextValue(error?.message, 300));
+    }
+  }
+
+  if (!download?.buffer?.length) {
+    try {
+      const archived = await getLatestGhlContractArchiveRow(clientName, contactId);
+      if (archived?.contentBuffer?.length) {
+        download = {
+          buffer: archived.contentBuffer,
+          fileName: archived.fileName || `${clientName} contract.pdf`,
+          contentType: archived.mimeType || "application/pdf",
+        };
+        source = "archive";
+        contractTitle = sanitizeTextValue(archived.contractTitle, 300) || contractTitle;
+        contractUrl = sanitizeTextValue(archived.contractUrl, 2000) || contractUrl;
+        contactName = sanitizeTextValue(archived.contactName, 300) || contactName;
+        contactId = sanitizeTextValue(archived.contactId, 160) || contactId;
+        note = "Contract PDF loaded from archive fallback.";
+      }
+    } catch (error) {
+      console.warn("GHL contract PDF archive lookup failed:", sanitizeTextValue(error?.message, 300));
+    }
+  }
+
+  if (!download?.buffer?.length) {
+    throw toGhlContractTextOperationError("Contract PDF was not found for this client.", {
+      code: "ghl_contract_pdf_not_found",
+      httpStatus: 404,
+    });
+  }
+
+  return {
+    provider: "gohighlevel",
+    status: "ok",
+    clientName,
+    contactName,
+    contactId,
+    contractTitle,
+    source: source || "unknown",
+    contractUrl,
+    fileName: sanitizeTextValue(download.fileName, 300) || `${clientName} contract.pdf`,
+    mimeType: sanitizeTextValue(download.contentType, 120) || "application/pdf",
+    sizeBytes: download.buffer.length,
+    fileBase64: download.buffer.toString("base64"),
+    fetchedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+    note,
+  };
+}
+
 const handleGhlContractTextPost = async (req, res) => {
   if (
     !enforceRateLimit(req, res, {
@@ -33536,6 +33659,61 @@ const handleGhlContractTextPost = async (req, res) => {
     res.status(error?.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 400) || "Failed to load GoHighLevel contract text.",
       code: sanitizeTextValue(error?.code, 80) || "ghl_contract_text_request_failed",
+    });
+  }
+};
+
+const handleGhlContractPdfPost = async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.contract_pdf.read",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "GoHighLevel contract PDF request limit reached. Please wait before retrying.",
+      code: "ghl_contract_pdf_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const clientName = sanitizeTextValue(req.body?.clientName, 300);
+  const locationId = sanitizeTextValue(req.body?.locationId, 160);
+  if (!clientName) {
+    res.status(400).json({
+      error: "clientName is required for a PDF extraction request.",
+      code: "ghl_contract_pdf_invalid_payload",
+    });
+    return;
+  }
+
+  try {
+    const result = await fetchGhlContractPdfViaApiKey({
+      clientName,
+      locationId,
+    });
+    res.json({
+      ok: true,
+      result,
+    });
+  } catch (error) {
+    console.error("POST /api/ghl/contract-pdf failed:", {
+      code: sanitizeTextValue(error?.code, 80),
+      status: Number.isFinite(error?.httpStatus) ? error.httpStatus : "",
+      message: sanitizeTextValue(error?.message, 320),
+      user: sanitizeTextValue(req.webAuthUser, 160),
+      clientName,
+    });
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 400) || "Failed to load GoHighLevel contract PDF.",
+      code: sanitizeTextValue(error?.code, 80) || "ghl_contract_pdf_request_failed",
     });
   }
 };
@@ -40768,6 +40946,7 @@ registerGhlRoutes({
   },
   handlers: {
     handleGhlContractTextPost,
+    handleGhlContractPdfPost,
     handleGhlLeadsGet: ghlLeadsController.handleGhlLeadsGet,
     handleGhlLeadsRefreshPost: ghlLeadsController.handleGhlLeadsRefreshPost,
     handleGhlClientManagersGet: ghlLeadsController.handleGhlClientManagersGet,
