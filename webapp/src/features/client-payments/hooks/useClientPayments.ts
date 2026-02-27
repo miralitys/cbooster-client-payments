@@ -211,10 +211,12 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
 
     try {
       let savePayload: { updatedAt?: string | null };
-      if (recordsPatchEnabledRef.current) {
-        const operations = buildRecordsPatchOperations(baselineRecordsRef.current, snapshot);
+      const operations = buildRecordsPatchOperations(baselineRecordsRef.current, snapshot);
+      const shouldTryPatchFirst = recordsPatchEnabledRef.current || paginationEnabled;
+      if (shouldTryPatchFirst) {
         try {
           savePayload = await patchClients(operations, serverUpdatedAtRef.current);
+          recordsPatchEnabledRef.current = true;
         } catch (error) {
           if (!shouldFallbackToPutFromPatch(error)) {
             throw error;
