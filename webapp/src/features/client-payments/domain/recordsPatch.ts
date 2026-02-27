@@ -91,17 +91,21 @@ export function shouldFallbackToPutFromPatch(error: unknown): boolean {
 }
 
 export function resolveRecordsPatchEnabled(session: Session | null): boolean {
-  const envEnabled = parseBooleanLike(import.meta.env.VITE_RECORDS_PATCH);
-  if (!envEnabled) {
-    return false;
+  const sessionFlag = readSessionPatchFlag(session);
+  if (sessionFlag !== null) {
+    return sessionFlag;
   }
 
-  const sessionFlag = readSessionPatchFlag(session);
-  if (sessionFlag === null) {
+  const rawEnvFlag = import.meta.env.VITE_RECORDS_PATCH;
+  if (rawEnvFlag === undefined || rawEnvFlag === null) {
     return true;
   }
 
-  return sessionFlag;
+  if (typeof rawEnvFlag === "string" && !rawEnvFlag.trim()) {
+    return true;
+  }
+
+  return parseBooleanLike(rawEnvFlag);
 }
 
 function pickChangedRecordFields(previous: ClientRecord, next: ClientRecord): Partial<ClientRecord> {

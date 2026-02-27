@@ -374,7 +374,7 @@ const PERF_DB_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.P
 const PERF_DB_SLOW_QUERY_MS = Math.min(Math.max(parsePositiveInteger(process.env.PERF_DB_SLOW_QUERY_MS, 700), 50), 60000);
 const PERF_EVENT_LOOP_INTERVAL_MS = Math.min(Math.max(parsePositiveInteger(process.env.PERF_EVENT_LOOP_INTERVAL_MS, 1000), 100), 10000);
 const PERF_EVENT_LOOP_SAMPLE_SIZE = Math.min(Math.max(parsePositiveInteger(process.env.PERF_EVENT_LOOP_SAMPLE_SIZE, 600), 30), 10000);
-const RECORDS_PATCH_ENABLED = resolveOptionalBoolean(process.env.RECORDS_PATCH) === true;
+const RECORDS_PATCH_ENABLED = resolveOptionalBoolean(process.env.RECORDS_PATCH) !== false;
 const DUAL_WRITE_V2_ENABLED = resolveOptionalBoolean(process.env.DUAL_WRITE_V2) === true;
 const DUAL_READ_COMPARE_ENABLED = resolveOptionalBoolean(process.env.DUAL_READ_COMPARE) === true;
 const READ_V2_ENABLED = resolveOptionalBoolean(process.env.READ_V2) === true;
