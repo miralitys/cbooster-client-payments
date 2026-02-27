@@ -25,6 +25,14 @@ const TEST_CS_MIDDLE_MANAGER_USERNAME = "marynau@creditbooster.com";
 const TEST_CS_MIDDLE_MANAGER_PASSWORD = "CsMiddle!AuthZ123";
 const TEST_CS_HEAD_USERNAME = "nataly.regush@creditbooster.com";
 const TEST_CS_HEAD_PASSWORD = "CsHead!AuthZ123";
+const TEST_CS_NATASHA_USERNAME = "natasha.grek@creditbooster.com";
+const TEST_CS_NATASHA_PASSWORD = "CsNatasha!AuthZ123";
+const TEST_CS_KRISTINA_USERNAME = "kristina.troinova@creditbooster.com";
+const TEST_CS_KRISTINA_PASSWORD = "CsKristina!AuthZ123";
+const TEST_CS_LIUDMYLA_USERNAME = "liudmyla.sidachenko@creditbooster.com";
+const TEST_CS_LIUDMYLA_PASSWORD = "CsLiudmyla!AuthZ123";
+const TEST_CS_VADIM_USERNAME = "vadim.kozorezov@creditbooster.com";
+const TEST_CS_VADIM_PASSWORD = "CsVadim!AuthZ123";
 const TEST_WEB_AUTH_SESSION_SECRET = "authz-security-test-web-auth-session-secret-abcdefghijklmnopqrstuvwxyz";
 const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
 
@@ -656,6 +664,154 @@ test("authz regression: client-service manager scope uses clientManager only and
         "Yurii Kis",
       ],
     );
+    },
+  );
+});
+
+test("authz regression: natasha middle-manager scope is consistent across records and clients endpoints", async () => {
+  await withServer(
+    {
+      WEB_AUTH_USERS_JSON: JSON.stringify([
+        {
+          username: TEST_ADMIN_USERNAME,
+          password: TEST_ADMIN_PASSWORD,
+          departmentId: "accounting",
+          roleId: "admin",
+        },
+        {
+          username: TEST_SALES_VLAD_USERNAME,
+          password: TEST_SALES_VLAD_PASSWORD,
+          departmentId: "sales",
+          roleId: "manager",
+          displayName: "Vlad Burnis",
+        },
+        {
+          username: TEST_CS_NATASHA_USERNAME,
+          password: TEST_CS_NATASHA_PASSWORD,
+          departmentId: "client_service",
+          roleId: "middle_manager",
+          displayName: "Natasha Grek",
+          teamUsernames: [TEST_CS_KRISTINA_USERNAME, TEST_CS_LIUDMYLA_USERNAME, TEST_SALES_VLAD_USERNAME],
+        },
+        {
+          username: TEST_CS_KRISTINA_USERNAME,
+          password: TEST_CS_KRISTINA_PASSWORD,
+          departmentId: "client_service",
+          roleId: "manager",
+          displayName: "Kristina Troinova",
+        },
+        {
+          username: TEST_CS_LIUDMYLA_USERNAME,
+          password: TEST_CS_LIUDMYLA_PASSWORD,
+          departmentId: "client_service",
+          roleId: "manager",
+          displayName: "Liudmyla Sidachenko",
+        },
+        {
+          username: TEST_CS_VADIM_USERNAME,
+          password: TEST_CS_VADIM_PASSWORD,
+          departmentId: "client_service",
+          roleId: "manager",
+          displayName: "Vadim Kozorezov",
+        },
+      ]),
+    },
+    async ({ baseUrl }) => {
+      const owner = await loginApi(baseUrl, {
+        username: TEST_OWNER_USERNAME,
+        password: TEST_OWNER_PASSWORD,
+      });
+
+      const initial = await getRecords(baseUrl, owner);
+      assert.equal(initial.response.status, 200);
+
+      const seedResult = await putRecords(baseUrl, owner, {
+        expectedUpdatedAt: initial.body?.updatedAt || null,
+        records: [
+          {
+            id: "authz-natasha-rec-self",
+            clientName: "Visible Natasha Self",
+            closedBy: "unrelated.sales.manager",
+            clientManager: "Natasha Grek",
+            contractTotals: "$1,000.00",
+            payment1: "$100.00",
+            payment1Date: "02/10/2026",
+          },
+          {
+            id: "authz-natasha-rec-kristina",
+            clientName: "Visible Natasha Team Kristina",
+            closedBy: "unrelated.sales.manager",
+            clientManager: "Kristina Troinova",
+            contractTotals: "$1,100.00",
+            payment1: "$110.00",
+            payment1Date: "02/11/2026",
+          },
+          {
+            id: "authz-natasha-rec-liudmyla",
+            clientName: "Visible Natasha Team Liudmyla",
+            closedBy: "unrelated.sales.manager",
+            clientManager: "Liudmyla Sidachenko",
+            contractTotals: "$1,200.00",
+            payment1: "$120.00",
+            payment1Date: "02/12/2026",
+          },
+          {
+            id: "authz-natasha-rec-hidden-vadim",
+            clientName: "Hidden Natasha Non Team",
+            closedBy: "unrelated.sales.manager",
+            clientManager: "Vadim Kozorezov",
+            contractTotals: "$1,300.00",
+            payment1: "$130.00",
+            payment1Date: "02/13/2026",
+          },
+          {
+            id: "authz-natasha-rec-hidden-vlad",
+            clientName: "Hidden Natasha Cross Department",
+            closedBy: "unrelated.sales.manager",
+            clientManager: "Vlad Burnis",
+            contractTotals: "$1,400.00",
+            payment1: "$140.00",
+            payment1Date: "02/14/2026",
+          },
+          {
+            id: "authz-natasha-rec-hidden-closedby-only",
+            clientName: "Hidden Natasha ClosedBy Only",
+            closedBy: "Natasha Grek",
+            clientManager: "Another Manager",
+            contractTotals: "$1,500.00",
+            payment1: "$150.00",
+            payment1Date: "02/15/2026",
+          },
+        ],
+      });
+      assert.equal(seedResult.response.status, 200);
+      assert.equal(seedResult.body?.ok, true);
+
+      const natasha = await loginApi(baseUrl, {
+        username: TEST_CS_NATASHA_USERNAME,
+        password: TEST_CS_NATASHA_PASSWORD,
+      });
+
+      const natashaRecords = await getRecords(baseUrl, natasha);
+      assert.equal(natashaRecords.response.status, 200);
+      assert.deepEqual(
+        natashaRecords.body.records.map((item) => item.id).sort(),
+        ["authz-natasha-rec-kristina", "authz-natasha-rec-liudmyla", "authz-natasha-rec-self"],
+      );
+
+      const natashaClients = await getClients(baseUrl, natasha);
+      assert.equal(natashaClients.response.status, 200);
+      assert.deepEqual(
+        natashaClients.body.records.map((item) => item.id).sort(),
+        ["authz-natasha-rec-kristina", "authz-natasha-rec-liudmyla", "authz-natasha-rec-self"],
+      );
+
+      const natashaClientFilters = await getClientsFilters(baseUrl, natasha);
+      assert.equal(natashaClientFilters.response.status, 200);
+      assert.deepEqual(
+        natashaClientFilters.body.clientManagerOptions,
+        ["Kristina Troinova", "Liudmyla Sidachenko", "Natasha Grek"],
+      );
     },
   );
 });
