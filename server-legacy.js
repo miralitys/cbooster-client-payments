@@ -33520,6 +33520,37 @@ function normalizeGhlClientManagerRefreshClientNames(clientNames) {
   return [...uniqueByComparable.values()];
 }
 
+function isGhlClientManagerActiveEnabled(rawValue) {
+  const normalized = sanitizeTextValue(rawValue, 40).toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on" || normalized === "active";
+}
+
+function resolveActiveClientNamesFromRecords(records) {
+  const uniqueByComparable = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!isGhlClientManagerActiveEnabled(record?.active)) {
+      continue;
+    }
+
+    const clientName = sanitizeTextValue(record?.clientName, 300);
+    if (!clientName) {
+      continue;
+    }
+
+    const comparable = normalizeAssistantComparableText(clientName, 220);
+    if (!comparable || uniqueByComparable.has(comparable)) {
+      continue;
+    }
+    uniqueByComparable.set(comparable, clientName);
+  }
+
+  return [...uniqueByComparable.values()];
+}
+
+function normalizeGhlClientManagersRefreshScope(rawScope) {
+  return sanitizeTextValue(rawScope, 20).toLowerCase() === "active" ? "active" : "all";
+}
+
 async function refreshGhlClientManagersCacheForClientNames(clientNames, refreshMode = "incremental") {
   const normalizedClientNames = normalizeGhlClientManagerRefreshClientNames(clientNames);
   const normalizedRefreshMode = normalizeGhlRefreshMode(refreshMode);
@@ -33578,6 +33609,7 @@ function buildGhlClientManagersRefreshJobPayload(job) {
     id: sanitizeTextValue(job.id, 120),
     status: sanitizeTextValue(job.status, 40) || "unknown",
     done: isGhlClientManagersRefreshJobTerminalStatus(job.status),
+    scope: normalizeGhlClientManagersRefreshScope(job.scope),
     requestedBy: sanitizeTextValue(job.requestedBy, 160),
     totalClients: Array.isArray(job.clientNames) ? job.clientNames.length : 0,
     queuedAt: sanitizeTextValue(job.queuedAt, 80) || null,
@@ -33736,15 +33768,17 @@ function buildGhlClientManagersRefreshNotificationEntry(job) {
   }
 
   const refreshMeta = job.refresh && typeof job.refresh === "object" ? job.refresh : null;
+  const scope = normalizeGhlClientManagersRefreshScope(job.scope);
+  const scopeLabel = scope === "active" ? "active clients" : "clients";
   const refreshedClientsCount = normalizeDualWriteSummaryValue(refreshMeta?.refreshedClientsCount);
   const refreshedRowsWritten = normalizeDualWriteSummaryValue(refreshMeta?.refreshedRowsWritten);
   const totalClients = Array.isArray(job.clientNames) ? job.clientNames.length : 0;
   const isCompleted = job.status === "completed";
 
-  const title = isCompleted ? "Client managers total refresh completed" : "Client managers total refresh failed";
+  const title = isCompleted ? "Client managers refresh completed" : "Client managers refresh failed";
   const message = isCompleted
-    ? `Processed ${totalClients} clients. Refreshed ${refreshedClientsCount}. Cache rows written: ${refreshedRowsWritten}.`
-    : sanitizeTextValue(job.error, 600) || "Client managers total refresh failed.";
+    ? `Processed ${totalClients} ${scopeLabel}. Refreshed ${refreshedClientsCount}. Cache rows written: ${refreshedRowsWritten}.`
+    : sanitizeTextValue(job.error, 600) || "Client managers refresh failed.";
 
   return {
     id: createWebNotificationId(),
@@ -33758,6 +33792,7 @@ function buildGhlClientManagersRefreshNotificationEntry(job) {
     payload: {
       jobId: sanitizeTextValue(job.id, 120),
       status: sanitizeTextValue(job.status, 40),
+      scope,
       totalClients,
       refreshedClientsCount,
       refreshedRowsWritten,
@@ -33791,6 +33826,7 @@ async function publishGhlClientManagersRefreshNotification(job) {
 function enqueueGhlClientManagersRefreshJob(clientNames, options = {}) {
   const normalizedClientNames = normalizeGhlClientManagerRefreshClientNames(clientNames);
   const requestedBy = normalizeWebAuthUsername(options.requestedBy) || "unknown";
+  const scope = normalizeGhlClientManagersRefreshScope(options.scope);
 
   if (!normalizedClientNames.length) {
     throw createHttpError("No visible clients available for refresh.", 404, "ghl_client_managers_refresh_no_clients");
@@ -33823,6 +33859,7 @@ function enqueueGhlClientManagersRefreshJob(clientNames, options = {}) {
   const job = {
     id: crypto.randomUUID(),
     status: "queued",
+    scope,
     requestedBy,
     clientNames: normalizedClientNames,
     queuedAt: nowIso,
@@ -33925,6 +33962,7 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
   }
 
   try {
+    const refreshActiveOnly = refreshMode !== "none" && parseBooleanFlag(req.body?.activeOnly, false);
     const requestedClientNames =
       refreshMode !== "none"
         ? resolveRequestedGhlClientManagerNames(req.body?.clientNames || req.body?.clientName)
@@ -33943,7 +33981,10 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
 
     const state = await getStoredRecords();
     const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
-    const clientNames = scopeVisibleClientNamesByRequestedSubset(visibilityContext.visibleClientNames, requestedClientNames);
+    let clientNames = scopeVisibleClientNamesByRequestedSubset(visibilityContext.visibleClientNames, requestedClientNames);
+    if (refreshMode !== "none" && refreshActiveOnly && !isScopedRefreshRequest) {
+      clientNames = resolveActiveClientNamesFromRecords(visibilityContext.visibleRecords);
+    }
     if (refreshMode !== "none" && isScopedRefreshRequest && !clientNames.length) {
       res.status(404).json({
         error: "Client was not found in your visible scope.",
@@ -33987,6 +34028,7 @@ async function respondGhlClientManagers(req, res, refreshMode = "none", routeLab
       updatedAt: sanitizeTextValue(persisted?.updatedAt, 80) || state.updatedAt,
       refresh: {
         ...refreshMeta,
+        activeOnly: refreshActiveOnly,
         savedRecordsCount: normalizeDualWriteSummaryValue(persisted?.savedRecordsCount),
         recordsUpdatedAt: sanitizeTextValue(persisted?.updatedAt, 80) || null,
       },
@@ -38440,15 +38482,21 @@ const handleGhlClientManagersRefreshBackgroundPost = async (req, res) => {
     });
     return;
   }
+  const activeOnly = parseBooleanFlag(req.body?.activeOnly, false);
 
   try {
     const state = await getStoredRecords();
     const visibilityContext = resolveVisibleClientNamesForWebAuthUser(state.records, req.webAuthProfile);
-    const enqueueResult = enqueueGhlClientManagersRefreshJob(visibilityContext.visibleClientNames, {
+    const targetClientNames = activeOnly
+      ? resolveActiveClientNamesFromRecords(visibilityContext.visibleRecords)
+      : visibilityContext.visibleClientNames;
+    const enqueueResult = enqueueGhlClientManagersRefreshJob(targetClientNames, {
       requestedBy: req.webAuthUser || req.webAuthProfile?.username,
+      scope: activeOnly ? "active" : "all",
     });
     const payload = buildGhlClientManagersRefreshJobPayload(enqueueResult.job);
 
+    const scopeLabel = activeOnly ? "active-client" : "total";
     res.status(enqueueResult.reused ? 200 : 202).json({
       ok: true,
       reused: enqueueResult.reused === true,
@@ -38456,8 +38504,8 @@ const handleGhlClientManagersRefreshBackgroundPost = async (req, res) => {
       job: payload,
       message:
         enqueueResult.reused === true
-          ? "A background total refresh is already running for your user."
-          : "Background total refresh started.",
+          ? `A background ${scopeLabel} refresh is already running for your user.`
+          : `Background ${scopeLabel} refresh started.`,
     });
   } catch (error) {
     console.error("POST /api/ghl/client-managers/refresh/background failed:", error);

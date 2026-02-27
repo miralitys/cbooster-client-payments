@@ -290,7 +290,7 @@ export default function ClientPaymentsPage() {
         return "Client managers: running total refresh...";
       }
       if (managersRefreshMode === "incremental") {
-        return "Client managers: refreshing new clients...";
+        return "Client managers: starting active-client refresh...";
       }
       return "Client managers: loading saved data...";
     }
@@ -317,7 +317,29 @@ export default function ClientPaymentsPage() {
       setManagersRefreshMode(mode);
 
       try {
-        const payload = await getClientManagers(mode);
+        if (mode === "incremental") {
+          const payload = await startClientManagersRefreshBackgroundJob({
+            activeOnly: true,
+          });
+          const totalClientsRaw = Number(payload?.job?.totalClients);
+          const totalClients = Number.isFinite(totalClientsRaw) && totalClientsRaw > 0 ? totalClientsRaw : null;
+          const detail = totalClients === null ? "" : ` for ${totalClients} active clients`;
+          const message =
+            payload?.reused === true
+              ? "Active-client refresh is already running in background. You will receive a notification when it finishes."
+              : `Active-client refresh started in background${detail}. You will receive a notification when it finishes.`;
+
+          showToast({
+            type: "success",
+            message,
+          });
+          setManagersStatusNote(message);
+          return;
+        }
+
+        const payload = await getClientManagers(mode, {
+          activeOnly: true,
+        });
         await forceRefresh();
 
         const refreshedClientsCountRaw = Number(payload?.refresh?.refreshedClientsCount);
@@ -327,10 +349,15 @@ export default function ClientPaymentsPage() {
         const savedRecordsCount = Number.isFinite(savedRecordsCountRaw) && savedRecordsCountRaw >= 0 ? savedRecordsCountRaw : 0;
 
         setManagersStatusNote(
-          `Client managers refreshed from GoHighLevel. Refreshed clients: ${refreshedClientsCount}. Saved records: ${savedRecordsCount}.`,
+          `Active clients refreshed from GoHighLevel. Refreshed clients: ${refreshedClientsCount}. Saved records: ${savedRecordsCount}.`,
         );
       } catch (error) {
-        setManagersError(error instanceof Error ? error.message : "Failed to refresh client-manager data.");
+        const message = error instanceof Error ? error.message : "Failed to refresh client-manager data.";
+        setManagersError(message);
+        showToast({
+          type: "error",
+          message,
+        });
       } finally {
         setIsManagersLoading(false);
         setManagersRefreshMode("none");
