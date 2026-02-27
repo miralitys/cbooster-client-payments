@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
+import { requestOpenClientCard } from "@/shared/lib/openClientCard";
 import { withStableRowKeys, type RowWithKey } from "@/shared/lib/stableRowKeys";
 import {
   approveModerationSubmission,
@@ -456,8 +457,28 @@ export default function DashboardPage() {
         key: "clientName",
         label: "Client Name",
         align: "left",
-        cell: (item) =>
-          formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0),
+        cell: (item) => {
+          const label = formatQuickBooksClientLabel(item.clientName, item.transactionType, Number(item.paymentAmount) || 0);
+          const normalizedClientName = String(item.clientName || "").trim();
+          if (!normalizedClientName) {
+            return label;
+          }
+
+          return (
+            <button
+              type="button"
+              className="payments-today-client-link"
+              onClick={() =>
+                requestOpenClientCard(normalizedClientName, {
+                  fallbackHref: "/app/client-payments",
+                })
+              }
+              aria-label={`Open client card for ${normalizedClientName}`}
+            >
+              {label}
+            </button>
+          );
+        },
       },
       {
         key: "paymentAmount",

@@ -18,7 +18,7 @@ import type { TableColumn } from "@/shared/ui";
 
 const MATCH_FROM_DATE = "2026-01-01";
 const MATCH_FROM_TIMESTAMP = parseDateValue(MATCH_FROM_DATE) ?? 0;
-const CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY = "client-match-confirmed-v1";
+const CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY = "client-match-confirmed-v2";
 const NAME_SORTER = new Intl.Collator("en-US", { sensitivity: "base", numeric: true });
 
 interface PaymentPair {
@@ -75,7 +75,7 @@ export default function ClientMatchPage() {
   const [clientsUpdatedAt, setClientsUpdatedAt] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<EditingCellState | null>(null);
   const [selectedClientRecord, setSelectedClientRecord] = useState<ClientRecord | null>(null);
-  const [confirmedClientIds, setConfirmedClientIds] = useState<string[]>(() => readConfirmedClientIds());
+  const [confirmedRowKeys, setConfirmedRowKeys] = useState<string[]>(() => readConfirmedRowKeys());
 
   const loadMatches = useCallback(async () => {
     setIsLoading(true);
@@ -133,11 +133,28 @@ export default function ClientMatchPage() {
     void loadMatches();
   }, [loadMatches]);
 
-  const confirmedClientIdSet = useMemo(() => new Set(confirmedClientIds), [confirmedClientIds]);
-  const visibleRows = useMemo(() => rows.filter((row) => !confirmedClientIdSet.has(row.id)), [confirmedClientIdSet, rows]);
+  useEffect(() => {
+    const intervalId = globalThis.window?.setInterval(() => {
+      if (!editingCell) {
+        void loadMatches();
+      }
+    }, 60000);
+
+    return () => {
+      if (intervalId) {
+        globalThis.window?.clearInterval(intervalId);
+      }
+    };
+  }, [editingCell, loadMatches]);
+
+  const confirmedRowKeySet = useMemo(() => new Set(confirmedRowKeys), [confirmedRowKeys]);
+  const visibleRows = useMemo(
+    () => rows.filter((row) => !confirmedRowKeySet.has(buildClientMatchConfirmationKey(row))),
+    [confirmedRowKeySet, rows],
+  );
   const confirmedRowsCount = useMemo(
-    () => rows.reduce((count, row) => (confirmedClientIdSet.has(row.id) ? count + 1 : count), 0),
-    [confirmedClientIdSet, rows],
+    () => rows.reduce((count, row) => (confirmedRowKeySet.has(buildClientMatchConfirmationKey(row)) ? count + 1 : count), 0),
+    [confirmedRowKeySet, rows],
   );
   const maxPaymentColumns = useMemo(() => {
     const maxColumns = visibleRows.reduce((max, row) => {
@@ -147,11 +164,12 @@ export default function ClientMatchPage() {
   }, [visibleRows]);
 
   useEffect(() => {
-    writeConfirmedClientIds(confirmedClientIds);
-  }, [confirmedClientIds]);
+    writeConfirmedRowKeys(confirmedRowKeys);
+  }, [confirmedRowKeys]);
 
   const confirmClientRow = useCallback((row: ClientMatchRow) => {
-    if (confirmedClientIdSet.has(row.id)) {
+    const confirmationKey = buildClientMatchConfirmationKey(row);
+    if (confirmedRowKeySet.has(confirmationKey)) {
       return;
     }
 
@@ -160,20 +178,20 @@ export default function ClientMatchPage() {
       return;
     }
 
-    setConfirmedClientIds((previous) => {
-      if (previous.includes(row.id)) {
+    setConfirmedRowKeys((previous) => {
+      if (previous.includes(confirmationKey)) {
         return previous;
       }
-      return [...previous, row.id];
+      return [...previous, confirmationKey];
     });
 
     showToast({
       type: "success",
       message: `Client ${row.clientName} confirmed.`,
-      dedupeKey: `client-match-confirm-${row.id}`,
+      dedupeKey: `client-match-confirm-${confirmationKey}`,
       cooldownMs: 800,
     });
-  }, [confirmedClientIdSet]);
+  }, [confirmedRowKeySet]);
 
   const openClientCardByRow = useCallback((row: ClientMatchRow) => {
     const matchedRecords = clientRecords.filter((record) => normalizeClientName(record.clientName) === row.id);
@@ -468,7 +486,7 @@ export default function ClientMatchPage() {
         className: "client-match-column-client",
         headerClassName: "client-match-column-client",
         cell: (row) => {
-          const isConfirmed = confirmedClientIdSet.has(row.id);
+          const isConfirmed = confirmedRowKeySet.has(buildClientMatchConfirmationKey(row));
           return (
             <div className={`client-match-client-name ${isConfirmed ? "is-confirmed" : ""}`.trim()}>
               <input
@@ -547,7 +565,7 @@ export default function ClientMatchPage() {
     }
 
     return columns;
-  }, [confirmClientRow, confirmedClientIdSet, maxPaymentColumns, openClientCardByRow, renderDbAmountCell, renderDbDateCell]);
+  }, [confirmClientRow, confirmedRowKeySet, maxPaymentColumns, openClientCardByRow, renderDbAmountCell, renderDbDateCell]);
 
   const headerMeta = (
     <div className="client-match-meta">
@@ -816,7 +834,7 @@ function buildEditableAmountValue(rawAmount: number | null | undefined): string 
   return rawAmount.toFixed(2);
 }
 
-function readConfirmedClientIds(): string[] {
+function readConfirmedRowKeys(): string[] {
   try {
     const rawValue = globalThis.window?.localStorage?.getItem(CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY) || "";
     if (!rawValue) {
@@ -835,15 +853,29 @@ function readConfirmedClientIds(): string[] {
   }
 }
 
-function writeConfirmedClientIds(clientIds: string[]): void {
+function writeConfirmedRowKeys(rowKeys: string[]): void {
   try {
-    const normalizedClientIds = clientIds
+    const normalizedRowKeys = rowKeys
       .map((item) => String(item || "").trim())
       .filter((item, index, array) => Boolean(item) && array.indexOf(item) === index);
-    globalThis.window?.localStorage?.setItem(CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY, JSON.stringify(normalizedClientIds));
+    globalThis.window?.localStorage?.setItem(CLIENT_MATCH_CONFIRMATIONS_STORAGE_KEY, JSON.stringify(normalizedRowKeys));
   } catch {
     // Ignore localStorage write errors for this temporary page.
   }
+}
+
+function buildClientMatchConfirmationKey(row: ClientMatchRow): string {
+  const paymentsSignature = row.quickBooksPayments
+    .map((payment) => `${normalizeDateForStorage(payment.date) || String(payment.date || "").trim()}|${normalizeConfirmationAmount(payment.amount)}`)
+    .join(";");
+  return `${row.id}::${paymentsSignature}`;
+}
+
+function normalizeConfirmationAmount(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "";
+  }
+  return value.toFixed(2);
 }
 
 function formatDateForApi(value: Date): string {
