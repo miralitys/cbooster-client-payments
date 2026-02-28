@@ -1950,8 +1950,6 @@ const webAppDistAvailable = fs.existsSync(webAppIndexFile);
 const WEB_STATIC_ASSET_ALLOWLIST = new Map([
   ["/mini.css", "mini.css"],
   ["/mini.js", "mini.js"],
-  ["/client-payment-2.css", "client-payment-2.css"],
-  ["/client-payment-2.js", "client-payment-2.js"],
 ]);
 
 const pool = createDbPool({
@@ -34926,7 +34924,6 @@ registerRecordsRoutes({
     handleRecordsGet: recordsController.handleRecordsGet,
     handleClientHealthGet: recordsController.handleClientHealthGet,
     handleClientsFiltersGet: recordsController.handleClientsFiltersGet,
-    handleClientsTotalsGet: recordsController.handleClientsTotalsGet,
     handleClientManagerKpiGet: recordsController.handleClientManagerKpiGet,
     handleRecordsPut: recordsController.handleRecordsPut,
     handleRecordsPatch: recordsController.handleRecordsPatch,
@@ -41732,21 +41729,6 @@ app.get("/Client_Payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT
 
 app.get("/client-payments", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
   res.redirect(302, "/app/client-payments");
-});
-
-app.get("/client-payments-2", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
-  setNoStoreNoCacheHtmlHeaders(res);
-  res.sendFile(path.join(staticRoot, "client-payment-2.html"));
-});
-
-app.get("/client-payment-2", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
-  setNoStoreNoCacheHtmlHeaders(res);
-  res.sendFile(path.join(staticRoot, "client-payment-2.html"));
-});
-
-app.get("/app/client-payments-2", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS), (_req, res) => {
-  setNoStoreNoCacheHtmlHeaders(res);
-  res.sendFile(path.join(staticRoot, "client-payment-2.html"));
 });
 
 app.get("/client-health", requireOwnerAdminOrClientServiceHeadAccess(), (_req, res) => {

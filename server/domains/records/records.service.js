@@ -201,47 +201,6 @@ function createRecordsService(dependencies = {}) {
     };
   }
 
-  async function getClientTotalsForApi({ webAuthProfile, clientFilters = null }) {
-    if (simulateSlowRecords) {
-      await delayMs(simulateSlowRecordsDelayMs);
-      return {
-        status: 200,
-        body: {
-          totalsCents: buildEmptyClientTotalsCents(),
-          rowCount: 0,
-          invalidFieldsCount: 0,
-          source: "simulated",
-          updatedAt: new Date().toISOString(),
-        },
-      };
-    }
-
-    if (!hasDatabase()) {
-      return {
-        status: 503,
-        body: {
-          error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
-        },
-      };
-    }
-
-    const state = await getStoredRecordsForApiRecordsRoute();
-    const roleFilteredRecords = filterClientRecordsForWebAuthUser(state.records, webAuthProfile);
-    const filteredRecords = applyClientApiFilters(roleFilteredRecords, clientFilters);
-    const totals = calculateClientTotalsCents(filteredRecords);
-
-    return {
-      status: 200,
-      body: {
-        totalsCents: totals.totalsCents,
-        rowCount: filteredRecords.length,
-        invalidFieldsCount: totals.invalidFieldsCount,
-        source: "server_filtered",
-        updatedAt: state.updatedAt || null,
-      },
-    };
-  }
-
   async function getClientManagerKpiForApi({ webAuthProfile }) {
     if (simulateSlowRecords) {
       await delayMs(simulateSlowRecordsDelayMs);
@@ -399,7 +358,6 @@ function createRecordsService(dependencies = {}) {
     getRecordsForApi,
     getClientHealthSnapshotForApi,
     getClientFilterOptionsForApi,
-    getClientTotalsForApi,
     getClientManagerKpiForApi,
     saveRecordsForApi,
     patchRecordsForApi,
@@ -420,15 +378,8 @@ const STATUS_FILTER_OVERDUE = "overdue";
 const NO_MANAGER_LABEL = "No manager";
 const ZERO_TOLERANCE = 1e-6;
 const KPI_CHICAGO_TIMEZONE = "America/Chicago";
-const CLIENT_TOTALS_FIELD_KEYS = Object.freeze([
-  "contractTotals",
-  "totalPayments",
-  "futurePayments",
-  "collection",
-]);
 const STATUS_CONTROL_FIELDS = Object.freeze(new Set(["afterResult", "writtenOff", "active"]));
 const RECORD_META_FIELDS = Object.freeze(new Set(["id", "createdAt"]));
-const MONEY_NUMBER_PATTERN = /^[-+]?(?:\d+\.?\d*|\.\d+)$/;
 
 function enforcePutWriteAccessPolicy(options = {}) {
   const previousRecords = Array.isArray(options.previousRecords) ? options.previousRecords : [];
@@ -625,60 +576,6 @@ function resolveAccountingDepartmentAccess(userProfile) {
 
 function normalizeRecordId(rawValue) {
   return String(rawValue || "").trim();
-}
-
-function buildEmptyClientTotalsCents() {
-  return {
-    contractTotals: 0,
-    totalPayments: 0,
-    futurePayments: 0,
-    collection: 0,
-  };
-}
-
-function calculateClientTotalsCents(records) {
-  const totalsCents = buildEmptyClientTotalsCents();
-  let invalidFieldsCount = 0;
-
-  for (const record of Array.isArray(records) ? records : []) {
-    if (!record || typeof record !== "object") {
-      continue;
-    }
-
-    for (const fieldKey of CLIENT_TOTALS_FIELD_KEYS) {
-      const rawValue = record?.[fieldKey];
-      const normalizedText = String(rawValue || "").trim();
-      if (!normalizedText) {
-        continue;
-      }
-
-      const cents = parseMoneyToSafeCents(rawValue);
-      if (cents === null) {
-        invalidFieldsCount += 1;
-        continue;
-      }
-
-      totalsCents[fieldKey] += cents;
-    }
-  }
-
-  return {
-    totalsCents,
-    invalidFieldsCount,
-  };
-}
-
-function parseMoneyToSafeCents(rawValue) {
-  const amount = parseMoneyValue(rawValue);
-  if (amount === null) {
-    return null;
-  }
-
-  const cents = Math.round(amount * 100);
-  if (!Number.isSafeInteger(cents)) {
-    return null;
-  }
-  return cents;
 }
 
 function createRecordsWritePolicyError(message, code) {
@@ -1090,31 +987,18 @@ function computeFuturePaymentsAmount(record) {
 }
 
 function parseMoneyValue(rawValue) {
-  let value = String(rawValue || "").trim();
+  const value = String(rawValue || "").trim();
   if (!value) {
     return null;
   }
-
-  value = value.replace(/[−–—]/g, "-");
-  let negativeByParentheses = false;
-  if (value.startsWith("(") && value.endsWith(")")) {
-    negativeByParentheses = true;
-    value = value.slice(1, -1).trim();
-  }
-
-  if (/[a-z]/i.test(value)) {
+  const normalized = value
+    .replace(/[−–—]/g, "-")
+    .replace(/\(([^)]+)\)/g, "-$1")
+    .replace(/[^0-9.-]/g, "");
+  if (!normalized || normalized === "-" || normalized === "." || normalized === "-.") {
     return null;
   }
-
-  value = value.replace(/[$,\s]/g, "");
-  if (!value || !MONEY_NUMBER_PATTERN.test(value)) {
-    return null;
-  }
-
-  let parsed = Number(value);
-  if (negativeByParentheses) {
-    parsed = -Math.abs(parsed);
-  }
+  const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
@@ -1575,34 +1459,27 @@ function readRecordTextValue(record, key) {
 }
 
 function parseMoneyLikeValue(rawValue) {
-  let value = String(rawValue ?? "").trim();
+  const value = String(rawValue ?? "").trim();
   if (!value) {
     return null;
   }
 
-  value = value.replace(/[−–—]/g, "-");
-  let negativeByParentheses = false;
-  if (value.startsWith("(") && value.endsWith(")")) {
-    negativeByParentheses = true;
-    value = value.slice(1, -1).trim();
+  let normalized = value.replace(/[$,\s]/g, "");
+  let isNegative = false;
+  if (normalized.startsWith("(") && normalized.endsWith(")")) {
+    isNegative = true;
+    normalized = normalized.slice(1, -1);
   }
 
-  if (/[a-z]/i.test(value)) {
+  normalized = normalized.replace(/[^0-9.+-]/g, "");
+  if (!normalized) {
     return null;
   }
 
-  value = value.replace(/[$,\s]/g, "");
-  if (!value || !MONEY_NUMBER_PATTERN.test(value)) {
-    return null;
-  }
-
-  let parsed = Number(value);
+  const parsed = Number.parseFloat(normalized);
   if (!Number.isFinite(parsed)) {
     return null;
   }
 
-  if (negativeByParentheses) {
-    parsed = -Math.abs(parsed);
-  }
-  return parsed;
+  return isNegative ? -parsed : parsed;
 }

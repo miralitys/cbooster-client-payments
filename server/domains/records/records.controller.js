@@ -83,20 +83,6 @@ function createRecordsController(dependencies = {}) {
     }
   }
 
-  async function handleClientsTotalsGet(req, res) {
-    try {
-      const result = await recordsService.getClientTotalsForApi({
-        webAuthProfile: req.webAuthProfile,
-        webAuthUser: req.webAuthUser,
-        clientFilters: resolveClientFiltersFromQuery(req.query),
-      });
-      res.status(result.status).json(result.body);
-    } catch (error) {
-      console.error("GET /api/clients/totals failed:", error);
-      res.status(resolveDbHttpStatus(error)).json(buildPublicErrorPayload(error, "Failed to load client totals"));
-    }
-  }
-
   async function handleClientManagerKpiGet(req, res) {
     try {
       const result = await recordsService.getClientManagerKpiForApi({
@@ -206,7 +192,6 @@ function createRecordsController(dependencies = {}) {
     handleRecordsGet,
     handleClientHealthGet,
     handleClientsFiltersGet,
-    handleClientsTotalsGet,
     handleClientManagerKpiGet,
     handleRecordsPut,
     handleRecordsPatch,

@@ -21,7 +21,6 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/custom-dashboard", label: "Custom Dashboard", hint: "Personalized", group: "operations" },
   { to: "/leads", label: "Leads", hint: "Pipeline", group: "operations" },
   { to: "/client-payments", label: "Client Payments", hint: "Collections", group: "clients" },
-  { to: "/client-payments-3", label: "Client Payment 3", hint: "Redesign", group: "clients" },
   { to: "/client-health", label: "Здоровье клиента", hint: "Health", group: "clients", visibility: "owner-admin-or-client-service-head" },
   { to: "/clients", label: "Clients", hint: "Directory", group: "clients" },
   { to: "/client-match", label: "Client Match", hint: "Matching", group: "clients", visibility: "owner-admin-or-accounting" },
@@ -114,10 +113,6 @@ function resolvePageTitle(pathname: string): string {
   }
   if (pathname.startsWith("/access-control")) {
     return "Access Control";
-  }
-
-  if (pathname.startsWith("/client-payments-3")) {
-    return "Client Payment 3";
   }
 
   if (pathname.startsWith("/client-payments")) {

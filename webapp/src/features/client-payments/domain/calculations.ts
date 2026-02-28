@@ -79,7 +79,6 @@ const DATE_LIKE_FIELDS: ReadonlySet<keyof ClientRecord> = new Set([
 ]);
 
 const OVERDUE_GRACE_DAYS = 30;
-const MONEY_NUMBER_PATTERN = /^[-+]?(?:\d+\.?\d*|\.\d+)$/;
 
 export interface DateRange {
   from: string;
@@ -531,31 +530,21 @@ export function normalizeDateForStorage(value: string): string | null {
 }
 
 export function parseMoneyValue(rawValue: unknown): number | null {
-  let value = sanitizeText(rawValue);
+  const value = sanitizeText(rawValue);
   if (!value) {
     return null;
   }
 
-  value = value.replace(/[−–—]/g, "-");
-  let negativeByParentheses = false;
-  if (value.startsWith("(") && value.endsWith(")")) {
-    negativeByParentheses = true;
-    value = value.slice(1, -1).trim();
-  }
+  const normalized = value
+    .replace(/[−–—]/g, "-")
+    .replace(/\(([^)]+)\)/g, "-$1")
+    .replace(/[^0-9.-]/g, "");
 
-  if (/[a-z]/i.test(value)) {
+  if (!normalized || normalized === "-" || normalized === "." || normalized === "-.") {
     return null;
   }
 
-  value = value.replace(/[$,\s]/g, "");
-  if (!value || !MONEY_NUMBER_PATTERN.test(value)) {
-    return null;
-  }
-
-  let parsed = Number(value);
-  if (negativeByParentheses) {
-    parsed = -Math.abs(parsed);
-  }
+  const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
 }
 

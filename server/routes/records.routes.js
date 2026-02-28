@@ -50,11 +50,6 @@ function registerRecordsRoutes(context) {
     handlers.handleClientsFiltersGet,
   );
   app.get(
-    "/api/clients/totals",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS),
-    handlers.handleClientsTotalsGet,
-  );
-  app.get(
     "/api/clients/kpi-client-manager",
     requireOwnerOrAdminAccess("Owner or admin access is required."),
     handlers.handleClientManagerKpiGet,
