@@ -1,3 +1,14 @@
+export interface ClientManagerKpiClientRow {
+  clientId: string;
+  clientName: string;
+  shouldPayThisMonth: boolean;
+  paidThisMonth: boolean;
+  paymentDatesThisMonth: string[];
+  paymentAmountsThisMonth: number[];
+  totalPaidThisMonth: number;
+  reason: string;
+}
+
 export interface ClientManagerKpiRow {
   managerName: string;
   totalClients: number;
@@ -7,6 +18,9 @@ export interface ClientManagerKpiRow {
   kpiPercent: number;
   bonusUsd: number;
   isKpiReached: boolean;
+  calculationLabel: string;
+  calculationDescription: string;
+  clients: ClientManagerKpiClientRow[];
 }
 
 export interface ClientManagerKpiPayload {

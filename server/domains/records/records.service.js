@@ -904,6 +904,7 @@ function buildClientManagerKpiRows(records) {
           fullyPaidClients: 0,
           kpiBaseClients: 0,
           clientsPaidThisMonth: 0,
+          clients: [],
         });
       }
 
@@ -916,9 +917,22 @@ function buildClientManagerKpiRows(records) {
       }
 
       row.kpiBaseClients += 1;
+      const monthlyPayments = collectPositivePaymentsInMonth(record, monthRange);
       if (hasPaymentThisMonth) {
         row.clientsPaidThisMonth += 1;
       }
+      row.clients.push({
+        clientId: normalizeRecordIdentifier(record),
+        clientName: String(record?.clientName || "").trim() || "Unknown client",
+        shouldPayThisMonth: true,
+        paidThisMonth: hasPaymentThisMonth,
+        paymentDatesThisMonth: monthlyPayments.map((item) => item.date),
+        paymentAmountsThisMonth: monthlyPayments.map((item) => item.amount),
+        totalPaidThisMonth: Number(monthlyPayments.reduce((sum, item) => sum + item.amount, 0).toFixed(2)),
+        reason: hasPaymentThisMonth
+          ? "At least one payment with amount > 0 in this month."
+          : "No payment with amount > 0 in this month.",
+      });
     }
   }
 
@@ -932,11 +946,16 @@ function buildClientManagerKpiRows(records) {
         ? Number(((item.clientsPaidThisMonth / item.kpiBaseClients) * 100).toFixed(2))
         : 100;
       let bonusUsd = 0;
-      if (kpiPercent >= 76) {
+      if (kpiPercent >= 81) {
         bonusUsd = 300;
-      } else if (kpiPercent >= 70) {
+      } else if (kpiPercent >= 76) {
         bonusUsd = 150;
       }
+
+      const sortedClients = item.clients
+        .slice()
+        .sort((left, right) =>
+          left.clientName.localeCompare(right.clientName, "en-US", { sensitivity: "base", numeric: true }));
 
       return {
         managerName: item.managerName,
@@ -946,13 +965,24 @@ function buildClientManagerKpiRows(records) {
         clientsPaidThisMonth: item.clientsPaidThisMonth,
         kpiPercent,
         bonusUsd,
-        isKpiReached: kpiPercent >= 70,
+        isKpiReached: kpiPercent >= 76,
+        calculationLabel: `${item.clientsPaidThisMonth} / ${item.kpiBaseClients}`,
+        calculationDescription:
+          item.kpiBaseClients > 0
+            ? `${item.clientsPaidThisMonth} clients paid in current month out of ${item.kpiBaseClients} clients in KPI base.`
+            : "No clients in KPI base for this manager.",
+        clients: sortedClients,
       };
     })
     .sort((left, right) => collator.compare(left.managerName, right.managerName));
 }
 
 function hasAnyPositivePaymentInMonth(record, monthRange) {
+  return collectPositivePaymentsInMonth(record, monthRange).length > 0;
+}
+
+function collectPositivePaymentsInMonth(record, monthRange) {
+  const result = [];
   for (let index = 0; index < PAYMENT_DATE_FIELD_KEYS.length; index += 1) {
     const dateField = PAYMENT_DATE_FIELD_KEYS[index];
     const paymentTimestamp = parseDateValue(record?.[dateField]);
@@ -966,10 +996,35 @@ function hasAnyPositivePaymentInMonth(record, monthRange) {
     const amountField = PAYMENT_FIELD_KEYS[index];
     const amountValue = parseMoneyValue(record?.[amountField]);
     if (amountValue !== null && amountValue > ZERO_TOLERANCE) {
-      return true;
+      result.push({
+        amount: Number(amountValue.toFixed(2)),
+        date: formatUtcTimestampAsMmDdYyyy(paymentTimestamp),
+      });
     }
   }
-  return false;
+  return result;
+}
+
+function formatUtcTimestampAsMmDdYyyy(timestamp) {
+  if (!Number.isFinite(timestamp)) {
+    return "";
+  }
+  const date = new Date(timestamp);
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const year = String(date.getUTCFullYear());
+  return `${month}/${day}/${year}`;
+}
+
+function normalizeRecordIdentifier(record) {
+  const candidate = record && typeof record === "object" ? record.id : null;
+  if (typeof candidate === "string" && candidate.trim()) {
+    return candidate.trim();
+  }
+  if (typeof candidate === "number" && Number.isFinite(candidate)) {
+    return String(candidate);
+  }
+  return "";
 }
 
 function resolveChicagoCurrentMonthRange(now = new Date()) {
