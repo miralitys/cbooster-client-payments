@@ -26,6 +26,7 @@ export default function GhlContractsPage() {
   const [statusMessage, setStatusMessage] = useState("Ready to load contract terms from GoHighLevel API.");
   const [latestResult, setLatestResult] = useState<GhlContractTermsResult | null>(null);
   const [historyRows, setHistoryRows] = useState<GhlContractTextHistoryRow[]>([]);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
 
   const historyColumns = useMemo<TableColumn<GhlContractTextHistoryRow>[]>(() => {
     return [
@@ -33,6 +34,8 @@ export default function GhlContractsPage() {
         key: "client",
         label: "Client",
         align: "left",
+        headerClassName: "ghl-contracts-history-col-client",
+        className: "ghl-contracts-history-col-client",
         cell: (row) => (
           <div>
             <strong>{row.clientName || "Unnamed client"}</strong>
@@ -44,6 +47,8 @@ export default function GhlContractsPage() {
         key: "status",
         label: "Status",
         align: "center",
+        headerClassName: "ghl-contracts-history-col-status",
+        className: "ghl-contracts-history-col-status",
         cell: (row) => {
           const tone = row.status === "completed" ? "success" : "warning";
           return <Badge tone={tone}>{row.status || "-"}</Badge>;
@@ -52,7 +57,9 @@ export default function GhlContractsPage() {
       {
         key: "fetchedAt",
         label: "Checked At",
-        align: "center",
+        align: "right",
+        headerClassName: "ghl-contracts-history-col-checked",
+        className: "ghl-contracts-history-col-checked",
         cell: (row) => formatDateTime(row.fetchedAt),
       },
     ];
@@ -89,6 +96,7 @@ export default function GhlContractsPage() {
           ...result,
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         };
+        setSelectedHistoryId(nextItem.id);
         return [nextItem, ...previous].slice(0, HISTORY_MAX_ROWS);
       });
       void loadRecent();
@@ -129,6 +137,16 @@ export default function GhlContractsPage() {
       locationId: form.locationId.trim() || undefined,
     };
     await executeContractTextRequest(request);
+  }
+
+  function handleHistoryRowClick(row: GhlContractTextHistoryRow) {
+    setLatestResult(row);
+    setSelectedHistoryId(row.id);
+    setSubmitError("");
+    setStatusMessage(`Loaded cached contract terms from ${formatDateTime(row.fetchedAt)}.`);
+    if (row.clientName) {
+      setForm((previous) => ({ ...previous, clientName: row.clientName }));
+    }
   }
 
   return (
@@ -272,7 +290,10 @@ export default function GhlContractsPage() {
           columns={historyColumns}
           rows={historyRows}
           rowKey={(row) => row.id}
+          onRowClick={handleHistoryRowClick}
+          rowClassName={(row) => (row.id === selectedHistoryId ? "ghl-contracts-history-row--active" : undefined)}
           className="ghl-contracts-history-wrap"
+          tableClassName="ghl-contracts-history-table"
           emptyState="No extraction history in this browser session yet."
           density="compact"
         />

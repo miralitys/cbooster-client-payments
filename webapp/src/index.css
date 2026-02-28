@@ -4405,6 +4405,28 @@ a {
   min-height: 120px;
 }
 
+.ghl-contracts-history-table {
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.ghl-contracts-history-col-client {
+  width: 55%;
+  white-space: normal;
+}
+
+.ghl-contracts-history-col-status {
+  width: 20%;
+}
+
+.ghl-contracts-history-col-checked {
+  width: 25%;
+}
+
+.ghl-contracts-history-row--active td {
+  background: #eaf1fb;
+}
+
 .access-control-react-page {
   display: grid;
   gap: var(--layout-block-gap);
