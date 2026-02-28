@@ -4407,20 +4407,19 @@ a {
 
 .ghl-contracts-history-table {
   min-width: 0;
-  table-layout: fixed;
+  table-layout: auto;
 }
 
 .ghl-contracts-history-col-client {
-  width: 55%;
   white-space: normal;
 }
 
 .ghl-contracts-history-col-status {
-  width: 20%;
+  text-align: center;
 }
 
 .ghl-contracts-history-col-checked {
-  width: 25%;
+  text-align: right;
 }
 
 .ghl-contracts-history-row--active td {

@@ -33,6 +33,12 @@ function registerGhlRoutes(context) {
   );
 
   app.get(
+    "/api/ghl/contract-terms/cache/:id",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
+    handlers.handleGhlContractTermsCacheGet,
+  );
+
+  app.get(
     "/api/ghl/leads",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
     handlers.handleGhlLeadsGet,

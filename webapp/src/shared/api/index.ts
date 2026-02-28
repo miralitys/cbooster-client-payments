@@ -60,5 +60,5 @@ export {
 export { getIdentityIqCreditScore } from "@/shared/api/identityIq";
 export { getGhlContractText } from "@/shared/api/ghlContractText";
 export { getGhlContractPdf } from "@/shared/api/ghlContractPdf";
-export { getGhlContractTerms, getGhlContractTermsRecent } from "@/shared/api/ghlContractTerms";
+export { getGhlContractTerms, getGhlContractTermsRecent, getGhlContractTermsCache } from "@/shared/api/ghlContractTerms";
 export { postGhlClientPhoneRefresh } from "@/shared/api/ghlClientPhone";

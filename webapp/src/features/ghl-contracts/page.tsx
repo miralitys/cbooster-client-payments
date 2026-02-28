@@ -1,6 +1,6 @@
 import { type FormEvent, useMemo, useState, useEffect } from "react";
 
-import { getGhlContractTerms, getGhlContractTermsRecent } from "@/shared/api";
+import { getGhlContractTerms, getGhlContractTermsCache, getGhlContractTermsRecent } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
 import type { GhlContractTermsRequest, GhlContractTermsResult } from "@/shared/types/ghlContractTerms";
 import { Badge, Button, EmptyState, Field, Input, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
@@ -27,6 +27,7 @@ export default function GhlContractsPage() {
   const [latestResult, setLatestResult] = useState<GhlContractTermsResult | null>(null);
   const [historyRows, setHistoryRows] = useState<GhlContractTextHistoryRow[]>([]);
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
 
   const historyColumns = useMemo<TableColumn<GhlContractTextHistoryRow>[]>(() => {
     return [
@@ -139,13 +140,40 @@ export default function GhlContractsPage() {
     await executeContractTextRequest(request);
   }
 
-  function handleHistoryRowClick(row: GhlContractTextHistoryRow) {
-    setLatestResult(row);
+  async function handleHistoryRowClick(row: GhlContractTextHistoryRow) {
     setSelectedHistoryId(row.id);
     setSubmitError("");
-    setStatusMessage(`Loaded cached contract terms from ${formatDateTime(row.fetchedAt)}.`);
+    setLatestResult(row);
+    setStatusMessage("Loading cached contract terms...");
     if (row.clientName) {
       setForm((previous) => ({ ...previous, clientName: row.clientName }));
+    }
+
+    if (!row.id) {
+      setStatusMessage(`Loaded cached contract terms from ${formatDateTime(row.fetchedAt)}.`);
+      return;
+    }
+
+    setIsHistoryLoading(true);
+    try {
+      const payload = await getGhlContractTermsCache(row.id);
+      if (payload?.result) {
+        setLatestResult(payload.result);
+        setStatusMessage(`Loaded cached contract terms from ${formatDateTime(payload.result.fetchedAt)}.`);
+      } else {
+        setStatusMessage(`Loaded cached contract terms from ${formatDateTime(row.fetchedAt)}.`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load cached contract terms.";
+      setStatusMessage("Failed to load cached contract terms.");
+      showToast({
+        type: "error",
+        message,
+        dedupeKey: `ghl-contract-terms-cache-error-${message}`,
+        cooldownMs: 2200,
+      });
+    } finally {
+      setIsHistoryLoading(false);
     }
   }
 
@@ -188,7 +216,7 @@ export default function GhlContractsPage() {
           </Field>
 
           <div className="ghl-contracts-actions">
-            <Button type="submit" size="sm" isLoading={isLoading}>
+            <Button type="submit" size="sm" isLoading={isLoading || isHistoryLoading}>
               Get Contract Terms
             </Button>
           </div>

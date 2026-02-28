@@ -34113,32 +34113,7 @@ const handleGhlContractTermsRecentGet = async (req, res) => {
   try {
     const limit = parsePositiveInteger(req.query?.limit, 20);
     const rows = await listRecentGhlContractTermsCacheRows(limit);
-    const items = rows.map((row) => {
-      const result = row.result || {};
-      const clientName = sanitizeTextValue(result.clientName, 300) || row.clientName;
-      const contactDetails =
-        result.contactDetails && typeof result.contactDetails === "object"
-          ? { ...buildEmptyGhlContractTermsContactDetails(clientName), ...result.contactDetails }
-          : buildEmptyGhlContractTermsContactDetails(clientName);
-      return {
-        id: row.id,
-        documentId: sanitizeTextValue(result.documentId, 160),
-        documentName: sanitizeTextValue(result.documentName, 320),
-        status: sanitizeTextValue(result.status, 80) || row.status,
-        source: sanitizeTextValue(result.source, 120) || row.source,
-        updatedAt: sanitizeTextValue(result.updatedAt, 80) || row.updatedAt || "",
-        contactName: sanitizeTextValue(result.contactName, 300),
-        contactEmail: sanitizeTextValue(result.contactEmail, 300),
-        signedAt: sanitizeTextValue(result.signedAt, 80),
-        contactDetails,
-        terms: Array.isArray(result.terms) ? result.terms.filter(Boolean) : [],
-        payments: Array.isArray(result.payments) ? result.payments : [],
-        signatureDataUrl: sanitizeTextValue(result.signatureDataUrl, 120000),
-        clientName,
-        fetchedAt: sanitizeTextValue(result.fetchedAt, 80) || row.updatedAt || "",
-        elapsedMs: Number.isFinite(result.elapsedMs) ? result.elapsedMs : 0,
-      };
-    });
+    const items = rows.map(buildGhlContractTermsResultFromCacheRow).filter(Boolean);
 
     res.json({
       ok: true,
@@ -34148,6 +34123,43 @@ const handleGhlContractTermsRecentGet = async (req, res) => {
     console.error("GET /api/ghl/contract-terms/recent failed:", error);
     res.status(error?.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 600) || "Failed to load recent contract terms.",
+    });
+  }
+};
+
+const handleGhlContractTermsCacheGet = async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  const cacheId = sanitizeTextValue(req.params?.id, 180) || sanitizeTextValue(req.query?.id, 180);
+  if (!cacheId) {
+    res.status(400).json({
+      error: "Cache id is required.",
+    });
+    return;
+  }
+
+  try {
+    const row = await getGhlContractTermsCacheRowById(cacheId);
+    if (!row) {
+      res.status(404).json({
+        error: "Cached contract terms not found.",
+      });
+      return;
+    }
+    const result = buildGhlContractTermsResultFromCacheRow(row);
+    res.json({
+      ok: true,
+      result,
+    });
+  } catch (error) {
+    console.error("GET /api/ghl/contract-terms/cache failed:", error);
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load cached contract terms.",
     });
   }
 };
@@ -36314,6 +36326,36 @@ function mapGhlContractTermsCacheRow(rawRow) {
   };
 }
 
+function buildGhlContractTermsResultFromCacheRow(row) {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+  const result = row.result || {};
+  const clientName = sanitizeTextValue(result.clientName, 300) || row.clientName;
+  const contactDetails =
+    result.contactDetails && typeof result.contactDetails === "object"
+      ? { ...buildEmptyGhlContractTermsContactDetails(clientName), ...result.contactDetails }
+      : buildEmptyGhlContractTermsContactDetails(clientName);
+  return {
+    id: row.id,
+    documentId: sanitizeTextValue(result.documentId, 160),
+    documentName: sanitizeTextValue(result.documentName, 320),
+    status: sanitizeTextValue(result.status, 80) || row.status,
+    source: sanitizeTextValue(result.source, 120) || row.source,
+    updatedAt: sanitizeTextValue(result.updatedAt, 80) || row.updatedAt || "",
+    contactName: sanitizeTextValue(result.contactName, 300),
+    contactEmail: sanitizeTextValue(result.contactEmail, 300),
+    signedAt: sanitizeTextValue(result.signedAt, 80),
+    contactDetails,
+    terms: Array.isArray(result.terms) ? result.terms.filter(Boolean) : [],
+    payments: Array.isArray(result.payments) ? result.payments : [],
+    signatureDataUrl: sanitizeTextValue(result.signatureDataUrl, 120000),
+    clientName,
+    fetchedAt: sanitizeTextValue(result.fetchedAt, 80) || row.updatedAt || "",
+    elapsedMs: Number.isFinite(result.elapsedMs) ? result.elapsedMs : 0,
+  };
+}
+
 async function insertGhlContractTermsCacheRow(entry = {}) {
   await ensureDatabaseReady();
   const normalizedClientName = sanitizeTextValue(entry?.clientName, 300);
@@ -36370,6 +36412,28 @@ async function getLatestGhlContractTermsCacheRow(clientName, locationId) {
       LIMIT 1
     `,
     [normalizedClientNameLookup, normalizedLocationId],
+  );
+  if (!response.rows.length) {
+    return null;
+  }
+  return mapGhlContractTermsCacheRow(response.rows[0]);
+}
+
+async function getGhlContractTermsCacheRowById(cacheId) {
+  await ensureDatabaseReady();
+  const normalizedId = sanitizeTextValue(cacheId, 180);
+  if (!normalizedId) {
+    return null;
+  }
+  const response = await sharedDbQuery(
+    `
+      SELECT
+        id, client_name, client_name_lookup, location_id, status, source, result, error, created_at, updated_at
+      FROM ${GHL_CONTRACT_TERMS_CACHE_TABLE}
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [normalizedId],
   );
   if (!response.rows.length) {
     return null;
@@ -41516,6 +41580,7 @@ registerGhlRoutes({
     handleGhlContractPdfPost,
     handleGhlContractTermsPost,
     handleGhlContractTermsRecentGet,
+    handleGhlContractTermsCacheGet,
     handleGhlLeadsGet: ghlLeadsController.handleGhlLeadsGet,
     handleGhlLeadsRefreshPost: ghlLeadsController.handleGhlLeadsRefreshPost,
     handleGhlClientManagersGet: ghlLeadsController.handleGhlClientManagersGet,

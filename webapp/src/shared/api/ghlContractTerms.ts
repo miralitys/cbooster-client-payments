@@ -22,3 +22,7 @@ export async function getGhlContractTermsRecent(limit = 20): Promise<GhlContract
   });
   return apiRequest<GhlContractTermsRecentPayload>(`/api/ghl/contract-terms/recent?${query.toString()}`);
 }
+
+export async function getGhlContractTermsCache(id: string): Promise<GhlContractTermsPayload> {
+  return apiRequest<GhlContractTermsPayload>(`/api/ghl/contract-terms/cache/${encodeURIComponent(id)}`);
+}
