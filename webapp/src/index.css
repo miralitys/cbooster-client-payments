@@ -6296,9 +6296,81 @@ th.ghl-contracts-history-col-checked {
   gap: 4px;
 }
 
+.ads-page .table-panel .cb-panel__body {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.ads-filters-grid {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ads-filters-actions {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+}
+
+.ads-overview-grid {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ads-overview-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.ads-metric-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.ads-metric-card.is-success {
+  background: #f4fbf7;
+  border-color: #d4ebdb;
+}
+
+.ads-metric-card__label {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ads-metric-card__value {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  line-height: 1.15;
+  font-family: var(--font-family-heading);
+  color: var(--color-text);
+}
+
+.ads-table-wrap {
+  max-height: 62vh;
+}
+
 @media (max-width: 1080px) {
   .client-health-tech-grid {
     grid-template-columns: 1fr;
+  }
+
+  .ads-filters-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ads-overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -6322,6 +6394,11 @@ th.ghl-contracts-history-col-checked {
   }
 
   .client-health-summary-score dl div {
+    grid-template-columns: 1fr;
+  }
+
+  .ads-filters-grid,
+  .ads-overview-grid {
     grid-template-columns: 1fr;
   }
 }

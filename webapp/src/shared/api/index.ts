@@ -1,5 +1,6 @@
 export { ApiError, apiRequest } from "@/shared/api/fetcher";
 export { getSession } from "@/shared/api/session";
+export { getAdsOverview } from "@/shared/api/ads";
 export {
   getNotificationsFeed,
   getNotificationsPushPublicKey,

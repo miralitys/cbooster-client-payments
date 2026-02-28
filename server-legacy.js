@@ -45,6 +45,7 @@ const { registerSupportRoutes } = require("./server/routes/support.routes");
 const { registerAssistantRoutes } = require("./server/routes/assistant.routes");
 const { registerGhlRoutes } = require("./server/routes/ghl.routes");
 const { registerQuickBooksRoutes } = require("./server/routes/quickbooks.routes");
+const { registerAdsRoutes } = require("./server/routes/ads.routes");
 const { registerModerationRoutes } = require("./server/routes/moderation.routes");
 const { registerMiniRoutes } = require("./server/routes/mini.routes");
 const { createGhlReadOnlyGuard } = require("./server/integrations/ghl/client");
@@ -52,6 +53,7 @@ const { createGhlNotesController } = require("./server/domains/ghl-notes");
 const { createGhlLeadsController } = require("./server/domains/ghl-leads");
 const { createGhlCommunicationsController } = require("./server/domains/ghl-communications");
 const { createQuickBooksController, createQuickBooksService, createQuickBooksRepo } = require("./server/domains/quickbooks");
+const { createAdsController, createAdsService } = require("./server/domains/ads");
 const { createModerationController } = require("./server/domains/moderation");
 const { createMiniController } = require("./server/domains/mini");
 const { createAssistantService, createAssistantController, createAssistantRepo } = require("./server/domains/assistant");
@@ -572,6 +574,24 @@ const QUICKBOOKS_REALM_ID = (process.env.QUICKBOOKS_REALM_ID || "").toString().t
 const QUICKBOOKS_REDIRECT_URI = (process.env.QUICKBOOKS_REDIRECT_URI || "").toString().trim();
 const QUICKBOOKS_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
 const QUICKBOOKS_API_BASE_URL = ((process.env.QUICKBOOKS_API_BASE_URL || "https://quickbooks.api.intuit.com").toString().trim() || "https://quickbooks.api.intuit.com").replace(/\/+$/, "");
+const META_ADS_ACCESS_TOKEN = (process.env.META_ADS_ACCESS_TOKEN || "").toString().trim();
+const META_ADS_ACCOUNT_IDS = (process.env.META_ADS_ACCOUNT_IDS || "").toString().trim();
+const META_ADS_GRAPH_API_BASE_URL = (
+  (process.env.META_ADS_GRAPH_API_BASE_URL || "https://graph.facebook.com").toString().trim() || "https://graph.facebook.com"
+).replace(/\/+$/, "");
+const META_ADS_GRAPH_API_VERSION = (process.env.META_ADS_GRAPH_API_VERSION || "v21.0").toString().trim() || "v21.0";
+const META_ADS_HTTP_TIMEOUT_MS = Math.min(
+  Math.max(parsePositiveInteger(process.env.META_ADS_HTTP_TIMEOUT_MS, 15000), 1000),
+  120000,
+);
+const META_ADS_MAX_PAGES_PER_ACCOUNT = Math.min(
+  Math.max(parsePositiveInteger(process.env.META_ADS_MAX_PAGES_PER_ACCOUNT, 15), 1),
+  100,
+);
+const META_ADS_PAGE_LIMIT = Math.min(
+  Math.max(parsePositiveInteger(process.env.META_ADS_PAGE_LIMIT, 500), 25),
+  1000,
+);
 const QUICKBOOKS_QUERY_PAGE_SIZE = 200;
 const QUICKBOOKS_MAX_QUERY_ROWS = 5000;
 const QUICKBOOKS_PAYMENT_DETAILS_CONCURRENCY = 2;
@@ -25196,6 +25216,22 @@ const quickBooksService = createQuickBooksService({
   requestOpenAiQuickBooksInsight,
 });
 
+const adsService = createAdsService({
+  sanitizeTextValue,
+  graphApiBaseUrl: META_ADS_GRAPH_API_BASE_URL,
+  graphApiVersion: META_ADS_GRAPH_API_VERSION,
+  accessToken: META_ADS_ACCESS_TOKEN,
+  accountIdsRaw: META_ADS_ACCOUNT_IDS,
+  requestTimeoutMs: META_ADS_HTTP_TIMEOUT_MS,
+  maxPagesPerAccount: META_ADS_MAX_PAGES_PER_ACCOUNT,
+  pageLimit: META_ADS_PAGE_LIMIT,
+});
+
+const adsController = createAdsController({
+  adsService,
+  sanitizeTextValue,
+});
+
 async function getStoredRecords() {
   return recordsRepo.getStoredRecords();
 }
@@ -30086,6 +30122,14 @@ registerQuickBooksRoutes({
     handleQuickBooksPendingConfirmationsGet: quickBooksController.handleQuickBooksPendingConfirmationsGet,
     handleQuickBooksSyncJobGet: quickBooksController.handleQuickBooksSyncJobGet,
     handleQuickBooksTransactionInsightPost: quickBooksController.handleQuickBooksTransactionInsightPost,
+  },
+});
+
+registerAdsRoutes({
+  app,
+  requireOwnerOrAdminAccess,
+  handlers: {
+    handleAdsOverviewGet: adsController.handleAdsOverviewGet,
   },
 });
 
