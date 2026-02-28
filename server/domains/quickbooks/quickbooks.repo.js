@@ -616,6 +616,23 @@ function createQuickBooksRepo(dependencies = {}) {
     return Array.isArray(result.rows) ? result.rows : [];
   }
 
+  async function listPendingQuickBooksPaymentMatchRecordIds() {
+    await ensureReady();
+    const result = await query(
+      `
+        SELECT DISTINCT matched_record_id
+        FROM ${QUICKBOOKS_TRANSACTIONS_TABLE}
+        WHERE COALESCE(matched_record_id, '') <> ''
+          AND matched_confirmed = FALSE
+        ORDER BY matched_record_id ASC
+      `,
+      [],
+    );
+    return (Array.isArray(result.rows) ? result.rows : [])
+      .map((row) => sanitizeTextValue(row?.matched_record_id, 180))
+      .filter(Boolean);
+  }
+
   return {
     ensureQuickBooksSchema,
     persistQuickBooksRefreshToken,
@@ -631,6 +648,7 @@ function createQuickBooksRepo(dependencies = {}) {
     markQuickBooksPaymentMatched,
     confirmQuickBooksPaymentMatch,
     listPendingQuickBooksPaymentMatchesByRecordId,
+    listPendingQuickBooksPaymentMatchRecordIds,
   };
 }
 

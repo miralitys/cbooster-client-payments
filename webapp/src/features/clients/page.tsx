@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { showToast } from "@/shared/lib/toast";
-import { getClientFilterOptions, getClientManagers, postGhlClientPhoneRefresh } from "@/shared/api";
+import {
+  getClientFilterOptions,
+  getClientManagers,
+  getQuickBooksPendingConfirmationRecordIds,
+  postGhlClientPhoneRefresh,
+} from "@/shared/api";
 import {
   canConfirmQuickBooksPaymentsSession,
   canRefreshClientManagerFromGhlSession,
@@ -144,6 +149,10 @@ export default function ClientsPage() {
   const [isScoreFilterOpen, setIsScoreFilterOpen] = useState(false);
   const [isMoreFiltersOpen, setIsMoreFiltersOpen] = useState(false);
   const [isActiveOnly, setIsActiveOnly] = useState(true);
+  const [isNotConfirmedOnly, setIsNotConfirmedOnly] = useState(false);
+  const [isPendingConfirmationIdsLoading, setIsPendingConfirmationIdsLoading] = useState(false);
+  const [pendingConfirmationIdsError, setPendingConfirmationIdsError] = useState("");
+  const [pendingConfirmationRecordIds, setPendingConfirmationRecordIds] = useState<Set<string>>(new Set());
   const [refreshingCardClientManagerKey, setRefreshingCardClientManagerKey] = useState("");
   const [refreshingCardClientPhoneKey, setRefreshingCardClientPhoneKey] = useState("");
   const [isFilterOptionsLoading, setIsFilterOptionsLoading] = useState(true);
@@ -228,6 +237,33 @@ export default function ClientsPage() {
   const canRefreshClientPhoneInCard = canRefreshClientPhoneFromGhlSession(session);
   const canConfirmPendingQuickBooksPayments = canConfirmQuickBooksPaymentsSession(session);
   const isPageLoading = isFilterOptionsLoading || isLoading;
+
+  const loadPendingConfirmationRecordIds = useCallback(async () => {
+    if (!canConfirmPendingQuickBooksPayments) {
+      return;
+    }
+    setIsPendingConfirmationIdsLoading(true);
+    setPendingConfirmationIdsError("");
+    try {
+      const payload = await getQuickBooksPendingConfirmationRecordIds();
+      const nextSet = new Set<string>(
+        (Array.isArray(payload.recordIds) ? payload.recordIds : [])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      );
+      setPendingConfirmationRecordIds(nextSet);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load not-confirmed clients.";
+      setPendingConfirmationIdsError(message);
+      showToast({
+        type: "error",
+        message,
+      });
+      throw error;
+    } finally {
+      setIsPendingConfirmationIdsLoading(false);
+    }
+  }, [canConfirmPendingQuickBooksPayments]);
 
   useEffect(() => {
     let cancelled = false;
@@ -364,21 +400,22 @@ export default function ClientsPage() {
           isWrittenOff: status.isWrittenOff,
         };
       })
-      .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter));
-  }, [scoreByRecordId, scoreFilter, visibleRecords]);
+      .filter((item) => matchesScoreFilter(item.score.displayScore, scoreFilter))
+      .filter((item) => !isNotConfirmedOnly || pendingConfirmationRecordIds.has(String(item.record.id || "").trim()));
+  }, [isNotConfirmedOnly, pendingConfirmationRecordIds, scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
   const filteredCount = useMemo(() => filteredRecords.length, [filteredRecords.length]);
 
   useEffect(() => {
-    if (scoreFilter === "all") {
+    if (scoreFilter === "all" && !isNotConfirmedOnly) {
       return;
     }
     if (isPageLoading || isLoadingMoreRecords || loadError || !hasMoreRecords) {
       return;
     }
     void loadMoreRecords();
-  }, [hasMoreRecords, isLoadingMoreRecords, isPageLoading, loadError, loadMoreRecords, scoreFilter]);
+  }, [hasMoreRecords, isLoadingMoreRecords, isNotConfirmedOnly, isPageLoading, loadError, loadMoreRecords, scoreFilter]);
   const summedColumnValues = useMemo(() => {
     const totals = new Map<keyof ClientRecord, number | null>();
     const runningTotals = new Map<keyof ClientRecord, number>();
@@ -671,9 +708,28 @@ export default function ClientsPage() {
     setDateRange("fullyPaidDateRange", "from", "");
     setDateRange("fullyPaidDateRange", "to", "");
     setIsActiveOnly(true);
+    setIsNotConfirmedOnly(false);
     setScoreFilter("all");
     setManagerFilter(MANAGER_FILTER_ALL);
     setIsScoreFilterOpen(false);
+  }
+
+  function toggleNotConfirmedFilter() {
+    if (!canConfirmPendingQuickBooksPayments || isPendingConfirmationIdsLoading) {
+      return;
+    }
+    if (isNotConfirmedOnly) {
+      setIsNotConfirmedOnly(false);
+      return;
+    }
+    void (async () => {
+      try {
+        await loadPendingConfirmationRecordIds();
+        setIsNotConfirmedOnly(true);
+      } catch {
+        setIsNotConfirmedOnly(false);
+      }
+    })();
   }
 
   return (
@@ -767,6 +823,7 @@ export default function ClientsPage() {
                 </div>
               </div>
               {filterOptionsError ? <p className="react-user-footnote">{filterOptionsError}</p> : null}
+              {pendingConfirmationIdsError ? <p className="react-user-footnote">{pendingConfirmationIdsError}</p> : null}
 
               {isMoreFiltersOpen ? (
                 <>
@@ -861,6 +918,18 @@ export default function ClientsPage() {
                     >
                       Score
                     </button>
+                    {canConfirmPendingQuickBooksPayments ? (
+                      <button
+                        type="button"
+                        className={`cb-segmented__item clients-status-controls__toggle ${isNotConfirmedOnly ? "is-active" : ""}`.trim()}
+                        aria-pressed={isNotConfirmedOnly}
+                        onClick={toggleNotConfirmedFilter}
+                        disabled={isPendingConfirmationIdsLoading}
+                        title="Show clients with unconfirmed payments"
+                      >
+                        {isPendingConfirmationIdsLoading ? "Not Confirmed..." : "Not Confirmed"}
+                      </button>
+                    ) : null}
                   </div>
 
                   {filters.status === STATUS_FILTER_OVERDUE ? (

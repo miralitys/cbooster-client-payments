@@ -53,6 +53,12 @@ function createQuickBooksService(dependencies = {}) {
       }
       return repo.listPendingQuickBooksPaymentMatchesByRecordId(recordId);
     },
+    listPendingQuickBooksPaymentMatchRecordIds() {
+      if (typeof repo.listPendingQuickBooksPaymentMatchRecordIds !== "function") {
+        return Promise.resolve([]);
+      }
+      return repo.listPendingQuickBooksPaymentMatchRecordIds();
+    },
   };
 }
 

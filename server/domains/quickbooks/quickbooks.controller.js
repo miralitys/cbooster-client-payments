@@ -59,6 +59,10 @@ function createQuickBooksController(dependencies = {}) {
     quickBooksService && typeof quickBooksService.listPendingQuickBooksPaymentMatchesByRecordId === "function"
       ? quickBooksService.listPendingQuickBooksPaymentMatchesByRecordId
       : null;
+  const listPendingPaymentMatchRecordIds =
+    quickBooksService && typeof quickBooksService.listPendingQuickBooksPaymentMatchRecordIds === "function"
+      ? quickBooksService.listPendingQuickBooksPaymentMatchRecordIds
+      : null;
 
   function hasDatabaseConfigured() {
     if (typeof hasDatabase === "function") {
@@ -467,6 +471,36 @@ function createQuickBooksController(dependencies = {}) {
       res.status(503).json({
         error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
       });
+      return;
+    }
+
+    const scope = sanitizeTextValue(req.query?.scope, 40).toLowerCase();
+    const shouldReturnRecordIds = scope === "records" || scope === "record_ids";
+    if (shouldReturnRecordIds) {
+      if (
+        typeof hasWebAuthPermission === "function" &&
+        !hasWebAuthPermission(req.webAuthProfile, webAuthPermissionSyncQuickbooks)
+      ) {
+        res.status(403).json({
+          error: "Access denied. You do not have permission to view pending QuickBooks confirmations.",
+        });
+        return;
+      }
+
+      try {
+        const recordIds = listPendingPaymentMatchRecordIds ? await listPendingPaymentMatchRecordIds() : [];
+        res.json({
+          ok: true,
+          count: Array.isArray(recordIds) ? recordIds.length : 0,
+          recordIds: Array.isArray(recordIds) ? recordIds : [],
+        });
+      } catch (error) {
+        console.error("GET /api/quickbooks/payments/pending-confirmations?scope=records failed:", error);
+        res.status(error?.httpStatus || 502).json({
+          error: sanitizeTextValue(error?.message, 600) || "Failed to load pending payment confirmations.",
+          code: sanitizeTextValue(error?.code, 80) || "quickbooks_pending_confirmations_failed",
+        });
+      }
       return;
     }
 

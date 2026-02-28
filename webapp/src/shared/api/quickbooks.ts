@@ -2,6 +2,7 @@ import { apiRequest } from "@/shared/api/fetcher";
 import type {
   QuickBooksConfirmPaymentPayload,
   QuickBooksConfirmPaymentRequest,
+  QuickBooksPendingConfirmationRecordIdsPayload,
   QuickBooksPendingConfirmationsPayload,
   QuickBooksPaymentsPayload,
   QuickBooksSyncJobPayload,
@@ -77,6 +78,19 @@ export async function getQuickBooksPendingConfirmations(recordId: string): Promi
   return apiRequest<QuickBooksPendingConfirmationsPayload>(
     `/api/quickbooks/payments/pending-confirmations?${query.toString()}`,
   );
+}
+
+export async function getQuickBooksPendingConfirmationRecordIds(): Promise<QuickBooksPendingConfirmationRecordIdsPayload> {
+  const payload = await apiRequest<QuickBooksPendingConfirmationRecordIdsPayload>(
+    "/api/quickbooks/payments/pending-confirmations?scope=records",
+  );
+  return {
+    ok: Boolean(payload?.ok),
+    count: typeof payload?.count === "number" && Number.isFinite(payload.count) ? payload.count : 0,
+    recordIds: Array.isArray(payload?.recordIds)
+      ? payload.recordIds.map((value) => String(value || "").trim()).filter(Boolean)
+      : [],
+  };
 }
 
 export async function confirmQuickBooksRecentPayment(

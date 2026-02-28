@@ -32,6 +32,7 @@ export {
 export {
   confirmQuickBooksRecentPayment,
   createQuickBooksSyncJob,
+  getQuickBooksPendingConfirmationRecordIds,
   getQuickBooksPendingConfirmations,
   getQuickBooksOutgoingPayments,
   getQuickBooksPayments,

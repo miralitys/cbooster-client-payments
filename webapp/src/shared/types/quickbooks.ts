@@ -98,6 +98,12 @@ export interface QuickBooksPendingConfirmationsPayload {
   items: QuickBooksPendingConfirmationRow[];
 }
 
+export interface QuickBooksPendingConfirmationRecordIdsPayload {
+  ok: boolean;
+  count: number;
+  recordIds: string[];
+}
+
 export interface QuickBooksConfirmPaymentRequest {
   transactionId: string;
   transactionType?: string;
