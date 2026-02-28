@@ -114,13 +114,17 @@ export default function ClientScorePage() {
     [asOfDate],
   );
 
+  const eligibleRecords = useMemo(() => {
+    return records.filter((record) => isEligibleForProbabilityTable(record));
+  }, [records]);
+
   const legacyRows = useMemo<ClientProbabilityRow[]>(() => {
-    return records.slice(0, MAX_CLIENTS).map((record) => buildLegacyProbabilityRow(record, asOfDate));
-  }, [asOfDate, records]);
+    return eligibleRecords.slice(0, MAX_CLIENTS).map((record) => buildLegacyProbabilityRow(record, asOfDate));
+  }, [asOfDate, eligibleRecords]);
 
   useEffect(() => {
     let isCancelled = false;
-    const source = records.slice(0, MAX_CLIENTS);
+    const source = eligibleRecords.slice(0, MAX_CLIENTS);
 
     if (isLoading || loadError) {
       setVersion2Rows([]);
@@ -163,7 +167,7 @@ export default function ClientScorePage() {
     return () => {
       isCancelled = true;
     };
-  }, [asOfDate, isLoading, loadError, records]);
+  }, [asOfDate, eligibleRecords, isLoading, loadError]);
 
   const columns = useMemo<TableColumn<ClientProbabilityRow>[]>(() => {
     return [
@@ -221,7 +225,7 @@ export default function ClientScorePage() {
     if (loadError) {
       return loadError;
     }
-    return `Showing first ${legacyRows.length} clients. As of ${formatScoreAsOfDate(asOfDate)}.`;
+    return `Showing first ${legacyRows.length} active clients (excluding Fully Paid / After Result). As of ${formatScoreAsOfDate(asOfDate)}.`;
   }, [asOfDate, isLoading, legacyRows.length, loadError]);
 
   const version2StatusText = useMemo(() => {
@@ -233,7 +237,7 @@ export default function ClientScorePage() {
     }
     const mlRows = version2Rows.filter((row) => row.probabilitySource === "ml").length;
     const fallbackRows = Math.max(0, version2Rows.length - mlRows);
-    return `Showing first ${version2Rows.length} clients (ML: ${mlRows}, fallback: ${fallbackRows}). As of ${formatScoreAsOfDate(asOfDate)}.`;
+    return `Showing first ${version2Rows.length} active clients (excluding Fully Paid / After Result), ML: ${mlRows}, fallback: ${fallbackRows}. As of ${formatScoreAsOfDate(asOfDate)}.`;
   }, [asOfDate, isLoading, isVersion2Loading, loadError, version2Rows]);
 
   const activeStatusText = activeVersion === "v1" ? statusText : version2StatusText;
@@ -438,4 +442,18 @@ function clampProbability(value: number): number {
 
 function clamp(value: number, minValue: number, maxValue: number): number {
   return Math.min(maxValue, Math.max(minValue, value));
+}
+
+function isEligibleForProbabilityTable(record: ClientRecord): boolean {
+  const status = getRecordStatusFlags(record);
+  if (!status.isActive) {
+    return false;
+  }
+  if (status.isAfterResult) {
+    return false;
+  }
+  if (status.isFullyPaid) {
+    return false;
+  }
+  return true;
 }
