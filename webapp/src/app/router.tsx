@@ -5,6 +5,7 @@ import { OwnerAdminRoute } from "@/app/OwnerAdminRoute";
 import { OwnerAdminOrClientServiceHeadRoute } from "@/app/OwnerAdminOrClientServiceHeadRoute";
 import { OwnerAdminOrAccountingRoute } from "@/app/OwnerAdminOrAccountingRoute";
 import AccessControlPage from "@/features/access-control/page";
+import AdsPage from "@/features/ads/page";
 import ClientsPage from "@/features/clients/page";
 import ClientHealthPage from "@/features/client-health/page";
 import ClientMatchPage from "@/features/client-match/page";
@@ -69,6 +70,14 @@ export function AppRouter() {
           element={(
             <OwnerAdminRoute>
               <QuickBooksPage />
+            </OwnerAdminRoute>
+          )}
+        />
+        <Route
+          path="ads"
+          element={(
+            <OwnerAdminRoute>
+              <AdsPage />
             </OwnerAdminRoute>
           )}
         />

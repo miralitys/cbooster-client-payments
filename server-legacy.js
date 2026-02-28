@@ -41711,6 +41711,10 @@ app.get("/quickbooks-payments", requireOwnerOrAdminAccess(), (_req, res) => {
   res.redirect(302, "/app/quickbooks-payments");
 });
 
+app.get("/ads", requireOwnerOrAdminAccess(), (_req, res) => {
+  res.redirect(302, "/app/ads");
+});
+
 app.get("/client-managers", requireWebPermission(WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS), (_req, res) => {
   res.redirect(302, "/app/client-managers");
 });
