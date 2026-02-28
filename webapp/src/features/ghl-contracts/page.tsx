@@ -212,7 +212,6 @@ export default function GhlContractsPage() {
               <p className="react-user-footnote">
                 Document ID: {latestResult.documentId || "-"}
               </p>
-              {latestResult.note ? <p className="react-user-footnote">{latestResult.note}</p> : null}
             </div>
 
             <div className="ghl-contracts-text">
