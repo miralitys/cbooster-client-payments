@@ -304,7 +304,7 @@ export default function SupportPage() {
         }
         await loadRequests();
         showToast({ type: "success", message: "Support request created." });
-      } catch (error) {
+      } catch {
         setFormError("Failed to create support request.");
       } finally {
         setFormSubmitting(false);
