@@ -1,6 +1,7 @@
 import { apiRequest } from "@/shared/api/fetcher";
 import type {
   ClientsFilterOptionsPayload,
+  ClientsTotalsPayload,
   ClientRecord,
   PatchRecordsPayload,
   PutRecordsPayload,
@@ -65,6 +66,26 @@ export async function getClientFilterOptions(): Promise<ClientsFilterOptionsPayl
   };
 }
 
+export async function getClientsTotals(
+  query: Record<string, string | number | boolean | null | undefined> = {},
+): Promise<ClientsTotalsPayload> {
+  const params = buildClientsQueryParams(query);
+  const path = params.toString() ? `/api/clients/totals?${params.toString()}` : "/api/clients/totals";
+  const payload = await apiRequest<ClientsTotalsPayload>(path);
+  return {
+    totalsCents: {
+      contractTotals: normalizeFiniteNumber(payload?.totalsCents?.contractTotals),
+      totalPayments: normalizeFiniteNumber(payload?.totalsCents?.totalPayments),
+      futurePayments: normalizeFiniteNumber(payload?.totalsCents?.futurePayments),
+      collection: normalizeFiniteNumber(payload?.totalsCents?.collection),
+    },
+    rowCount: Math.max(0, Math.trunc(normalizeFiniteNumber(payload?.rowCount))),
+    invalidFieldsCount: Math.max(0, Math.trunc(normalizeFiniteNumber(payload?.invalidFieldsCount))),
+    source: typeof payload?.source === "string" ? payload.source : undefined,
+    updatedAt: typeof payload?.updatedAt === "string" ? payload.updatedAt : null,
+  };
+}
+
 export async function putClients(records: ClientRecord[], expectedUpdatedAt: string | null): Promise<PutRecordsPayload> {
   const payload = await apiRequest<PutRecordsPayload>("/api/clients", {
     method: "PUT",
@@ -115,6 +136,10 @@ function normalizeOptionalNumber(value: unknown): number | undefined {
   return Math.trunc(value);
 }
 
+function normalizeFiniteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 function normalizeOptionalNumberOrNull(value: unknown): number | null | undefined {
   if (value === null) {
     return null;
@@ -129,4 +154,21 @@ function clampInteger(value: number, min: number, max: number): number {
   }
   const normalized = Math.trunc(value);
   return Math.max(min, Math.min(max, normalized));
+}
+
+function buildClientsQueryParams(
+  query: Record<string, string | number | boolean | null | undefined>,
+): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, rawValue] of Object.entries(query || {})) {
+    if (rawValue === null || rawValue === undefined) {
+      continue;
+    }
+    const value = String(rawValue).trim();
+    if (!value) {
+      continue;
+    }
+    params.set(key, value);
+  }
+  return params;
 }

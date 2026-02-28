@@ -124,6 +124,21 @@ export interface ClientsFilterOptionsPayload {
   clientManagerOptions: string[];
 }
 
+export interface ClientsTotalsCents {
+  contractTotals: number;
+  totalPayments: number;
+  futurePayments: number;
+  collection: number;
+}
+
+export interface ClientsTotalsPayload {
+  totalsCents: ClientsTotalsCents;
+  rowCount: number;
+  invalidFieldsCount: number;
+  source?: string;
+  updatedAt?: string | null;
+}
+
 export interface PutRecordsPayload {
   ok: boolean;
   updatedAt?: string | null;
