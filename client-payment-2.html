@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Client Payment 2</title>
+    <link rel="stylesheet" href="/client-payment-2.css" />
+  </head>
+  <body>
+    <div class="cp2-page">
+      <header class="cp2-nav">
+        <div class="cp2-nav__brand">
+          <span class="cp2-brand-dot" aria-hidden="true"></span>
+          <span class="cp2-brand-text">Credit Booster</span>
+          <span class="cp2-brand-tag">Client Payment 2</span>
+        </div>
+        <nav class="cp2-nav__links" aria-label="Page sections">
+          <a href="#overview">Overview</a>
+          <a href="#workspace">Workspace</a>
+          <a href="#details">Details</a>
+        </nav>
+        <div class="cp2-nav__actions">
+          <button class="cp2-btn cp2-btn--light" type="button" id="cp2-reload-frame">Reload</button>
+          <a class="cp2-btn cp2-btn--primary" href="/app/client-payments">Open Original</a>
+        </div>
+      </header>
+
+      <main class="cp2-main">
+        <section class="cp2-hero" id="overview">
+          <p class="cp2-eyebrow">Experimental Standalone View</p>
+          <h1>Client Payment 2</h1>
+          <h2>Built for fast testing of alternate visual styles.</h2>
+          <p class="cp2-hero__text">
+            This page is isolated from React components and can be removed in one commit. Business logic stays the same,
+            because the operational Client Payment workspace is loaded from the existing production flow.
+          </p>
+          <div class="cp2-hero__actions">
+            <a class="cp2-btn cp2-btn--primary" href="#workspace">Go to workspace</a>
+            <a class="cp2-btn cp2-btn--ghost" href="/app/dashboard">Back to dashboard</a>
+          </div>
+        </section>
+
+        <section class="cp2-cards" id="details" aria-label="Highlights">
+          <article class="cp2-card">
+            <p class="cp2-card__title">No business logic rewrite</p>
+            <p class="cp2-card__text">All create/edit/filter/save operations remain in your current Client Payment implementation.</p>
+          </article>
+          <article class="cp2-card">
+            <p class="cp2-card__title">Separate style layer</p>
+            <p class="cp2-card__text">Visual experiment is fully isolated in <code>client-payment-2.css</code>.</p>
+          </article>
+          <article class="cp2-card">
+            <p class="cp2-card__title">Easy rollback</p>
+            <p class="cp2-card__text">Remove route + 3 static files, and the experiment is gone without touching core flows.</p>
+          </article>
+        </section>
+
+        <section class="cp2-workspace" id="workspace">
+          <div class="cp2-workspace__header">
+            <div>
+              <p class="cp2-workspace__eyebrow">Live operational area</p>
+              <h3>Embedded Client Payment engine</h3>
+            </div>
+            <div class="cp2-workspace__meta">
+              <span>Last checked:</span>
+              <strong id="cp2-last-checked">-</strong>
+            </div>
+          </div>
+
+          <div class="cp2-workspace__frame-wrap">
+            <iframe
+              id="cp2-frame"
+              src="/app/client-payments"
+              title="Client Payment 2 Workspace"
+              loading="lazy"
+              referrerpolicy="same-origin"
+            ></iframe>
+          </div>
+        </section>
+
+        <section class="cp2-cta">
+          <h3>Test visual changes safely, keep production logic untouched.</h3>
+          <p>Use this page only as a design sandbox. Remove it any time when you finish experiments.</p>
+        </section>
+      </main>
+    </div>
+
+    <script src="/client-payment-2.js" defer></script>
+  </body>
+</html>
