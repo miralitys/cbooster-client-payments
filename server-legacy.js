@@ -902,6 +902,11 @@ const GHL_CONTRACT_ARCHIVE_TABLE_NAME = resolveTableName(
   process.env.DB_GHL_CONTRACT_ARCHIVE_TABLE_NAME,
   DEFAULT_GHL_CONTRACT_ARCHIVE_TABLE_NAME,
 );
+const DEFAULT_GHL_CONTRACT_TERMS_CACHE_TABLE_NAME = "ghl_contract_terms_cache";
+const GHL_CONTRACT_TERMS_CACHE_TABLE_NAME = resolveTableName(
+  process.env.DB_GHL_CONTRACT_TERMS_CACHE_TABLE_NAME,
+  DEFAULT_GHL_CONTRACT_TERMS_CACHE_TABLE_NAME,
+);
 const DEFAULT_ASSISTANT_REVIEW_TABLE_NAME = "assistant_review_queue";
 const ASSISTANT_REVIEW_TABLE_NAME = resolveTableName(
   process.env.DB_ASSISTANT_REVIEW_TABLE_NAME,
@@ -949,6 +954,7 @@ const GHL_BASIC_NOTE_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_BASIC_NOTE_CA
 const GHL_CALL_TRANSCRIPT_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CALL_TRANSCRIPT_CACHE_TABLE_NAME);
 const GHL_LEADS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_LEADS_CACHE_TABLE_NAME);
 const GHL_CONTRACT_ARCHIVE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CONTRACT_ARCHIVE_TABLE_NAME);
+const GHL_CONTRACT_TERMS_CACHE_TABLE = qualifyTableName(DB_SCHEMA, GHL_CONTRACT_TERMS_CACHE_TABLE_NAME);
 const ASSISTANT_REVIEW_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_REVIEW_TABLE_NAME);
 const ASSISTANT_SESSION_SCOPE_TABLE = qualifyTableName(DB_SCHEMA, ASSISTANT_SESSION_SCOPE_TABLE_NAME);
 const MINI_RUNTIME_STATE_TABLE = qualifyTableName(DB_SCHEMA, MINI_RUNTIME_STATE_TABLE_NAME);
@@ -24809,6 +24815,31 @@ async function ensureDatabaseReady() {
       `);
 
       await sharedDbQuery(`
+        CREATE TABLE IF NOT EXISTS ${GHL_CONTRACT_TERMS_CACHE_TABLE} (
+          id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL DEFAULT '',
+          client_name_lookup TEXT NOT NULL DEFAULT '',
+          location_id TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT '',
+          result JSONB NOT NULL DEFAULT '{}'::jsonb,
+          error TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_TERMS_CACHE_TABLE_NAME}_client_lookup_idx
+        ON ${GHL_CONTRACT_TERMS_CACHE_TABLE} (client_name_lookup, location_id, updated_at DESC)
+      `);
+
+      await sharedDbQuery(`
+        CREATE INDEX IF NOT EXISTS ${GHL_CONTRACT_TERMS_CACHE_TABLE_NAME}_updated_at_idx
+        ON ${GHL_CONTRACT_TERMS_CACHE_TABLE} (updated_at DESC)
+      `);
+
+      await sharedDbQuery(`
         CREATE TABLE IF NOT EXISTS ${ASSISTANT_REVIEW_TABLE} (
           id BIGSERIAL PRIMARY KEY,
           asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -33755,6 +33786,21 @@ function normalizeGhlContractTermsDob(value) {
   return `${digits.slice(0, 2)} ${digits.slice(2, 4)} ${digits.slice(4)}`;
 }
 
+function buildEmptyGhlContractTermsContactDetails(clientName = "") {
+  return {
+    fullName: sanitizeTextValue(clientName, 300),
+    phone: "",
+    email: "",
+    address: "",
+    monitoringService: "",
+    monitoringEmail: "",
+    monitoringPassword: "",
+    monitoringSecret: "",
+    ssn: "",
+    dob: "",
+  };
+}
+
 function extractGhlContractTermsFromDocument(doc, clientName) {
   if (!doc || typeof doc !== "object") {
     return null;
@@ -33836,11 +33882,13 @@ function extractGhlContractTermsFromDocument(doc, clientName) {
     documentId: sanitizeTextValue(doc?._id || doc?.documentId, 160),
     documentName: sanitizeTextValue(doc?.name, 320),
     status: sanitizeTextValue(doc?.status, 80),
+    source: "api",
     updatedAt: sanitizeTextValue(doc?.updatedAt, 80),
     contactName: recipientName,
     contactEmail: recipientEmail || email,
     signedAt: signedDate,
     contactDetails: {
+      ...buildEmptyGhlContractTermsContactDetails(clientName),
       fullName: contactName || recipientName || clientName,
       phone,
       email,
@@ -33887,6 +33935,23 @@ async function fetchGhlContractTermsViaApiKey(payload) {
   const limit = 21;
   let lastSeenTotal = null;
 
+  if (pool) {
+    try {
+      const cached = await getLatestGhlContractTermsCacheRow(clientName, locationId);
+      if (cached?.result && Object.keys(cached.result).length) {
+        const cachedResult = cached.result;
+        return {
+          ...cachedResult,
+          source: "cache",
+          fetchedAt: new Date().toISOString(),
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+    } catch {
+      // Cache is best-effort.
+    }
+  }
+
   while (true) {
     const response = await requestGhlApi("/proposals/document", {
       method: "GET",
@@ -33915,11 +33980,19 @@ async function fetchGhlContractTermsViaApiKey(payload) {
 
     for (const doc of documents) {
       const name = sanitizeTextValue(doc?.name, 320);
-      const comparable = normalizeAssistantComparableText(name, 220);
-      if (!comparable) {
-        continue;
-      }
-      if (comparable.includes(normalizedClientName)) {
+      const recipients = Array.isArray(doc?.recipients) ? doc.recipients : [];
+      const recipientName = sanitizeTextValue(recipients[0]?.contactName, 300);
+      const fillableFields = Array.isArray(doc?.fillableFields) ? doc.fillableFields : [];
+      const fieldName = sanitizeTextValue(
+        fillableFields.find((field) => sanitizeTextValue(field?.fieldId, 120) === "text_field_2")?.value,
+        300,
+      );
+      const candidates = [name, recipientName, fieldName].filter(Boolean);
+      const matched = candidates.some((candidate) => {
+        const comparable = normalizeAssistantComparableText(candidate, 220);
+        return comparable && comparable.includes(normalizedClientName);
+      });
+      if (matched) {
         const terms = extractGhlContractTermsFromDocument(doc, clientName);
         if (!terms) {
           continue;
@@ -33927,6 +34000,7 @@ async function fetchGhlContractTermsViaApiKey(payload) {
         return {
           ...terms,
           clientName,
+          source: "api",
           fetchedAt: new Date().toISOString(),
           elapsedMs: Date.now() - startedAt,
         };
@@ -33942,10 +34016,25 @@ async function fetchGhlContractTermsViaApiKey(payload) {
     }
   }
 
-  throw toGhlContractTextOperationError("Contract was not found for this client.", {
-    code: "ghl_contract_terms_not_found",
-    httpStatus: 404,
-  });
+  const notFoundResult = {
+    documentId: "",
+    documentName: "",
+    status: "not_found",
+    source: "api",
+    updatedAt: "",
+    contactName: "",
+    contactEmail: "",
+    signedAt: "",
+    contactDetails: buildEmptyGhlContractTermsContactDetails(clientName),
+    terms: [],
+    payments: [],
+    signatureDataUrl: "",
+    clientName,
+    source: "api",
+    fetchedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+  };
+  return notFoundResult;
 }
 
 const handleGhlContractTermsPost = async (req, res) => {
@@ -33984,6 +34073,16 @@ const handleGhlContractTermsPost = async (req, res) => {
       clientName,
       locationId,
     });
+    if (pool) {
+      await insertGhlContractTermsCacheRow({
+        clientName,
+        locationId,
+        status: sanitizeTextValue(result?.status, 80) || "ok",
+        source: sanitizeTextValue(result?.source, 120) || "cache",
+        result,
+        error: sanitizeTextValue(result?.status, 80) === "not_found" ? "not_found" : "",
+      }).catch(() => {});
+    }
     res.json({
       ok: true,
       result,
@@ -33999,6 +34098,56 @@ const handleGhlContractTermsPost = async (req, res) => {
     res.status(error?.httpStatus || 502).json({
       error: sanitizeTextValue(error?.message, 400) || "Failed to load GoHighLevel contract terms.",
       code: sanitizeTextValue(error?.code, 80) || "ghl_contract_terms_request_failed",
+    });
+  }
+};
+
+const handleGhlContractTermsRecentGet = async (req, res) => {
+  if (!pool) {
+    res.status(503).json({
+      error: "Database is not configured. Add DATABASE_URL in Render environment variables.",
+    });
+    return;
+  }
+
+  try {
+    const limit = parsePositiveInteger(req.query?.limit, 20);
+    const rows = await listRecentGhlContractTermsCacheRows(limit);
+    const items = rows.map((row) => {
+      const result = row.result || {};
+      const clientName = sanitizeTextValue(result.clientName, 300) || row.clientName;
+      const contactDetails =
+        result.contactDetails && typeof result.contactDetails === "object"
+          ? { ...buildEmptyGhlContractTermsContactDetails(clientName), ...result.contactDetails }
+          : buildEmptyGhlContractTermsContactDetails(clientName);
+      return {
+        id: row.id,
+        documentId: sanitizeTextValue(result.documentId, 160),
+        documentName: sanitizeTextValue(result.documentName, 320),
+        status: sanitizeTextValue(result.status, 80) || row.status,
+        source: sanitizeTextValue(result.source, 120) || row.source,
+        updatedAt: sanitizeTextValue(result.updatedAt, 80) || row.updatedAt || "",
+        contactName: sanitizeTextValue(result.contactName, 300),
+        contactEmail: sanitizeTextValue(result.contactEmail, 300),
+        signedAt: sanitizeTextValue(result.signedAt, 80),
+        contactDetails,
+        terms: Array.isArray(result.terms) ? result.terms.filter(Boolean) : [],
+        payments: Array.isArray(result.payments) ? result.payments : [],
+        signatureDataUrl: sanitizeTextValue(result.signatureDataUrl, 120000),
+        clientName,
+        fetchedAt: sanitizeTextValue(result.fetchedAt, 80) || row.updatedAt || "",
+        elapsedMs: Number.isFinite(result.elapsedMs) ? result.elapsedMs : 0,
+      };
+    });
+
+    res.json({
+      ok: true,
+      items,
+    });
+  } catch (error) {
+    console.error("GET /api/ghl/contract-terms/recent failed:", error);
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 600) || "Failed to load recent contract terms.",
     });
   }
 };
@@ -36144,6 +36293,104 @@ function mapGhlContractArchiveRow(rawRow) {
     createdAt: rawRow.created_at || null,
     contentBuffer,
   };
+}
+
+function mapGhlContractTermsCacheRow(rawRow) {
+  if (!rawRow || typeof rawRow !== "object") {
+    return null;
+  }
+  const result = rawRow.result && typeof rawRow.result === "object" && !Array.isArray(rawRow.result) ? rawRow.result : {};
+  return {
+    id: sanitizeTextValue(rawRow.id, 180),
+    clientName: sanitizeTextValue(rawRow.client_name, 300),
+    clientNameLookup: sanitizeTextValue(rawRow.client_name_lookup, 320),
+    locationId: sanitizeTextValue(rawRow.location_id, 160),
+    status: sanitizeTextValue(rawRow.status, 80),
+    source: sanitizeTextValue(rawRow.source, 120),
+    result,
+    error: sanitizeTextValue(rawRow.error, 600),
+    createdAt: rawRow.created_at || null,
+    updatedAt: rawRow.updated_at || null,
+  };
+}
+
+async function insertGhlContractTermsCacheRow(entry = {}) {
+  await ensureDatabaseReady();
+  const normalizedClientName = sanitizeTextValue(entry?.clientName, 300);
+  if (!normalizedClientName) {
+    throw createHttpError("Client name is required for contract terms cache.", 400, "ghl_contract_terms_cache_client_required");
+  }
+  const normalizedClientNameLookup = normalizeNameForLookup(normalizedClientName);
+  const normalizedLocationId = sanitizeTextValue(entry?.locationId, 160);
+  const normalizedStatus = sanitizeTextValue(entry?.status, 80);
+  const normalizedSource = sanitizeTextValue(entry?.source, 120);
+  const normalizedError = sanitizeTextValue(entry?.error, 600);
+  const result = entry?.result && typeof entry.result === "object" && !Array.isArray(entry.result) ? entry.result : {};
+  const cacheId = `ghl-terms-${generateId()}`;
+
+  const response = await sharedDbQuery(
+    `
+      INSERT INTO ${GHL_CONTRACT_TERMS_CACHE_TABLE}
+        (id, client_name, client_name_lookup, location_id, status, source, result, error, created_at, updated_at)
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW(), NOW())
+      RETURNING
+        id, client_name, client_name_lookup, location_id, status, source, result, error, created_at, updated_at
+    `,
+    [
+      cacheId,
+      normalizedClientName,
+      normalizedClientNameLookup,
+      normalizedLocationId,
+      normalizedStatus,
+      normalizedSource,
+      JSON.stringify(result),
+      normalizedError,
+    ],
+  );
+
+  return mapGhlContractTermsCacheRow(response.rows[0]);
+}
+
+async function getLatestGhlContractTermsCacheRow(clientName, locationId) {
+  await ensureDatabaseReady();
+  const normalizedClientNameLookup = normalizeNameForLookup(clientName);
+  if (!normalizedClientNameLookup) {
+    return null;
+  }
+  const normalizedLocationId = sanitizeTextValue(locationId, 160);
+  const response = await sharedDbQuery(
+    `
+      SELECT
+        id, client_name, client_name_lookup, location_id, status, source, result, error, created_at, updated_at
+      FROM ${GHL_CONTRACT_TERMS_CACHE_TABLE}
+      WHERE client_name_lookup = $1
+        AND location_id = $2
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 1
+    `,
+    [normalizedClientNameLookup, normalizedLocationId],
+  );
+  if (!response.rows.length) {
+    return null;
+  }
+  return mapGhlContractTermsCacheRow(response.rows[0]);
+}
+
+async function listRecentGhlContractTermsCacheRows(limit = 20) {
+  await ensureDatabaseReady();
+  const normalizedLimit = Math.min(Math.max(parsePositiveInteger(limit, 20), 1), 50);
+  const response = await sharedDbQuery(
+    `
+      SELECT
+        id, client_name, client_name_lookup, location_id, status, source, result, error, created_at, updated_at
+      FROM ${GHL_CONTRACT_TERMS_CACHE_TABLE}
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT $1
+    `,
+    [normalizedLimit],
+  );
+  return response.rows.map(mapGhlContractTermsCacheRow).filter(Boolean);
 }
 
 async function insertGhlContractArchiveRow(entry = {}) {
@@ -41268,6 +41515,7 @@ registerGhlRoutes({
     handleGhlContractTextPost,
     handleGhlContractPdfPost,
     handleGhlContractTermsPost,
+    handleGhlContractTermsRecentGet,
     handleGhlLeadsGet: ghlLeadsController.handleGhlLeadsGet,
     handleGhlLeadsRefreshPost: ghlLeadsController.handleGhlLeadsRefreshPost,
     handleGhlClientManagersGet: ghlLeadsController.handleGhlClientManagersGet,

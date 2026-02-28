@@ -25,6 +25,7 @@ export interface GhlContractTermsResult {
   documentId: string;
   documentName: string;
   status: string;
+  source: string;
   updatedAt: string;
   contactName: string;
   contactEmail: string;
@@ -41,4 +42,13 @@ export interface GhlContractTermsResult {
 export interface GhlContractTermsPayload {
   ok: boolean;
   result: GhlContractTermsResult;
+}
+
+export interface GhlContractTermsRecentItem extends GhlContractTermsResult {
+  id: string;
+}
+
+export interface GhlContractTermsRecentPayload {
+  ok: boolean;
+  items: GhlContractTermsRecentItem[];
 }

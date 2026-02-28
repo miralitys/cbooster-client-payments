@@ -1,6 +1,6 @@
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useMemo, useState, useEffect } from "react";
 
-import { getGhlContractTerms } from "@/shared/api";
+import { getGhlContractTerms, getGhlContractTermsRecent } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
 import type { GhlContractTermsRequest, GhlContractTermsResult } from "@/shared/types/ghlContractTerms";
 import { Badge, Button, EmptyState, Field, Input, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
@@ -50,7 +50,10 @@ export default function GhlContractsPage() {
         key: "status",
         label: "Status",
         align: "center",
-        cell: (row) => <Badge tone={row.status === "completed" ? "success" : "warning"}>{row.status || "-"}</Badge>,
+        cell: (row) => {
+          const tone = row.status === "completed" ? "success" : "warning";
+          return <Badge tone={tone}>{row.status || "-"}</Badge>;
+        },
       },
       {
         key: "fetchedAt",
@@ -60,6 +63,20 @@ export default function GhlContractsPage() {
       },
     ];
   }, []);
+
+  useEffect(() => {
+    void loadRecent();
+  }, []);
+
+  async function loadRecent() {
+    try {
+      const payload = await getGhlContractTermsRecent(20);
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      setHistoryRows(items.map((item) => ({ ...item, id: item.id || `${Date.now()}-${Math.random()}` })));
+    } catch {
+      // Recent extractions are optional.
+    }
+  }
 
   async function executeContractTextRequest(request: GhlContractTermsRequest) {
     setIsLoading(true);
@@ -80,6 +97,7 @@ export default function GhlContractsPage() {
         };
         return [nextItem, ...previous].slice(0, HISTORY_MAX_ROWS);
       });
+      void loadRecent();
       setStatusMessage(`Last extraction completed at ${formatDateTime(result.fetchedAt)}.`);
       showToast({
         type: "success",
@@ -198,52 +216,59 @@ export default function GhlContractsPage() {
             </div>
 
             <div className="ghl-contracts-text">
-              <div className="ghl-contracts-terms">
-                <h3 className="ghl-contracts-terms__title">{latestResult.documentName}</h3>
-                <p><strong>Status:</strong> {latestResult.status}</p>
-                <p><strong>Last update:</strong> {latestResult.updatedAt}</p>
-                <p><strong>Contact name in GHL:</strong> {latestResult.contactName}</p>
-                <p><strong>Email:</strong> {latestResult.contactEmail}</p>
+              {latestResult.status === "not_found" ? (
+                <div className="ghl-contracts-terms">
+                  <h3 className="ghl-contracts-terms__title">Contract not found</h3>
+                  <p>No contract terms were found for this client in GoHighLevel.</p>
+                </div>
+              ) : (
+                <div className="ghl-contracts-terms">
+                  <h3 className="ghl-contracts-terms__title">{latestResult.documentName}</h3>
+                  <p><strong>Status:</strong> {latestResult.status}</p>
+                  <p><strong>Last update:</strong> {latestResult.updatedAt}</p>
+                  <p><strong>Contact name in GHL:</strong> {latestResult.contactName}</p>
+                  <p><strong>Email:</strong> {latestResult.contactEmail}</p>
 
-                <p className="ghl-contracts-terms__section">Date of signature: {latestResult.signedAt || "-"}</p>
+                  <p className="ghl-contracts-terms__section">Date of signature: {latestResult.signedAt || "-"}</p>
 
-                <h4>Contact details from the contract:</h4>
-                <p>{latestResult.contactDetails.fullName}</p>
-                <p><strong>Phone number:</strong> {latestResult.contactDetails.phone}</p>
-                <p><strong>Email address:</strong> {latestResult.contactDetails.email}</p>
-                <p><strong>Address:</strong> {latestResult.contactDetails.address}</p>
+                  <h4>Contact details from the contract:</h4>
+                  <p>{latestResult.contactDetails.fullName}</p>
+                  <p><strong>Phone number:</strong> {latestResult.contactDetails.phone}</p>
+                  <p><strong>Email address:</strong> {latestResult.contactDetails.email}</p>
+                  <p><strong>Address:</strong> {latestResult.contactDetails.address}</p>
 
-                <h4>Credit monitoring service:</h4>
-                <p>{latestResult.contactDetails.monitoringService}</p>
-                <p>{latestResult.contactDetails.monitoringEmail}</p>
-                <p>{latestResult.contactDetails.monitoringPassword}</p>
-                <p><strong>Secret:</strong> {latestResult.contactDetails.monitoringSecret}</p>
-                <p><strong>SSN:</strong> {latestResult.contactDetails.ssn}</p>
-                <p><strong>Date of birth:</strong> {latestResult.contactDetails.dob}</p>
+                  <h4>Credit monitoring service:</h4>
+                  <p>{latestResult.contactDetails.monitoringService}</p>
+                  <p>{latestResult.contactDetails.monitoringEmail}</p>
+                  <p>{latestResult.contactDetails.monitoringPassword}</p>
+                  <p><strong>Secret:</strong> {latestResult.contactDetails.monitoringSecret}</p>
+                  <p><strong>SSN:</strong> {latestResult.contactDetails.ssn}</p>
+                  <p><strong>Date of birth:</strong> {latestResult.contactDetails.dob}</p>
 
-                <h4>Contract terms:</h4>
-                <ol>
-                  {latestResult.terms.map((term) => (
-                    <li key={term}>{term}</li>
-                  ))}
-                </ol>
+                  <h4>Contract terms:</h4>
+                  <ol>
+                    {latestResult.terms.map((term) => (
+                      <li key={term}>{term}</li>
+                    ))}
+                  </ol>
 
-                <h4>Payments under the contract:</h4>
-                <ol>
-                  {latestResult.payments.map((payment) => (
-                    <li key={`${payment.dueDate}-${payment.amount}`}>
-                      {payment.dueDate} {payment.amount}
-                    </li>
-                  ))}
-                </ol>
+                  <h4>Payments under the contract:</h4>
+                  <ol>
+                    {latestResult.payments.map((payment) => (
+                      <li key={`${payment.dueDate}-${payment.amount}`}>
+                        {payment.dueDate} {payment.amount}
+                      </li>
+                    ))}
+                  </ol>
 
-                {latestResult.signatureDataUrl ? (
-                  <>
-                    <h4>Signature</h4>
-                    <img className="ghl-contracts-signature" src={latestResult.signatureDataUrl} alt="Signature" />
-                  </>
-                ) : null}
-              </div>
+                  {latestResult.signatureDataUrl ? (
+                    <>
+                      <h4>Signature</h4>
+                      <img className="ghl-contracts-signature" src={latestResult.signatureDataUrl} alt="Signature" />
+                    </>
+                  ) : null}
+                </div>
+              )}
             </div>
           </div>
         )}
