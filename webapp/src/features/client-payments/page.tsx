@@ -12,6 +12,7 @@ import {
   formatKpiMoney,
   formatMoney,
   getRecordStatusFlags,
+  parseDateValue,
   parseMoneyValue,
 } from "@/features/client-payments/domain/calculations";
 import { evaluateClientScore, type ClientScoreResult } from "@/features/client-score/domain/scoring";
@@ -126,6 +127,27 @@ function resolveColumnLabel(column: string): string {
     return isDate ? `Payment ${index} Date` : `Payment ${index}`;
   }
   return COLUMN_LABELS[column] || column;
+}
+
+function resolvePaymentDateField(column: keyof ClientRecord | string): keyof ClientRecord | null {
+  const match = String(column || "").match(PAYMENT_COLUMN_MATCH);
+  if (!match) {
+    return null;
+  }
+  return `payment${match[1]}Date` as keyof ClientRecord;
+}
+
+function isTimestampWithinOptionalRange(timestamp: number | null, from: number | null, to: number | null): boolean {
+  if (timestamp === null) {
+    return false;
+  }
+  if (from !== null && timestamp < from) {
+    return false;
+  }
+  if (to !== null && timestamp > to) {
+    return false;
+  }
+  return true;
 }
 
 function getOverviewContextLabel(period: OverviewPeriodKey): string {
@@ -265,6 +287,28 @@ export default function ClientPaymentsPage() {
   }, [managerFilter, scoreByRecordId, scoreFilter, visibleRecords]);
 
   const filteredRecords = useMemo(() => scoredVisibleRecords.map((item) => item.record), [scoredVisibleRecords]);
+  const paymentDateRangeBounds = useMemo(
+    () => ({
+      from: parseDateValue(filters.paymentDateRange.from),
+      to: parseDateValue(filters.paymentDateRange.to),
+    }),
+    [filters.paymentDateRange.from, filters.paymentDateRange.to],
+  );
+  const hasPaymentDateRangeFilter = paymentDateRangeBounds.from !== null || paymentDateRangeBounds.to !== null;
+  const isPaymentCellVisibleInRange = useCallback(
+    (record: ClientRecord, column: keyof ClientRecord | string): boolean => {
+      const paymentDateField = resolvePaymentDateField(column);
+      if (!paymentDateField || !hasPaymentDateRangeFilter) {
+        return true;
+      }
+      return isTimestampWithinOptionalRange(
+        parseDateValue(record[paymentDateField]),
+        paymentDateRangeBounds.from,
+        paymentDateRangeBounds.to,
+      );
+    },
+    [hasPaymentDateRangeFilter, paymentDateRangeBounds.from, paymentDateRangeBounds.to],
+  );
   const filteredClientNamesForPhoneRefresh = useMemo<string[]>(() => {
     const uniqueByComparable = new Map<string, string>();
 
@@ -296,6 +340,10 @@ export default function ClientPaymentsPage() {
 
     for (const record of filteredRecords) {
       for (const column of SUMMABLE_TABLE_COLUMNS) {
+        if (!isPaymentCellVisibleInRange(record, column)) {
+          continue;
+        }
+
         const amount = parseMoneyValue(record[column]);
         if (amount === null) {
           continue;
@@ -311,7 +359,7 @@ export default function ClientPaymentsPage() {
     }
 
     return totals;
-  }, [filteredRecords]);
+  }, [filteredRecords, isPaymentCellVisibleInRange]);
   const managerStatusText = useMemo(() => {
     if (isManagersLoading) {
       if (managersRefreshMode === "full") {
@@ -671,6 +719,9 @@ export default function ClientPaymentsPage() {
             case "payment5":
             case "payment6":
             case "payment7":
+              if (!isPaymentCellVisibleInRange(record, column)) {
+                return "-";
+              }
               return formatMoneyCell(record[column]);
             case "payment1Date":
             case "payment2Date":
@@ -679,6 +730,10 @@ export default function ClientPaymentsPage() {
             case "payment5Date":
             case "payment6Date":
             case "payment7Date":
+              if (!isPaymentCellVisibleInRange(record, column)) {
+                return "-";
+              }
+              return formatDate((record[column] || "").toString());
             case "dateOfCollection":
             case "dateWhenWrittenOff":
               return formatDate((record[column] || "").toString());
@@ -694,6 +749,9 @@ export default function ClientPaymentsPage() {
               if (typeof column === "string") {
                 const match = column.match(PAYMENT_COLUMN_MATCH);
                 if (match) {
+                  if (!isPaymentCellVisibleInRange(record, column)) {
+                    return "-";
+                  }
                   const isDate = Boolean(match[2]);
                   return isDate
                     ? formatDate((record[column as keyof ClientRecord] || "").toString())
@@ -705,7 +763,7 @@ export default function ClientPaymentsPage() {
         },
       };
     });
-  }, [sortState.direction, sortState.key, sortableColumns, tableColumnKeys, toggleSort]);
+  }, [isPaymentCellVisibleInRange, sortState.direction, sortState.key, sortableColumns, tableColumnKeys, toggleSort]);
 
   useEffect(() => {
     function onPointerDown(event: MouseEvent) {

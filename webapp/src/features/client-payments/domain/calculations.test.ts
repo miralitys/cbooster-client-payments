@@ -280,7 +280,9 @@ describe("calculations", () => {
         companyName: "Alpha Logistics",
         closedBy: "Manager A",
         payment1Date: "01/10/2026",
+        payment1: "100",
         payment2Date: "02/20/2026",
+        payment2: "250",
       }),
       makeRecord({
         id: "out-of-range",
@@ -288,7 +290,9 @@ describe("calculations", () => {
         companyName: "Alpha Transport",
         closedBy: "Manager A",
         payment1Date: "01/10/2026",
+        payment1: "100",
         payment2Date: "03/01/2026",
+        payment2: "250",
       }),
       makeRecord({
         id: "wrong-closed-by",
@@ -296,6 +300,7 @@ describe("calculations", () => {
         companyName: "Alpha Fleet",
         closedBy: "Manager B",
         payment2Date: "02/15/2026",
+        payment2: "300",
       }),
     ];
 

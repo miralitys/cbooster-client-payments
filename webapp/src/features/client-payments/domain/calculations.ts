@@ -965,9 +965,14 @@ function matchesSearchQuery(record: ClientRecord, query: string): boolean {
 }
 
 function hasAnyPaymentDateWithinRange(record: ClientRecord, fromDate: number | null, toDate: number | null): boolean {
-  for (const [, paymentDateField] of PAYMENT_PAIRS) {
+  for (const [paymentField, paymentDateField] of PAYMENT_PAIRS) {
     const paymentDate = (record[paymentDateField] || "").toString();
-    if (isDateWithinRange(paymentDate, fromDate, toDate)) {
+    if (!isDateWithinRange(paymentDate, fromDate, toDate)) {
+      continue;
+    }
+
+    const paymentAmount = parseMoneyValue(record[paymentField]);
+    if (paymentAmount !== null && paymentAmount > ZERO_TOLERANCE) {
       return true;
     }
   }
