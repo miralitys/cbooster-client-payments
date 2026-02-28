@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createEmptyRecord } from "@/features/client-payments/domain/calculations";
-import { evaluateClientScore } from "@/features/client-score/domain/scoring";
+import { computeLegacyPaymentProbabilities, evaluateClientScore } from "@/features/client-score/domain/scoring";
 import type { ClientRecord } from "@/shared/types/records";
 
 function makeRecord(patch: Partial<ClientRecord>): ClientRecord {
@@ -66,5 +66,24 @@ describe("evaluateClientScore", () => {
     expect(result.score).toBeNull();
     expect(result.displayScore).toBeNull();
     expect(result.explanation).toContain("Fully Paid");
+  });
+});
+
+describe("computeLegacyPaymentProbabilities", () => {
+  it("returns 0% across months when score is 0", () => {
+    const result = computeLegacyPaymentProbabilities({
+      contractTotal: 1000,
+      paidTotal: 100,
+      paidRatio: 0.1,
+      paymentPace: 0.1,
+      displayScore: 0,
+      overdueDays: 0,
+      openMilestones: 0,
+      futurePayments: 900,
+      writtenOff: false,
+      balance: 900,
+    });
+
+    expect(result).toEqual({ p1: 0, p2: 0, p3: 0 });
   });
 });

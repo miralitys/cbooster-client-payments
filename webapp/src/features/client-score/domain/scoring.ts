@@ -127,6 +127,11 @@ export function computeLegacyPaymentProbabilities(features: PaymentFeatures): Pa
     return { p1: 0, p2: 0, p3: 0 };
   }
 
+  // Product rule for Version 1: score 0 means 0% payment probability.
+  if (toFiniteNullableNumber(features.displayScore) !== null && toFiniteNumber(features.displayScore) <= 0) {
+    return { p1: 0, p2: 0, p3: 0 };
+  }
+
   const scoreFactor = clampNumber(
     (toFiniteNullableNumber(features.displayScore) ?? LEGACY_SCORE_DEFAULT) / 100,
     0,
