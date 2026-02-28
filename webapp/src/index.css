@@ -4422,6 +4422,14 @@ a {
   text-align: right;
 }
 
+th.ghl-contracts-history-col-status {
+  text-align: center;
+}
+
+th.ghl-contracts-history-col-checked {
+  text-align: right;
+}
+
 .ghl-contracts-history-row--active td {
   background: #eaf1fb;
 }
