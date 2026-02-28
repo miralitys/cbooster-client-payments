@@ -1315,6 +1315,7 @@ export default function ClientPaymentsPage() {
             isRefreshingClientPhone={refreshingCardClientPhoneKey === normalizeComparableClientName(activeRecord.clientName)}
             onRefreshClientPhone={refreshSingleClientPhone}
             canConfirmPendingQuickBooksPayments={canConfirmPendingQuickBooksPayments}
+            onPaymentRowCleared={forceRefresh}
           />
         ) : null}
         {!isViewMode ? <RecordEditorForm draft={modalState.draft} onChange={updateDraftField} /> : null}

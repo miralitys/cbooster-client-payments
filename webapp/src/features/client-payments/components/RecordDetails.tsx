@@ -4,6 +4,7 @@ import {
   confirmQuickBooksRecentPayment,
   getGhlClientBasicNote,
   getGhlClientCommunications,
+  patchClients,
   getQuickBooksPendingConfirmations,
   postGhlClientCommunicationNormalizeTranscripts,
   postGhlClientCommunicationTranscript,
@@ -32,6 +33,7 @@ interface RecordDetailsProps {
   isRefreshingClientPhone?: boolean;
   onRefreshClientPhone?: (clientName: string) => Promise<void>;
   canConfirmPendingQuickBooksPayments?: boolean;
+  onPaymentRowCleared?: () => Promise<void> | void;
 }
 
 const HEADER_FIELD_KEYS = new Set<keyof ClientRecord>([
@@ -115,6 +117,7 @@ export function RecordDetails({
   isRefreshingClientPhone = false,
   onRefreshClientPhone,
   canConfirmPendingQuickBooksPayments = false,
+  onPaymentRowCleared,
 }: RecordDetailsProps) {
   const [ghlBasicNote, setGhlBasicNote] = useState<GhlClientBasicNotePayload | null>(null);
   const [isLoadingGhlBasicNote, setIsLoadingGhlBasicNote] = useState(false);
@@ -137,6 +140,7 @@ export function RecordDetails({
   const [clientManagerRefreshError, setClientManagerRefreshError] = useState("");
   const [clientPhoneRefreshError, setClientPhoneRefreshError] = useState("");
   const [confirmingPendingPaymentField, setConfirmingPendingPaymentField] = useState("");
+  const [clearingPendingPaymentField, setClearingPendingPaymentField] = useState("");
   const [pendingQuickBooksConfirmationError, setPendingQuickBooksConfirmationError] = useState("");
   const transcriptNormalizationByClientRef = useRef<Record<string, boolean>>({});
 
@@ -651,7 +655,8 @@ export function RecordDetails({
     () =>
       PAYMENT_PAIRS.map(([paymentField, paymentDateField], index) => ({
         id: `payment-${index + 1}`,
-        paymentField: String(paymentField),
+        paymentField,
+        paymentDateField,
         label: `Payment ${index + 1}`,
         amount: record[paymentField] ? formatMoneyCell(record[paymentField]) : "-",
         date: record[paymentDateField] ? formatDate(record[paymentDateField]) : "-",
@@ -675,11 +680,15 @@ export function RecordDetails({
     if (!recordId) {
       setPendingQuickBooksMatches([]);
       setPendingQuickBooksConfirmationError("");
+      setConfirmingPendingPaymentField("");
+      setClearingPendingPaymentField("");
       return;
     }
 
     let isActive = true;
     setPendingQuickBooksConfirmationError("");
+    setConfirmingPendingPaymentField("");
+    setClearingPendingPaymentField("");
 
     void getQuickBooksPendingConfirmations(recordId)
       .then((payload) => {
@@ -778,6 +787,72 @@ export function RecordDetails({
       });
     } finally {
       setConfirmingPendingPaymentField("");
+    }
+  }
+
+  async function handleClearPendingPayment(paymentField: keyof ClientRecord, paymentDateField: keyof ClientRecord) {
+    if (!canConfirmPendingQuickBooksPayments) {
+      showToast({
+        type: "error",
+        message: "You do not have permission to delete payments.",
+        dedupeKey: "record-details-clear-permission-denied",
+      });
+      return;
+    }
+
+    const recordId = String(record.id || "").trim();
+    if (!recordId) {
+      showToast({
+        type: "error",
+        message: "Payment deletion is unavailable for this row.",
+        dedupeKey: "record-details-clear-record-id-missing",
+      });
+      return;
+    }
+
+    const shouldClear = window.confirm("Delete this payment and date? Yes/No");
+    if (!shouldClear) {
+      return;
+    }
+
+    setPendingQuickBooksConfirmationError("");
+    setClearingPendingPaymentField(String(paymentField));
+
+    try {
+      await patchClients(
+        [
+          {
+            type: "upsert",
+            id: recordId,
+            record: {
+              [paymentField]: "",
+              [paymentDateField]: "",
+            },
+          },
+        ],
+        null,
+      );
+      setPendingQuickBooksMatches((previous) =>
+        previous.filter((item) => String(item.matchedPaymentField || "").trim() !== String(paymentField)),
+      );
+      if (typeof onPaymentRowCleared === "function") {
+        await onPaymentRowCleared();
+      }
+      showToast({
+        type: "success",
+        message: "Payment and date deleted.",
+        dedupeKey: "record-details-payment-cleared",
+        cooldownMs: 1200,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to delete payment.";
+      setPendingQuickBooksConfirmationError(message);
+      showToast({
+        type: "error",
+        message,
+      });
+    } finally {
+      setClearingPendingPaymentField("");
     }
   }
 
@@ -908,6 +983,9 @@ export function RecordDetails({
             <div className="record-payments-panel__rows" role="list">
               {visiblePaymentScheduleRows.map((payment) => {
                 const pendingMatch = payment.pendingMatch;
+                const paymentFieldKey = String(payment.paymentField);
+                const isPendingActionInProgress =
+                  confirmingPendingPaymentField === paymentFieldKey || clearingPendingPaymentField === paymentFieldKey;
                 return (
                   <div key={payment.id} className="record-payments-panel__row" role="listitem">
                     <span className="record-payments-panel__label">{payment.label}</span>
@@ -920,11 +998,23 @@ export function RecordDetails({
                             type="button"
                             className="record-payments-panel__confirm-btn"
                             onClick={() => void handleConfirmPendingQuickBooksPayment(pendingMatch)}
-                            disabled={confirmingPendingPaymentField === payment.paymentField}
+                            disabled={isPendingActionInProgress}
                             title="Confirm payment"
                             aria-label={`Confirm ${payment.label}`}
                           >
-                            {confirmingPendingPaymentField === payment.paymentField ? "..." : "✓"}
+                            {confirmingPendingPaymentField === paymentFieldKey ? "..." : "✓"}
+                          </button>
+                        ) : null}
+                        {canConfirmPendingQuickBooksPayments ? (
+                          <button
+                            type="button"
+                            className="record-payments-panel__clear-btn"
+                            onClick={() => void handleClearPendingPayment(payment.paymentField, payment.paymentDateField)}
+                            disabled={isPendingActionInProgress}
+                            title="Delete payment and date"
+                            aria-label={`Delete ${payment.label}`}
+                          >
+                            {clearingPendingPaymentField === paymentFieldKey ? "..." : "✕"}
                           </button>
                         ) : null}
                         <span className="record-payments-panel__pending">Not Confirmed</span>
