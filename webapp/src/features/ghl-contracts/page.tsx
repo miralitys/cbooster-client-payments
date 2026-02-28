@@ -1,8 +1,8 @@
 import { type FormEvent, useMemo, useState } from "react";
 
-import { getGhlContractPdf } from "@/shared/api";
+import { getGhlContractTerms } from "@/shared/api";
 import { showToast } from "@/shared/lib/toast";
-import type { GhlContractPdfRequest, GhlContractPdfResult } from "@/shared/types/ghlContractPdf";
+import type { GhlContractTermsRequest, GhlContractTermsResult } from "@/shared/types/ghlContractTerms";
 import { Badge, Button, EmptyState, Field, Input, PageHeader, PageShell, Panel, Table } from "@/shared/ui";
 import type { TableColumn } from "@/shared/ui";
 
@@ -11,7 +11,7 @@ interface GhlContractTextFormState {
   locationId: string;
 }
 
-interface GhlContractTextHistoryRow extends GhlContractPdfResult {
+interface GhlContractTextHistoryRow extends GhlContractTermsResult {
   id: string;
 }
 
@@ -23,8 +23,8 @@ export default function GhlContractsPage() {
   });
   const [isLoading, setIsLoading] = useState(false);
   const [submitError, setSubmitError] = useState("");
-  const [statusMessage, setStatusMessage] = useState("Ready to load contract PDF from GoHighLevel API.");
-  const [latestResult, setLatestResult] = useState<GhlContractPdfResult | null>(null);
+  const [statusMessage, setStatusMessage] = useState("Ready to load contract terms from GoHighLevel API.");
+  const [latestResult, setLatestResult] = useState<GhlContractTermsResult | null>(null);
   const [historyRows, setHistoryRows] = useState<GhlContractTextHistoryRow[]>([]);
 
   const historyColumns = useMemo<TableColumn<GhlContractTextHistoryRow>[]>(() => {
@@ -47,10 +47,10 @@ export default function GhlContractsPage() {
         cell: (row) => <Badge tone={row.status === "ok" ? "success" : "warning"}>{row.status}</Badge>,
       },
       {
-        key: "size",
-        label: "PDF Size",
+        key: "status",
+        label: "Status",
         align: "center",
-        cell: (row) => formatSizeBytes(row.sizeBytes),
+        cell: (row) => <Badge tone={row.status === "completed" ? "success" : "warning"}>{row.status || "-"}</Badge>,
       },
       {
         key: "fetchedAt",
@@ -61,15 +61,15 @@ export default function GhlContractsPage() {
     ];
   }, []);
 
-  async function executeContractTextRequest(request: GhlContractPdfRequest) {
+  async function executeContractTextRequest(request: GhlContractTermsRequest) {
     setIsLoading(true);
-    setStatusMessage("Fetching contract PDF from GoHighLevel API...");
+    setStatusMessage("Fetching contract terms from GoHighLevel API...");
     try {
-      const payload = await getGhlContractPdf(request);
+      const payload = await getGhlContractTerms(request);
 
       const result = payload?.result;
-      if (!result?.fileBase64) {
-        throw new Error("GoHighLevel returned an empty contract PDF result.");
+      if (!result?.terms?.length) {
+        throw new Error("GoHighLevel returned empty contract terms.");
       }
 
       setLatestResult(result);
@@ -83,18 +83,18 @@ export default function GhlContractsPage() {
       setStatusMessage(`Last extraction completed at ${formatDateTime(result.fetchedAt)}.`);
       showToast({
         type: "success",
-        message: "Contract PDF loaded.",
-        dedupeKey: "ghl-contract-pdf-success",
+        message: "Contract terms loaded.",
+        dedupeKey: "ghl-contract-terms-success",
         cooldownMs: 2200,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load GoHighLevel contract PDF.";
+      const message = error instanceof Error ? error.message : "Failed to load GoHighLevel contract terms.";
       setSubmitError(message);
-      setStatusMessage("GoHighLevel contract PDF request failed.");
+      setStatusMessage("GoHighLevel contract terms request failed.");
       showToast({
         type: "error",
         message,
-        dedupeKey: `ghl-contract-pdf-error-${message}`,
+        dedupeKey: `ghl-contract-terms-error-${message}`,
         cooldownMs: 2200,
       });
     } finally {
@@ -112,7 +112,7 @@ export default function GhlContractsPage() {
       return;
     }
 
-    const request: GhlContractPdfRequest = {
+    const request: GhlContractTermsRequest = {
       clientName: form.clientName.trim(),
       locationId: form.locationId.trim() || undefined,
     };
@@ -122,8 +122,8 @@ export default function GhlContractsPage() {
   return (
     <PageShell className="ghl-contracts-react-page">
       <PageHeader
-        title="GoHighLevel Contract PDF"
-        subtitle="API-based contract PDF extraction"
+        title="GoHighLevel Contract Terms"
+        subtitle="API-based contract terms lookup"
         meta={
           <>
             <p className={`dashboard-message ${submitError ? "error" : ""}`.trim()}>{submitError || statusMessage}</p>
@@ -134,7 +134,7 @@ export default function GhlContractsPage() {
         }
       />
 
-      <Panel className="table-panel" title="Extract Contract PDF">
+      <Panel className="table-panel" title="Extract Contract Terms">
         <form className="ghl-contracts-form" onSubmit={handleSubmit}>
           <Field label="Client Name" htmlFor="ghl-contract-client-name">
             <Input
@@ -159,15 +159,15 @@ export default function GhlContractsPage() {
 
           <div className="ghl-contracts-actions">
             <Button type="submit" size="sm" isLoading={isLoading}>
-              Get Contract PDF
+              Get Contract Terms
             </Button>
           </div>
         </form>
       </Panel>
 
-      <Panel className="table-panel" title="Latest PDF Result">
+      <Panel className="table-panel" title="Latest Contract Terms">
         {!latestResult ? (
-          <EmptyState title="No contract PDF loaded yet." description="Run an extraction to see the PDF here." />
+          <EmptyState title="No contract terms loaded yet." description="Run an extraction to see the terms here." />
         ) : (
           <div className="ghl-contracts-result">
             <div className="ghl-contracts-summary">
@@ -177,11 +177,13 @@ export default function GhlContractsPage() {
               </div>
               <div>
                 <p className="react-user-footnote">Status</p>
-                <Badge tone={latestResult.status === "ok" ? "success" : "warning"}>{latestResult.status}</Badge>
+                <Badge tone={latestResult.status === "completed" ? "success" : "warning"}>
+                  {latestResult.status || "unknown"}
+                </Badge>
               </div>
               <div>
-                <p className="react-user-footnote">PDF Size</p>
-                <p className="ghl-contracts-summary__value">{formatSizeBytes(latestResult.sizeBytes)}</p>
+                <p className="react-user-footnote">Last Update</p>
+                <p className="ghl-contracts-summary__value">{formatDateTime(latestResult.updatedAt)}</p>
               </div>
             </div>
 
@@ -190,27 +192,58 @@ export default function GhlContractsPage() {
                 Checked at: {formatDateTime(latestResult.fetchedAt)} ({latestResult.elapsedMs} ms)
               </p>
               <p className="react-user-footnote">
-                Source: {latestResult.source || "-"}
+                Document ID: {latestResult.documentId || "-"}
               </p>
               {latestResult.note ? <p className="react-user-footnote">{latestResult.note}</p> : null}
-              {latestResult.fileName ? <p className="react-user-footnote">File: {latestResult.fileName}</p> : null}
-              {latestResult.contractUrl ? (
-                <p className="react-user-footnote">
-                  Contract URL:
-                  {" "}
-                  <a href={latestResult.contractUrl} target="_blank" rel="noreferrer">
-                    {latestResult.contractUrl}
-                  </a>
-                </p>
-              ) : null}
             </div>
 
             <div className="ghl-contracts-text">
-              <iframe
-                className="ghl-contracts-pdf"
-                title="Contract PDF"
-                src={`data:${latestResult.mimeType || "application/pdf"};base64,${latestResult.fileBase64}`}
-              />
+              <div className="ghl-contracts-terms">
+                <h3 className="ghl-contracts-terms__title">{latestResult.documentName}</h3>
+                <p><strong>Status:</strong> {latestResult.status}</p>
+                <p><strong>Last update:</strong> {latestResult.updatedAt}</p>
+                <p><strong>Contact name in GHL:</strong> {latestResult.contactName}</p>
+                <p><strong>Email:</strong> {latestResult.contactEmail}</p>
+
+                <p className="ghl-contracts-terms__section">Date of signature: {latestResult.signedAt || "-"}</p>
+
+                <h4>Contact details from the contract:</h4>
+                <p>{latestResult.contactDetails.fullName}</p>
+                <p><strong>Phone number:</strong> {latestResult.contactDetails.phone}</p>
+                <p><strong>Email address:</strong> {latestResult.contactDetails.email}</p>
+                <p><strong>Address:</strong> {latestResult.contactDetails.address}</p>
+
+                <h4>Credit monitoring service:</h4>
+                <p>{latestResult.contactDetails.monitoringService}</p>
+                <p>{latestResult.contactDetails.monitoringEmail}</p>
+                <p>{latestResult.contactDetails.monitoringPassword}</p>
+                <p><strong>Secret:</strong> {latestResult.contactDetails.monitoringSecret}</p>
+                <p><strong>SSN:</strong> {latestResult.contactDetails.ssn}</p>
+                <p><strong>Date of birth:</strong> {latestResult.contactDetails.dob}</p>
+
+                <h4>Contract terms:</h4>
+                <ol>
+                  {latestResult.terms.map((term) => (
+                    <li key={term}>{term}</li>
+                  ))}
+                </ol>
+
+                <h4>Payments under the contract:</h4>
+                <ol>
+                  {latestResult.payments.map((payment) => (
+                    <li key={`${payment.dueDate}-${payment.amount}`}>
+                      {payment.dueDate} {payment.amount}
+                    </li>
+                  ))}
+                </ol>
+
+                {latestResult.signatureDataUrl ? (
+                  <>
+                    <h4>Signature</h4>
+                    <img className="ghl-contracts-signature" src={latestResult.signatureDataUrl} alt="Signature" />
+                  </>
+                ) : null}
+              </div>
             </div>
           </div>
         )}
@@ -236,20 +269,6 @@ function validateGhlContractTextForm(form: GhlContractTextFormState): string {
   }
 
   return "";
-}
-
-function formatSizeBytes(value: number): string {
-  const size = Number.isFinite(value) ? Number(value) : 0;
-  if (size <= 0) {
-    return "0 B";
-  }
-  if (size < 1024) {
-    return `${size} B`;
-  }
-  if (size < 1024 * 1024) {
-    return `${(size / 1024).toFixed(1)} KB`;
-  }
-  return `${(size / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function formatDateTime(rawValue: string): string {

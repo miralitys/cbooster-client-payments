@@ -20,6 +20,12 @@ function registerGhlRoutes(context) {
     handlers.handleGhlContractPdfPost,
   );
 
+  app.post(
+    "/api/ghl/contract-terms",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
+    handlers.handleGhlContractTermsPost,
+  );
+
   app.get(
     "/api/ghl/leads",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),

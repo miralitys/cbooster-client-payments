@@ -33723,6 +33723,286 @@ const handleGhlContractPdfPost = async (req, res) => {
   }
 };
 
+function normalizeGhlContractTermsText(value) {
+  return sanitizeTextValue(value, 2000);
+}
+
+function normalizeGhlContractTermsAmount(value) {
+  const normalized = sanitizeTextValue(value, 120).replace(/[^\d.]/g, "");
+  if (!normalized) {
+    return "";
+  }
+  const numeric = Number(normalized);
+  if (!Number.isFinite(numeric)) {
+    return "";
+  }
+  return `$${numeric.toFixed(2)}`;
+}
+
+function normalizeGhlContractTermsSsn(value) {
+  const digits = sanitizeTextValue(value, 80).replace(/\D/g, "");
+  if (digits.length !== 9) {
+    return sanitizeTextValue(value, 80);
+  }
+  return `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
+}
+
+function normalizeGhlContractTermsDob(value) {
+  const digits = sanitizeTextValue(value, 40).replace(/\D/g, "");
+  if (digits.length !== 8) {
+    return sanitizeTextValue(value, 40);
+  }
+  return `${digits.slice(0, 2)} ${digits.slice(2, 4)} ${digits.slice(4)}`;
+}
+
+function extractGhlContractTermsFromDocument(doc, clientName) {
+  if (!doc || typeof doc !== "object") {
+    return null;
+  }
+  const fields = Array.isArray(doc.fillableFields) ? doc.fillableFields : [];
+  const fieldValues = new Map();
+  const dateValues = [];
+
+  for (const field of fields) {
+    const fieldId = sanitizeTextValue(field?.fieldId, 120);
+    const value = sanitizeTextValue(field?.value, 2000);
+    if (!fieldId) {
+      continue;
+    }
+    if (fieldId === "date_field_39") {
+      if (value) {
+        dateValues.push(value);
+      }
+      continue;
+    }
+    if (!fieldValues.has(fieldId)) {
+      fieldValues.set(fieldId, value);
+    }
+  }
+
+  const recipients = Array.isArray(doc.recipients) ? doc.recipients : [];
+  const primaryRecipient = recipients[0] || {};
+  const recipientName = sanitizeTextValue(primaryRecipient?.contactName, 300) || clientName;
+  const recipientEmail = sanitizeTextValue(primaryRecipient?.email, 300);
+  const signedDate = sanitizeTextValue(primaryRecipient?.signedDate, 80);
+  const signatureDataUrl = sanitizeTextValue(primaryRecipient?.imgUrl, 100000);
+
+  const contactName = normalizeGhlContractTermsText(fieldValues.get("text_field_2"));
+  const phone = normalizeGhlContractTermsText(fieldValues.get("text_field_3"));
+  const email = normalizeGhlContractTermsText(fieldValues.get("text_field_4"));
+  const addressLine = normalizeGhlContractTermsText(fieldValues.get("text_field_6"));
+  const cityStateZip = normalizeGhlContractTermsText(fieldValues.get("text_field_5"));
+  const address = [addressLine, cityStateZip].filter(Boolean).join(", ");
+
+  const monitoringService = normalizeGhlContractTermsText(fieldValues.get("text_field_7"));
+  const monitoringEmail = normalizeGhlContractTermsText(fieldValues.get("text_field_8"));
+  const monitoringPassword = normalizeGhlContractTermsText(fieldValues.get("text_field_9"));
+  const monitoringSecret = normalizeGhlContractTermsText(fieldValues.get("text_field_10"));
+  const ssn = normalizeGhlContractTermsSsn(fieldValues.get("text_field_11"));
+  const dob = normalizeGhlContractTermsDob(fieldValues.get("text_field_12"));
+
+  const terms = [
+    normalizeGhlContractTermsText(fieldValues.get("text_field_17")),
+    normalizeGhlContractTermsText(fieldValues.get("text_field_18")),
+    normalizeGhlContractTermsText(fieldValues.get("text_field_20")),
+    normalizeGhlContractTermsText(fieldValues.get("text_field_21")),
+    normalizeGhlContractTermsText(fieldValues.get("text_field_22")),
+    normalizeGhlContractTermsText(fieldValues.get("text_field_23")),
+    normalizeGhlContractTermsText(fieldValues.get("text_field_24")),
+  ].filter(Boolean);
+
+  const paymentAmounts = [
+    fieldValues.get("text_field_27"),
+    fieldValues.get("text_field_28"),
+    fieldValues.get("text_field_29"),
+    fieldValues.get("text_field_30"),
+    fieldValues.get("text_field_31"),
+    fieldValues.get("text_field_32"),
+    fieldValues.get("text_field_37"),
+    fieldValues.get("text_field_38"),
+  ]
+    .map((value) => normalizeGhlContractTermsAmount(value))
+    .filter(Boolean);
+
+  const payments = [];
+  for (let index = 0; index < Math.min(dateValues.length, paymentAmounts.length); index += 1) {
+    payments.push({
+      dueDate: dateValues[index],
+      amount: paymentAmounts[index],
+    });
+  }
+
+  return {
+    documentId: sanitizeTextValue(doc?._id || doc?.documentId, 160),
+    documentName: sanitizeTextValue(doc?.name, 320),
+    status: sanitizeTextValue(doc?.status, 80),
+    updatedAt: sanitizeTextValue(doc?.updatedAt, 80),
+    contactName: recipientName,
+    contactEmail: recipientEmail || email,
+    signedAt: signedDate,
+    contactDetails: {
+      fullName: contactName || recipientName || clientName,
+      phone,
+      email,
+      address,
+      monitoringService,
+      monitoringEmail,
+      monitoringPassword,
+      monitoringSecret,
+      ssn,
+      dob,
+    },
+    terms,
+    payments,
+    signatureDataUrl,
+  };
+}
+
+async function fetchGhlContractTermsViaApiKey(payload) {
+  const clientName = sanitizeTextValue(payload?.clientName, 300);
+  const locationId = resolveGhlLocationId(payload?.locationId);
+  const startedAt = Date.now();
+
+  if (!clientName) {
+    throw toGhlContractTextOperationError("clientName is required.", {
+      code: "ghl_contract_terms_invalid_payload",
+      httpStatus: 400,
+    });
+  }
+  if (!GHL_API_KEY) {
+    throw toGhlContractTextOperationError("GHL integration is not configured. Set GHL_API_KEY.", {
+      code: "ghl_contract_terms_missing_api_key",
+      httpStatus: 503,
+    });
+  }
+  if (!locationId) {
+    throw toGhlContractTextOperationError("GHL locationId is not configured. Set GHL_LOCATION_ID or pass locationId.", {
+      code: "ghl_contract_terms_missing_location",
+      httpStatus: 503,
+    });
+  }
+
+  const normalizedClientName = normalizeAssistantComparableText(clientName, 220);
+  let skip = 0;
+  const limit = 21;
+  let lastSeenTotal = null;
+
+  while (true) {
+    const response = await requestGhlApi("/proposals/document", {
+      method: "GET",
+      query: {
+        locationId,
+        limit,
+        skip,
+        status: "draft,sent,viewed,completed,accepted",
+      },
+      tolerateNotFound: true,
+      timeoutMs: Math.min(20000, GHL_REQUEST_TIMEOUT_MS),
+    });
+
+    if (!response.ok || !response.body) {
+      throw toGhlContractTextOperationError("Failed to load contract data from GoHighLevel.", {
+        code: "ghl_contract_terms_request_failed",
+        httpStatus: 502,
+      });
+    }
+
+    const documents = Array.isArray(response.body?.documents) ? response.body.documents : [];
+    const totalCount = Number.isFinite(response.body?.total) ? response.body.total : null;
+    if (Number.isFinite(totalCount)) {
+      lastSeenTotal = totalCount;
+    }
+
+    for (const doc of documents) {
+      const name = sanitizeTextValue(doc?.name, 320);
+      const comparable = normalizeAssistantComparableText(name, 220);
+      if (!comparable) {
+        continue;
+      }
+      if (comparable.includes(normalizedClientName)) {
+        const terms = extractGhlContractTermsFromDocument(doc, clientName);
+        if (!terms) {
+          continue;
+        }
+        return {
+          ...terms,
+          clientName,
+          fetchedAt: new Date().toISOString(),
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+    }
+
+    skip += limit;
+    if (documents.length < limit) {
+      break;
+    }
+    if (lastSeenTotal !== null && skip >= lastSeenTotal) {
+      break;
+    }
+  }
+
+  throw toGhlContractTextOperationError("Contract was not found for this client.", {
+    code: "ghl_contract_terms_not_found",
+    httpStatus: 404,
+  });
+}
+
+const handleGhlContractTermsPost = async (req, res) => {
+  if (
+    !enforceRateLimit(req, res, {
+      scope: "api.ghl.contract_terms.read",
+      ipProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsIp,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      userProfile: {
+        windowMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.windowMs,
+        maxHits: RATE_LIMIT_PROFILE_API_EXPENSIVE.maxHitsUser,
+        blockMs: RATE_LIMIT_PROFILE_API_EXPENSIVE.blockMs,
+      },
+      message: "GoHighLevel contract terms request limit reached. Please wait before retrying.",
+      code: "ghl_contract_terms_rate_limited",
+    })
+  ) {
+    return;
+  }
+
+  const clientName = sanitizeTextValue(req.body?.clientName, 300);
+  const locationId = sanitizeTextValue(req.body?.locationId, 160);
+  if (!clientName) {
+    res.status(400).json({
+      error: "clientName is required for a contract terms request.",
+      code: "ghl_contract_terms_invalid_payload",
+    });
+    return;
+  }
+
+  try {
+    const result = await fetchGhlContractTermsViaApiKey({
+      clientName,
+      locationId,
+    });
+    res.json({
+      ok: true,
+      result,
+    });
+  } catch (error) {
+    console.error("POST /api/ghl/contract-terms failed:", {
+      code: sanitizeTextValue(error?.code, 80),
+      status: Number.isFinite(error?.httpStatus) ? error.httpStatus : "",
+      message: sanitizeTextValue(error?.message, 320),
+      user: sanitizeTextValue(req.webAuthUser, 160),
+      clientName,
+    });
+    res.status(error?.httpStatus || 502).json({
+      error: sanitizeTextValue(error?.message, 400) || "Failed to load GoHighLevel contract terms.",
+      code: sanitizeTextValue(error?.code, 80) || "ghl_contract_terms_request_failed",
+    });
+  }
+};
+
 const PAYMENT_PROBABILITY_MODEL_VERSION =
   sanitizeTextValue(process.env.PAYMENT_PROBABILITY_MODEL_VERSION, 120) || "v2-local-2026-02-22";
 
@@ -40987,6 +41267,7 @@ registerGhlRoutes({
   handlers: {
     handleGhlContractTextPost,
     handleGhlContractPdfPost,
+    handleGhlContractTermsPost,
     handleGhlLeadsGet: ghlLeadsController.handleGhlLeadsGet,
     handleGhlLeadsRefreshPost: ghlLeadsController.handleGhlLeadsRefreshPost,
     handleGhlClientManagersGet: ghlLeadsController.handleGhlClientManagersGet,
