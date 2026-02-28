@@ -159,6 +159,7 @@ export default function ClientPaymentsPage() {
   const {
     session,
     canManage,
+    canDeleteClient,
     isLoading,
     loadError,
     records,
@@ -194,6 +195,7 @@ export default function ClientPaymentsPage() {
     discardDraftAndCloseModal,
     updateDraftField,
     saveDraft,
+    deleteActiveRecord,
     retrySave,
   } = useClientPayments();
 
@@ -379,6 +381,7 @@ export default function ClientPaymentsPage() {
   }, [isManagersLoading, managersError, managersRefreshMode, managersStatusNote]);
 
   const isViewMode = modalState.mode === "view";
+  const canDeleteActiveRecord = !isViewMode && modalState.mode !== "create" && canDeleteClient;
   const activeRecordClientManagerLabel = useMemo(() => {
     if (!activeRecord) {
       return "";
@@ -626,6 +629,32 @@ export default function ClientPaymentsPage() {
       setIsPhonesRefreshLoading(false);
     }
   }, [canRefreshClientPhoneInCard, filteredClientNamesForPhoneRefresh, filteredRecords, forceRefresh]);
+
+  const handleDeleteActiveRecord = useCallback(async () => {
+    if (!activeRecord || !canDeleteActiveRecord) {
+      return;
+    }
+
+    const safeClientName = (activeRecord.clientName || "").trim() || "this client";
+    const shouldDelete = window.confirm(`Delete "${safeClientName}"? Yes/No`);
+    if (!shouldDelete) {
+      return;
+    }
+
+    const result = await deleteActiveRecord();
+    if (result.ok) {
+      showToast({
+        type: "success",
+        message: "Client deleted.",
+      });
+      return;
+    }
+
+    showToast({
+      type: "error",
+      message: result.error || "Failed to delete client.",
+    });
+  }, [activeRecord, canDeleteActiveRecord, deleteActiveRecord]);
 
   const counters = useMemo(() => {
     let writtenOffCount = 0;
@@ -1294,6 +1323,11 @@ export default function ClientPaymentsPage() {
             {isViewMode ? (
               <Button size="sm" onClick={startEditRecord}>
                 Edit
+              </Button>
+            ) : null}
+            {canDeleteActiveRecord ? (
+              <Button type="button" variant="danger" size="sm" onClick={() => void handleDeleteActiveRecord()}>
+                Delete
               </Button>
             ) : null}
             {!isViewMode ? (

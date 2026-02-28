@@ -120,6 +120,8 @@ function createRecordsController(dependencies = {}) {
 
     try {
       const result = await recordsService.saveRecordsForApi({
+        webAuthProfile: req.webAuthProfile,
+        webAuthUser: req.webAuthUser,
         records: validationResult.records,
         expectedUpdatedAt: expectedUpdatedAtResult.expectedUpdatedAt,
       });
@@ -170,6 +172,8 @@ function createRecordsController(dependencies = {}) {
 
     try {
       const result = await recordsService.patchRecordsForApi({
+        webAuthProfile: req.webAuthProfile,
+        webAuthUser: req.webAuthUser,
         operations: validationResult.operations,
         expectedUpdatedAt: expectedUpdatedAtResult.expectedUpdatedAt,
       });

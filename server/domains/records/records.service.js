@@ -26,6 +26,8 @@ function createRecordsService(dependencies = {}) {
     saveStoredRecordsPatch,
     publishPaymentReceivedEvents,
     logWarn,
+    isOwnerOrAdminProfile,
+    isClientServiceDepartmentHeadProfile,
   } = dependencies;
   const warn = typeof logWarn === "function" ? logWarn : () => {};
 
@@ -235,7 +237,7 @@ function createRecordsService(dependencies = {}) {
     };
   }
 
-  async function saveRecordsForApi({ records, expectedUpdatedAt }) {
+  async function saveRecordsForApi({ webAuthProfile, records, expectedUpdatedAt }) {
     if (simulateSlowRecords) {
       await delayMs(simulateSlowRecordsDelayMs);
       return {
@@ -261,6 +263,13 @@ function createRecordsService(dependencies = {}) {
       warn,
       sanitizeTextValue,
     });
+    enforcePutWriteAccessPolicy({
+      previousRecords,
+      nextRecords: records,
+      webAuthProfile,
+      isOwnerOrAdminProfile,
+      isClientServiceDepartmentHeadProfile,
+    });
 
     const updatedAt = await saveStoredRecords(records, {
       expectedUpdatedAt,
@@ -283,7 +292,7 @@ function createRecordsService(dependencies = {}) {
     };
   }
 
-  async function patchRecordsForApi({ operations, expectedUpdatedAt }) {
+  async function patchRecordsForApi({ webAuthProfile, operations, expectedUpdatedAt }) {
     if (simulateSlowRecords) {
       await delayMs(simulateSlowRecordsDelayMs);
       return {
@@ -309,6 +318,12 @@ function createRecordsService(dependencies = {}) {
       getStoredRecordsForApiRecordsRoute,
       warn,
       sanitizeTextValue,
+    });
+    enforcePatchWriteAccessPolicy({
+      operations,
+      webAuthProfile,
+      isOwnerOrAdminProfile,
+      isClientServiceDepartmentHeadProfile,
     });
 
     const result = await saveStoredRecordsPatch(operations, {
@@ -363,6 +378,212 @@ const STATUS_FILTER_OVERDUE = "overdue";
 const NO_MANAGER_LABEL = "No manager";
 const ZERO_TOLERANCE = 1e-6;
 const KPI_CHICAGO_TIMEZONE = "America/Chicago";
+const STATUS_CONTROL_FIELDS = Object.freeze(new Set(["afterResult", "writtenOff", "active"]));
+const RECORD_META_FIELDS = Object.freeze(new Set(["id", "createdAt"]));
+
+function enforcePutWriteAccessPolicy(options = {}) {
+  const previousRecords = Array.isArray(options.previousRecords) ? options.previousRecords : [];
+  const nextRecords = Array.isArray(options.nextRecords) ? options.nextRecords : [];
+  const webAuthProfile = options.webAuthProfile;
+  const isOwnerOrAdmin = resolveOwnerOrAdminAccess(webAuthProfile, options.isOwnerOrAdminProfile);
+  if (isOwnerOrAdmin) {
+    return;
+  }
+
+  const isClientServiceHead = resolveClientServiceHeadAccess(
+    webAuthProfile,
+    options.isClientServiceDepartmentHeadProfile,
+  );
+  const isAccountingDepartment = resolveAccountingDepartmentAccess(webAuthProfile);
+  const canEditNonStatusFields = isClientServiceHead || isAccountingDepartment;
+  const canEditStatusFields = isClientServiceHead;
+  const canDeleteClients = isClientServiceHead;
+
+  const previousById = new Map();
+  for (const record of previousRecords) {
+    const recordId = normalizeRecordId(record?.id);
+    if (!recordId || previousById.has(recordId)) {
+      continue;
+    }
+    previousById.set(recordId, record);
+  }
+
+  const nextById = new Map();
+  for (const record of nextRecords) {
+    const recordId = normalizeRecordId(record?.id);
+    if (!recordId || nextById.has(recordId)) {
+      continue;
+    }
+    nextById.set(recordId, record);
+  }
+
+  let hasNonStatusChanges = false;
+  let hasStatusChanges = false;
+
+  for (const [recordId, previousRecord] of previousById.entries()) {
+    if (!nextById.has(recordId)) {
+      if (!canDeleteClients) {
+        throw createRecordsWritePolicyError(
+          "Only Owner, Admin, or Client Service Department Head can delete clients.",
+          "records_forbidden_delete",
+        );
+      }
+      continue;
+    }
+
+    const nextRecord = nextById.get(recordId);
+    const changedFields = collectChangedRecordFields(previousRecord, nextRecord);
+    if (!changedFields.length) {
+      continue;
+    }
+
+    if (changedFields.some((field) => STATUS_CONTROL_FIELDS.has(field))) {
+      hasStatusChanges = true;
+    }
+    if (changedFields.some((field) => !STATUS_CONTROL_FIELDS.has(field))) {
+      hasNonStatusChanges = true;
+    }
+  }
+
+  for (const [recordId, nextRecord] of nextById.entries()) {
+    if (previousById.has(recordId)) {
+      continue;
+    }
+
+    const nonMetaFields = Object.keys(nextRecord || {}).filter((field) => !RECORD_META_FIELDS.has(field));
+    if (!nonMetaFields.length) {
+      continue;
+    }
+    if (nonMetaFields.some((field) => STATUS_CONTROL_FIELDS.has(field))) {
+      hasStatusChanges = true;
+    }
+    if (nonMetaFields.some((field) => !STATUS_CONTROL_FIELDS.has(field))) {
+      hasNonStatusChanges = true;
+    }
+  }
+
+  if (hasStatusChanges && !canEditStatusFields) {
+    throw createRecordsWritePolicyError(
+      "Status fields can be edited only by Owner, Admin, or Client Service Department Head.",
+      "records_forbidden_status_edit",
+    );
+  }
+
+  if (hasNonStatusChanges && !canEditNonStatusFields) {
+    throw createRecordsWritePolicyError(
+      "Service and financial fields can be edited only by Owner, Admin, Accounting Department, or Client Service Department Head.",
+      "records_forbidden_field_edit",
+    );
+  }
+}
+
+function enforcePatchWriteAccessPolicy(options = {}) {
+  const operations = Array.isArray(options.operations) ? options.operations : [];
+  const webAuthProfile = options.webAuthProfile;
+  const isOwnerOrAdmin = resolveOwnerOrAdminAccess(webAuthProfile, options.isOwnerOrAdminProfile);
+  if (isOwnerOrAdmin) {
+    return;
+  }
+
+  const isClientServiceHead = resolveClientServiceHeadAccess(
+    webAuthProfile,
+    options.isClientServiceDepartmentHeadProfile,
+  );
+  const isAccountingDepartment = resolveAccountingDepartmentAccess(webAuthProfile);
+  const canEditNonStatusFields = isClientServiceHead || isAccountingDepartment;
+  const canEditStatusFields = isClientServiceHead;
+  const canDeleteClients = isClientServiceHead;
+
+  for (const operation of operations) {
+    const operationType = normalizeComparableText(operation?.type);
+    if (operationType === "delete") {
+      if (!canDeleteClients) {
+        throw createRecordsWritePolicyError(
+          "Only Owner, Admin, or Client Service Department Head can delete clients.",
+          "records_forbidden_delete",
+        );
+      }
+      continue;
+    }
+
+    if (operationType !== "upsert") {
+      continue;
+    }
+
+    const recordPatch = operation?.record && typeof operation.record === "object" ? operation.record : {};
+    const fieldKeys = Object.keys(recordPatch).filter((field) => !RECORD_META_FIELDS.has(field));
+    if (!fieldKeys.length) {
+      continue;
+    }
+
+    const touchesStatus = fieldKeys.some((field) => STATUS_CONTROL_FIELDS.has(field));
+    const touchesNonStatus = fieldKeys.some((field) => !STATUS_CONTROL_FIELDS.has(field));
+
+    if (touchesStatus && !canEditStatusFields) {
+      throw createRecordsWritePolicyError(
+        "Status fields can be edited only by Owner, Admin, or Client Service Department Head.",
+        "records_forbidden_status_edit",
+      );
+    }
+
+    if (touchesNonStatus && !canEditNonStatusFields) {
+      throw createRecordsWritePolicyError(
+        "Service and financial fields can be edited only by Owner, Admin, Accounting Department, or Client Service Department Head.",
+        "records_forbidden_field_edit",
+      );
+    }
+  }
+}
+
+function collectChangedRecordFields(previousRecord, nextRecord) {
+  const left = previousRecord && typeof previousRecord === "object" ? previousRecord : {};
+  const right = nextRecord && typeof nextRecord === "object" ? nextRecord : {};
+  const fields = new Set([...Object.keys(left), ...Object.keys(right)]);
+  const changed = [];
+
+  for (const field of fields) {
+    if (RECORD_META_FIELDS.has(field)) {
+      continue;
+    }
+    if (String(left[field] ?? "") !== String(right[field] ?? "")) {
+      changed.push(field);
+    }
+  }
+
+  return changed;
+}
+
+function resolveOwnerOrAdminAccess(userProfile, isOwnerOrAdminProfileFn) {
+  if (typeof isOwnerOrAdminProfileFn === "function") {
+    return isOwnerOrAdminProfileFn(userProfile) === true;
+  }
+
+  return false;
+}
+
+function resolveClientServiceHeadAccess(userProfile, isClientServiceDepartmentHeadProfileFn) {
+  if (typeof isClientServiceDepartmentHeadProfileFn === "function") {
+    return isClientServiceDepartmentHeadProfileFn(userProfile) === true;
+  }
+
+  return false;
+}
+
+function resolveAccountingDepartmentAccess(userProfile) {
+  const departmentId = normalizeComparableText(userProfile?.departmentId).replace(/\s+/g, "_");
+  return departmentId === "accounting" || departmentId === "accounting_department";
+}
+
+function normalizeRecordId(rawValue) {
+  return String(rawValue || "").trim();
+}
+
+function createRecordsWritePolicyError(message, code) {
+  const error = new Error(message);
+  error.httpStatus = 403;
+  error.code = code;
+  return error;
+}
 
 function applyClientApiFilters(records, rawFilters) {
   if (!Array.isArray(records) || !records.length) {

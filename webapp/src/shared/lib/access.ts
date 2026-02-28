@@ -20,7 +20,13 @@ function normalizeSessionIdentity(rawValue: string | null | undefined): string {
 export function isClientServiceDepartmentHeadSession(session: Session | null | undefined): boolean {
   const roleId = normalizeSessionIdentity(session?.user?.roleId);
   const departmentId = normalizeSessionIdentity(session?.user?.departmentId);
-  return roleId === "department_head" && departmentId === "client_service";
+  if (roleId === "department_head" && departmentId === "client_service") {
+    return true;
+  }
+  return Boolean(
+    departmentId === "client_service" &&
+      (session?.permissions?.sync_client_managers || session?.permissions?.review_moderation),
+  );
 }
 
 export function isDepartmentHeadSession(session: Session | null | undefined): boolean {
@@ -42,7 +48,11 @@ export function canConfirmQuickBooksPaymentsSession(session: Session | null | un
 }
 
 export function canRefreshClientManagerFromGhlSession(session: Session | null | undefined): boolean {
-  return isOwnerOrAdminSession(session) || isClientServiceDepartmentHeadSession(session);
+  return Boolean(
+    isOwnerOrAdminSession(session) ||
+      isClientServiceDepartmentHeadSession(session) ||
+      session?.permissions?.sync_client_managers,
+  );
 }
 
 export function canRefreshClientPhoneFromGhlSession(session: Session | null | undefined): boolean {
@@ -50,5 +60,9 @@ export function canRefreshClientPhoneFromGhlSession(session: Session | null | un
 }
 
 export function canViewClientHealthSession(session: Session | null | undefined): boolean {
+  return isOwnerOrAdminSession(session) || isClientServiceDepartmentHeadSession(session);
+}
+
+export function canDeleteClientSession(session: Session | null | undefined): boolean {
   return isOwnerOrAdminSession(session) || isClientServiceDepartmentHeadSession(session);
 }

@@ -26,9 +26,14 @@ function registerAuthProtectedRoutes(context) {
     app,
     requireWebPermission,
     requireOwnerOrAdminAccess,
+    requireStrictOwnerOrAdminAccess,
     permissionKeys,
     handlers,
   } = context;
+  const requireUsersManageAccess =
+    typeof requireStrictOwnerOrAdminAccess === "function"
+      ? requireStrictOwnerOrAdminAccess("Owner or admin access is required.")
+      : requireOwnerOrAdminAccess("Owner or admin access is required.");
 
   app.get("/first-password", handlers.handleWebFirstPasswordPage);
   app.post("/first-password", handlers.handleWebFirstPasswordSubmit);
@@ -47,22 +52,22 @@ function registerAuthProtectedRoutes(context) {
 
   app.get(
     "/api/auth/users",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
+    requireUsersManageAccess,
     handlers.handleApiAuthUsersList,
   );
   app.post(
     "/api/auth/users",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
+    requireUsersManageAccess,
     handlers.handleApiAuthUsersCreate,
   );
   app.put(
     "/api/auth/users/:username",
-    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL),
+    requireUsersManageAccess,
     handlers.handleApiAuthUsersUpdate,
   );
   app.delete(
     "/api/auth/users/:username",
-    requireOwnerOrAdminAccess(),
+    requireUsersManageAccess,
     handlers.handleApiAuthUsersDelete,
   );
 }

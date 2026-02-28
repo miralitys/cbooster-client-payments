@@ -33,6 +33,8 @@ const TEST_CS_LIUDMYLA_USERNAME = "liudmyla.sidachenko@creditbooster.com";
 const TEST_CS_LIUDMYLA_PASSWORD = "CsLiudmyla!AuthZ123";
 const TEST_CS_VADIM_USERNAME = "vadim.kozorezov@creditbooster.com";
 const TEST_CS_VADIM_PASSWORD = "CsVadim!AuthZ123";
+const TEST_ACCOUNTING_MANAGER_USERNAME = "accounting.manager.authz.security@test.local";
+const TEST_ACCOUNTING_MANAGER_PASSWORD = "AccountingManager!AuthZ123";
 const TEST_WEB_AUTH_SESSION_SECRET = "authz-security-test-web-auth-session-secret-abcdefghijklmnopqrstuvwxyz";
 const WEB_AUTH_CSRF_COOKIE_NAME = "cbooster_auth_csrf";
 
@@ -284,6 +286,21 @@ async function getClientsFilters(baseUrl, auth) {
 async function putRecords(baseUrl, auth, payload) {
   const response = await fetch(`${baseUrl}/api/records`, {
     method: "PUT",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Cookie: auth.cookieHeader,
+      "x-csrf-token": auth.csrfToken,
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  return { response, body };
+}
+
+async function patchRecords(baseUrl, auth, payload, routePath = "/api/records") {
+  const response = await fetch(`${baseUrl}${routePath}`, {
+    method: "PATCH",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
@@ -812,6 +829,232 @@ test("authz regression: natasha middle-manager scope is consistent across record
         natashaClientFilters.body.clientManagerOptions,
         ["Kristina Troinova", "Liudmyla Sidachenko", "Natasha Grek"],
       );
+    },
+  );
+});
+
+test("authz regression: accounting write scope excludes status/delete and client-service head can delete", async () => {
+  await withServer(
+    {
+      WEB_AUTH_USERS_JSON: JSON.stringify([
+        {
+          username: TEST_ADMIN_USERNAME,
+          password: TEST_ADMIN_PASSWORD,
+          departmentId: "accounting",
+          roleId: "admin",
+        },
+        {
+          username: TEST_ACCOUNTING_MANAGER_USERNAME,
+          password: TEST_ACCOUNTING_MANAGER_PASSWORD,
+          departmentId: "accounting",
+          roleId: "manager",
+          displayName: "Accounting Manager",
+        },
+        {
+          username: TEST_CS_HEAD_USERNAME,
+          password: TEST_CS_HEAD_PASSWORD,
+          departmentId: "client_service",
+          roleId: "manager",
+          displayName: "Nataly Regush",
+        },
+      ]),
+    },
+    async ({ baseUrl }) => {
+      const owner = await loginApi(baseUrl, {
+        username: TEST_OWNER_USERNAME,
+        password: TEST_OWNER_PASSWORD,
+      });
+
+      const initial = await getRecords(baseUrl, owner);
+      assert.equal(initial.response.status, 200);
+
+      const seedResult = await putRecords(baseUrl, owner, {
+        expectedUpdatedAt: initial.body?.updatedAt || null,
+        records: [
+          {
+            id: "authz-write-scope-rec-1",
+            clientName: "Write Scope Record",
+            clientManager: "Ruanna Ordukhanova-Aslanyan",
+            closedBy: "Accounting Manager",
+            active: "Yes",
+            contractTotals: "$1200.00",
+            payment1: "$100.00",
+            payment1Date: "02/10/2026",
+            notes: "seed",
+          },
+        ],
+      });
+      assert.equal(seedResult.response.status, 200);
+      assert.equal(seedResult.body?.ok, true);
+
+      const accounting = await loginApi(baseUrl, {
+        username: TEST_ACCOUNTING_MANAGER_USERNAME,
+        password: TEST_ACCOUNTING_MANAGER_PASSWORD,
+      });
+
+      const accountingRecords = await getRecords(baseUrl, accounting);
+      assert.equal(accountingRecords.response.status, 200);
+      assert.equal(accountingRecords.body.records.length, 1);
+      let accountingUpdatedAt = accountingRecords.body?.updatedAt || null;
+
+      const accountingRecordsNonStatusPatch = await patchRecords(baseUrl, accounting, {
+        expectedUpdatedAt: accountingUpdatedAt,
+        operations: [
+          {
+            type: "upsert",
+            id: "authz-write-scope-rec-1",
+            record: {
+              notes: "accounting-updated-via-records",
+              contractTotals: "$1300.00",
+            },
+          },
+        ],
+      });
+      assert.equal(accountingRecordsNonStatusPatch.response.status, 200);
+      assert.equal(accountingRecordsNonStatusPatch.body?.ok, true);
+      accountingUpdatedAt = accountingRecordsNonStatusPatch.body?.updatedAt || accountingUpdatedAt;
+
+      const accountingRecordsStatusPatch = await patchRecords(baseUrl, accounting, {
+        expectedUpdatedAt: accountingUpdatedAt,
+        operations: [
+          {
+            type: "upsert",
+            id: "authz-write-scope-rec-1",
+            record: {
+              active: "No",
+            },
+          },
+        ],
+      });
+      assert.equal(accountingRecordsStatusPatch.response.status, 403);
+      assert.equal(accountingRecordsStatusPatch.body?.code, "records_forbidden_status_edit");
+
+      const accountingRecordsDeletePatch = await patchRecords(baseUrl, accounting, {
+        expectedUpdatedAt: accountingUpdatedAt,
+        operations: [
+          {
+            type: "delete",
+            id: "authz-write-scope-rec-1",
+          },
+        ],
+      });
+      assert.equal(accountingRecordsDeletePatch.response.status, 403);
+      assert.equal(accountingRecordsDeletePatch.body?.code, "records_forbidden_delete");
+
+      const accountingClients = await getClients(baseUrl, accounting);
+      assert.equal(accountingClients.response.status, 200);
+      let accountingClientsUpdatedAt = accountingClients.body?.updatedAt || null;
+
+      const accountingClientsNonStatusPatch = await patchRecords(
+        baseUrl,
+        accounting,
+        {
+          expectedUpdatedAt: accountingClientsUpdatedAt,
+          operations: [
+            {
+              type: "upsert",
+              id: "authz-write-scope-rec-1",
+              record: {
+                notes: "accounting-updated-via-clients",
+              },
+            },
+          ],
+        },
+        "/api/clients",
+      );
+      assert.equal(accountingClientsNonStatusPatch.response.status, 200);
+      assert.equal(accountingClientsNonStatusPatch.body?.ok, true);
+      accountingClientsUpdatedAt = accountingClientsNonStatusPatch.body?.updatedAt || accountingClientsUpdatedAt;
+
+      const accountingClientsStatusPatch = await patchRecords(
+        baseUrl,
+        accounting,
+        {
+          expectedUpdatedAt: accountingClientsUpdatedAt,
+          operations: [
+            {
+              type: "upsert",
+              id: "authz-write-scope-rec-1",
+              record: {
+                writtenOff: "Yes",
+              },
+            },
+          ],
+        },
+        "/api/clients",
+      );
+      assert.equal(accountingClientsStatusPatch.response.status, 403);
+      assert.equal(accountingClientsStatusPatch.body?.code, "records_forbidden_status_edit");
+
+      const accountingClientsDeletePatch = await patchRecords(
+        baseUrl,
+        accounting,
+        {
+          expectedUpdatedAt: accountingClientsUpdatedAt,
+          operations: [
+            {
+              type: "delete",
+              id: "authz-write-scope-rec-1",
+            },
+          ],
+        },
+        "/api/clients",
+      );
+      assert.equal(accountingClientsDeletePatch.response.status, 403);
+      assert.equal(accountingClientsDeletePatch.body?.code, "records_forbidden_delete");
+
+      const clientServiceHead = await loginApi(baseUrl, {
+        username: TEST_CS_HEAD_USERNAME,
+        password: TEST_CS_HEAD_PASSWORD,
+      });
+
+      const headClientsBeforePatch = await getClients(baseUrl, clientServiceHead);
+      assert.equal(headClientsBeforePatch.response.status, 200);
+      assert.equal(headClientsBeforePatch.body.records.length, 1);
+      let headUpdatedAt = headClientsBeforePatch.body?.updatedAt || null;
+
+      const headStatusPatch = await patchRecords(
+        baseUrl,
+        clientServiceHead,
+        {
+          expectedUpdatedAt: headUpdatedAt,
+          operations: [
+            {
+              type: "upsert",
+              id: "authz-write-scope-rec-1",
+              record: {
+                active: "No",
+                writtenOff: "Yes",
+              },
+            },
+          ],
+        },
+        "/api/clients",
+      );
+      assert.equal(headStatusPatch.response.status, 200);
+      assert.equal(headStatusPatch.body?.ok, true);
+      headUpdatedAt = headStatusPatch.body?.updatedAt || headUpdatedAt;
+
+      const headDeletePatch = await patchRecords(
+        baseUrl,
+        clientServiceHead,
+        {
+          expectedUpdatedAt: headUpdatedAt,
+          operations: [
+            {
+              type: "delete",
+              id: "authz-write-scope-rec-1",
+            },
+          ],
+        },
+        "/api/clients",
+      );
+      assert.equal(headDeletePatch.response.status, 200);
+      assert.equal(headDeletePatch.body?.ok, true);
+
+      const ownerAfterDelete = await getRecords(baseUrl, owner);
+      assert.equal(ownerAfterDelete.response.status, 200);
+      assert.deepEqual(ownerAfterDelete.body.records, []);
     },
   );
 });

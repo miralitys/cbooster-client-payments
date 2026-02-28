@@ -4,6 +4,7 @@ import type { MutableRefObject } from "react";
 import { ApiError, getClients, getClientsPage, getSession, patchClients, putClients } from "@/shared/api";
 import type { ClientRecord } from "@/shared/types/records";
 import type { Session } from "@/shared/types/session";
+import { canDeleteClientSession } from "@/shared/lib/access";
 import {
   calculateOverviewMetrics,
   calculateTableTotals,
@@ -155,6 +156,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
   const clientsApiQueryKey = useMemo(() => serializeClientsApiQuery(clientsApiQuery), [clientsApiQuery]);
 
   const canManage = Boolean(session?.permissions?.manage_client_payments);
+  const canDeleteClient = canDeleteClientSession(session);
 
   const visibleRecords = useMemo(() => {
     const scoped = filterRecords(records, filters);
@@ -563,6 +565,81 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
     void flushSave();
   }, [flushSave]);
 
+  const deleteActiveRecord = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    const recordId = String(modalState.recordId || "").trim();
+    if (!recordId || modalState.mode === "create") {
+      return {
+        ok: false,
+        error: "Only existing client records can be deleted.",
+      };
+    }
+
+    if (!canDeleteClient) {
+      const message = "Only owner/admin/client-service department head can delete clients.";
+      setSaveError(message);
+      return {
+        ok: false,
+        error: message,
+      };
+    }
+
+    clearDebounceTimer(debounceTimerRef);
+    clearRetryTimer(retryTimerRef);
+    resetSaveRetryState(retryAttemptRef, setSaveRetryCount, setSaveRetryGiveUp);
+    setSaveError("");
+    setSaveSuccessNotice("");
+    setIsSaving(true);
+
+    const remainingRecords = recordsRef.current.filter((record) => record.id !== recordId);
+
+    try {
+      let savePayload: { updatedAt?: string | null };
+      try {
+        savePayload = await patchClients(
+          [
+            {
+              type: "delete",
+              id: recordId,
+            },
+          ],
+          serverUpdatedAtRef.current,
+        );
+        recordsPatchEnabledRef.current = true;
+      } catch (error) {
+        if (!shouldFallbackToPutFromPatch(error)) {
+          throw error;
+        }
+        if (paginationEnabled) {
+          throw new Error("PATCH API is unavailable. Delete is blocked in paged mode to prevent partial overwrite.");
+        }
+        recordsPatchEnabledRef.current = false;
+        savePayload = await putClients(remainingRecords, serverUpdatedAtRef.current);
+      }
+
+      baselineRef.current = serializeRecords(remainingRecords);
+      baselineRecordsRef.current = cloneRecords(remainingRecords);
+      recordsRef.current = remainingRecords;
+      setRecords(remainingRecords);
+      const nextUpdatedAt = normalizeRevisionTimestamp(savePayload.updatedAt) || new Date().toISOString();
+      serverUpdatedAtRef.current = nextUpdatedAt;
+      setLastSyncedAt(nextUpdatedAt);
+      setTotalRecordsCount((prev) => (typeof prev === "number" ? Math.max(0, prev - 1) : prev));
+      setHasUnsavedChanges(false);
+      maybeShowSaveSuccess(setSaveSuccessNotice, saveSuccessTimerRef, lastSaveSuccessAtRef);
+      closeModalNow();
+      return { ok: true };
+    } catch (error) {
+      const message = extractErrorMessage(error, "Failed to delete client.");
+      setSaveError(message);
+      return {
+        ok: false,
+        error: message,
+      };
+    } finally {
+      setIsSaving(false);
+    }
+  }, [canDeleteClient, closeModalNow, modalState.mode, modalState.recordId, paginationEnabled]);
+
   const forceRefresh = useCallback(async () => {
     if (!hookEnabled) {
       return;
@@ -655,6 +732,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
   return {
     session,
     canManage,
+    canDeleteClient,
     isLoading,
     loadError,
     records,
@@ -695,6 +773,7 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
     discardDraftAndCloseModal,
     updateDraftField,
     saveDraft,
+    deleteActiveRecord,
     retrySave,
   };
 }

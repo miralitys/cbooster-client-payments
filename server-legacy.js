@@ -6926,6 +6926,9 @@ function buildWebAuthPermissionsForUser(userProfile) {
   permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_PAYMENTS] = true;
 
   const isDepartmentHead = roleId === WEB_AUTH_ROLE_DEPARTMENT_HEAD;
+  const isClientServiceDepartmentHead =
+    departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE &&
+    (isDepartmentHead || isWebAuthClientServiceDepartmentHeadProfile(userProfile));
   const isMiddleManager = roleId === WEB_AUTH_ROLE_MIDDLE_MANAGER;
 
   if (departmentId === WEB_AUTH_DEPARTMENT_ACCOUNTING) {
@@ -6936,11 +6939,11 @@ function buildWebAuthPermissionsForUser(userProfile) {
 
   if (departmentId === WEB_AUTH_DEPARTMENT_CLIENT_SERVICE) {
     permissions[WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS] = true;
-    permissions[WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS] = isDepartmentHead;
+    permissions[WEB_AUTH_PERMISSION_SYNC_CLIENT_MANAGERS] = isClientServiceDepartmentHead;
     permissions[WEB_AUTH_PERMISSION_VIEW_MODERATION] = true;
-    permissions[WEB_AUTH_PERMISSION_REVIEW_MODERATION] = isDepartmentHead;
+    permissions[WEB_AUTH_PERMISSION_REVIEW_MODERATION] = isClientServiceDepartmentHead;
 
-    if (isDepartmentHead) {
+    if (isClientServiceDepartmentHead) {
       permissions[WEB_AUTH_PERMISSION_MANAGE_CLIENT_PAYMENTS] = true;
     }
   }
@@ -13433,6 +13436,18 @@ function requireOwnerOrAdminAccess(message = "Owner or admin access is required.
   return (req, res, next) => {
     const profile = req.webAuthProfile;
     if (isWebAuthOwnerOrAdminProfile(profile) || hasWebAuthPermission(profile, WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL)) {
+      next();
+      return;
+    }
+
+    denyWebPermission(req, res, message);
+  };
+}
+
+function requireStrictOwnerOrAdminAccess(message = "Owner or admin access is required.") {
+  return (req, res, next) => {
+    const profile = req.webAuthProfile;
+    if (isWebAuthOwnerOrAdminProfile(profile)) {
       next();
       return;
     }
@@ -30013,6 +30028,7 @@ registerAuthProtectedRoutes({
   app,
   requireWebPermission,
   requireOwnerOrAdminAccess,
+  requireStrictOwnerOrAdminAccess,
   permissionKeys: {
     WEB_AUTH_PERMISSION_MANAGE_ACCESS_CONTROL,
   },
@@ -34874,6 +34890,8 @@ const recordsService = createRecordsService({
   logWarn: (message) => {
     console.warn(message);
   },
+  isOwnerOrAdminProfile: isWebAuthOwnerOrAdminProfile,
+  isClientServiceDepartmentHeadProfile: isWebAuthClientServiceDepartmentHeadProfile,
 });
 
 const recordsController = createRecordsController({
