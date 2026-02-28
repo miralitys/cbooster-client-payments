@@ -4408,26 +4408,36 @@ a {
 .ghl-contracts-history-table {
   min-width: 0;
   table-layout: auto;
+  width: 100%;
 }
 
 .ghl-contracts-history-col-client {
+  width: auto;
   white-space: normal;
 }
 
 .ghl-contracts-history-col-status {
   text-align: center;
+  white-space: nowrap;
+  width: 1%;
 }
 
 .ghl-contracts-history-col-checked {
   text-align: right;
+  white-space: nowrap;
+  width: 1%;
 }
 
 th.ghl-contracts-history-col-status {
   text-align: center;
+  white-space: nowrap;
+  width: 1%;
 }
 
 th.ghl-contracts-history-col-checked {
   text-align: right;
+  white-space: nowrap;
+  width: 1%;
 }
 
 .ghl-contracts-history-row--active td {
