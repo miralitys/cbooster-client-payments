@@ -732,6 +732,8 @@ export default function SupportPage() {
           open={moveModalOpen}
           title={moveTargetStatus === "rejected" ? "Reason for rejection" : "Reason for revision"}
           onClose={closeMoveModal}
+          dialogClassName="support-small-modal"
+          contentClassName="support-small-modal__content"
         >
             <div className="support-modal">
               <Textarea
@@ -771,7 +773,13 @@ export default function SupportPage() {
       ) : null}
 
       {editModalOpen ? (
-        <Modal open={editModalOpen} title="Edit request" onClose={closeEditModal}>
+        <Modal
+          open={editModalOpen}
+          title="Edit request"
+          onClose={closeEditModal}
+          dialogClassName="support-small-modal"
+          contentClassName="support-small-modal__content"
+        >
           <div className="support-modal">
             <Input
               value={editDraft.title}
@@ -811,135 +819,148 @@ export default function SupportPage() {
       ) : null}
 
       {isOverlayOpen && selectedRequest ? (
-        <Modal open={isOverlayOpen} title="Support Request" onClose={closeOverlay}>
+        <Modal
+          open={isOverlayOpen}
+          title="Support Request"
+          onClose={closeOverlay}
+          dialogClassName="support-overlay-modal"
+          contentClassName="support-overlay-modal__content"
+        >
           <div className="support-overlay">
-            <div className="support-overlay__header">
-              <h3>{selectedRequest.title}</h3>
-              {selectedRequest.isFromHead ? <span className="support-card__head-badge">From Head</span> : null}
-            </div>
-            <p>{selectedRequest.description}</p>
-            <div className="support-overlay__meta">
-              <span>Status: {STATUS_LABELS[selectedRequest.status] || selectedRequest.status}</span>
-              <span>Priority: {resolvePriorityLabel(selectedRequest.priority)}</span>
-              <span>Created: {formatDateTime(selectedRequest.createdAt)}</span>
-              <span>Due: {formatDateTime(selectedRequest.desiredDueDate)}</span>
-            </div>
+            <section className="support-overlay__hero">
+              <div className="support-overlay__header">
+                <h3>{selectedRequest.title}</h3>
+                {selectedRequest.isFromHead ? <span className="support-card__head-badge">From Head</span> : null}
+              </div>
+              <p className="support-overlay__description">{selectedRequest.description}</p>
+              <div className="support-overlay__meta">
+                <span className="support-overlay__meta-chip">Status: {STATUS_LABELS[selectedRequest.status] || selectedRequest.status}</span>
+                <span className="support-overlay__meta-chip">Priority: {resolvePriorityLabel(selectedRequest.priority)}</span>
+                <span className="support-overlay__meta-chip">Created: {formatDateTime(selectedRequest.createdAt)}</span>
+                <span className="support-overlay__meta-chip">Due: {formatDateTime(selectedRequest.desiredDueDate)}</span>
+              </div>
+            </section>
 
             {isAdmin ? (
-              <div className="support-overlay__admin">
-                <Select
-                  value={selectedRequest.status}
-                  onChange={(event) => {
-                    const nextStatus = event.target.value;
-                    if (nextStatus === "needs_revision" || nextStatus === "rejected") {
-                      openMoveModal(selectedRequest, nextStatus);
-                      return;
-                    }
-                    void moveSupportRequest(selectedRequest.id, { status: nextStatus }).then(async (updated) => {
-                      setSelectedRequest(updated);
-                      await loadRequests();
-                    }).catch(() => {
-                      showToast({ type: "error", message: "Failed to update status." });
-                    });
-                  }}
-                >
-                  {Object.entries(STATUS_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </Select>
-                <Select
-                  value={selectedRequest.assignedTo}
-                  onChange={(event) => {
-                    const username = event.target.value;
-                    const displayName = assignableUsers.find((user) => user.username === username)?.displayName || "";
-                    void moveSupportRequest(selectedRequest.id, { status: selectedRequest.status, assigned_to: username, assigned_to_display_name: displayName }).then(async (updated) => {
-                      setSelectedRequest(updated);
-                      await loadRequests();
-                    }).catch(() => {
-                      showToast({ type: "error", message: "Failed to assign request." });
-                    });
-                  }}
-                >
-                  <option value="">Unassigned</option>
-                  {assignableUsers.map((user) => (
-                    <option key={user.username} value={user.username}>
-                      {user.displayName}
-                    </option>
-                  ))}
-                </Select>
-              </div>
+              <section className="support-overlay__admin support-overlay__section">
+                <h4 className="support-overlay__section-title">Admin Controls</h4>
+                <div className="support-overlay__admin-controls">
+                  <Select
+                    value={selectedRequest.status}
+                    onChange={(event) => {
+                      const nextStatus = event.target.value;
+                      if (nextStatus === "needs_revision" || nextStatus === "rejected") {
+                        openMoveModal(selectedRequest, nextStatus);
+                        return;
+                      }
+                      void moveSupportRequest(selectedRequest.id, { status: nextStatus }).then(async (updated) => {
+                        setSelectedRequest(updated);
+                        await loadRequests();
+                      }).catch(() => {
+                        showToast({ type: "error", message: "Failed to update status." });
+                      });
+                    }}
+                  >
+                    {Object.entries(STATUS_LABELS).map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </Select>
+                  <Select
+                    value={selectedRequest.assignedTo}
+                    onChange={(event) => {
+                      const username = event.target.value;
+                      const displayName = assignableUsers.find((user) => user.username === username)?.displayName || "";
+                      void moveSupportRequest(selectedRequest.id, { status: selectedRequest.status, assigned_to: username, assigned_to_display_name: displayName }).then(async (updated) => {
+                        setSelectedRequest(updated);
+                        await loadRequests();
+                      }).catch(() => {
+                        showToast({ type: "error", message: "Failed to assign request." });
+                      });
+                    }}
+                  >
+                    <option value="">Unassigned</option>
+                    {assignableUsers.map((user) => (
+                      <option key={user.username} value={user.username}>
+                        {user.displayName}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </section>
             ) : null}
 
-            <div className="support-overlay__attachments">
-              <h4>Attachments</h4>
-              {(selectedRequest.attachments || []).length === 0 ? (
-                <p>No attachments</p>
-              ) : (
-                <ul>
-                  {(selectedRequest.attachments || []).map((attachment: SupportAttachment) => (
-                    <li key={attachment.id}>
-                      <a href={attachment.storageUrl || getSupportAttachmentDownloadUrl(attachment.id)} target="_blank" rel="noreferrer">
-                        {attachment.fileName}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <div className="support-file-row">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => overlayFileInputRef.current?.click()}
-                  disabled={attachmentUploading}
-                >
-                  Attach files
-                </Button>
-                <span className="support-file-count">
-                  {attachmentUploading ? "Uploading..." : " "}
-                </span>
-                <input
-                  ref={overlayFileInputRef}
-                  type="file"
-                  multiple
-                  disabled={attachmentUploading}
-                  onChange={(event) => void uploadOverlayAttachments(Array.from(event.target.files || []))}
-                  hidden
-                />
-              </div>
-            </div>
+            <div className="support-overlay__columns">
+              <section className="support-overlay__attachments support-overlay__section">
+                <h4 className="support-overlay__section-title">Attachments</h4>
+                {(selectedRequest.attachments || []).length === 0 ? (
+                  <p className="support-overlay__muted">No attachments</p>
+                ) : (
+                  <ul>
+                    {(selectedRequest.attachments || []).map((attachment: SupportAttachment) => (
+                      <li key={attachment.id}>
+                        <a href={attachment.storageUrl || getSupportAttachmentDownloadUrl(attachment.id)} target="_blank" rel="noreferrer">
+                          {attachment.fileName}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="support-file-row">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => overlayFileInputRef.current?.click()}
+                    disabled={attachmentUploading}
+                  >
+                    Attach files
+                  </Button>
+                  <span className="support-file-count">
+                    {attachmentUploading ? "Uploading..." : " "}
+                  </span>
+                  <input
+                    ref={overlayFileInputRef}
+                    type="file"
+                    multiple
+                    disabled={attachmentUploading}
+                    onChange={(event) => void uploadOverlayAttachments(Array.from(event.target.files || []))}
+                    hidden
+                  />
+                </div>
+              </section>
 
-            <div className="support-overlay__comments">
-              <h4>Comments</h4>
-              <div className="support-overlay__history">
-                {(selectedRequest.history || []).map((entry) => (
-                  <div key={entry.id} className="support-overlay__history-item">
-                    <div className="support-overlay__history-meta">
-                      <span>{entry.actorDisplayName || entry.actorUsername}</span>
-                      <span>{formatDateTime(entry.createdAt)}</span>
-                    </div>
-                    {entry.action === "comment" ? <p>{String(entry.payload?.comment || "")}</p> : null}
-                    {entry.action === "status_change" ? (
-                      <div>
-                        <p>
-                          Status: {String(entry.payload?.from || "")} → {String(entry.payload?.to || "")}
-                        </p>
-                        {entry.payload?.reason ? (
-                          <p className="support-overlay__history-reason">
-                            Reason: {String(entry.payload.reason)}
-                          </p>
-                        ) : null}
+              <section className="support-overlay__comments support-overlay__section">
+                <h4 className="support-overlay__section-title">Comments</h4>
+                <div className="support-overlay__history">
+                  {(selectedRequest.history || []).map((entry) => (
+                    <div key={entry.id} className="support-overlay__history-item">
+                      <div className="support-overlay__history-meta">
+                        <span>{entry.actorDisplayName || entry.actorUsername}</span>
+                        <span>{formatDateTime(entry.createdAt)}</span>
                       </div>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-              <Textarea value={commentText} onChange={(event) => setCommentText(event.target.value)} placeholder="Add a comment" />
-              <Button onClick={() => void saveComment()} isLoading={commentSaving}>
-                Add Comment
-              </Button>
+                      {entry.action === "comment" ? <p>{String(entry.payload?.comment || "")}</p> : null}
+                      {entry.action === "status_change" ? (
+                        <div>
+                          <p>
+                            Status: {String(entry.payload?.from || "")} → {String(entry.payload?.to || "")}
+                          </p>
+                          {entry.payload?.reason ? (
+                            <p className="support-overlay__history-reason">
+                              Reason: {String(entry.payload.reason)}
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                <Textarea value={commentText} onChange={(event) => setCommentText(event.target.value)} placeholder="Add a comment" />
+                <Button onClick={() => void saveComment()} isLoading={commentSaving}>
+                  Add Comment
+                </Button>
+              </section>
             </div>
           </div>
         </Modal>
