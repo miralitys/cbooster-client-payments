@@ -27,7 +27,7 @@ const NAV_ITEMS: NavigationItem[] = [
   { to: "/payment-probability", label: "Client Payment Probability", hint: "Forecast", group: "analytics" },
   { to: "/kpi-client-manager", label: "KPI Client Manager", hint: "KPI", group: "analytics", visibility: "owner-admin" },
   { to: "/identityiq-score", label: "IdentityIQ Scores", hint: "Scores", group: "analytics" },
-  { to: "/ghl-contracts", label: "GHL Contract Text", hint: "Contracts", group: "analytics" },
+  { to: "/ghl-contracts", label: "GHL Contract Terms", hint: "Contracts", group: "analytics" },
   { to: "/quickbooks", label: "QuickBooks", hint: "Accounting", group: "system", visibility: "owner-admin" },
   { to: "/access-control", label: "Access Control", hint: "Roles", group: "system" },
 ];
@@ -109,7 +109,7 @@ function resolvePageTitle(pathname: string): string {
   }
 
   if (pathname.startsWith("/ghl-contracts")) {
-    return "GHL Contract Text";
+    return "GHL Contract Terms";
   }
   if (pathname.startsWith("/access-control")) {
     return "Access Control";

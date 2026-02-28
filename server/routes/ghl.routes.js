@@ -14,6 +14,30 @@ function registerGhlRoutes(context) {
     handlers.handleGhlContractTextPost,
   );
 
+  app.post(
+    "/api/ghl/contract-pdf",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
+    handlers.handleGhlContractPdfPost,
+  );
+
+  app.post(
+    "/api/ghl/contract-terms",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
+    handlers.handleGhlContractTermsPost,
+  );
+
+  app.get(
+    "/api/ghl/contract-terms/recent",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
+    handlers.handleGhlContractTermsRecentGet,
+  );
+
+  app.get(
+    "/api/ghl/contract-terms/cache/:id",
+    requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
+    handlers.handleGhlContractTermsCacheGet,
+  );
+
   app.get(
     "/api/ghl/leads",
     requireWebPermission(permissionKeys.WEB_AUTH_PERMISSION_VIEW_CLIENT_MANAGERS),
