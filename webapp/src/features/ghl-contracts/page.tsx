@@ -44,12 +44,6 @@ export default function GhlContractsPage() {
         key: "status",
         label: "Status",
         align: "center",
-        cell: (row) => <Badge tone={row.status === "ok" ? "success" : "warning"}>{row.status}</Badge>,
-      },
-      {
-        key: "status",
-        label: "Status",
-        align: "center",
         cell: (row) => {
           const tone = row.status === "completed" ? "success" : "warning";
           return <Badge tone={tone}>{row.status || "-"}</Badge>;
