@@ -5,6 +5,7 @@ function createQuickBooksService(dependencies = {}) {
     repo,
     listCachedQuickBooksTransactionsInRange: listCachedTransactionsInRange,
     listQuickBooksOutgoingTransactionsInRange,
+    autoApplyQuickBooksPaymentsToRecordsInRange,
     buildQuickBooksSyncMeta,
     enqueueQuickBooksSyncJob,
     buildQuickBooksSyncJobPayload,
@@ -25,6 +26,12 @@ function createQuickBooksService(dependencies = {}) {
     },
     listQuickBooksOutgoingTransactionsInRange(rangeFrom, rangeTo) {
       return listQuickBooksOutgoingTransactionsInRange(rangeFrom, rangeTo);
+    },
+    autoApplyQuickBooksPaymentsToRecordsInRange(rangeFrom, rangeTo) {
+      if (typeof autoApplyQuickBooksPaymentsToRecordsInRange !== "function") {
+        return Promise.resolve(null);
+      }
+      return autoApplyQuickBooksPaymentsToRecordsInRange(rangeFrom, rangeTo);
     },
     buildQuickBooksSyncMeta(options) {
       return buildQuickBooksSyncMeta(options);

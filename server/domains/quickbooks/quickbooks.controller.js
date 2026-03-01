@@ -51,6 +51,10 @@ function createQuickBooksController(dependencies = {}) {
     quickBooksService && typeof quickBooksService.requestOpenAiQuickBooksInsight === "function"
       ? quickBooksService.requestOpenAiQuickBooksInsight
       : requestOpenAiQuickBooksInsight;
+  const autoApplyPaymentsInRange =
+    quickBooksService && typeof quickBooksService.autoApplyQuickBooksPaymentsToRecordsInRange === "function"
+      ? quickBooksService.autoApplyQuickBooksPaymentsToRecordsInRange
+      : null;
   const confirmPaymentMatch =
     quickBooksService && typeof quickBooksService.confirmQuickBooksPaymentMatch === "function"
       ? quickBooksService.confirmQuickBooksPaymentMatch
@@ -98,6 +102,25 @@ function createQuickBooksController(dependencies = {}) {
     });
   }
 
+  function hasUnmatchedPositiveQuickBooksPayments(items) {
+    const sourceItems = Array.isArray(items) ? items : [];
+    for (const item of sourceItems) {
+      const transactionType = sanitizeTextValue(item?.transactionType ?? item?.transaction_type, 40).toLowerCase();
+      if (transactionType !== "payment") {
+        continue;
+      }
+      const matchedRecordId = sanitizeTextValue(item?.matchedRecordId ?? item?.matched_record_id, 180);
+      if (matchedRecordId) {
+        continue;
+      }
+      const amount = Number.parseFloat(String(item?.paymentAmount ?? item?.payment_amount ?? "").trim());
+      if (Number.isFinite(amount) && amount > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function respondQuickBooksRecentPayments(req, res, options = {}) {
     const range = options.range;
     const routeLabel = sanitizeTextValue(options.routeLabel, 120) || "api/quickbooks/payments/recent";
@@ -135,7 +158,19 @@ function createQuickBooksController(dependencies = {}) {
         syncMode: "incremental",
       });
 
-      const items = await listCachedTransactions(range.from, range.to);
+      let items = await listCachedTransactions(range.from, range.to);
+      if (autoApplyPaymentsInRange && hasUnmatchedPositiveQuickBooksPayments(items)) {
+        try {
+          await autoApplyPaymentsInRange(range.from, range.to);
+          items = await listCachedTransactions(range.from, range.to);
+        } catch (error) {
+          console.warn(
+            `[QuickBooks Auto Match] ${routeLabel} on-read auto-apply failed: ${
+              sanitizeTextValue(error?.message, 320) || "unknown error"
+            }`,
+          );
+        }
+      }
 
       res.json({
         ok: true,

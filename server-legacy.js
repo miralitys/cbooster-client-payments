@@ -25211,6 +25211,7 @@ const quickBooksService = createQuickBooksService({
   repo: quickBooksRepo,
   listCachedQuickBooksTransactionsInRange,
   listQuickBooksOutgoingTransactionsInRange,
+  autoApplyQuickBooksPaymentsToRecordsInRange,
   buildQuickBooksSyncMeta,
   enqueueQuickBooksSyncJob,
   buildQuickBooksSyncJobPayload,

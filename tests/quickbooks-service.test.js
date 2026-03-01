@@ -50,3 +50,39 @@ test("listCachedQuickBooksTransactionsInRange falls back to repo loader", async 
   assert.equal(repoCallCount, 1);
   assert.deepEqual(result, repoResult);
 });
+
+test("autoApplyQuickBooksPaymentsToRecordsInRange uses injected matcher when provided", async () => {
+  const expected = { matchedCount: 2, skippedCount: 0 };
+  let callCount = 0;
+
+  const service = createQuickBooksService({
+    repo: {
+      async listCachedQuickBooksTransactionsInRange() {
+        return [];
+      },
+    },
+    autoApplyQuickBooksPaymentsToRecordsInRange: async (fromDate, toDate) => {
+      callCount += 1;
+      assert.equal(fromDate, "2026-02-01");
+      assert.equal(toDate, "2026-02-28");
+      return expected;
+    },
+  });
+
+  const result = await service.autoApplyQuickBooksPaymentsToRecordsInRange("2026-02-01", "2026-02-28");
+  assert.equal(callCount, 1);
+  assert.deepEqual(result, expected);
+});
+
+test("autoApplyQuickBooksPaymentsToRecordsInRange returns null when matcher is not injected", async () => {
+  const service = createQuickBooksService({
+    repo: {
+      async listCachedQuickBooksTransactionsInRange() {
+        return [];
+      },
+    },
+  });
+
+  const result = await service.autoApplyQuickBooksPaymentsToRecordsInRange("2026-02-01", "2026-02-28");
+  assert.equal(result, null);
+});
