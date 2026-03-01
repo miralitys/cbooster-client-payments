@@ -12401,7 +12401,9 @@ async function persistClientManagersToRecordsByClientNames(clientNames) {
 
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const state = await getStoredRecords();
+    // Use the same records source as /api/clients (/api/records): V2 when enabled, legacy fallback otherwise.
+    // This keeps background record updaters consistent after WRITE_V2/READ_V2 migrations.
+    const state = await getStoredRecordsForApiRecordsRoute();
     const sourceRecords = Array.isArray(state?.records) ? state.records : [];
     const operations = buildClientManagerUpsertOperationsForClientKeys(sourceRecords, labelsByClientKey, targetClientKeys);
     if (!operations.length) {
@@ -26168,7 +26170,9 @@ async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
   }
 
   for (let attempt = 1; attempt <= QUICKBOOKS_AUTO_MATCH_RECORD_WRITE_MAX_RETRIES; attempt += 1) {
-    const state = await getStoredRecords();
+    // Use the same records source as /api/clients (/api/records): V2 when enabled, legacy fallback otherwise.
+    // This keeps background record updaters consistent after WRITE_V2/READ_V2 migrations.
+    const state = await getStoredRecordsForApiRecordsRoute();
     const sourceRecords = Array.isArray(state?.records) ? state.records : [];
     const nextRecords = sourceRecords.map((record) =>
       record && typeof record === "object" && !Array.isArray(record) ? { ...record } : {},
