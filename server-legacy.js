@@ -26143,6 +26143,10 @@ function buildQuickBooksRecordIndexesByClientKey(records) {
   const sourceRecords = Array.isArray(records) ? records : [];
   for (let recordIndex = 0; recordIndex < sourceRecords.length; recordIndex += 1) {
     const record = sourceRecords[recordIndex];
+    const recordId = sanitizeTextValue(record?.id, 180);
+    if (!recordId) {
+      continue;
+    }
     const clientKey = normalizePaymentClientNameForLookup(record?.clientName);
     if (!clientKey) {
       continue;
@@ -26303,9 +26307,13 @@ async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
 
     let updatedAt = sanitizeTextValue(state?.updatedAt, 80) || null;
     if (recordsChanged) {
+      const expectedUpdatedAt =
+        sanitizeTextValue(state?.source, 40) === "v2"
+          ? await getStoredRecordsHeadRevision()
+          : state?.updatedAt || null;
       try {
         updatedAt = await saveStoredRecords(nextRecords, {
-          expectedUpdatedAt: state?.updatedAt || null,
+          expectedUpdatedAt,
         });
       } catch (error) {
         if (sanitizeTextValue(error?.code, 80) === "records_conflict" && attempt < QUICKBOOKS_AUTO_MATCH_RECORD_WRITE_MAX_RETRIES) {
