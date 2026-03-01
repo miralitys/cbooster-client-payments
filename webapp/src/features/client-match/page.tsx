@@ -174,6 +174,40 @@ export default function ClientMatchPage() {
     writeConfirmedRowKeys(confirmedRowKeys);
   }, [confirmedRowKeys]);
 
+  useEffect(() => {
+    if (!rows.length || !confirmedRowKeys.some(isLegacyClientMatchConfirmationKey)) {
+      return;
+    }
+
+    const normalizedKeys = new Set<string>();
+    for (const key of confirmedRowKeys) {
+      const normalizedKey = String(key || "").trim();
+      if (!normalizedKey) {
+        continue;
+      }
+
+      if (!isLegacyClientMatchConfirmationKey(normalizedKey)) {
+        normalizedKeys.add(normalizedKey);
+        continue;
+      }
+
+      const rowForLegacyKey = rows.find((row) => row.id === normalizedKey);
+      if (!rowForLegacyKey) {
+        normalizedKeys.add(normalizedKey);
+        continue;
+      }
+
+      normalizedKeys.add(buildClientMatchConfirmationKey(rowForLegacyKey));
+    }
+
+    const nextKeys = [...normalizedKeys];
+    if (nextKeys.length === confirmedRowKeys.length && nextKeys.every((key) => confirmedRowKeys.includes(key))) {
+      return;
+    }
+
+    setConfirmedRowKeys(nextKeys);
+  }, [confirmedRowKeys, rows]);
+
   const confirmClientRow = useCallback((row: ClientMatchRow) => {
     const confirmationKey = buildClientMatchConfirmationKey(row);
     if (isClientMatchRowConfirmed(row, confirmedRowKeySet)) {
@@ -1041,7 +1075,12 @@ function buildClientMatchConfirmationKey(row: ClientMatchRow): string {
 
 function isClientMatchRowConfirmed(row: ClientMatchRow, confirmedRowKeySet: ReadonlySet<string>): boolean {
   const confirmationKey = buildClientMatchConfirmationKey(row);
-  return confirmedRowKeySet.has(confirmationKey) || confirmedRowKeySet.has(row.id);
+  return confirmedRowKeySet.has(confirmationKey);
+}
+
+function isLegacyClientMatchConfirmationKey(rawValue: string): boolean {
+  const value = String(rawValue || "").trim();
+  return Boolean(value) && !value.includes("::");
 }
 
 function normalizeConfirmationAmount(value: number | null | undefined): string {
