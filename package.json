@@ -32,7 +32,7 @@
     "compression": "^1.8.1",
     "express": "^4.21.2",
     "helmet": "^8.1.0",
-    "multer": "^2.0.2",
+    "multer": "^2.1.0",
     "pg": "^8.13.3",
     "playwright": "^1.58.2",
     "qrcode": "^1.5.4",
