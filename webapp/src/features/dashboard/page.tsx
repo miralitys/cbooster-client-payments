@@ -554,6 +554,7 @@ export default function DashboardPage() {
               onClick={() =>
                 requestOpenClientCard(normalizedClientName, {
                   fallbackHref: "/app/client-payments",
+                  recordId: String(item.matchedRecordId || "").trim() || undefined,
                 })
               }
               aria-label={`Open client card for ${normalizedClientName}`}

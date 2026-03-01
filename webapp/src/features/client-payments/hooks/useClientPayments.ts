@@ -462,30 +462,45 @@ export function useClientPayments(options: UseClientPaymentsOptions = {}) {
     [openRecordModal, records],
   );
 
+  const openClientByRequest = useCallback(
+    (detail: OpenClientCardEventDetail | undefined) => {
+      const requestedRecordId = String(detail?.recordId || "").trim();
+      if (requestedRecordId) {
+        const matchedById = records.find((record) => String(record.id || "").trim() === requestedRecordId);
+        if (matchedById) {
+          openRecordModal(matchedById);
+          return;
+        }
+      }
+      openClientByName(detail?.clientName);
+    },
+    [openClientByName, openRecordModal, records],
+  );
+
   useEffect(() => {
     if (!records.length) {
       return;
     }
 
-    const pendingClientName = consumePendingOpenClientCardRequest();
-    if (!pendingClientName) {
+    const pendingRequest = consumePendingOpenClientCardRequest();
+    if (!pendingRequest.clientName && !pendingRequest.recordId) {
       return;
     }
 
-    openClientByName(pendingClientName);
-  }, [openClientByName, records.length]);
+    openClientByRequest(pendingRequest);
+  }, [openClientByRequest, records.length]);
 
   useEffect(() => {
     function onAssistantOpenClient(event: Event) {
       const detail = (event as CustomEvent<OpenClientCardEventDetail>).detail;
-      openClientByName(detail?.clientName);
+      openClientByRequest(detail);
     }
 
     window.addEventListener(OPEN_CLIENT_CARD_EVENT_NAME, onAssistantOpenClient as EventListener);
     return () => {
       window.removeEventListener(OPEN_CLIENT_CARD_EVENT_NAME, onAssistantOpenClient as EventListener);
     };
-  }, [openClientByName]);
+  }, [openClientByRequest]);
 
   const startEditRecord = useCallback(() => {
     if (!activeRecord) {

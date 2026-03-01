@@ -26100,19 +26100,39 @@ function formatQuickBooksPaymentDateForRecord(rawValue) {
   return `${month}/${day}/${year}`;
 }
 
+function normalizeQuickBooksPaymentCellValue(rawValue, maxLength) {
+  const value = sanitizeTextValue(rawValue, maxLength);
+  if (!value) {
+    return "";
+  }
+  const comparable = value.toLowerCase();
+  if (
+    comparable === "-" ||
+    comparable === "—" ||
+    comparable === "n/a" ||
+    comparable === "na" ||
+    comparable === "none" ||
+    comparable === "null" ||
+    comparable === "undefined"
+  ) {
+    return "";
+  }
+  return value;
+}
+
 function findQuickBooksExistingPaymentSlot(record, amountValue, dateValue) {
   if (!record || typeof record !== "object") {
     return null;
   }
-  const normalizedAmount = sanitizeTextValue(amountValue, 120);
-  const normalizedDate = sanitizeTextValue(dateValue, 40);
+  const normalizedAmount = normalizeQuickBooksPaymentCellValue(amountValue, 120);
+  const normalizedDate = normalizeQuickBooksPaymentCellValue(dateValue, 40);
   if (!normalizedAmount || !normalizedDate) {
     return null;
   }
 
   for (const pair of QUICKBOOKS_AUTO_MATCH_PAYMENT_FIELD_PAIRS) {
-    const currentAmount = sanitizeTextValue(record?.[pair.paymentField], 120);
-    const currentDate = sanitizeTextValue(record?.[pair.paymentDateField], 40);
+    const currentAmount = normalizeQuickBooksPaymentCellValue(record?.[pair.paymentField], 120);
+    const currentDate = normalizeQuickBooksPaymentCellValue(record?.[pair.paymentDateField], 40);
     if (!currentAmount || !currentDate) {
       continue;
     }
@@ -26129,8 +26149,8 @@ function findQuickBooksNextFreePaymentSlot(record) {
     return null;
   }
   for (const pair of QUICKBOOKS_AUTO_MATCH_PAYMENT_FIELD_PAIRS) {
-    const amountValue = sanitizeTextValue(record?.[pair.paymentField], 120);
-    const dateValue = sanitizeTextValue(record?.[pair.paymentDateField], 40);
+    const amountValue = normalizeQuickBooksPaymentCellValue(record?.[pair.paymentField], 120);
+    const dateValue = normalizeQuickBooksPaymentCellValue(record?.[pair.paymentDateField], 40);
     if (!amountValue && !dateValue) {
       return pair;
     }
