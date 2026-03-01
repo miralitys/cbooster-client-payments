@@ -86,3 +86,36 @@ test("autoApplyQuickBooksPaymentsToRecordsInRange returns null when matcher is n
   const result = await service.autoApplyQuickBooksPaymentsToRecordsInRange("2026-02-01", "2026-02-28");
   assert.equal(result, null);
 });
+
+test("syncQuickBooksMatchedPaymentsToRecord uses injected syncer when provided", async () => {
+  let callCount = 0;
+  const service = createQuickBooksService({
+    repo: {
+      async listCachedQuickBooksTransactionsInRange() {
+        return [];
+      },
+    },
+    syncQuickBooksMatchedPaymentsToRecord: async (recordId) => {
+      callCount += 1;
+      assert.equal(recordId, "record-1");
+      return { syncedCount: 1 };
+    },
+  });
+
+  const result = await service.syncQuickBooksMatchedPaymentsToRecord("record-1");
+  assert.equal(callCount, 1);
+  assert.deepEqual(result, { syncedCount: 1 });
+});
+
+test("syncQuickBooksMatchedPaymentsToRecord returns null when syncer is not injected", async () => {
+  const service = createQuickBooksService({
+    repo: {
+      async listCachedQuickBooksTransactionsInRange() {
+        return [];
+      },
+    },
+  });
+
+  const result = await service.syncQuickBooksMatchedPaymentsToRecord("record-1");
+  assert.equal(result, null);
+});

@@ -25212,6 +25212,7 @@ const quickBooksService = createQuickBooksService({
   listCachedQuickBooksTransactionsInRange,
   listQuickBooksOutgoingTransactionsInRange,
   autoApplyQuickBooksPaymentsToRecordsInRange,
+  syncQuickBooksMatchedPaymentsToRecord,
   buildQuickBooksSyncMeta,
   enqueueQuickBooksSyncJob,
   buildQuickBooksSyncJobPayload,
@@ -26371,6 +26372,106 @@ async function autoApplyQuickBooksPaymentsToRecordsInRange(fromDate, toDate) {
     matchedCount: 0,
     skippedCount: unmatchedRows.length,
     writtenOffCount: 0,
+    updatedAt: null,
+  };
+}
+
+async function syncQuickBooksMatchedPaymentsToRecord(recordId) {
+  const normalizedRecordId = sanitizeTextValue(recordId, 180);
+  if (!normalizedRecordId) {
+    return {
+      syncedCount: 0,
+      updatedAt: null,
+    };
+  }
+
+  const pendingRows = await quickBooksRepo.listPendingQuickBooksPaymentMatchesByRecordId(normalizedRecordId);
+  if (!pendingRows.length) {
+    return {
+      syncedCount: 0,
+      updatedAt: null,
+    };
+  }
+
+  const allowedPaymentFields = new Set(
+    QUICKBOOKS_AUTO_MATCH_PAYMENT_FIELD_PAIRS.map((pair) => `${pair.paymentField}:${pair.paymentDateField}`),
+  );
+
+  for (let attempt = 1; attempt <= QUICKBOOKS_AUTO_MATCH_RECORD_WRITE_MAX_RETRIES; attempt += 1) {
+    const state = await getStoredRecordsForApiRecordsRoute();
+    const sourceRecords = Array.isArray(state?.records) ? state.records : [];
+    const nextRecords = sourceRecords.map((record) =>
+      record && typeof record === "object" && !Array.isArray(record) ? { ...record } : {},
+    );
+
+    const recordIndex = nextRecords.findIndex((record) => sanitizeTextValue(record?.id, 180) === normalizedRecordId);
+    if (recordIndex < 0) {
+      return {
+        syncedCount: 0,
+        updatedAt: sanitizeTextValue(state?.updatedAt, 80) || null,
+      };
+    }
+
+    const targetRecord = nextRecords[recordIndex];
+    let syncedCount = 0;
+
+    for (const row of pendingRows) {
+      const paymentField = sanitizeTextValue(row?.matched_payment_field, 40);
+      const paymentDateField = sanitizeTextValue(row?.matched_payment_date_field, 40);
+      if (!paymentField || !paymentDateField) {
+        continue;
+      }
+      if (!allowedPaymentFields.has(`${paymentField}:${paymentDateField}`)) {
+        continue;
+      }
+
+      const paymentAmount = formatQuickBooksPaymentAmountForRecord(row?.payment_amount);
+      const paymentDate = formatQuickBooksPaymentDateForRecord(row?.payment_date);
+      if (!paymentAmount || !paymentDate) {
+        continue;
+      }
+
+      const currentAmount = normalizeQuickBooksPaymentCellValue(targetRecord?.[paymentField], 120);
+      const currentDate = normalizeQuickBooksPaymentCellValue(targetRecord?.[paymentDateField], 40);
+      if (currentAmount === paymentAmount && currentDate === paymentDate) {
+        continue;
+      }
+
+      targetRecord[paymentField] = paymentAmount;
+      targetRecord[paymentDateField] = paymentDate;
+      syncedCount += 1;
+    }
+
+    if (!syncedCount) {
+      return {
+        syncedCount: 0,
+        updatedAt: sanitizeTextValue(state?.updatedAt, 80) || null,
+      };
+    }
+
+    const expectedUpdatedAt =
+      sanitizeTextValue(state?.source, 40) === "v2"
+        ? await getStoredRecordsHeadRevision()
+        : state?.updatedAt || null;
+
+    try {
+      const updatedAt = await saveStoredRecords(nextRecords, {
+        expectedUpdatedAt,
+      });
+      return {
+        syncedCount,
+        updatedAt,
+      };
+    } catch (error) {
+      if (sanitizeTextValue(error?.code, 80) === "records_conflict" && attempt < QUICKBOOKS_AUTO_MATCH_RECORD_WRITE_MAX_RETRIES) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return {
+    syncedCount: 0,
     updatedAt: null,
   };
 }

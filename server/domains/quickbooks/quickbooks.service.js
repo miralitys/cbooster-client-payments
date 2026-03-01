@@ -6,6 +6,7 @@ function createQuickBooksService(dependencies = {}) {
     listCachedQuickBooksTransactionsInRange: listCachedTransactionsInRange,
     listQuickBooksOutgoingTransactionsInRange,
     autoApplyQuickBooksPaymentsToRecordsInRange,
+    syncQuickBooksMatchedPaymentsToRecord,
     buildQuickBooksSyncMeta,
     enqueueQuickBooksSyncJob,
     buildQuickBooksSyncJobPayload,
@@ -32,6 +33,12 @@ function createQuickBooksService(dependencies = {}) {
         return Promise.resolve(null);
       }
       return autoApplyQuickBooksPaymentsToRecordsInRange(rangeFrom, rangeTo);
+    },
+    syncQuickBooksMatchedPaymentsToRecord(recordId) {
+      if (typeof syncQuickBooksMatchedPaymentsToRecord !== "function") {
+        return Promise.resolve(null);
+      }
+      return syncQuickBooksMatchedPaymentsToRecord(recordId);
     },
     buildQuickBooksSyncMeta(options) {
       return buildQuickBooksSyncMeta(options);

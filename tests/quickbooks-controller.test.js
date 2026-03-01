@@ -178,3 +178,50 @@ test("GET /api/quickbooks/payments/recent does not run auto-apply when all rows 
   assert.equal(autoApplyCallCount, 0);
   assert.equal(res.payload?.count, 1);
 });
+
+test("GET /api/quickbooks/payments/pending-confirmations syncs matched payment fields for requested record", async () => {
+  let syncCallCount = 0;
+  let listCallCount = 0;
+  const controller = createController({
+    quickBooksService: {
+      async listCachedQuickBooksTransactionsInRange() {
+        return [];
+      },
+      async syncQuickBooksMatchedPaymentsToRecord(recordId) {
+        syncCallCount += 1;
+        assert.equal(recordId, "record-123");
+        return { syncedCount: 1 };
+      },
+      async listPendingQuickBooksPaymentMatchesByRecordId(recordId) {
+        listCallCount += 1;
+        assert.equal(recordId, "record-123");
+        return [
+          {
+            transaction_type: "payment",
+            transaction_id: "tx-1",
+            matched_payment_field: "payment2",
+            matched_payment_date_field: "payment2Date",
+            payment_amount: 800,
+            payment_date: "2026-02-28",
+          },
+        ];
+      },
+    },
+  });
+
+  const req = {
+    method: "GET",
+    query: {
+      recordId: "record-123",
+    },
+  };
+  const res = createMockResponse();
+
+  await controller.handleQuickBooksPendingConfirmationsGet(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(syncCallCount, 1);
+  assert.equal(listCallCount, 1);
+  assert.equal(res.payload?.count, 1);
+  assert.equal(res.payload?.items?.[0]?.matchedPaymentField, "payment2");
+});

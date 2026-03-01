@@ -55,6 +55,10 @@ function createQuickBooksController(dependencies = {}) {
     quickBooksService && typeof quickBooksService.autoApplyQuickBooksPaymentsToRecordsInRange === "function"
       ? quickBooksService.autoApplyQuickBooksPaymentsToRecordsInRange
       : null;
+  const syncMatchedPaymentsToRecord =
+    quickBooksService && typeof quickBooksService.syncQuickBooksMatchedPaymentsToRecord === "function"
+      ? quickBooksService.syncQuickBooksMatchedPaymentsToRecord
+      : null;
   const confirmPaymentMatch =
     quickBooksService && typeof quickBooksService.confirmQuickBooksPaymentMatch === "function"
       ? quickBooksService.confirmQuickBooksPaymentMatch
@@ -549,6 +553,18 @@ function createQuickBooksController(dependencies = {}) {
     }
 
     try {
+      if (syncMatchedPaymentsToRecord) {
+        try {
+          await syncMatchedPaymentsToRecord(recordId);
+        } catch (error) {
+          console.warn(
+            `[QuickBooks Auto Match] pending-confirmations sync failed for record ${recordId}: ${
+              sanitizeTextValue(error?.message, 320) || "unknown error"
+            }`,
+          );
+        }
+      }
+
       const rows = listPendingPaymentMatchesByRecordId
         ? await listPendingPaymentMatchesByRecordId(recordId)
         : [];
